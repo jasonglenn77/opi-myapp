@@ -1,0 +1,74 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: myapp-mysql-dev
+    env_file:
+      - .env.local
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data_dev:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [devnet]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: myapp-backend-dev
+    env_file:
+      - .env.local
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE}
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    networks: [devnet]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: myapp-frontend-dev
+    depends_on:
+      - backend
+    expose:
+      - "5173"
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -lc "npm ci && npm run watch:css & npm run serve"
+    networks: [devnet]
+
+  devproxy:
+    image: nginx:alpine
+    container_name: myapp-devproxy
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend/nginx.dev.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [devnet]
+
+networks:
+  devnet:
+
+volumes:
+  mysql_data_dev:
+  frontend_node_modules:
