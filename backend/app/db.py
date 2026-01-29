@@ -1,20 +1,32 @@
-from pathlib import Path
 import os
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-# Always load the .env file from the backend folder, no matter where uvicorn is started from.
-BACKEND_DIR = Path(__file__).resolve().parents[1]  # .../backend
-ENV_PATH = BACKEND_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH, override=True)
+# In production, we rely on real environment variables (from Docker / Lightsail).
+# If you want dotenv loading locally, set LOAD_DOTENV=1 in your local env and keep a backend/.env file.
+if os.getenv("LOAD_DOTENV", "0") == "1":
+    from pathlib import Path
+    from dotenv import load_dotenv
 
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = os.getenv("DB_PORT", "3307")
-DB_NAME = os.getenv("DB_NAME", "myapp")
-DB_USER = os.getenv("DB_USER", "myappuser")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "myapppassword")
+    BACKEND_DIR = Path(__file__).resolve().parents[1]  # .../backend
+    ENV_PATH = BACKEND_DIR / ".env"
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
 
-DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "3306")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+
+if not all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
+    raise RuntimeError(
+        "Missing DB env vars. Need DB_HOST, DB_NAME, DB_USER, DB_PASSWORD (and optional DB_PORT)."
+    )
+
+# Optional TLS toggle for managed MySQL
+MYSQL_SSL_MODE = os.getenv("MYSQL_SSL_MODE", "").lower()
+ssl_query = "?ssl=true" if MYSQL_SSL_MODE in ("require", "required") else ""
+
+DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}{ssl_query}"
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
@@ -24,15 +36,12 @@ def db_check() -> dict:
     return {"connected": True, "mysql_version": version}
 
 def db_config_safe() -> dict:
-    # Never return the password
     return {
-        "env_path": str(ENV_PATH),
         "db_host": DB_HOST,
         "db_port": DB_PORT,
         "db_name": DB_NAME,
         "db_user": DB_USER,
     }
-
 
 def notes_add_and_list(message: str) -> dict:
     with engine.begin() as conn:
