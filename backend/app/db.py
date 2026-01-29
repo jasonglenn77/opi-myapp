@@ -22,13 +22,17 @@ if not all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
         "Missing DB env vars. Need DB_HOST, DB_NAME, DB_USER, DB_PASSWORD (and optional DB_PORT)."
     )
 
-# Optional TLS toggle for managed MySQL
 MYSQL_SSL_MODE = os.getenv("MYSQL_SSL_MODE", "").lower()
-ssl_query = "?ssl=true" if MYSQL_SSL_MODE in ("require", "required") else ""
 
-DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}{ssl_query}"
+DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+connect_args = {}
+if MYSQL_SSL_MODE in ("require", "required"):
+    # PyMySQL expects ssl to be a dict, not a string.
+    # This requests TLS without CA verification (good starter setting for managed DBs).
+    connect_args["ssl"] = {}
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
 
 def db_check() -> dict:
     with engine.connect() as conn:
