@@ -82,7 +82,26 @@ function layoutShell({ title, subtitle, bodyHtml }) {
 
 function loginPage(message = "") {
   mount(`
-  <div class="min-h-screen flex items-center justify-center px-4">
+  <div class="min-h-screen flex items-center justify-center px-4 relative">
+    <!-- Top-right link -->
+    <a
+      href="https://www.onpointinstallers.com/"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="fixed top-4 right-4 z-50 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold bg-white/10 text-white border border-white/20 hover:bg-white/20 backdrop-blur shadow-soft"
+      aria-label="Open onpointinstallers.com"
+    >
+      onpointinstallers.com
+      <span
+        aria-hidden="true"
+        class="inline-flex h-5 w-5 items-center justify-center rounded bg-brand-500"
+      >
+        <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5">
+          <path d="M7 13L13 7" stroke="white" stroke-width="2" stroke-linecap="round"/>
+          <path d="M9 7h4v4" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+    </a>
     <div class="w-full max-w-md">
       <div class="mb-4 flex justify-center">
         ${brandHeader()}
