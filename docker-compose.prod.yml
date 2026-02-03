@@ -14,13 +14,30 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+  caddy:
+    image: caddy:2
+    container_name: myapp-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./frontend/src:/usr/share/caddy
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
 
   frontend:
     build:
       context: ./frontend
     container_name: myapp-frontend
-    ports:
-      - "80:80"
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

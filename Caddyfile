@@ -1,0 +1,10 @@
+app.onpointinstallers.com {
+
+    encode gzip
+
+    @api path /api/*
+    reverse_proxy @api backend:8000
+
+    root * /usr/share/caddy
+    file_server
+}
