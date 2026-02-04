@@ -5,9 +5,52 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>OnPoint Installers - App</title>
   <link rel="stylesheet" href="/output.css" />
+  <link rel="preload" href="/assets/opi-wordmark-light.webp" as="image" type="image/webp" fetchpriority="high">
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app">
+
+    <!-- Login-only root (no header/sidebar, so nothing can flash) -->
+    <div id="authRoot" class="min-h-screen flex items-center justify-center px-4"></div>
+
+    <!-- App shell root (header + sidebar + body). Hidden until logged in -->
+    <div id="shellRoot" class="min-h-screen hidden">
+      <!-- Persistent top bar -->
+      <div class="border-b border-white/10 bg-ink-900/60 backdrop-blur">
+        <div class="mx-auto max-w-6xl px-4 py-4 flex items-center justify-between">
+          <div id="brandSlot"></div>
+          <button id="logoutBtn" class="btn-outline">Log out</button>
+        </div>
+      </div>
+
+      <!-- Persistent shell -->
+      <div class="mx-auto max-w-6xl px-4 py-6">
+        <div class="mb-5">
+          <div id="pageTitle" class="text-2xl font-extrabold"></div>
+          <div id="pageSubtitle" class="text-white/60 text-sm"></div>
+        </div>
+
+        <div class="grid grid-cols-12 gap-4">
+          <aside id="sidebar" class="col-span-12 md:col-span-3">
+            <div class="card p-4">
+              <div class="text-xs font-bold text-black/60 mb-2">Navigation</div>
+              <nav class="space-y-2">
+                <a href="#/dashboard" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Dashboard</a>
+                <a href="#/jobs" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Jobs</a>
+                <a href="#/quotes" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Quotes</a>
+                <a href="#/invoices" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Invoices</a>
+                <a href="#/users" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Users</a>
+                <a href="#/teams" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Teams</a>
+              </nav>
+            </div>
+          </aside>
+
+          <main id="pageBody" class="col-span-12 md:col-span-9"></main>
+        </div>
+      </div>
+    </div>
+
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

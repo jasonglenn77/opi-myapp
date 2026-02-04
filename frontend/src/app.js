@@ -28,14 +28,55 @@ async function api(path, opts = {}) {
   return body;
 }
 
-function mount(html) {
-  document.getElementById("app").innerHTML = html;
+function showAuth() {
+  document.getElementById("authRoot")?.classList.remove("hidden");
+  document.getElementById("shellRoot")?.classList.add("hidden");
+}
+
+function showShell() {
+  document.getElementById("authRoot")?.classList.add("hidden");
+  document.getElementById("shellRoot")?.classList.remove("hidden");
+}
+
+function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true }) {
+  // Ensure shell is visible for app pages
+  showShell();
+
+  // Brand/header is rendered once
+  const brandSlot = document.getElementById("brandSlot");
+  if (brandSlot && !brandSlot.dataset.ready) {
+    brandSlot.innerHTML = brandHeader();
+    brandSlot.dataset.ready = "1";
+  }
+
+  const pageTitle = document.getElementById("pageTitle");
+  const pageSubtitle = document.getElementById("pageSubtitle");
+  const pageBody = document.getElementById("pageBody");
+
+  if (pageTitle) pageTitle.textContent = title;
+  if (pageSubtitle) pageSubtitle.textContent = subtitle;
+  if (pageBody) pageBody.innerHTML = bodyHtml;
+
+  // Sidebar always exists for app pages
+  const sidebar = document.getElementById("sidebar");
+  if (sidebar) sidebar.classList.remove("hidden");
+
+  // Toggle logout
+  const logoutBtn = document.getElementById("logoutBtn");
+  if (logoutBtn) logoutBtn.classList.toggle("hidden", !showLogout);
 }
 
 function brandHeader() {
   return `
   <div class="flex items-center gap-3">
-    <div class="h-11 w-11 rounded-2xl bg-brand-500 shadow-soft"></div>
+    <img
+      src="/assets/opi-wordmark-light.webp"
+      alt="Company Logo"
+      loading="eager"
+      decoding="sync"
+      fetchpriority="high"
+      class="h-11 w-11 rounded-2xl shadow-soft object-contain"
+    />
     <div>
       <div class="text-white font-extrabold leading-tight">OnPoint Installers</div>
       <div class="text-white/60 text-xs">Internal Ops Portal</div>
@@ -83,28 +124,29 @@ function layoutShell({ title, subtitle, bodyHtml }) {
 }
 
 function loginPage(message = "") {
-  mount(`
-  <div class="min-h-screen flex items-center justify-center px-4 relative">
-    <!-- Top-right link -->
-    <a
-      href="https://www.onpointinstallers.com/"
-      target="_blank"
-      rel="noopener noreferrer"
-      class="fixed top-4 right-4 z-50 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold bg-white/10 text-white border border-white/20 hover:bg-white/20 backdrop-blur shadow-soft"
-      aria-label="Open onpointinstallers.com"
-    >
-      onpointinstallers.com
-      <span
-        aria-hidden="true"
-        class="inline-flex h-5 w-5 items-center justify-center rounded bg-brand-500"
+  showAuth();
+
+  const root = document.getElementById("authRoot");
+  if (!root) return;
+
+  root.innerHTML = `
+    <div class="w-full max-w-md relative">
+      <a
+        href="https://www.onpointinstallers.com/"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="fixed top-4 right-4 z-50 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold bg-white/10 text-white border border-white/20 hover:bg-white/20 backdrop-blur shadow-soft"
+        aria-label="Open onpointinstallers.com"
       >
-        <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5">
-          <path d="M7 13L13 7" stroke="white" stroke-width="2" stroke-linecap="round"/>
-          <path d="M9 7h4v4" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </span>
-    </a>
-    <div class="w-full max-w-md">
+        onpointinstallers.com
+        <span aria-hidden="true" class="inline-flex h-5 w-5 items-center justify-center rounded bg-brand-500">
+          <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5">
+            <path d="M7 13L13 7" stroke="white" stroke-width="2" stroke-linecap="round"/>
+            <path d="M9 7h4v4" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+      </a>
+
       <div class="mb-4 flex justify-center">
         ${brandHeader()}
       </div>
@@ -141,24 +183,29 @@ function loginPage(message = "") {
         © ${new Date().getFullYear()} OnPoint Installers
       </div>
     </div>
-  </div>
-  `);
+  `;
 
-  document.getElementById("loginForm").addEventListener("submit", async (e) => {
+  document.getElementById("loginForm").onsubmit = async (e) => {
     e.preventDefault();
+
     const email = document.getElementById("email").value.trim();
     const password = document.getElementById("password").value;
     const remember = document.getElementById("remember").checked;
 
     try {
-      const data = await api("/login", { method: "POST", body: JSON.stringify({ email, password }) });
+      const data = await api("/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password })
+      });
+
       setToken(data.access_token, remember);
       location.hash = "#/dashboard";
-      await route();
+      route();
     } catch (err) {
+      console.error("Login error:", err);
       loginPage("Login failed. Check email/password.");
     }
-  });
+  };
 }
 
 async function dashboardPage() {
@@ -205,17 +252,18 @@ async function dashboardPage() {
     </div>
   `;
 
-  mount(layoutShell({
+  setShell({
     title: "Dashboard",
     subtitle: "Overview of today’s operational activity.",
-    bodyHtml
-  }));
+    bodyHtml,
+    showLogout: true
+  });
 
-  document.getElementById("logoutBtn").addEventListener("click", () => {
+  document.getElementById("logoutBtn").onclick = () => {
     clearToken();
     location.hash = "#/login";
     route();
-  });
+  };
 }
 
 async function usersPage() {
@@ -336,18 +384,18 @@ async function usersPage() {
     </div>
   `;
 
-  mount(layoutShell({
+  setShell({
     title: "Users",
     subtitle: "Manage application access.",
-    bodyHtml
-  }));
+    bodyHtml,
+    showLogout: true
+  });
 
-  // header logout
-  document.getElementById("logoutBtn").addEventListener("click", () => {
+  document.getElementById("logoutBtn").onclick = () => {
     clearToken();
     location.hash = "#/login";
     route();
-  });
+  };
 
   const modal = document.getElementById("userModal");
   const modalMsg = document.getElementById("modalMsg");
@@ -642,18 +690,18 @@ async function teamsPage() {
     </div>
   `;
 
-  mount(layoutShell({
-    title: "Teams",
-    subtitle: "Manage project managers and work crews.",
-    bodyHtml
-  }));
+setShell({
+  title: "Teams",
+  subtitle: "Manage project managers and work crews.",
+  bodyHtml,
+  showLogout: true 
+});
 
-  // header logout
-  document.getElementById("logoutBtn").addEventListener("click", () => {
-    clearToken();
-    location.hash = "#/login";
-    route();
-  });
+document.getElementById("logoutBtn").onclick = () => {
+  clearToken();
+  location.hash = "#/login";
+  loginPage();
+};
 
   // Modal helpers
   function openModal(modalEl) {
