@@ -12,7 +12,11 @@ from sqlalchemy import text
 import uuid
 from typing import Optional
 
+from .auth import create_access_token, get_current_user, require_admin
+from app.qbo.routes import router as qbo_router
+
 app = FastAPI()
+app.include_router(qbo_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -69,47 +73,47 @@ class WorkCrewUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
 
-def create_access_token(sub: str) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRE_MINUTES)
-    payload = {"sub": sub, "exp": expire}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+# def create_access_token(sub: str) -> str:
+#     expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRE_MINUTES)
+#     payload = {"sub": sub, "exp": expire}
+#     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def get_current_user(authorization: str = Header(default="")):
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+# def get_current_user(authorization: str = Header(default="")):
+#     if not authorization.startswith("Bearer "):
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
 
-    token = authorization.removeprefix("Bearer ").strip()
+#     token = authorization.removeprefix("Bearer ").strip()
 
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        email = payload.get("sub")
-        if not email:
-            raise HTTPException(status_code=401, detail="Invalid token")
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid/expired token")
+#     try:
+#         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+#         email = payload.get("sub")
+#         if not email:
+#             raise HTTPException(status_code=401, detail="Invalid token")
+#     except JWTError:
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid/expired token")
 
-    # Validate user still exists + active in DB
-    from .db import engine
-    with engine.connect() as conn:
-        user = conn.execute(
-            text("""
-                SELECT id, email, role, is_active
-                FROM users
-                WHERE email = :email
-                LIMIT 1
-            """),
-            {"email": email.lower()},
-        ).mappings().first()
+#     # Validate user still exists + active in DB
+#     from .db import engine
+#     with engine.connect() as conn:
+#         user = conn.execute(
+#             text("""
+#                 SELECT id, email, role, is_active
+#                 FROM users
+#                 WHERE email = :email
+#                 LIMIT 1
+#             """),
+#             {"email": email.lower()},
+#         ).mappings().first()
 
-    if not user or int(user["is_active"]) != 1:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid/expired token")
+#     if not user or int(user["is_active"]) != 1:
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid/expired token")
 
-    return {"id": user["id"], "email": user["email"], "role": user["role"]}
+#     return {"id": user["id"], "email": user["email"], "role": user["role"]}
 
-def require_admin(user=Depends(get_current_user)):
-    if (user.get("role") or "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
+# def require_admin(user=Depends(get_current_user)):
+#     if (user.get("role") or "").lower() != "admin":
+#         raise HTTPException(status_code=403, detail="Admin access required")
+#     return user
 
 @app.get("/api/health")
 def health():
