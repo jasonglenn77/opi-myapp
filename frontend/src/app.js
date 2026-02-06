@@ -90,7 +90,7 @@ function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true 
   if (sidebar) sidebar.classList.remove("hidden");
 
   bindNavHandlers();
-  
+
   // Toggle logout
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn) logoutBtn.classList.toggle("hidden", !showLogout);
@@ -896,7 +896,7 @@ async function quickBooksPage() {
         <div class="flex items-start justify-between gap-3">
           <div>
             <div class="text-lg font-extrabold">QuickBooks Connection</div>
-            <div class="text-sm text-black/60">Status of your QBO sandbox connection.</div>
+            <div class="text-sm text-black/60">Status of your QBO production connection.</div>
           </div>
           <span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${connected ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}">
             ${connected ? "Connected" : "Not connected"}
@@ -919,7 +919,7 @@ async function quickBooksPage() {
         </div>
 
         <div class="mt-4 flex flex-wrap gap-2">
-          <button id="qboConnectBtn" class="btn-outline">Connect / Reconnect</button>
+          <button id="qboConnectBtn" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Connect / Reconnect</button>
         </div>
 
         <div id="qboConnectMsg" class="text-sm text-red-700 min-h-[1.25rem] mt-2"></div>
