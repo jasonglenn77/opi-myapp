@@ -10,6 +10,9 @@ from sqlalchemy import text
 
 from app.db import engine
 
+from decimal import Decimal
+from typing import Any, Optional
+
 QBO_CLIENT_ID = os.getenv("QBO_CLIENT_ID")
 QBO_CLIENT_SECRET = os.getenv("QBO_CLIENT_SECRET")
 QBO_REDIRECT_URI = os.getenv("QBO_REDIRECT_URI")
@@ -26,6 +29,29 @@ SCOPES = ["com.intuit.quickbooks.accounting"]
 def _basic_auth_header() -> str:
     raw = f"{QBO_CLIENT_ID}:{QBO_CLIENT_SECRET}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("utf-8")
+
+def _parse_bool(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    return 1 if bool(v) else 0
+
+def _parse_decimal(v: Any) -> Optional[Decimal]:
+    if v is None:
+        return None
+    try:
+        return Decimal(str(v))
+    except Exception:
+        return None
+
+def _parse_qbo_dt(s: Any) -> Optional[datetime]:
+    # QBO returns ISO with timezone, e.g. "2026-02-05T22:39:07-08:00"
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        # Python 3.11+ handles offset with fromisoformat
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
 
 def qbo_init_tables() -> None:
@@ -47,6 +73,13 @@ def qbo_init_tables() -> None:
               qbo_id VARCHAR(32) NOT NULL UNIQUE,
               display_name VARCHAR(255) NULL,
               email VARCHAR(255) NULL,
+              job TINYINT(1) NULL,
+              active TINYINT(1) NULL,
+              is_project TINYINT(1) NULL,
+              parent_qbo_id VARCHAR(32) NULL,
+              balance_with_jobs DECIMAL(18,2) NULL,
+              meta_create_time DATETIME NULL,
+              meta_last_updated_time DATETIME NULL,
               raw_json JSON NOT NULL,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
@@ -200,7 +233,6 @@ def log_sync_finish(run_id: int, success: bool, fetched: int = 0, upserted: int 
             "error_message": error_message,
         })
 
-
 # FOR CUSTOMERS INTO qbo_customers TABLE
 def fetch_customers(realm_id: str, access_token: str, page_size: int = 500) -> list[dict]:
     url = f"{QBO_API_BASE}/v3/company/{realm_id}/query"
@@ -226,6 +258,7 @@ def fetch_customers(realm_id: str, access_token: str, page_size: int = 500) -> l
 def upsert_customers(customers: list[dict]) -> int:
     qbo_init_tables()
     count = 0
+
     with engine.begin() as conn:
         for c in customers:
             qbo_id = str(c.get("Id") or "")
@@ -233,25 +266,63 @@ def upsert_customers(customers: list[dict]) -> int:
                 continue
 
             display_name = c.get("DisplayName")
-            email = None
             pe = c.get("PrimaryEmailAddr") or {}
-            if isinstance(pe, dict):
-                email = pe.get("Address")
+            email = pe.get("Address") if isinstance(pe, dict) else None
+
+            job = _parse_bool(c.get("Job"))
+            active = _parse_bool(c.get("Active"))
+            is_project = _parse_bool(c.get("IsProject"))
+
+            parent_qbo_id = None
+            pref = c.get("ParentRef") or {}
+            if isinstance(pref, dict) and pref.get("value"):
+                parent_qbo_id = str(pref.get("value"))
+
+            balance_with_jobs = _parse_decimal(c.get("BalanceWithJobs"))
+
+            md = c.get("MetaData") or {}
+            meta_create_time = _parse_qbo_dt(md.get("CreateTime")) if isinstance(md, dict) else None
+            meta_last_updated_time = _parse_qbo_dt(md.get("LastUpdatedTime")) if isinstance(md, dict) else None
 
             conn.execute(text("""
-                INSERT INTO qbo_customers (qbo_id, display_name, email, raw_json)
-                VALUES (:qbo_id, :display_name, :email, CAST(:raw AS JSON))
+                INSERT INTO qbo_customers (
+                  qbo_id, display_name, email, raw_json,
+                  job, active, is_project, parent_qbo_id,
+                  balance_with_jobs, meta_create_time, meta_last_updated_time
+                )
+                VALUES (
+                  :qbo_id, :display_name, :email, CAST(:raw AS JSON),
+                  :job, :active, :is_project, :parent_qbo_id,
+                  :balance_with_jobs, :meta_create_time, :meta_last_updated_time
+                )
                 ON DUPLICATE KEY UPDATE
                   display_name = VALUES(display_name),
                   email = VALUES(email),
-                  raw_json = VALUES(raw_json)
+                  raw_json = VALUES(raw_json),
+                  job = VALUES(job),
+                  active = VALUES(active),
+                  is_project = VALUES(is_project),
+                  parent_qbo_id = VALUES(parent_qbo_id),
+                  balance_with_jobs = VALUES(balance_with_jobs),
+                  meta_create_time = VALUES(meta_create_time),
+                  meta_last_updated_time = VALUES(meta_last_updated_time)
             """), {
                 "qbo_id": qbo_id,
                 "display_name": display_name,
                 "email": email,
                 "raw": json.dumps(c),
+
+                "job": job,
+                "active": active,
+                "is_project": is_project,
+                "parent_qbo_id": parent_qbo_id,
+                "balance_with_jobs": balance_with_jobs,
+                "meta_create_time": meta_create_time,
+                "meta_last_updated_time": meta_last_updated_time,
             })
+
             count += 1
+
     return count
 
 def run_customers_sync(triggered_by: str = "manual") -> dict:

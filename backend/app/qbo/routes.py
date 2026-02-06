@@ -64,7 +64,8 @@ def customers_sample(limit: int = 20, _admin=Depends(require_admin)):
     service.qbo_init_tables()
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT qbo_id, display_name, email, JSON_EXTRACT(raw_json, '$') AS raw_json
+            SELECT qbo_id, display_name, email, job, active, is_project, parent_qbo_id,
+                balance_with_jobs, meta_create_time, meta_last_updated_time
             FROM qbo_customers
             ORDER BY id DESC
             LIMIT :limit
