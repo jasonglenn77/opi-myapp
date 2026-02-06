@@ -42,6 +42,17 @@ function showShell() {
   document.getElementById("shellRoot")?.classList.remove("hidden");
 }
 
+function bindNavHandlers() {
+  document.querySelectorAll('a[href^="#/"]').forEach(a => {
+    if (a.dataset.bound) return;
+    a.addEventListener("click", () => {
+      // Ensure routing happens even if hashchange event doesn't fire
+      setTimeout(route, 0);
+    });
+    a.dataset.bound = "1";
+  });
+}
+
 function bindGlobalHandlers() {
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn && !logoutBtn.dataset.bound) {
@@ -78,6 +89,8 @@ function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true 
   const sidebar = document.getElementById("sidebar");
   if (sidebar) sidebar.classList.remove("hidden");
 
+  bindNavHandlers();
+  
   // Toggle logout
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn) logoutBtn.classList.toggle("hidden", !showLogout);
