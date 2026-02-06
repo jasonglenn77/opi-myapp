@@ -1,5 +1,5 @@
 FROM node:20-alpine
 WORKDIR /app
 EXPOSE 5173
-CMD ["sh","-lc","npm ci && npm run watch:css & npm run serve"]
+CMD ["sh","-lc","npm ci && (npm run watch:css &) && npm run serve"]
 

@@ -52,6 +52,22 @@ def qbo_init_tables() -> None:
             )
         """))
 
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS qbo_sync_runs (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              sync_type VARCHAR(50) NOT NULL,
+              triggered_by VARCHAR(50) NOT NULL,
+              started_at DATETIME NOT NULL,
+              finished_at DATETIME NULL,
+              success TINYINT(1) NOT NULL DEFAULT 0,
+              fetched_count INT NOT NULL DEFAULT 0,
+              upserted_count INT NOT NULL DEFAULT 0,
+              error_message TEXT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              INDEX idx_sync_type_started (sync_type, started_at)
+            )
+        """))
+
 
 def build_auth_url() -> str:
     if not all([QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_REDIRECT_URI]):
@@ -156,6 +172,34 @@ def get_valid_access_token() -> tuple[str, str]:
     upsert_connection(realm_id, new_tokens)
     return realm_id, new_tokens["access_token"]
 
+def log_sync_start(sync_type: str, triggered_by: str) -> int:
+    qbo_init_tables()
+    with engine.begin() as conn:
+        res = conn.execute(text("""
+            INSERT INTO qbo_sync_runs (sync_type, triggered_by, started_at, success)
+            VALUES (:sync_type, :triggered_by, UTC_TIMESTAMP(), 0)
+        """), {"sync_type": sync_type, "triggered_by": triggered_by})
+        return int(res.lastrowid)
+
+
+def log_sync_finish(run_id: int, success: bool, fetched: int = 0, upserted: int = 0, error_message: str | None = None) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE qbo_sync_runs
+            SET finished_at = UTC_TIMESTAMP(),
+                success = :success,
+                fetched_count = :fetched,
+                upserted_count = :upserted,
+                error_message = :error_message
+            WHERE id = :id
+        """), {
+            "id": run_id,
+            "success": 1 if success else 0,
+            "fetched": int(fetched or 0),
+            "upserted": int(upserted or 0),
+            "error_message": error_message,
+        })
+
 
 # FOR CUSTOMERS INTO qbo_customers TABLE
 def fetch_customers(realm_id: str, access_token: str, limit: int = 200) -> list[dict]:
@@ -199,8 +243,19 @@ def upsert_customers(customers: list[dict]) -> int:
             count += 1
     return count
 
-def run_customers_sync() -> dict:
-    realm_id, access_token = get_valid_access_token()
-    customers = fetch_customers(realm_id, access_token)
-    upserted = upsert_customers(customers)
-    return {"realm_id": realm_id, "customers_fetched": len(customers), "customers_upserted": upserted}
+def run_customers_sync(triggered_by: str = "manual") -> dict:
+    run_id = log_sync_start("customers", triggered_by)
+    try:
+        realm_id, access_token = get_valid_access_token()
+        customers = fetch_customers(realm_id, access_token)
+        upserted = upsert_customers(customers)
+        log_sync_finish(run_id, True, fetched=len(customers), upserted=upserted)
+        return {
+            "realm_id": realm_id,
+            "customers_fetched": len(customers),
+            "customers_upserted": upserted,
+            "run_id": run_id,
+        }
+    except Exception as e:
+        log_sync_finish(run_id, False, error_message=str(e))
+        raise

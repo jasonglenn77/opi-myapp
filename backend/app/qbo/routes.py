@@ -32,10 +32,32 @@ def qbo_callback(code: str, realmId: str, state: str = ""):
 @router.post("/sync/customers")
 def sync_customers(_admin=Depends(require_admin)):
     try:
-        return service.run_customers_sync()
+        return service.run_customers_sync(triggered_by="manual")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/status")
+def qbo_status(_admin=Depends(require_admin)):
+    service.qbo_init_tables()
+
+    conn_row = service.get_connection()
+
+    with engine.connect() as conn:
+        last_run = conn.execute(text("""
+            SELECT id, sync_type, triggered_by, started_at, finished_at, success,
+                   fetched_count, upserted_count, error_message
+            FROM qbo_sync_runs
+            WHERE sync_type = 'customers'
+            ORDER BY id DESC
+            LIMIT 1
+        """)).mappings().first()
+
+    return {
+        "connected": bool(conn_row),
+        "realm_id": conn_row["realm_id"] if conn_row else None,
+        "token_expires_at": str(conn_row["expires_at"]) if conn_row else None,
+        "last_customers_sync": dict(last_run) if last_run else None,
+    }
 
 @router.get("/customers/sample")
 def customers_sample(limit: int = 20, _admin=Depends(require_admin)):

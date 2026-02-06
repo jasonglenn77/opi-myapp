@@ -18,7 +18,11 @@ function clearToken() {
 
 async function api(path, opts = {}) {
   const token = getToken();
-  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  const headers = Object.assign({}, opts.headers || {});
+  if (!(opts.body instanceof FormData)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+  }
+
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
@@ -38,9 +42,22 @@ function showShell() {
   document.getElementById("shellRoot")?.classList.remove("hidden");
 }
 
+function bindGlobalHandlers() {
+  const logoutBtn = document.getElementById("logoutBtn");
+  if (logoutBtn && !logoutBtn.dataset.bound) {
+    logoutBtn.onclick = () => {
+      clearToken();
+      location.hash = "#/login";
+      route();
+    };
+    logoutBtn.dataset.bound = "1";
+  }
+}
+
 function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true }) {
   // Ensure shell is visible for app pages
   showShell();
+  bindGlobalHandlers();
 
   // Brand/header is rendered once
   const brandSlot = document.getElementById("brandSlot");
@@ -80,45 +97,6 @@ function brandHeader() {
     <div>
       <div class="text-white font-extrabold leading-tight">OnPoint Installers</div>
       <div class="text-white/60 text-xs">Internal Ops Portal</div>
-    </div>
-  </div>`;
-}
-
-function layoutShell({ title, subtitle, bodyHtml }) {
-  return `
-  <div class="min-h-screen">
-    <div class="border-b border-white/10 bg-ink-900/60 backdrop-blur">
-      <div class="mx-auto max-w-6xl px-4 py-4 flex items-center justify-between">
-        ${brandHeader()}
-        <button id="logoutBtn" class="btn-outline">Log out</button>
-      </div>
-    </div>
-
-    <div class="mx-auto max-w-6xl px-4 py-6">
-      <div class="mb-5">
-        <div class="text-2xl font-extrabold">${title}</div>
-        <div class="text-white/60 text-sm">${subtitle}</div>
-      </div>
-
-      <div class="grid grid-cols-12 gap-4">
-        <aside class="col-span-12 md:col-span-3">
-          <div class="card p-4">
-            <div class="text-xs font-bold text-black/60 mb-2">Navigation</div>
-            <nav class="space-y-2">
-              <a href="#/dashboard" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Dashboard</a>
-              <a href="#/jobs" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Jobs</a>
-              <a href="#/quotes" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Quotes</a>
-              <a href="#/invoices" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Invoices</a>
-              <a href="#/users" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Users</a>
-              <a href="#/teams" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Teams</a>
-              </nav>
-          </div>
-        </aside>
-
-        <main class="col-span-12 md:col-span-9">
-          ${bodyHtml}
-        </main>
-      </div>
     </div>
   </div>`;
 }
@@ -258,12 +236,6 @@ async function dashboardPage() {
     bodyHtml,
     showLogout: true
   });
-
-  document.getElementById("logoutBtn").onclick = () => {
-    clearToken();
-    location.hash = "#/login";
-    route();
-  };
 }
 
 async function usersPage() {
@@ -391,12 +363,6 @@ async function usersPage() {
     showLogout: true
   });
 
-  document.getElementById("logoutBtn").onclick = () => {
-    clearToken();
-    location.hash = "#/login";
-    route();
-  };
-
   const modal = document.getElementById("userModal");
   const modalMsg = document.getElementById("modalMsg");
 
@@ -418,9 +384,12 @@ async function usersPage() {
   });
 
   // Close on Escape
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeModal();
-  });
+  if (!document.body.dataset.usersEscBound) {
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeModal();
+    });
+    document.body.dataset.usersEscBound = "1";
+  }
 
   // Close buttons
   document.getElementById("closeModalBtn").addEventListener("click", closeModal);
@@ -697,12 +666,6 @@ setShell({
   showLogout: true 
 });
 
-document.getElementById("logoutBtn").onclick = () => {
-  clearToken();
-  location.hash = "#/login";
-  loginPage();
-};
-
   // Modal helpers
   function openModal(modalEl) {
     modalEl.classList.remove("hidden");
@@ -725,12 +688,15 @@ document.getElementById("logoutBtn").onclick = () => {
   document.getElementById("crewCancelBtn").addEventListener("click", () => closeModal(crewModal));
   crewModal.addEventListener("click", (e) => { if (e.target === crewModal) closeModal(crewModal); });
 
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      closeModal(pmModal);
-      closeModal(crewModal);
-    }
-  });
+  if (!document.body.dataset.teamsEscBound) {
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        closeModal(pmModal);
+        closeModal(crewModal);
+      }
+    });
+    document.body.dataset.teamsEscBound = "1";
+  }
 
   // New PM
   document.getElementById("newPmBtn").addEventListener("click", () => {
@@ -883,6 +849,155 @@ document.getElementById("logoutBtn").onclick = () => {
   });
 }
 
+function fmtDate(s) {
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return String(s); // fallback
+  return d.toLocaleString();
+}
+
+async function quickBooksPage() {
+  // Load status from backend
+  let status;
+  try {
+    status = await api("/qbo/status");
+  } catch (e) {
+    console.error(e);
+    status = null;
+  }
+
+  const connected = !!status?.connected;
+  const last = status?.last_customers_sync || null;
+
+  const lastBadge = !last
+    ? `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-black/5">No runs yet</span>`
+    : (last.success
+        ? `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-green-100 text-green-800">Success</span>`
+        : `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-red-100 text-red-800">Failed</span>`);
+
+  const bodyHtml = `
+    <div class="grid grid-cols-1 gap-4">
+
+      <!-- Connection -->
+      <div class="card p-5">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="text-lg font-extrabold">QuickBooks Connection</div>
+            <div class="text-sm text-black/60">Status of your QBO sandbox connection.</div>
+          </div>
+          <span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${connected ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}">
+            ${connected ? "Connected" : "Not connected"}
+          </span>
+        </div>
+
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Realm ID</div>
+            <div class="font-semibold mt-1">${status?.realm_id || "—"}</div>
+          </div>
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Token expires</div>
+            <div class="font-semibold mt-1">${status?.token_expires_at || "—"}</div>
+          </div>
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Last customers sync</div>
+            <div class="mt-1">${lastBadge}</div>
+          </div>
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-2">
+          <button id="qboConnectBtn" class="btn-outline">Connect / Reconnect</button>
+        </div>
+
+        <div id="qboConnectMsg" class="text-sm text-red-700 min-h-[1.25rem] mt-2"></div>
+      </div>
+
+      <!-- Sync -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-lg font-extrabold">Customers Sync</div>
+            <div class="text-sm text-black/60">Sync customers from QuickBooks into your database.</div>
+          </div>
+          <button id="qboSyncBtn" class="btn-primary" ${connected ? "" : "disabled"}>Sync customers now</button>
+        </div>
+
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Started</div>
+            <div class="font-semibold mt-1">${last?.started_at ? fmtDate(last.started_at) : "—"}</div>
+          </div>
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Finished</div>
+            <div class="font-semibold mt-1">${last?.finished_at ? fmtDate(last.finished_at) : "—"}</div>
+          </div>
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Fetched</div>
+            <div class="font-semibold mt-1">${(last && typeof last.fetched_count !== "undefined") ? last.fetched_count : "—"}</div>
+          </div>
+          <div class="rounded-2xl border border-black/5 p-4">
+            <div class="text-xs font-bold text-black/60">Upserted</div>
+            <div class="font-semibold mt-1">${(last && typeof last.upserted_count !== "undefined") ? last.upserted_count : "—"}</div>
+          </div>
+        </div>
+
+        <div id="qboSyncMsg" class="text-sm text-red-700 min-h-[1.25rem] mt-3"></div>
+      </div>
+
+    </div>
+  `;
+
+  setShell({
+    title: "QuickBooks",
+    subtitle: "Connection + manual sync controls.",
+    bodyHtml,
+    showLogout: true
+  });
+
+  // Connect / Reconnect: get auth_url from backend and open it
+  document.getElementById("qboConnectBtn").onclick = async () => {
+    const msg = document.getElementById("qboConnectMsg");
+    msg.textContent = "";
+    try {
+      const data = await api("/qbo/start");
+      if (!data?.auth_url) throw new Error("Missing auth_url");
+      window.open(data.auth_url, "_blank", "noopener,noreferrer");
+      msg.textContent = "Opened QuickBooks authorization in a new tab.";
+      msg.className = "text-sm text-green-700 min-h-[1.25rem] mt-2";
+    } catch (e) {
+      msg.textContent = "Failed to start QuickBooks auth (check backend logs).";
+    }
+  };
+
+  // Sync button: blocking call, show loading state, then reload page to refresh status
+  const syncBtn = document.getElementById("qboSyncBtn");
+  syncBtn.onclick = async () => {
+    const msg = document.getElementById("qboSyncMsg");
+    msg.textContent = "";
+    msg.className = "text-sm text-black/60 min-h-[1.25rem] mt-3";
+
+    syncBtn.disabled = true;
+    const original = syncBtn.textContent;
+    syncBtn.textContent = "Syncing…";
+
+    try {
+      const result = await api("/qbo/sync/customers", { method: "POST" });
+      msg.className = "text-sm text-green-700 min-h-[1.25rem] mt-3";
+      msg.textContent = `Sync complete. Fetched ${result.customers_fetched}, upserted ${result.customers_upserted}.`;
+
+      // reload status from server and rerender the page
+      location.hash = "#/quickbooks";
+      route();
+
+    } catch (e) {
+      msg.className = "text-sm text-red-700 min-h-[1.25rem] mt-3";
+      msg.textContent = "Sync failed. Check backend logs or status error details.";
+      syncBtn.disabled = false;
+      syncBtn.textContent = original;
+    }
+  };
+}
+
 async function route() {
   const hash = location.hash || "#/dashboard";
 
@@ -906,6 +1021,7 @@ async function route() {
   if (hash === "#/dashboard") return dashboardPage();
   if (hash === "#/users") return usersPage();
   if (hash === "#/teams") return teamsPage();
+  if (hash === "#/quickbooks") return quickBooksPage();
 
   // placeholder pages
   return dashboardPage();

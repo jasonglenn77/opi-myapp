@@ -1,9 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
-from datetime import datetime, timedelta
-import os
 
-from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 from .db import db_check
@@ -19,10 +16,6 @@ app = FastAPI()
 app.include_router(qbo_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-change-me")
-JWT_ALG = "HS256"
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 
 
 class LoginRequest(BaseModel):
@@ -73,47 +66,6 @@ class WorkCrewUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
 
-# def create_access_token(sub: str) -> str:
-#     expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRE_MINUTES)
-#     payload = {"sub": sub, "exp": expire}
-#     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-# def get_current_user(authorization: str = Header(default="")):
-#     if not authorization.startswith("Bearer "):
-#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-
-#     token = authorization.removeprefix("Bearer ").strip()
-
-#     try:
-#         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-#         email = payload.get("sub")
-#         if not email:
-#             raise HTTPException(status_code=401, detail="Invalid token")
-#     except JWTError:
-#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid/expired token")
-
-#     # Validate user still exists + active in DB
-#     from .db import engine
-#     with engine.connect() as conn:
-#         user = conn.execute(
-#             text("""
-#                 SELECT id, email, role, is_active
-#                 FROM users
-#                 WHERE email = :email
-#                 LIMIT 1
-#             """),
-#             {"email": email.lower()},
-#         ).mappings().first()
-
-#     if not user or int(user["is_active"]) != 1:
-#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid/expired token")
-
-#     return {"id": user["id"], "email": user["email"], "role": user["role"]}
-
-# def require_admin(user=Depends(get_current_user)):
-#     if (user.get("role") or "").lower() != "admin":
-#         raise HTTPException(status_code=403, detail="Admin access required")
-#     return user
 
 @app.get("/api/health")
 def health():
@@ -204,6 +156,9 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
     if role not in ("admin", "user"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
+    if not req.password or not req.password.strip():
+        raise HTTPException(status_code=400, detail="Password required")
+
     user_uuid = str(uuid.uuid4())
     password_hash = pwd_context.hash(req.password)
 
@@ -244,13 +199,14 @@ def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_adm
         updates.append("email = :email")
         params["email"] = email
 
-    if req.first_name is not None:
+    # Allow clearing (client sends null) by checking fields_set
+    if "first_name" in req.__fields_set__:
         updates.append("first_name = :first_name")
-        params["first_name"] = req.first_name.strip() or None
+        params["first_name"] = (req.first_name or "").strip() or None
 
-    if req.last_name is not None:
+    if "last_name" in req.__fields_set__:
         updates.append("last_name = :last_name")
-        params["last_name"] = req.last_name.strip() or None
+        params["last_name"] = (req.last_name or "").strip() or None
 
     if req.role is not None:
         role = req.role.strip().lower()
@@ -263,9 +219,11 @@ def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_adm
         updates.append("is_active = :is_active")
         params["is_active"] = 1 if req.is_active else 0
 
-    if req.password is not None and req.password != "":
-        updates.append("password_hash = :password_hash")
-        params["password_hash"] = pwd_context.hash(req.password)
+    # Password: if included and non-empty, update it. If included as empty/null, ignore.
+    if "password" in req.__fields_set__:
+        if req.password is not None and str(req.password).strip() != "":
+            updates.append("password_hash = :password_hash")
+            params["password_hash"] = pwd_context.hash(req.password)
 
     if not updates:
         return {"ok": True, "updated": False}
@@ -355,21 +313,21 @@ def update_project_manager(pm_id: int, req: ProjectManagerUpdateRequest, _admin=
     updates = []
     params = {"id": pm_id}
 
-    if req.first_name is not None:
+    if "first_name" in req.__fields_set__:
         updates.append("first_name = :first_name")
-        params["first_name"] = req.first_name.strip() or None
+        params["first_name"] = (req.first_name or "").strip() or None
 
-    if req.last_name is not None:
+    if "last_name" in req.__fields_set__:
         updates.append("last_name = :last_name")
-        params["last_name"] = req.last_name.strip() or None
+        params["last_name"] = (req.last_name or "").strip() or None
 
-    if req.email is not None:
+    if "email" in req.__fields_set__:
         updates.append("email = :email")
-        params["email"] = req.email.strip().lower() or None
+        params["email"] = (req.email or "").strip().lower() or None
 
-    if req.phone is not None:
+    if "phone" in req.__fields_set__:
         updates.append("phone = :phone")
-        params["phone"] = req.phone.strip() or None
+        params["phone"] = (req.phone or "").strip() or None
 
     if req.is_active is not None:
         updates.append("is_active = :is_active")
@@ -478,9 +436,9 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(re
         updates.append("name = :name")
         params["name"] = name
 
-    if req.code is not None:
+    if "code" in req.__fields_set__:
         updates.append("code = :code")
-        params["code"] = req.code.strip() or None
+        params["code"] = (req.code or "").strip() or None
 
     if req.sort_order is not None:
         updates.append("sort_order = :sort_order")
@@ -490,19 +448,23 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(re
         updates.append("is_active = :is_active")
         params["is_active"] = 1 if req.is_active else 0
 
-    if req.parent_id is not None:
-        if int(req.parent_id) == int(crew_id):
-            raise HTTPException(status_code=400, detail="Crew cannot be its own parent")
+    # parent_id: allow clearing when client sends null
+    if "parent_id" in req.__fields_set__:
+        if req.parent_id is None:
+            updates.append("parent_id = NULL")
+        else:
+            if int(req.parent_id) == int(crew_id):
+                raise HTTPException(status_code=400, detail="Crew cannot be its own parent")
 
-        with engine.connect() as conn:
-            parent = conn.execute(text("""
-                SELECT id FROM work_crews WHERE id = :id LIMIT 1
-            """), {"id": req.parent_id}).first()
-        if not parent:
-            raise HTTPException(status_code=400, detail="Parent crew not found")
+            with engine.connect() as conn:
+                parent = conn.execute(text("""
+                    SELECT id FROM work_crews WHERE id = :id LIMIT 1
+                """), {"id": req.parent_id}).first()
+            if not parent:
+                raise HTTPException(status_code=400, detail="Parent crew not found")
 
-        updates.append("parent_id = :parent_id")
-        params["parent_id"] = req.parent_id
+            updates.append("parent_id = :parent_id")
+            params["parent_id"] = req.parent_id
 
     if not updates:
         return {"ok": True, "updated": False}
