@@ -202,15 +202,26 @@ def log_sync_finish(run_id: int, success: bool, fetched: int = 0, upserted: int 
 
 
 # FOR CUSTOMERS INTO qbo_customers TABLE
-def fetch_customers(realm_id: str, access_token: str, limit: int = 200) -> list[dict]:
-    query = f"SELECT * FROM Customer MAXRESULTS {int(limit)}"
+def fetch_customers(realm_id: str, access_token: str, page_size: int = 500) -> list[dict]:
     url = f"{QBO_API_BASE}/v3/company/{realm_id}/query"
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    with httpx.Client(timeout=30) as client:
-        r = client.get(url, headers=headers, params={"query": query})
-        r.raise_for_status()
-        data = r.json()
-    return data.get("QueryResponse", {}).get("Customer", []) or []
+
+    all_rows: list[dict] = []
+    start = 1  # STARTPOSITION is 1-based
+    with httpx.Client(timeout=60) as client:
+        while True:
+            query = f"SELECT * FROM Customer STARTPOSITION {start} MAXRESULTS {int(page_size)}"
+            r = client.get(url, headers=headers, params={"query": query})
+            r.raise_for_status()
+            data = r.json()
+            rows = data.get("QueryResponse", {}).get("Customer", []) or []
+            all_rows.extend(rows)
+
+            if len(rows) < page_size:
+                break
+            start += page_size
+
+    return all_rows
 
 def upsert_customers(customers: list[dict]) -> int:
     qbo_init_tables()
