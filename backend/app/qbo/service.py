@@ -101,6 +101,21 @@ def _fmt_qbo_dt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# NEW: safe schema upgrade helper
+def _ensure_column(conn, table: str, column: str, ddl: str) -> None:
+    exists = conn.execute(text("""
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = :t
+          AND COLUMN_NAME = :c
+        LIMIT 1
+    """), {"t": table, "c": column}).first()
+
+    if not exists:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
+
 def qbo_init_tables() -> None:
     with engine.begin() as conn:
         conn.execute(text("""
@@ -215,6 +230,11 @@ def qbo_init_tables() -> None:
                 ON DELETE CASCADE
             ) ENGINE=InnoDB
         """))
+
+        # NEW: schema upgrades (existing DBs)
+        _ensure_column(conn, "qbo_transactions", "due_date", "due_date DATE NULL")
+        _ensure_column(conn, "qbo_transactions", "sales_term_name", "sales_term_name VARCHAR(255) NULL")
+        _ensure_column(conn, "qbo_transaction_lines", "cost_amount", "cost_amount DECIMAL(18,2) NULL")
 
 
 def build_auth_url() -> str:
@@ -510,6 +530,13 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
             txn_date = t.get("TxnDate")
             doc_number = t.get("DocNumber")
 
+            # NEW: DueDate + SalesTermRef.name
+            due_date = t.get("DueDate")  # "YYYY-MM-DD" or None
+            sales_term_name = None
+            st = t.get("SalesTermRef") or {}
+            if isinstance(st, dict):
+                sales_term_name = st.get("name")
+
             currency_code = None
             cur = t.get("CurrencyRef") or {}
             if isinstance(cur, dict):
@@ -527,14 +554,16 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 INSERT INTO qbo_transactions (
                   realm_id, entity_type, qbo_id,
                   customer_qbo_id, vendor_qbo_id,
-                  txn_date, doc_number, currency_code, total_amt,
+                  txn_date, due_date, doc_number, currency_code, total_amt,
+                  sales_term_name,
                   sync_token, meta_create_time, meta_last_updated_time,
                   raw_json
                 )
                 VALUES (
                   :realm_id, :entity_type, :qbo_id,
                   :customer_qbo_id, :vendor_qbo_id,
-                  :txn_date, :doc_number, :currency_code, :total_amt,
+                  :txn_date, :due_date, :doc_number, :currency_code, :total_amt,
+                  :sales_term_name,
                   :sync_token, :meta_create_time, :meta_last_updated_time,
                   CAST(:raw AS JSON)
                 )
@@ -543,9 +572,11 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                   customer_qbo_id = VALUES(customer_qbo_id),
                   vendor_qbo_id = VALUES(vendor_qbo_id),
                   txn_date = VALUES(txn_date),
+                  due_date = VALUES(due_date),
                   doc_number = VALUES(doc_number),
                   currency_code = VALUES(currency_code),
                   total_amt = VALUES(total_amt),
+                  sales_term_name = VALUES(sales_term_name),
                   sync_token = VALUES(sync_token),
                   meta_create_time = VALUES(meta_create_time),
                   meta_last_updated_time = VALUES(meta_last_updated_time),
@@ -557,9 +588,11 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 "customer_qbo_id": customer_qbo_id,
                 "vendor_qbo_id": vendor_qbo_id,
                 "txn_date": txn_date,
+                "due_date": due_date,
                 "doc_number": doc_number,
                 "currency_code": currency_code,
                 "total_amt": total_amt,
+                "sales_term_name": sales_term_name,
                 "sync_token": sync_token,
                 "meta_create_time": meta_create_time,
                 "meta_last_updated_time": meta_last_updated_time,
@@ -581,6 +614,9 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 detail_type = line.get("DetailType")
                 description = line.get("Description")
                 amount = _parse_decimal(line.get("Amount"))
+
+                # NEW: CostAmount (line-level)
+                cost_amount = _parse_decimal(line.get("CostAmount"))
 
                 line_customer_qbo_id = None
                 account_qbo_id = None
@@ -629,7 +665,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 conn.execute(text("""
                     INSERT INTO qbo_transaction_lines (
                       realm_id, transaction_id, line_key,
-                      detail_type, description, amount,
+                      detail_type, description, amount, cost_amount,
                       line_customer_qbo_id, account_qbo_id, item_qbo_id,
                       class_qbo_id, department_qbo_id, vendor_qbo_id,
                       qty, unit_price, billable_status,
@@ -637,7 +673,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                     )
                     VALUES (
                       :realm_id, :transaction_id, :line_key,
-                      :detail_type, :description, :amount,
+                      :detail_type, :description, :amount, :cost_amount,
                       :line_customer_qbo_id, :account_qbo_id, :item_qbo_id,
                       :class_qbo_id, :department_qbo_id, :vendor_qbo_id,
                       :qty, :unit_price, :billable_status,
@@ -647,6 +683,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                       detail_type = VALUES(detail_type),
                       description = VALUES(description),
                       amount = VALUES(amount),
+                      cost_amount = VALUES(cost_amount),
                       line_customer_qbo_id = VALUES(line_customer_qbo_id),
                       account_qbo_id = VALUES(account_qbo_id),
                       item_qbo_id = VALUES(item_qbo_id),
@@ -664,6 +701,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                     "detail_type": detail_type,
                     "description": description,
                     "amount": amount,
+                    "cost_amount": cost_amount,
                     "line_customer_qbo_id": line_customer_qbo_id,
                     "account_qbo_id": account_qbo_id,
                     "item_qbo_id": item_qbo_id,
