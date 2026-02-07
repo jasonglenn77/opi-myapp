@@ -864,9 +864,34 @@ setShell({
 
 function fmtDate(s) {
   if (!s) return "";
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return String(s); // fallback
-  return d.toLocaleString();
+
+  const str = String(s).trim();
+  let d;
+
+  // "YYYY-MM-DD HH:MM:SS" -> assume UTC
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(str)) {
+    d = new Date(str.replace(" ", "T") + "Z");
+  }
+  // "YYYY-MM-DDTHH:MM:SS" (no timezone) -> assume UTC
+  else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(str)) {
+    d = new Date(str + "Z");
+  }
+  // already has timezone or parseable
+  else {
+    d = new Date(str);
+  }
+
+  if (Number.isNaN(d.getTime())) return str;
+
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Denver",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(d);
 }
 
 async function quickBooksPage() {
@@ -881,10 +906,17 @@ async function quickBooksPage() {
 
   const connected = !!status?.connected;
   const last = status?.last_customers_sync || null;
+  const lastTx = status?.last_transactions_sync || null;
 
   const lastBadge = !last
     ? `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-black/5">No runs yet</span>`
     : (last.success
+        ? `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-green-100 text-green-800">Success</span>`
+        : `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-red-100 text-red-800">Failed</span>`);
+
+  const lastTxBadge = !lastTx
+    ? `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-black/5">No runs yet</span>`
+    : (lastTx.success
         ? `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-green-100 text-green-800">Success</span>`
         : `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-red-100 text-red-800">Failed</span>`);
 
@@ -903,18 +935,27 @@ async function quickBooksPage() {
           </span>
         </div>
 
-        <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Realm ID</div>
-            <div class="font-semibold mt-1">${status?.realm_id || "—"}</div>
-          </div>
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Token expires</div>
-            <div class="font-semibold mt-1">${status?.token_expires_at || "—"}</div>
-          </div>
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Last customers sync</div>
-            <div class="mt-1">${lastBadge}</div>
+        <div class="mt-4 rounded-2xl border border-black/5 bg-white/40 overflow-hidden">
+          <div class="flex flex-wrap items-stretch divide-y sm:divide-y-0 sm:divide-x divide-black/5">
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Realm ID</div>
+              <div class="font-semibold mt-1 truncate">${status?.realm_id || "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Token expires</div>
+              <div class="font-semibold mt-1 whitespace-nowrap">${status?.token_expires_at || "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Last customers sync</div>
+              <div class="mt-1">${lastBadge}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Last transactions sync</div>
+              <div class="mt-1">${lastTxBadge}</div>
+            </div>
           </div>
         </div>
 
@@ -935,26 +976,68 @@ async function quickBooksPage() {
           <button id="qboSyncBtn" class="btn-primary" ${connected ? "" : "disabled"}>Sync customers now</button>
         </div>
 
-        <div class="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Started</div>
-            <div class="font-semibold mt-1">${last?.started_at ? fmtDate(last.started_at) : "—"}</div>
-          </div>
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Finished</div>
-            <div class="font-semibold mt-1">${last?.finished_at ? fmtDate(last.finished_at) : "—"}</div>
-          </div>
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Fetched</div>
-            <div class="font-semibold mt-1">${(last && typeof last.fetched_count !== "undefined") ? last.fetched_count : "—"}</div>
-          </div>
-          <div class="rounded-2xl border border-black/5 p-4">
-            <div class="text-xs font-bold text-black/60">Upserted</div>
-            <div class="font-semibold mt-1">${(last && typeof last.upserted_count !== "undefined") ? last.upserted_count : "—"}</div>
+        <div class="mt-4 rounded-2xl border border-black/5 bg-white/40 overflow-hidden">
+          <div class="flex flex-wrap items-stretch divide-y sm:divide-y-0 sm:divide-x divide-black/5">
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Started</div>
+              <div class="font-semibold mt-1">${last?.started_at ? fmtDate(last.started_at) : "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Finished</div>
+              <div class="font-semibold mt-1">${last?.finished_at ? fmtDate(last.finished_at) : "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Fetched</div>
+              <div class="font-semibold mt-1">${(last && typeof last.fetched_count !== "undefined") ? last.fetched_count : "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Upserted</div>
+              <div class="font-semibold mt-1">${(last && typeof last.upserted_count !== "undefined") ? last.upserted_count : "—"}</div>
+            </div>
           </div>
         </div>
 
         <div id="qboSyncMsg" class="text-sm text-red-700 min-h-[1.25rem] mt-3"></div>
+      </div>
+
+      <!-- Transactions Sync -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-lg font-extrabold">Transactions Sync</div>
+            <div class="text-sm text-black/60">Sync invoices, bills, purchases, etc. into qbo_transactions + qbo_transaction_lines.</div>
+          </div>
+          <button id="qboTxSyncBtn" class="btn-primary" ${connected ? "" : "disabled"}>Sync transactions now</button>
+        </div>
+
+        <div class="mt-4 rounded-2xl border border-black/5 bg-white/40 overflow-hidden">
+          <div class="flex flex-wrap items-stretch divide-y sm:divide-y-0 sm:divide-x divide-black/5">
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Started</div>
+              <div class="font-semibold mt-1">${lastTx?.started_at ? fmtDate(lastTx.started_at) : "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Finished</div>
+              <div class="font-semibold mt-1">${lastTx?.finished_at ? fmtDate(lastTx.finished_at) : "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Fetched</div>
+              <div class="font-semibold mt-1">${(lastTx && typeof lastTx.fetched_count !== "undefined") ? lastTx.fetched_count : "—"}</div>
+            </div>
+
+            <div class="flex-1 min-w-[180px] p-4">
+              <div class="text-xs font-bold text-black/60">Upserted</div>
+              <div class="font-semibold mt-1">${(lastTx && typeof lastTx.upserted_count !== "undefined") ? lastTx.upserted_count : "—"}</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="qboTxSyncMsg" class="text-sm text-red-700 min-h-[1.25rem] mt-3"></div>
       </div>
 
     </div>
@@ -1009,6 +1092,32 @@ async function quickBooksPage() {
       syncBtn.textContent = original;
     }
   };
+
+  const txBtn = document.getElementById("qboTxSyncBtn");
+  txBtn.onclick = async () => {
+    const msg = document.getElementById("qboTxSyncMsg");
+    msg.textContent = "";
+    msg.className = "text-sm text-black/60 min-h-[1.25rem] mt-3";
+
+    txBtn.disabled = true;
+    const original = txBtn.textContent;
+    txBtn.textContent = "Syncing…";
+
+    try {
+      const result = await api("/qbo/sync/transactions", { method: "POST" });
+      msg.className = "text-sm text-green-700 min-h-[1.25rem] mt-3";
+      msg.textContent = `Sync complete. Fetched ${result.fetched_total}, upserted ${result.transactions_upserted}, lines ${result.lines_upserted}.`;
+
+      location.hash = "#/quickbooks";
+      route();
+    } catch (e) {
+      msg.className = "text-sm text-red-700 min-h-[1.25rem] mt-3";
+      msg.textContent = "Transactions sync failed. Check backend logs or status error details.";
+      txBtn.disabled = false;
+      txBtn.textContent = original;
+    }
+  };
+
 }
 
 async function route() {
