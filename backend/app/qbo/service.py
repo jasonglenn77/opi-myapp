@@ -101,21 +101,6 @@ def _fmt_qbo_dt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-# NEW: safe schema upgrade helper
-def _ensure_column(conn, table: str, column: str, ddl: str) -> None:
-    exists = conn.execute(text("""
-        SELECT 1
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = :t
-          AND COLUMN_NAME = :c
-        LIMIT 1
-    """), {"t": table, "c": column}).first()
-
-    if not exists:
-        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
-
-
 def qbo_init_tables() -> None:
     with engine.begin() as conn:
         conn.execute(text("""
@@ -176,9 +161,11 @@ def qbo_init_tables() -> None:
               vendor_qbo_id VARCHAR(32) NULL,
 
               txn_date DATE NULL,
+              due_date DATE NULL,
               doc_number VARCHAR(50) NULL,
               currency_code VARCHAR(10) NULL,
               total_amt DECIMAL(18,2) NULL,
+              sales_term_name VARCHAR(255) NULL,
 
               sync_token VARCHAR(32) NULL,
               meta_create_time DATETIME NULL,
@@ -206,6 +193,7 @@ def qbo_init_tables() -> None:
               detail_type VARCHAR(80) NULL,
               description VARCHAR(4000) NULL,
               amount DECIMAL(18,2) NULL,
+              cost_amount DECIMAL(18,2) NULL,  -- NEW: for expense lines
 
               -- IMPORTANT: project linkage on cost docs is often line-level
               line_customer_qbo_id VARCHAR(32) NULL,
@@ -230,11 +218,6 @@ def qbo_init_tables() -> None:
                 ON DELETE CASCADE
             ) ENGINE=InnoDB
         """))
-
-        # NEW: schema upgrades (existing DBs)
-        _ensure_column(conn, "qbo_transactions", "due_date", "due_date DATE NULL")
-        _ensure_column(conn, "qbo_transactions", "sales_term_name", "sales_term_name VARCHAR(255) NULL")
-        _ensure_column(conn, "qbo_transaction_lines", "cost_amount", "cost_amount DECIMAL(18,2) NULL")
 
 
 def build_auth_url() -> str:
