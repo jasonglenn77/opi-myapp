@@ -199,6 +199,7 @@ function loginPage(message = "") {
   };
 }
 
+
 function fmtMoney(n) {
   const v = Number(n || 0);
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(v);
@@ -210,89 +211,281 @@ function fmtPct(n) {
   return `${(v * 100).toFixed(1)}%`;
 }
 
+function statusBadge(status) {
+  const s = String(status || "").toUpperCase();
+  // Using your existing Tailwind-ish utility classes
+  const cls =
+    s === "COMPLETED" ? "bg-green-100 text-green-800" :
+    s === "NOT_STARTED" ? "bg-black/5 text-ink-800" :
+    s === "NEEDS_ATTENTION" ? "bg-amber-100 text-amber-900" :
+    "bg-blue-100 text-blue-900";
+
+  return `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${cls}">${s}</span>`;
+}
+
+function sortIndicator(key, state) {
+  if (state.sortKey !== key) return "";
+  return state.sortDir === "asc" ? " ▲" : " ▼";
+}
+
+function normalizeStr(v) {
+  return String(v ?? "").toLowerCase();
+}
+
 async function dashboardPage() {
   const data = await api("/dashboard/projects");
   const s = data.summary || {};
   const counts = s.status_counts || {};
+  const rawProjects = Array.isArray(data.projects) ? data.projects : [];
 
-  const bodyHtml = `
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-      <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Total projects</div>
-        <div class="text-3xl font-extrabold mt-1">${s.total_projects ?? "—"}</div>
-        <div class="text-sm text-black/50 mt-1">All QBO projects (is_project=1)</div>
-      </div>
-      <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Not started</div>
-        <div class="text-3xl font-extrabold mt-1">${counts.NOT_STARTED ?? 0}</div>
-        <div class="text-sm text-black/50 mt-1">Estimate but no invoice</div>
-      </div>
-      <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Ongoing</div>
-        <div class="text-3xl font-extrabold mt-1">${counts.ONGOING ?? 0}</div>
-        <div class="text-sm text-black/50 mt-1">Work in progress</div>
-      </div>
-      <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Completed</div>
-        <div class="text-3xl font-extrabold mt-1">${counts.COMPLETED ?? 0}</div>
-        <div class="text-sm text-black/50 mt-1">Invoice balance = 0</div>
-      </div>
-    </div>
+  // ---------- UI state ----------
+  const state = {
+    status: "ALL",            // ALL | NOT_STARTED | ONGOING | COMPLETED | NEEDS_ATTENTION
+    q: "",                    // search string
+    sortKey: "project_lastupdate_dttm",
+    sortDir: "desc",
+  };
 
-    <div class="mt-4 card p-5">
-      <div class="flex items-center justify-between gap-3">
-        <div>
-          <div class="text-lg font-extrabold">Project overview</div>
-          <div class="text-sm text-black/60">
-            Avg age (days): <span class="font-semibold">${(s.avg_age_days ?? null) === null ? "—" : Number(s.avg_age_days).toFixed(1)}</span>
-            ${counts.NEEDS_ATTENTION ? ` • Needs attention: <span class="font-semibold">${counts.NEEDS_ATTENTION}</span>` : ""}
+  // ---------- render helpers ----------
+  function filteredRows() {
+    let rows = rawProjects.slice();
+
+    // status filter
+    if (state.status !== "ALL") {
+      rows = rows.filter(p => String(p.project_status || "").toUpperCase() === state.status);
+    }
+
+    // search filter (name + id)
+    if (state.q.trim()) {
+      const q = state.q.trim().toLowerCase();
+      rows = rows.filter(p =>
+        normalizeStr(p.project_name).includes(q) ||
+        normalizeStr(p.project_qbo_id).includes(q)
+      );
+    }
+
+    // sorting
+    const key = state.sortKey;
+    const dir = state.sortDir === "asc" ? 1 : -1;
+
+    rows.sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+
+      // dates or strings
+      if (key.includes("dttm")) {
+        const at = av ? new Date(av).getTime() : 0;
+        const bt = bv ? new Date(bv).getTime() : 0;
+        return (at - bt) * dir;
+      }
+
+      // numbers
+      const an = Number(av);
+      const bn = Number(bv);
+      if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
+
+      // fallback string
+      const as = normalizeStr(av);
+      const bs = normalizeStr(bv);
+      if (as < bs) return -1 * dir;
+      if (as > bs) return 1 * dir;
+      return 0;
+    });
+
+    return rows;
+  }
+
+  function renderKpis() {
+    const avgAge = (s.avg_age_days ?? null) === null ? "—" : Number(s.avg_age_days).toFixed(1);
+
+    // Compact KPI strip: 2 rows on md+, 1 column on mobile
+    return `
+      <div class="card p-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div class="text-lg font-extrabold">Project health</div>
+            <div class="text-sm text-black/60">Snapshot from QBO rollups</div>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <div class="text-xs text-black/60 font-bold">Avg age</div>
+            <div class="inline-flex items-center rounded-full px-3 py-1 text-sm font-extrabold bg-black/5">
+              ${avgAge} days
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-3 flex flex-wrap gap-2">
+          ${kpiTile("Total", s.total_projects ?? "—")}
+          ${kpiTile("Not started", counts.NOT_STARTED ?? 0)}
+          ${kpiTile("Ongoing", counts.ONGOING ?? 0)}
+          ${kpiTile("Completed", counts.COMPLETED ?? 0)}
+          ${kpiTile("Needs attention", counts.NEEDS_ATTENTION ?? 0)}
+          ${kpiTile("Showing", filteredRows().length)}
+        </div>
+
+      </div>
+    `;
+  }
+
+  function kpiTile(label, value) {
+    return `
+      <div class="rounded-2xl border border-black/5 bg-white/40 px-3 py-2 flex-1 min-w-[160px]">
+        <div class="text-[11px] font-bold text-black/60">${label}</div>
+        <div class="text-xl font-extrabold leading-tight">${value}</div>
+      </div>
+    `;
+  }
+
+  function renderFilters() {
+    const buttons = ["ALL", "NOT_STARTED", "ONGOING", "NEEDS_ATTENTION", "COMPLETED"];
+    return `
+      <div class="card p-4">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div class="flex flex-wrap gap-2">
+            ${buttons.map(b => {
+              const active = state.status === b;
+              return `
+                <button
+                  class="${active ? "btn-primary" : "btn-outline"}"
+                  data-status="${b}"
+                  type="button"
+                >
+                  ${b.replace("_", " ")}
+                </button>
+              `;
+            }).join("")}
+          </div>
+
+          <div class="flex items-center gap-2">
+            <div class="text-xs font-bold text-black/60">Search</div>
+            <input
+              id="projSearch"
+              class="input max-w-xs"
+              placeholder="Project name or QBO id…"
+              value="${state.q}"
+            />
           </div>
         </div>
       </div>
+    `;
+  }
 
-      <div class="mt-4 overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="text-left text-black/60">
-            <tr class="border-b border-black/10">
-              <th class="py-2 pr-3">Status</th>
-              <th class="py-2 pr-3">Project</th>
-              <th class="py-2 pr-3">Balance</th>
-              <th class="py-2 pr-3">Income</th>
-              <th class="py-2 pr-3">Cost</th>
-              <th class="py-2 pr-3">Profit</th>
-              <th class="py-2 pr-3">Margin</th>
-              <th class="py-2 pr-3">Created</th>
-              <th class="py-2 pr-3">Last updated</th>
-              <th class="py-2 pr-3 text-right">Txns</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${(data.projects || []).map(p => `
-              <tr class="border-b border-black/5">
-                <td class="py-2 pr-3 font-bold">${p.project_status || ""}</td>
-                <td class="py-2 pr-3 font-semibold">${p.project_name || ""}</td>
-                <td class="py-2 pr-3">${fmtMoney(p.project_balance)}</td>
-                <td class="py-2 pr-3">${fmtMoney(p.total_income)}</td>
-                <td class="py-2 pr-3">${fmtMoney(p.total_cost)}</td>
-                <td class="py-2 pr-3">${fmtMoney(p.total_profit)}</td>
-                <td class="py-2 pr-3">${fmtPct(p.profit_margin)}</td>
-                <td class="py-2 pr-3">${fmtDate(p.project_create_dttm)}</td>
-                <td class="py-2 pr-3">${fmtDate(p.project_lastupdate_dttm)}</td>
-                <td class="py-2 pr-3 text-right">${p.total_transaction_ct ?? ""}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
+  function renderTable() {
+    const rows = filteredRows();
+
+    const th = (label, key, opts = {}) => {
+      const { right = false } = opts;
+      return `
+        <th class="py-2 px-3 ${right ? "text-right" : ""}">
+          <button class="font-bold text-black/60 hover:text-black inline-flex items-center gap-1"
+            data-sort="${key}" type="button">
+            ${label}${sortIndicator(key, state)}
+          </button>
+        </th>
+      `;
+    };
+
+    const tr = rows.map(p => `
+      <tr class="border-b border-black/5">
+        <td class="py-2 px-3">${statusBadge(p.project_status)}</td>
+        <td class="py-2 px-3 font-semibold whitespace-nowrap">${p.project_name || ""}</td>
+        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.project_balance)}</td>
+        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.total_income)}</td>
+        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.total_cost)}</td>
+        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.total_profit)}</td>
+        <td class="py-2 px-3 text-right tabular-nums">${fmtPct(p.profit_margin)}</td>
+        <td class="py-2 px-3 whitespace-nowrap">${fmtDate(p.project_create_dttm)}</td>
+        <td class="py-2 px-3 whitespace-nowrap">${fmtDate(p.project_lastupdate_dttm)}</td>
+        <td class="py-2 px-3 text-right tabular-nums">${p.total_transaction_ct ?? ""}</td>
+      </tr>
+    `).join("");
+
+    return `
+      <div class="card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="text-lg font-extrabold">Projects</div>
+            <div class="text-sm text-black/60">Scroll + sort by column</div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-black/5 overflow-hidden">
+          <!-- Scroll container -->
+          <div class="overflow-auto max-h-[520px] bg-white/40">
+            <table class="w-full text-sm">
+              <thead class="sticky top-0 bg-white/90 backdrop-blur border-b border-black/10">
+                <tr>
+                  ${th("Status", "project_status")}
+                  ${th("Project", "project_name")}
+                  ${th("Balance", "project_balance", { right: true })}
+                  ${th("Income", "total_income", { right: true })}
+                  ${th("Cost", "total_cost", { right: true })}
+                  ${th("Profit", "total_profit", { right: true })}
+                  ${th("Margin", "profit_margin", { right: true })}
+                  ${th("Created", "project_create_dttm")}
+                  ${th("Last updated", "project_lastupdate_dttm")}
+                  ${th("Txns", "total_transaction_ct", { right: true })}
+                </tr>
+              </thead>
+              <tbody>${tr || `<tr><td class="py-6 px-3 text-black/60" colspan="10">No projects match these filters.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </div>
       </div>
-    </div>
-  `;
+    `;
+  }
 
-  setShell({
-    title: "Dashboard",
-    subtitle: "Project health snapshot from QBO rollups.",
-    bodyHtml,
-    showLogout: true
-  });
+  function render() {
+    const bodyHtml = `
+      <div class="grid grid-cols-1 gap-4">
+        ${renderKpis()}
+        ${renderFilters()}
+        ${renderTable()}
+      </div>
+    `;
+
+    setShell({
+      title: "Dashboard",
+      subtitle: "Compact project overview + sortable table.",
+      bodyHtml,
+      showLogout: true
+    });
+
+    // bind filter buttons
+    document.querySelectorAll("[data-status]").forEach(btn => {
+      btn.onclick = () => {
+        state.status = btn.getAttribute("data-status") || "ALL";
+        render();
+      };
+    });
+
+    // bind search input
+    const input = document.getElementById("projSearch");
+    if (input) {
+      input.oninput = () => {
+        state.q = input.value || "";
+        render();
+      };
+    }
+
+    // bind sort headers
+    document.querySelectorAll("[data-sort]").forEach(btn => {
+      btn.onclick = () => {
+        const key = btn.getAttribute("data-sort");
+        if (!key) return;
+        if (state.sortKey === key) {
+          state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+        } else {
+          state.sortKey = key;
+          state.sortDir = "desc";
+        }
+        render();
+      };
+    });
+  }
+
+  render();
 }
 
 
