@@ -199,57 +199,102 @@ function loginPage(message = "") {
   };
 }
 
+function fmtMoney(n) {
+  const v = Number(n || 0);
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(v);
+}
+function fmtPct(n) {
+  if (n === null || typeof n === "undefined") return "—";
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+
 async function dashboardPage() {
-  const data = await api("/dashboard");
+  const data = await api("/dashboard/projects");
+  const s = data.summary || {};
+  const counts = s.status_counts || {};
 
   const bodyHtml = `
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
       <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Open jobs</div>
-        <div class="text-3xl font-extrabold mt-1">${data.stats.open_jobs}</div>
-        <div class="text-sm text-black/50 mt-1">Active work orders assigned</div>
+        <div class="text-xs font-bold text-black/60">Total projects</div>
+        <div class="text-3xl font-extrabold mt-1">${s.total_projects ?? "—"}</div>
+        <div class="text-sm text-black/50 mt-1">All QBO projects (is_project=1)</div>
       </div>
       <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Quotes pending</div>
-        <div class="text-3xl font-extrabold mt-1">${data.stats.quotes_pending}</div>
-        <div class="text-sm text-black/50 mt-1">Awaiting approval</div>
+        <div class="text-xs font-bold text-black/60">Not started</div>
+        <div class="text-3xl font-extrabold mt-1">${counts.NOT_STARTED ?? 0}</div>
+        <div class="text-sm text-black/50 mt-1">Estimate but no invoice</div>
       </div>
       <div class="card p-5">
-        <div class="text-xs font-bold text-black/60">Invoices due</div>
-        <div class="text-3xl font-extrabold mt-1">${data.stats.invoices_due}</div>
-        <div class="text-sm text-black/50 mt-1">Needs follow-up</div>
+        <div class="text-xs font-bold text-black/60">Ongoing</div>
+        <div class="text-3xl font-extrabold mt-1">${counts.ONGOING ?? 0}</div>
+        <div class="text-sm text-black/50 mt-1">Work in progress</div>
+      </div>
+      <div class="card p-5">
+        <div class="text-xs font-bold text-black/60">Completed</div>
+        <div class="text-3xl font-extrabold mt-1">${counts.COMPLETED ?? 0}</div>
+        <div class="text-sm text-black/50 mt-1">Invoice balance = 0</div>
       </div>
     </div>
 
     <div class="mt-4 card p-5">
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between gap-3">
         <div>
-          <div class="text-lg font-extrabold">Welcome back</div>
-          <div class="text-sm text-black/60">Signed in as <span class="font-semibold">${data.user.email}</span></div>
+          <div class="text-lg font-extrabold">Project overview</div>
+          <div class="text-sm text-black/60">
+            Avg age (days): <span class="font-semibold">${(s.avg_age_days ?? null) === null ? "—" : Number(s.avg_age_days).toFixed(1)}</span>
+            ${counts.NEEDS_ATTENTION ? ` • Needs attention: <span class="font-semibold">${counts.NEEDS_ATTENTION}</span>` : ""}
+          </div>
         </div>
-        <div class="h-10 w-10 rounded-2xl bg-brand-500"></div>
       </div>
 
-      <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div class="rounded-2xl border border-black/5 p-4">
-          <div class="font-bold">Next step</div>
-          <div class="text-sm text-black/60 mt-1">Hook these tiles up to real tables (jobs / quotes / invoices).</div>
-        </div>
-        <div class="rounded-2xl border border-black/5 p-4">
-          <div class="font-bold">Quick action</div>
-          <button class="btn-primary mt-2">Create new job</button>
-        </div>
+      <div class="mt-4 overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="text-left text-black/60">
+            <tr class="border-b border-black/10">
+              <th class="py-2 pr-3">Status</th>
+              <th class="py-2 pr-3">Project</th>
+              <th class="py-2 pr-3">Balance</th>
+              <th class="py-2 pr-3">Income</th>
+              <th class="py-2 pr-3">Cost</th>
+              <th class="py-2 pr-3">Profit</th>
+              <th class="py-2 pr-3">Margin</th>
+              <th class="py-2 pr-3">Created</th>
+              <th class="py-2 pr-3">Last updated</th>
+              <th class="py-2 pr-3 text-right">Txns</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(data.projects || []).map(p => `
+              <tr class="border-b border-black/5">
+                <td class="py-2 pr-3 font-bold">${p.project_status || ""}</td>
+                <td class="py-2 pr-3 font-semibold">${p.project_name || ""}</td>
+                <td class="py-2 pr-3">${fmtMoney(p.project_balance)}</td>
+                <td class="py-2 pr-3">${fmtMoney(p.total_income)}</td>
+                <td class="py-2 pr-3">${fmtMoney(p.total_cost)}</td>
+                <td class="py-2 pr-3">${fmtMoney(p.total_profit)}</td>
+                <td class="py-2 pr-3">${fmtPct(p.profit_margin)}</td>
+                <td class="py-2 pr-3">${fmtDate(p.project_create_dttm)}</td>
+                <td class="py-2 pr-3">${fmtDate(p.project_lastupdate_dttm)}</td>
+                <td class="py-2 pr-3 text-right">${p.total_transaction_ct ?? ""}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
       </div>
     </div>
   `;
 
   setShell({
     title: "Dashboard",
-    subtitle: "Overview of today’s operational activity.",
+    subtitle: "Project health snapshot from QBO rollups.",
     bodyHtml,
     showLogout: true
   });
 }
+
 
 async function usersPage() {
   const users = await api("/users");

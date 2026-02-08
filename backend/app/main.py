@@ -514,3 +514,148 @@ def disable_work_crew(crew_id: int, _admin=Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Work crew not found")
 
     return {"ok": True}
+
+@app.get("/api/dashboard/projects")
+def dashboard_projects(user=Depends(get_current_user)):
+    from .db import engine
+
+    sql = text("""
+    WITH
+    projects AS (
+      SELECT
+        qbo_id,
+        display_name,
+        balance_with_jobs,
+        meta_create_time,
+        meta_last_updated_time
+      FROM myapp.qbo_customers
+      WHERE is_project = 1
+    ),
+    line_totals AS (
+      SELECT
+        transaction_id,
+        line_customer_qbo_id AS project_qbo_id,
+        SUM(amount) AS line_amt
+      FROM myapp.qbo_transaction_lines
+      WHERE line_customer_qbo_id IS NOT NULL
+      GROUP BY transaction_id, line_customer_qbo_id
+    ),
+    txn_rollup AS (
+      SELECT
+        COALESCE(t.customer_qbo_id, lt.project_qbo_id) AS project_qbo_id,
+
+        SUM(CASE WHEN t.entity_type='Estimate' THEN t.total_amt ELSE 0 END) AS estimate_amt,
+        SUM(CASE WHEN t.entity_type='Estimate' THEN 1 ELSE 0 END) AS estimate_ct,
+
+        SUM(CASE WHEN t.entity_type='Invoice' THEN t.total_amt ELSE 0 END) AS invoice_amt,
+        SUM(CASE WHEN t.entity_type='Invoice' THEN t.balance_amt ELSE 0 END) AS invoice_bal,
+        SUM(CASE WHEN t.entity_type='Invoice' THEN 1 ELSE 0 END) AS invoice_ct,
+
+        SUM(CASE WHEN t.entity_type='Bill' THEN COALESCE(lt.line_amt,0) ELSE 0 END) AS bill_amt,
+        SUM(CASE WHEN t.entity_type='Bill' THEN 1 ELSE 0 END) AS bill_ct,
+
+        SUM(CASE WHEN t.entity_type='Purchase' THEN COALESCE(lt.line_amt,0) ELSE 0 END) AS expense_amt,
+        SUM(CASE WHEN t.entity_type='Purchase' THEN 1 ELSE 0 END) AS expense_ct,
+
+        SUM(CASE WHEN t.entity_type='VendorCredit' THEN COALESCE(lt.line_amt,0) ELSE 0 END) AS vendorcredit_amt,
+        SUM(CASE WHEN t.entity_type='VendorCredit' THEN 1 ELSE 0 END) AS vendorcredit_ct,
+
+        SUM(CASE WHEN t.entity_type='CreditMemo' THEN t.total_amt ELSE 0 END) AS creditmemo_amt,
+        SUM(CASE WHEN t.entity_type='CreditMemo' THEN t.balance_amt ELSE 0 END) AS creditmemo_bal,
+        SUM(CASE WHEN t.entity_type='CreditMemo' THEN 1 ELSE 0 END) AS creditmemo_ct
+
+      FROM myapp.qbo_transactions t
+      LEFT JOIN line_totals lt
+        ON lt.transaction_id = t.id
+        AND t.entity_type IN ('Bill','Purchase','VendorCredit')
+      WHERE t.entity_type IN ('Estimate','Invoice','Bill','Purchase','VendorCredit','CreditMemo')
+      GROUP BY COALESCE(t.customer_qbo_id, lt.project_qbo_id)
+    )
+    SELECT
+      p.qbo_id AS project_qbo_id,
+      p.display_name AS project_name,
+      p.balance_with_jobs AS project_balance,
+      p.meta_create_time AS project_create_dttm,
+      p.meta_last_updated_time AS project_lastupdate_dttm,
+
+      COALESCE(r.estimate_amt,0) AS estimate_amt,
+      COALESCE(r.estimate_ct,0) AS estimate_ct,
+      COALESCE(r.invoice_amt,0) AS invoice_amt,
+      COALESCE(r.invoice_bal,0) AS invoice_bal,
+      COALESCE(r.invoice_ct,0) AS invoice_ct,
+      COALESCE(r.bill_amt,0) AS bill_amt,
+      COALESCE(r.bill_ct,0) AS bill_ct,
+      COALESCE(r.expense_amt,0) AS expense_amt,
+      COALESCE(r.expense_ct,0) AS expense_ct,
+      COALESCE(r.vendorcredit_amt,0) AS vendorcredit_amt,
+      COALESCE(r.vendorcredit_ct,0) AS vendorcredit_ct,
+      COALESCE(r.creditmemo_amt,0) AS creditmemo_amt,
+      COALESCE(r.creditmemo_bal,0) AS creditmemo_bal,
+      COALESCE(r.creditmemo_ct,0) AS creditmemo_ct,
+
+      (COALESCE(r.invoice_amt,0) - COALESCE(r.creditmemo_amt,0)) AS total_income,
+      (COALESCE(r.bill_amt,0) + COALESCE(r.expense_amt,0) - COALESCE(r.vendorcredit_amt,0)) AS total_cost,
+
+      (
+        (COALESCE(r.invoice_amt,0) - COALESCE(r.creditmemo_amt,0))
+        -
+        (COALESCE(r.bill_amt,0) + COALESCE(r.expense_amt,0) - COALESCE(r.vendorcredit_amt,0))
+      ) AS total_profit,
+
+      CASE
+        WHEN (COALESCE(r.invoice_amt,0) - COALESCE(r.creditmemo_amt,0)) = 0 THEN NULL
+        ELSE (
+          (
+            (COALESCE(r.invoice_amt,0) - COALESCE(r.creditmemo_amt,0))
+            -
+            (COALESCE(r.bill_amt,0) + COALESCE(r.expense_amt,0) - COALESCE(r.vendorcredit_amt,0))
+          ) / (COALESCE(r.invoice_amt,0) - COALESCE(r.creditmemo_amt,0))
+        )
+      END AS profit_margin,
+
+      DATEDIFF(p.meta_last_updated_time, p.meta_create_time) AS age_days,
+
+      CASE
+        WHEN COALESCE(r.estimate_ct,0) > 0 AND COALESCE(r.invoice_ct,0) = 0 THEN 'NOT_STARTED'
+        WHEN COALESCE(r.invoice_ct,0) > 0 AND COALESCE(r.invoice_bal,0) = 0 AND COALESCE(p.balance_with_jobs,0) = 0 THEN 'COMPLETED'
+        WHEN COALESCE(r.invoice_ct,0) = 0 AND (COALESCE(r.bill_ct,0) > 0 OR COALESCE(r.expense_ct,0) > 0) THEN 'NEEDS_ATTENTION'
+        ELSE 'ONGOING'
+      END AS project_status
+
+    FROM projects p
+    LEFT JOIN txn_rollup r
+      ON r.project_qbo_id = p.qbo_id
+    ORDER BY p.meta_last_updated_time DESC
+    """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+
+    projects = [dict(r) for r in rows]
+
+    # Summary counts + avg age
+    counts = {"NOT_STARTED": 0, "ONGOING": 0, "COMPLETED": 0, "NEEDS_ATTENTION": 0}
+    age_sum = 0
+    age_ct = 0
+
+    for p in projects:
+        s = p.get("project_status") or "ONGOING"
+        if s not in counts:
+            counts[s] = 0
+        counts[s] += 1
+
+        if p.get("age_days") is not None:
+            age_sum += int(p["age_days"])
+            age_ct += 1
+
+    avg_age_days = (age_sum / age_ct) if age_ct else None
+
+    return {
+        "summary": {
+            "total_projects": len(projects),
+            "status_counts": counts,
+            "avg_age_days": avg_age_days,
+        },
+        "projects": projects[:250],  # keep UI snappy; raise later or paginate
+    }
+
