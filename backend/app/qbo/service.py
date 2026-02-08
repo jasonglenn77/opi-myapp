@@ -165,6 +165,7 @@ def qbo_init_tables() -> None:
               doc_number VARCHAR(50) NULL,
               currency_code VARCHAR(10) NULL,
               total_amt DECIMAL(18,2) NULL,
+              balance_amt DECIMAL(18,2) NULL,
               sales_term_name VARCHAR(255) NULL,
 
               sync_token VARCHAR(32) NULL,
@@ -526,6 +527,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 currency_code = cur.get("value")
 
             total_amt = _parse_decimal(t.get("TotalAmt"))
+            balance_amt = _parse_decimal(t.get("Balance"))
             sync_token = t.get("SyncToken")
 
             md = t.get("MetaData") or {}
@@ -537,7 +539,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 INSERT INTO qbo_transactions (
                   realm_id, entity_type, qbo_id,
                   customer_qbo_id, vendor_qbo_id,
-                  txn_date, due_date, doc_number, currency_code, total_amt,
+                  txn_date, due_date, doc_number, currency_code, total_amt, balance_amt,
                   sales_term_name,
                   sync_token, meta_create_time, meta_last_updated_time,
                   raw_json
@@ -545,7 +547,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 VALUES (
                   :realm_id, :entity_type, :qbo_id,
                   :customer_qbo_id, :vendor_qbo_id,
-                  :txn_date, :due_date, :doc_number, :currency_code, :total_amt,
+                  :txn_date, :due_date, :doc_number, :currency_code, :total_amt, :balance_amt,
                   :sales_term_name,
                   :sync_token, :meta_create_time, :meta_last_updated_time,
                   CAST(:raw AS JSON)
@@ -559,6 +561,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                   doc_number = VALUES(doc_number),
                   currency_code = VALUES(currency_code),
                   total_amt = VALUES(total_amt),
+                  balance_amt = VALUES(balance_amt),
                   sales_term_name = VALUES(sales_term_name),
                   sync_token = VALUES(sync_token),
                   meta_create_time = VALUES(meta_create_time),
@@ -575,6 +578,7 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
                 "doc_number": doc_number,
                 "currency_code": currency_code,
                 "total_amt": total_amt,
+                "balance_amt": balance_amt,
                 "sales_term_name": sales_term_name,
                 "sync_token": sync_token,
                 "meta_create_time": meta_create_time,
