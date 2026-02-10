@@ -232,260 +232,224 @@ function normalizeStr(v) {
   return String(v ?? "").toLowerCase();
 }
 
+
 async function dashboardPage() {
   const data = await api("/dashboard/projects");
-  const s = data.summary || {};
-  const counts = s.status_counts || {};
-  const rawProjects = Array.isArray(data.projects) ? data.projects : [];
+  const rows = data.projects || [];
+  const summary = data.summary || null;
 
-  // ---------- UI state ----------
   const state = {
-    status: "ALL",            // ALL | NOT_STARTED | ONGOING | COMPLETED | NEEDS_ATTENTION
-    q: "",                    // search string
-    sortKey: "project_lastupdate_dttm",
-    sortDir: "desc",
+    status: "ALL",
+    q: "",
+    sortKey: "project_name",
+    sortDir: "asc",
   };
 
-  // ---------- render helpers ----------
-  function filteredRows() {
-    let rows = rawProjects.slice();
+  const bodyHtml = `
+    <div class="card p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="text-lg font-extrabold">Project health</div>
+          <div class="text-sm text-black/60">Snapshot from QBO rollups</div>
+        </div>
 
-    // status filter
-    if (state.status !== "ALL") {
-      rows = rows.filter(p => String(p.project_status || "").toUpperCase() === state.status);
-    }
+        <div class="text-sm text-black/60 font-semibold">
+          Avg age <span id="avgAgePill" class="inline-flex rounded-full px-2 py-0.5 bg-black/5 text-ink-800 font-bold">— days</span>
+        </div>
+      </div>
 
-    // search filter (name + id)
-    if (state.q.trim()) {
-      const q = state.q.trim().toLowerCase();
-      rows = rows.filter(p =>
-        normalizeStr(p.project_name).includes(q) ||
-        normalizeStr(p.project_qbo_id).includes(q)
-      );
-    }
+      <div class="mt-3 kpi-grid" id="kpiGrid"></div>
+    </div>
 
-    // sorting
-    const key = state.sortKey;
+    <div class="mt-4 card p-5">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-2 flex-wrap" id="statusPills"></div>
+
+        <div class="flex items-center gap-2">
+          <div class="text-sm font-semibold text-black/60">Search</div>
+          <input id="searchInput" class="input w-64" placeholder="Project name or QBO id" />
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-4 card p-5 overflow-hidden">
+      <div class="flex items-end justify-between gap-3">
+        <div>
+          <div class="text-lg font-extrabold">Projects</div>
+          <div class="text-sm text-black/60">Scroll + sort by column</div>
+        </div>
+        <div class="text-sm text-black/60" id="rowCount">—</div>
+      </div>
+
+      <div class="mt-4 overflow-x-auto" style="max-width:100%">
+        <table id="projectsTable" class="w-full text-sm" style="min-width:980px">
+          <thead class="text-left text-black/60 border-b border-black/10">
+            <tr>
+              ${th("project_status", "Status")}
+              ${th("project_name", "Project")}
+              ${th("project_balance", "Balance")}
+              ${th("total_income", "Income")}
+              ${th("total_cost", "Cost")}
+              ${th("total_profit", "Profit")}
+              ${th("profit_margin", "Margin")}
+              ${th("project_create_dttm", "Created")}
+              ${th("project_lastupdate_dttm", "Last updated")}
+              ${th("total_transaction_ct", "Txns")}
+            </tr>
+          </thead>
+          <tbody id="projectsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  setShell({
+    title: "Dashboard",
+    subtitle: "Compact project overview + sortable table.",
+    bodyHtml,
+    showLogout: true
+  });
+
+  function th(key, label) {
+    return `
+      <th class="py-2 pr-3 whitespace-nowrap">
+        <button class="font-bold hover:bg-black/5 rounded-xl px-2 py-1" data-sort="${key}">
+          ${label}
+        </button>
+      </th>`;
+  }
+
+  function normalize(v) {
+    return (v ?? "").toString().toLowerCase();
+  }
+
+  function filtered() {
+    const q = normalize(state.q);
+    return rows.filter(r => {
+      const rowStatus = String(r.project_status || "").toUpperCase();
+      if (state.status !== "ALL" && rowStatus !== state.status) return false;
+      if (!q) return true;
+      return normalize(r.project_name).includes(q) || normalize(r.project_qbo_id).includes(q);
+    });
+  }
+
+  function sorted(list) {
     const dir = state.sortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const va = a[state.sortKey];
+      const vb = b[state.sortKey];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
 
-    rows.sort((a, b) => {
-      const av = a[key];
-      const bv = b[key];
+      const na = Number(va), nb = Number(vb);
+      if (!Number.isNaN(na) && !Number.isNaN(nb)) return (na - nb) * dir;
 
-      // dates or strings
-      if (key.includes("dttm")) {
-        const at = av ? new Date(av).getTime() : 0;
-        const bt = bv ? new Date(bv).getTime() : 0;
-        return (at - bt) * dir;
-      }
+      return String(va).localeCompare(String(vb)) * dir;
+    });
+  }
 
-      // numbers
-      const an = Number(av);
-      const bn = Number(bv);
-      if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * dir;
-
-      // fallback string
-      const as = normalizeStr(av);
-      const bs = normalizeStr(bv);
-      if (as < bs) return -1 * dir;
-      if (as > bs) return 1 * dir;
-      return 0;
+  function renderKpis(list) {
+    const counts = { ALL: rows.length };
+    rows.forEach(r => {
+      const s = String(r.project_status || "").toUpperCase();
+      if (!s) return;
+      counts[s] = (counts[s] || 0) + 1;
     });
 
-    return rows;
+    // Prefer backend avg if present
+    const avg = (summary && typeof summary.avg_age_days === "number")
+      ? summary.avg_age_days
+      : null;
+
+    document.getElementById("avgAgePill").textContent =
+      avg != null ? `${avg.toFixed(1)} days` : "— days";
+
+    const grid = document.getElementById("kpiGrid");
+    grid.innerHTML = `
+      ${kpi("Total", counts.ALL || 0)}
+      ${kpi("Not started", counts.NOT_STARTED || 0)}
+      ${kpi("Ongoing", counts.ONGOING || 0)}
+      ${kpi("Completed", counts.COMPLETED || 0)}
+      ${kpi("Needs attention", counts.NEEDS_ATTENTION || 0)}
+      ${kpi("Showing", list.length)}
+    `;
+
+    function kpi(label, value) {
+      return `
+        <div class="rounded-xl border border-black/10 bg-black/5 px-4 py-3">
+          <div class="text-xs font-bold text-black/60">${label}</div>
+          <div class="text-2xl font-extrabold leading-tight">${value}</div>
+        </div>
+      `;
+    }
   }
 
-  function renderKpis() {
-    const avgAge = (s.avg_age_days ?? null) === null ? "—" : Number(s.avg_age_days).toFixed(1);
-
-    // Compact KPI strip: 2 rows on md+, 1 column on mobile
-    return `
-      <div class="card p-4">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div class="text-lg font-extrabold">Project health</div>
-            <div class="text-sm text-black/60">Snapshot from QBO rollups</div>
-          </div>
-
-          <div class="flex items-center gap-2">
-            <div class="text-xs text-black/60 font-bold">Avg age</div>
-            <div class="inline-flex items-center rounded-full px-3 py-1 text-sm font-extrabold bg-black/5">
-              ${avgAge} days
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-3 flex flex-wrap gap-2">
-          ${kpiTile("Total", s.total_projects ?? "—")}
-          ${kpiTile("Not started", counts.NOT_STARTED ?? 0)}
-          ${kpiTile("Ongoing", counts.ONGOING ?? 0)}
-          ${kpiTile("Completed", counts.COMPLETED ?? 0)}
-          ${kpiTile("Needs attention", counts.NEEDS_ATTENTION ?? 0)}
-          ${kpiTile("Showing", filteredRows().length)}
-        </div>
-
-      </div>
-    `;
-  }
-
-  function kpiTile(label, value) {
-    return `
-      <div class="rounded-2xl border border-black/5 bg-white/40 px-3 py-2 flex-1 min-w-[160px]">
-        <div class="text-[11px] font-bold text-black/60">${label}</div>
-        <div class="text-xl font-extrabold leading-tight">${value}</div>
-      </div>
-    `;
-  }
-
-  function renderFilters() {
-    const buttons = ["ALL", "NOT_STARTED", "ONGOING", "NEEDS_ATTENTION", "COMPLETED"];
-    return `
-      <div class="card p-4">
-        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div class="flex flex-wrap gap-2">
-            ${buttons.map(b => {
-              const active = state.status === b;
-              return `
-                <button
-                  class="${active ? "btn-primary" : "btn-outline"}"
-                  data-status="${b}"
-                  type="button"
-                >
-                  ${b.replace("_", " ")}
-                </button>
-              `;
-            }).join("")}
-          </div>
-
-          <div class="flex items-center gap-2">
-            <div class="text-xs font-bold text-black/60">Search</div>
-            <input
-              id="projSearch"
-              class="input max-w-xs"
-              placeholder="Project name or QBO id…"
-              value="${state.q}"
-            />
-          </div>
-        </div>
-      </div>
-    `;
+  function renderStatusPills() {
+    const statuses = ["ALL", "NOT_STARTED", "ONGOING", "COMPLETED", "NEEDS_ATTENTION"];
+    const wrap = document.getElementById("statusPills");
+    wrap.innerHTML = statuses.map(s => {
+      const active = state.status === s;
+      return `
+        <button
+          class="rounded-xl px-3 py-2 text-sm font-extrabold border ${active ? "bg-brand-500 text-white border-black/0" : "bg-white/60 text-ink-900 border-black/10 hover:bg-black/5"}"
+          data-status="${s}"
+        >${s === "ALL" ? "All" : s.replaceAll("_"," ").toLowerCase().replace(/^\w/,c=>c.toUpperCase())}</button>
+      `;
+    }).join("");
   }
 
   function renderTable() {
-    const rows = filteredRows();
+    const list = sorted(filtered());
+    renderKpis(list);
+    document.getElementById("rowCount").textContent = `${list.length} projects`;
 
-    const th = (label, key, opts = {}) => {
-      const { right = false } = opts;
+    const tbody = document.getElementById("projectsBody");
+    tbody.innerHTML = list.map(r => {
+      const rowStatus = String(r.project_status || "").toUpperCase();
       return `
-        <th class="py-2 px-3 ${right ? "text-right" : ""}">
-          <button class="font-bold text-black/60 hover:text-black inline-flex items-center gap-1"
-            data-sort="${key}" type="button">
-            ${label}${sortIndicator(key, state)}
-          </button>
-        </th>
+        <tr class="border-b border-black/5">
+          <td class="py-2 pr-3 whitespace-nowrap">${statusBadge(rowStatus)}</td>
+          <td class="py-2 pr-3 font-semibold">${r.project_name || ""}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.project_balance)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.total_income)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.total_cost)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.total_profit)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtPct(r.profit_margin)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtDate(r.project_create_dttm)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${fmtDate(r.project_lastupdate_dttm)}</td>
+          <td class="py-2 pr-3 whitespace-nowrap">${r.total_transaction_ct ?? ""}</td>
+        </tr>
       `;
-    };
-
-    const tr = rows.map(p => `
-      <tr class="border-b border-black/5">
-        <td class="py-2 px-3">${statusBadge(p.project_status)}</td>
-        <td class="py-2 px-3 font-semibold whitespace-nowrap">${p.project_name || ""}</td>
-        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.project_balance)}</td>
-        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.total_income)}</td>
-        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.total_cost)}</td>
-        <td class="py-2 px-3 text-right tabular-nums">${fmtMoney(p.total_profit)}</td>
-        <td class="py-2 px-3 text-right tabular-nums">${fmtPct(p.profit_margin)}</td>
-        <td class="py-2 px-3 whitespace-nowrap">${fmtDate(p.project_create_dttm)}</td>
-        <td class="py-2 px-3 whitespace-nowrap">${fmtDate(p.project_lastupdate_dttm)}</td>
-        <td class="py-2 px-3 text-right tabular-nums">${p.total_transaction_ct ?? ""}</td>
-      </tr>
-    `).join("");
-
-    return `
-      <div class="card p-4">
-        <div class="flex items-center justify-between mb-3">
-          <div>
-            <div class="text-lg font-extrabold">Projects</div>
-            <div class="text-sm text-black/60">Scroll + sort by column</div>
-          </div>
-        </div>
-
-        <div class="rounded-2xl border border-black/5 overflow-hidden">
-          <!-- Scroll container -->
-          <div class="overflow-auto max-h-[520px] bg-white/40">
-            <table class="w-full text-sm">
-              <thead class="sticky top-0 bg-white/90 backdrop-blur border-b border-black/10">
-                <tr>
-                  ${th("Status", "project_status")}
-                  ${th("Project", "project_name")}
-                  ${th("Balance", "project_balance", { right: true })}
-                  ${th("Income", "total_income", { right: true })}
-                  ${th("Cost", "total_cost", { right: true })}
-                  ${th("Profit", "total_profit", { right: true })}
-                  ${th("Margin", "profit_margin", { right: true })}
-                  ${th("Created", "project_create_dttm")}
-                  ${th("Last updated", "project_lastupdate_dttm")}
-                  ${th("Txns", "total_transaction_ct", { right: true })}
-                </tr>
-              </thead>
-              <tbody>${tr || `<tr><td class="py-6 px-3 text-black/60" colspan="10">No projects match these filters.</td></tr>`}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
+    }).join("") || `
+      <tr><td class="py-6 text-center text-black/50" colspan="10">No projects match these filters.</td></tr>
     `;
   }
 
-  function render() {
-    const bodyHtml = `
-      <div class="grid grid-cols-1 gap-4">
-        ${renderKpis()}
-        ${renderFilters()}
-        ${renderTable()}
-      </div>
-    `;
+  document.getElementById("statusPills").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-status]");
+    if (!btn) return;
+    state.status = btn.getAttribute("data-status");
+    renderStatusPills();
+    renderTable();
+  });
 
-    setShell({
-      title: "Dashboard",
-      subtitle: "Compact project overview + sortable table.",
-      bodyHtml,
-      showLogout: true
-    });
+  document.getElementById("searchInput").addEventListener("input", (e) => {
+    state.q = e.target.value;
+    renderTable();
+  });
 
-    // bind filter buttons
-    document.querySelectorAll("[data-status]").forEach(btn => {
-      btn.onclick = () => {
-        state.status = btn.getAttribute("data-status") || "ALL";
-        render();
-      };
-    });
+  document.querySelector("#projectsTable thead").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-sort]");
+    if (!btn) return;
+    const key = btn.getAttribute("data-sort");
+    if (state.sortKey === key) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+    else { state.sortKey = key; state.sortDir = "asc"; }
+    renderTable();
+  });
 
-    // bind search input
-    const input = document.getElementById("projSearch");
-    if (input) {
-      input.oninput = () => {
-        state.q = input.value || "";
-        render();
-      };
-    }
-
-    // bind sort headers
-    document.querySelectorAll("[data-sort]").forEach(btn => {
-      btn.onclick = () => {
-        const key = btn.getAttribute("data-sort");
-        if (!key) return;
-        if (state.sortKey === key) {
-          state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
-        } else {
-          state.sortKey = key;
-          state.sortDir = "desc";
-        }
-        render();
-      };
-    });
-  }
-
-  render();
+  renderStatusPills();
+  renderTable();
 }
 
 

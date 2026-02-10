@@ -19,4 +19,32 @@
          transition;}
   .input { @apply w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-ink-900 placeholder:text-black/40; }
   .label { @apply text-xs font-semibold text-black/60; }
+  /* KPI grid that auto-wraps nicely */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.5rem;
+  }
+
+  .kpi-card {
+    @apply rounded-xl border border-black/10 bg-white/60 px-4 py-3;
+  }
+
+  .kpi-label {
+    @apply text-[11px] font-bold text-black/50;
+  }
+
+  .kpi-value {
+    @apply text-xl font-extrabold leading-tight text-ink-900;
+  }
+
+  /* Table wrapper that always scrolls instead of overflowing */
+  .table-wrap {
+    @apply overflow-x-auto;
+    max-width: 100%;
+  }
+
+  .table-min {
+    min-width: 980px; /* adjust up/down as you like */
+  }
 }
