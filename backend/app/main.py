@@ -656,6 +656,6 @@ def dashboard_projects(user=Depends(get_current_user)):
             "status_counts": counts,
             "avg_age_days": avg_age_days,
         },
-        "projects": projects[:250],  # keep UI snappy; raise later or paginate
+        "projects": projects[:1000],  # keep UI snappy; raise later or paginate
     }
 

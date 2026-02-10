@@ -281,9 +281,9 @@ async function dashboardPage() {
         <div class="text-sm text-black/60" id="rowCount">—</div>
       </div>
 
-      <div class="mt-4 overflow-x-auto" style="max-width:100%">
-        <table id="projectsTable" class="w-full text-sm" style="min-width:980px">
-          <thead class="text-left text-black/60 border-b border-black/10">
+      <div class="mt-4 table-scroll border border-black/5 bg-white/40 overflow-hidden">
+        <table id="projectsTable" class="w-full text-sm table-fixed" style="min-width:980px">
+          <thead class="sticky top-0 z-20 bg-white text-left text-black/60 border-b border-black/10">
             <tr>
               ${th("project_status", "Status")}
               ${th("project_name", "Project")}
@@ -312,8 +312,8 @@ async function dashboardPage() {
 
   function th(key, label) {
     return `
-      <th class="py-2 pr-3 whitespace-nowrap">
-        <button class="font-bold hover:bg-black/5 rounded-xl px-2 py-1" data-sort="${key}">
+      <th class="py-2 pr-3 whitespace-nowrap align-middle">
+        <button class="font-bold hover:bg-black/5 rounded-xl px-2 py-1 w-full text-left" data-sort="${key}">
           ${label}
         </button>
       </th>`;
@@ -409,16 +409,16 @@ async function dashboardPage() {
       const rowStatus = String(r.project_status || "").toUpperCase();
       return `
         <tr class="border-b border-black/5">
-          <td class="py-2 pr-3 whitespace-nowrap">${statusBadge(rowStatus)}</td>
-          <td class="py-2 pr-3 font-semibold">${r.project_name || ""}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.project_balance)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.total_income)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.total_cost)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtMoney(r.total_profit)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtPct(r.profit_margin)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtDate(r.project_create_dttm)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${fmtDate(r.project_lastupdate_dttm)}</td>
-          <td class="py-2 pr-3 whitespace-nowrap">${r.total_transaction_ct ?? ""}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${statusBadge(rowStatus)}</td>
+          <td class="py-2 px-2 font-semibold max-w-0 truncate" title="${(r.project_name || "").replaceAll('"','&quot;')}">${r.project_name || ""}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.project_balance)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.total_income)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.total_cost)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.total_profit)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtPct(r.profit_margin)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtDate(r.project_create_dttm)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${fmtDate(r.project_lastupdate_dttm)}</td>
+          <td class="py-2 px-2 whitespace-nowrap">${r.total_transaction_ct ?? ""}</td>
         </tr>
       `;
     }).join("") || `
