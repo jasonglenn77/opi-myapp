@@ -48,12 +48,15 @@
     min-width: 980px; /* adjust up/down as you like */
   }
   .table-scroll {
-    max-height: 520px;      /* adjust as you like */
-    overflow: auto;         /* enables BOTH vertical + horizontal scrollbars */
+    height: 520px;      /* adjust as you like */
+    overflow: auto;
     max-width: 100%;
-    border-radius: 1rem;    /* optional: matches your rounded look */
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
-}
+  }
 
 }
+
+/* DEBUG: should appear in output.css */
+/* .debug-tailwind-copy { outline: 1px solid magenta !important; } */
+

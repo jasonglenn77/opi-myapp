@@ -272,7 +272,7 @@ async function dashboardPage() {
       </div>
     </div>
 
-    <div class="mt-4 card p-5 overflow-hidden">
+    <div class="mt-4 card p-5">
       <div class="flex items-end justify-between gap-3">
         <div>
           <div class="text-lg font-extrabold">Projects</div>
@@ -281,24 +281,26 @@ async function dashboardPage() {
         <div class="text-sm text-black/60" id="rowCount">—</div>
       </div>
 
-      <div class="mt-4 table-scroll border border-black/5 bg-white/40 overflow-hidden">
-        <table id="projectsTable" class="w-full text-sm table-fixed" style="min-width:980px">
-          <thead class="sticky top-0 z-20 bg-white text-left text-black/60 border-b border-black/10">
-            <tr>
-              ${th("project_status", "Status")}
-              ${th("project_name", "Project")}
-              ${th("project_balance", "Balance")}
-              ${th("total_income", "Income")}
-              ${th("total_cost", "Cost")}
-              ${th("total_profit", "Profit")}
-              ${th("profit_margin", "Margin")}
-              ${th("project_create_dttm", "Created")}
-              ${th("project_lastupdate_dttm", "Last updated")}
-              ${th("total_transaction_ct", "Txns")}
-            </tr>
-          </thead>
-          <tbody id="projectsBody"></tbody>
-        </table>
+      <div class="mt-4 border border-black/5 bg-white/40 rounded-2xl overflow-hidden">
+        <div class="table-scroll">
+          <table id="projectsTable" class="text-sm border-collapse w-full min-w-[980px]">
+            <thead class="sticky top-0 z-20 bg-white shadow-sm text-left text-black/60 border-b border-black/10">
+              <tr>
+                ${th("project_status", "Status")}
+                ${th("project_name", "Project")}
+                ${th("project_balance", "Balance")}
+                ${th("total_income", "Income")}
+                ${th("total_cost", "Cost")}
+                ${th("total_profit", "Profit")}
+                ${th("profit_margin", "Margin")}
+                ${th("project_create_dttm", "Created")}
+                ${th("project_lastupdate_dttm", "Last updated")}
+                ${th("total_transaction_ct", "Txns")}
+              </tr>
+            </thead>
+            <tbody id="projectsBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   `;
@@ -312,8 +314,8 @@ async function dashboardPage() {
 
   function th(key, label) {
     return `
-      <th class="py-2 pr-3 whitespace-nowrap align-middle">
-        <button class="font-bold hover:bg-black/5 rounded-xl px-2 py-1 w-full text-left" data-sort="${key}">
+      <th class="py-2 px-3 whitespace-nowrap">
+        <button class="font-bold hover:bg-black/5 rounded-xl px-2 py-1" data-sort="${key}">
           ${label}
         </button>
       </th>`;
