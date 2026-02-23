@@ -29,7 +29,7 @@ export async function quickBooksPage(routeFn) {
         : `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold bg-red-100 text-red-800">Failed</span>`);
 
   const bodyHtml = `
-    <div class="grid grid-cols-1 gap-4">
+    <div class="grid grid-cols-1 gap-4 pb-6">
 
       <!-- Connection -->
       <div class="card p-5">

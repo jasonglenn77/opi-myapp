@@ -54,7 +54,7 @@ export async function teamsPage(routeFn) {
   });
 
   const bodyHtml = `
-    <div class="grid grid-cols-1 gap-4">
+    <div class="grid grid-cols-1 gap-4 pb-6">
       <!-- PMs -->
       <div class="card p-5">
         <div class="flex items-center justify-between mb-4">
