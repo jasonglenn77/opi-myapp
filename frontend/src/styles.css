@@ -53,6 +53,20 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
+  /* Sticky horizontal scrollbar pinned to bottom of table frame */
+  .hscrollbar {
+    height: 14px;              /* visible bar height */
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: transparent;
+    flex: 0 0 14px;
+  }
+
+  /* This creates the scrollable width; JS will set its width */
+  .hscrollbar-inner {
+    height: 1px;
+    width: 0px;
+  }
 
 }
 

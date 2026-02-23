@@ -25,6 +25,18 @@ export async function projectsPage(routeFn) {
     return fmtDate(v);
   }
 
+  function th(key, label) {
+    return `
+      <th class="py-2 px-3 whitespace-nowrap text-left align-middle">
+        <button
+          class="block w-full text-left font-bold rounded-xl hover:bg-black/5 px-0 py-0"
+          data-sort="${key}"
+        >
+          ${label}
+        </button>
+      </th>`;
+  }
+
   const bodyHtml = `
     <div class="h-full flex flex-col min-h-0 gap-4">
       <!-- KPI card (fixed height) -->
@@ -101,16 +113,47 @@ export async function projectsPage(routeFn) {
     routeFn,
   });
 
-  function th(key, label) {
-    return `
-      <th class="py-2 px-3 whitespace-nowrap text-left align-middle">
-        <button
-          class="block w-full text-left font-bold rounded-xl hover:bg-black/5 px-0 py-0"
-          data-sort="${key}"
-        >
-          ${label}
-        </button>
-      </th>`;
+  function syncStickyHScroll() {
+    const scroller = document.getElementById("tableScroller");
+    const hScroll = document.getElementById("hScroll");
+    const hInner = document.getElementById("hScrollInner");
+    const table = document.getElementById("projectsTable");
+
+    if (!scroller || !hScroll || !hInner || !table) return;
+
+    // set the "fake" scroll width to match the real table width
+    const w = table.scrollWidth;
+    hInner.style.width = `${w}px`;
+
+    // sync positions once (important after refresh / filter / sort)
+    hScroll.scrollLeft = scroller.scrollLeft;
+  }
+
+  // keep them synced while scrolling
+  function bindStickyHScroll() {
+    const scroller = document.getElementById("tableScroller");
+    const hScroll = document.getElementById("hScroll");
+    if (!scroller || !hScroll) return;
+
+    let lock = false;
+
+    scroller.addEventListener("scroll", () => {
+      if (lock) return;
+      lock = true;
+      hScroll.scrollLeft = scroller.scrollLeft;
+      lock = false;
+    });
+
+    hScroll.addEventListener("scroll", () => {
+      if (lock) return;
+      lock = true;
+      scroller.scrollLeft = hScroll.scrollLeft;
+      lock = false;
+    });
+
+    window.addEventListener("resize", () => {
+      syncStickyHScroll();
+    });
   }
 
   function normalize(v) {
@@ -260,6 +303,7 @@ export async function projectsPage(routeFn) {
       `
       <tr><td class="py-6 text-center text-black/50" colspan="14">No projects match these filters.</td></tr>
     `;
+    syncStickyHScroll();
   }
 
   document.getElementById("kpiGrid").addEventListener("click", (e) => {
@@ -289,4 +333,7 @@ export async function projectsPage(routeFn) {
   });
 
   renderTable();
+  bindStickyHScroll();
+  // after first paint so scrollWidth is correct
+  setTimeout(syncStickyHScroll, 0);
 }
