@@ -24,14 +24,16 @@
       </div>
 
       <!-- Persistent shell -->
-      <div class="mx-auto max-w-6xl px-4 py-6">
+      <div class="mx-auto max-w-6xl px-4 py-6 h-[calc(100vh-72px)] flex flex-col">
+        <!-- Page header (fixed) -->
         <div class="mb-5">
           <div id="pageTitle" class="text-2xl font-extrabold"></div>
           <div id="pageSubtitle" class="text-white/60 text-sm"></div>
         </div>
 
-        <div class="grid grid-cols-12 gap-4">
-          <aside id="sidebar" class="col-span-12 md:col-span-3">
+        <!-- Main area fills remaining height -->
+        <div class="grid grid-cols-12 gap-4 flex-1 min-h-0">
+          <aside id="sidebar" class="col-span-12 md:col-span-3 min-h-0">
             <div class="card p-4">
               <div class="text-xs font-bold text-black/60 mb-2">Navigation</div>
               <nav class="space-y-2">
@@ -46,12 +48,12 @@
             </div>
           </aside>
 
-          <main id="pageBody" class="col-span-12 md:col-span-9"></main>
+          <main id="pageBody" class="col-span-12 md:col-span-9 min-h-0 h-full"></main>
         </div>
       </div>
     </div>
 
   </div>
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

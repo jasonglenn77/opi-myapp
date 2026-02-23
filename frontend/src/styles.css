@@ -22,7 +22,7 @@
   /* KPI grid that auto-wraps nicely */
   .kpi-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
     gap: 0.5rem;
   }
 
@@ -48,7 +48,6 @@
     min-width: 980px; /* adjust up/down as you like */
   }
   .table-scroll {
-    height: 520px;      /* adjust as you like */
     overflow: auto;
     max-width: 100%;
     -webkit-overflow-scrolling: touch;
