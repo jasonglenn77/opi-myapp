@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy import text
 from app.db import engine
+from datetime import date, datetime, timedelta
 
 from app.auth import get_current_user
 from .service import (
@@ -215,4 +216,106 @@ def projects(user=Depends(get_current_user)):
             "avg_age_days": avg_age_days,
         },
         "projects": projects[:1000],  # keep UI snappy; raise later or paginate
+    }
+
+@router.get("/schedule")
+def schedule(
+    week_start: Optional[str] = Query(None, description="YYYY-MM-DD (Monday preferred)"),
+    user=Depends(get_current_user),
+):
+    """
+    Returns:
+      - active work crews
+      - project assignments (primary crew + primary PM) that overlap the requested week
+    Frontend expands each assignment across days between start_date/end_date.
+    """
+
+    def parse_ymd(s: str) -> date:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+
+    def monday_of(d: date) -> date:
+        return d - timedelta(days=d.weekday())  # Monday=0
+
+    # Determine week start (Monday)
+    today = date.today()
+    ws = monday_of(today) if not week_start else monday_of(parse_ymd(week_start))
+    we = ws + timedelta(days=6)
+
+    # 1) Load crews (active) in a stable order
+    crews_sql = text("""
+      SELECT id, name, code, parent_id, is_active, sort_order
+      FROM myapp.work_crews
+      WHERE is_active = 1
+      ORDER BY
+        COALESCE(parent_id, id),
+        parent_id IS NOT NULL,
+        sort_order,
+        id
+    """)
+
+    # 2) Load assignments that overlap the week
+    # - projects table has: start_date, end_date, status, qbo_customer_id
+    # - primary crew from project_work_crews
+    # - primary pm from project_project_managers
+    # - project name from qbo_customers.display_name
+    assignments_sql = text("""
+      SELECT
+        p.id AS project_id,
+        p.start_date,
+        p.end_date,
+        p.status AS project_status,
+
+        wc.id AS work_crew_id,
+        wc.code AS work_crew_code,
+
+        qc.display_name AS project_name,
+
+        pm.id AS project_manager_id,
+        TRIM(CONCAT(
+          COALESCE(LEFT(pm.first_name, 1), ''),
+          COALESCE(LEFT(pm.last_name, 1), '')
+        )) AS pm_initials
+
+      FROM myapp.projects p
+      JOIN myapp.qbo_customers qc
+        ON qc.id = p.qbo_customer_id
+
+      LEFT JOIN myapp.project_work_crews pwc
+        ON pwc.project_id = p.id
+        AND pwc.unassigned_at IS NULL
+        AND pwc.is_primary = 1
+      LEFT JOIN myapp.work_crews wc
+        ON wc.id = pwc.work_crew_id
+
+      LEFT JOIN myapp.project_project_managers ppm
+        ON ppm.project_id = p.id
+        AND ppm.unassigned_at IS NULL
+        AND ppm.is_primary = 1
+      LEFT JOIN myapp.project_managers pm
+        ON pm.id = ppm.project_manager_id
+
+      WHERE
+        p.start_date IS NOT NULL
+        AND p.end_date IS NOT NULL
+        AND p.start_date <= :week_end
+        AND p.end_date >= :week_start
+
+      ORDER BY wc.sort_order, wc.code, p.start_date, p.id
+    """)
+
+    with engine.connect() as conn:
+        crews_rows = conn.execute(crews_sql).mappings().all()
+        assignment_rows = conn.execute(
+            assignments_sql,
+            {"week_start": ws.isoformat(), "week_end": we.isoformat()},
+        ).mappings().all()
+
+    crews = [dict(r) for r in crews_rows]
+    assignments = [dict(r) for r in assignment_rows]
+
+    return {
+        "week_start": ws.isoformat(),
+        "week_end": we.isoformat(),
+        "crews": crews,
+        "assignments": assignments,
     }

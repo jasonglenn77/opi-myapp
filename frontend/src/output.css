@@ -779,6 +779,10 @@ body {
   top: 1rem;
 }
 
+.top-\[44px\] {
+  top: 44px;
+}
+
 .z-20 {
   z-index: 20;
 }
@@ -896,6 +900,10 @@ body {
   height: 100%;
 }
 
+.h-1 {
+  height: 0.25rem;
+}
+
 .max-h-\[260px\] {
   max-height: 260px;
 }
@@ -958,6 +966,14 @@ body {
 
 .min-w-\[980px\] {
   min-width: 980px;
+}
+
+.min-w-\[1900px\] {
+  min-width: 1900px;
+}
+
+.min-w-\[260px\] {
+  min-width: 260px;
 }
 
 .max-w-6xl {
@@ -1122,6 +1138,10 @@ body {
 
 .rounded-xl {
   border-radius: 0.75rem;
+}
+
+.rounded-lg {
+  border-radius: 0.5rem;
 }
 
 .border {
@@ -1317,6 +1337,10 @@ body {
   text-align: right;
 }
 
+.align-top {
+  vertical-align: top;
+}
+
 .align-middle {
   vertical-align: middle;
 }
@@ -1414,6 +1438,10 @@ body {
 
 .text-white\/60 {
   color: rgb(255 255 255 / 0.6);
+}
+
+.text-black\/30 {
+  color: rgb(0 0 0 / 0.3);
 }
 
 .shadow-sm {

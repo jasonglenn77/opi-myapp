@@ -2,6 +2,7 @@ import { api, getToken, clearToken } from "./api.js";
 import { loginPage } from "./pages/login.js";
 import { dashboardPage } from "./pages/dashboard.js";
 import { projectsPage } from "./pages/projects.js";
+import { schedulePage } from "./pages/schedule.js";
 import { assignmentPage } from "./pages/assignment.js";
 import { usersPage } from "./pages/users.js";
 import { teamsPage } from "./pages/teams.js";
@@ -29,6 +30,7 @@ async function route() {
   if (hash === "#/login") return loginPage(route);
   if (hash === "#/dashboard") return dashboardPage(route);
   if (hash === "#/projects") return projectsPage(route);
+  if (hash === "#/schedule") return schedulePage(route);
   if (hash === "#/assignment") return assignmentPage(route);
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
