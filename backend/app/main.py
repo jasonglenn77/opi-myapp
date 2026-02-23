@@ -11,9 +11,11 @@ from typing import Optional
 
 from .auth import create_access_token, get_current_user, require_admin
 from app.qbo.routes import router as qbo_router
+from app.projects.routes import router as projects_router
 
 app = FastAPI()
 app.include_router(qbo_router)
+app.include_router(projects_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -562,8 +564,10 @@ def dashboard_projects(user=Depends(get_current_user)):
 
         SUM(CASE WHEN t.entity_type='CreditMemo' THEN t.total_amt ELSE 0 END) AS creditmemo_amt,
         SUM(CASE WHEN t.entity_type='CreditMemo' THEN t.balance_amt ELSE 0 END) AS creditmemo_bal,
-        SUM(CASE WHEN t.entity_type='CreditMemo' THEN 1 ELSE 0 END) AS creditmemo_ct
+        SUM(CASE WHEN t.entity_type='CreditMemo' THEN 1 ELSE 0 END) AS creditmemo_ct,
 
+        COUNT(DISTINCT t.id) AS total_transaction_ct
+        
       FROM myapp.qbo_transactions t
       LEFT JOIN line_totals lt
         ON lt.transaction_id = t.id
@@ -592,6 +596,7 @@ def dashboard_projects(user=Depends(get_current_user)):
       COALESCE(r.creditmemo_amt,0) AS creditmemo_amt,
       COALESCE(r.creditmemo_bal,0) AS creditmemo_bal,
       COALESCE(r.creditmemo_ct,0) AS creditmemo_ct,
+      COALESCE(r.total_transaction_ct, 0) AS total_transaction_ct,
 
       (COALESCE(r.invoice_amt,0) - COALESCE(r.creditmemo_amt,0)) AS total_income,
       (COALESCE(r.bill_amt,0) + COALESCE(r.expense_amt,0) - COALESCE(r.vendorcredit_amt,0)) AS total_cost,
@@ -613,14 +618,7 @@ def dashboard_projects(user=Depends(get_current_user)):
         )
       END AS profit_margin,
 
-      DATEDIFF(p.meta_last_updated_time, p.meta_create_time) AS age_days,
-
-      CASE
-        WHEN COALESCE(r.estimate_ct,0) > 0 AND COALESCE(r.invoice_ct,0) = 0 THEN 'NOT_STARTED'
-        WHEN COALESCE(r.invoice_ct,0) > 0 AND COALESCE(r.invoice_bal,0) = 0 AND COALESCE(p.balance_with_jobs,0) = 0 THEN 'COMPLETED'
-        WHEN COALESCE(r.invoice_ct,0) = 0 AND (COALESCE(r.bill_ct,0) > 0 OR COALESCE(r.expense_ct,0) > 0) THEN 'NEEDS_ATTENTION'
-        ELSE 'ONGOING'
-      END AS project_status
+      DATEDIFF(p.meta_last_updated_time, p.meta_create_time) AS age_days
 
     FROM projects p
     LEFT JOIN txn_rollup r
@@ -633,17 +631,11 @@ def dashboard_projects(user=Depends(get_current_user)):
 
     projects = [dict(r) for r in rows]
 
-    # Summary counts + avg age
-    counts = {"NOT_STARTED": 0, "ONGOING": 0, "COMPLETED": 0, "NEEDS_ATTENTION": 0}
+    # avg age
     age_sum = 0
     age_ct = 0
 
     for p in projects:
-        s = p.get("project_status") or "ONGOING"
-        if s not in counts:
-            counts[s] = 0
-        counts[s] += 1
-
         if p.get("age_days") is not None:
             age_sum += int(p["age_days"])
             age_ct += 1
@@ -653,7 +645,6 @@ def dashboard_projects(user=Depends(get_current_user)):
     return {
         "summary": {
             "total_projects": len(projects),
-            "status_counts": counts,
             "avg_age_days": avg_age_days,
         },
         "projects": projects[:1000],  # keep UI snappy; raise later or paginate

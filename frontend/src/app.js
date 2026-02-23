@@ -211,18 +211,6 @@ function fmtPct(n) {
   return `${(v * 100).toFixed(1)}%`;
 }
 
-function statusBadge(status) {
-  const s = String(status || "").toUpperCase();
-  // Using your existing Tailwind-ish utility classes
-  const cls =
-    s === "COMPLETED" ? "bg-green-100 text-green-800" :
-    s === "NOT_STARTED" ? "bg-black/5 text-ink-800" :
-    s === "NEEDS_ATTENTION" ? "bg-amber-100 text-amber-900" :
-    "bg-blue-100 text-blue-900";
-
-  return `<span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${cls}">${s}</span>`;
-}
-
 function sortIndicator(key, state) {
   if (state.sortKey !== key) return "";
   return state.sortDir === "asc" ? " ▲" : " ▼";
@@ -239,7 +227,6 @@ async function dashboardPage() {
   const summary = data.summary || null;
 
   const state = {
-    status: "ALL",
     q: "",
     sortKey: "project_name",
     sortDir: "asc",
@@ -249,7 +236,7 @@ async function dashboardPage() {
     <div class="card p-5">
       <div class="flex items-start justify-between gap-3">
         <div>
-          <div class="text-lg font-extrabold">Project health</div>
+          <div class="text-lg font-extrabold">Projects</div>
           <div class="text-sm text-black/60">Snapshot from QBO rollups</div>
         </div>
 
@@ -263,8 +250,6 @@ async function dashboardPage() {
 
     <div class="mt-4 card p-5">
       <div class="flex items-center justify-between gap-3 flex-wrap">
-        <div class="flex items-center gap-2 flex-wrap" id="statusPills"></div>
-
         <div class="flex items-center gap-2">
           <div class="text-sm font-semibold text-black/60">Search</div>
           <input id="searchInput" class="input w-64" placeholder="Project name or QBO id" />
@@ -286,7 +271,6 @@ async function dashboardPage() {
           <table id="projectsTable" class="text-sm border-collapse w-full min-w-[980px]">
             <thead class="sticky top-0 z-20 bg-white shadow-sm text-left text-black/60 border-b border-black/10">
               <tr>
-                ${th("project_status", "Status")}
                 ${th("project_name", "Project")}
                 ${th("project_balance", "Balance")}
                 ${th("total_income", "Income")}
@@ -328,8 +312,6 @@ async function dashboardPage() {
   function filtered() {
     const q = normalize(state.q);
     return rows.filter(r => {
-      const rowStatus = String(r.project_status || "").toUpperCase();
-      if (state.status !== "ALL" && rowStatus !== state.status) return false;
       if (!q) return true;
       return normalize(r.project_name).includes(q) || normalize(r.project_qbo_id).includes(q);
     });
@@ -353,11 +335,6 @@ async function dashboardPage() {
 
   function renderKpis(list) {
     const counts = { ALL: rows.length };
-    rows.forEach(r => {
-      const s = String(r.project_status || "").toUpperCase();
-      if (!s) return;
-      counts[s] = (counts[s] || 0) + 1;
-    });
 
     // Prefer backend avg if present
     const avg = (summary && typeof summary.avg_age_days === "number")
@@ -370,10 +347,6 @@ async function dashboardPage() {
     const grid = document.getElementById("kpiGrid");
     grid.innerHTML = `
       ${kpi("Total", counts.ALL || 0)}
-      ${kpi("Not started", counts.NOT_STARTED || 0)}
-      ${kpi("Ongoing", counts.ONGOING || 0)}
-      ${kpi("Completed", counts.COMPLETED || 0)}
-      ${kpi("Needs attention", counts.NEEDS_ATTENTION || 0)}
       ${kpi("Showing", list.length)}
     `;
 
@@ -387,20 +360,6 @@ async function dashboardPage() {
     }
   }
 
-  function renderStatusPills() {
-    const statuses = ["ALL", "NOT_STARTED", "ONGOING", "COMPLETED", "NEEDS_ATTENTION"];
-    const wrap = document.getElementById("statusPills");
-    wrap.innerHTML = statuses.map(s => {
-      const active = state.status === s;
-      return `
-        <button
-          class="rounded-xl px-3 py-2 text-sm font-extrabold border ${active ? "bg-brand-500 text-white border-black/0" : "bg-white/60 text-ink-900 border-black/10 hover:bg-black/5"}"
-          data-status="${s}"
-        >${s === "ALL" ? "All" : s.replaceAll("_"," ").toLowerCase().replace(/^\w/,c=>c.toUpperCase())}</button>
-      `;
-    }).join("");
-  }
-
   function renderTable() {
     const list = sorted(filtered());
     renderKpis(list);
@@ -408,11 +367,9 @@ async function dashboardPage() {
 
     const tbody = document.getElementById("projectsBody");
     tbody.innerHTML = list.map(r => {
-      const rowStatus = String(r.project_status || "").toUpperCase();
       return `
         <tr class="border-b border-black/5">
-          <td class="py-2 px-2 whitespace-nowrap">${statusBadge(rowStatus)}</td>
-          <td class="py-2 px-2 font-semibold max-w-0 truncate" title="${(r.project_name || "").replaceAll('"','&quot;')}">${r.project_name || ""}</td>
+          <td class="py-2 px-2 font-semibold truncate min-w-[100px]" title="${(r.project_name || "").replaceAll('"','&quot;')}">${r.project_name || ""}</td>
           <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.project_balance)}</td>
           <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.total_income)}</td>
           <td class="py-2 px-2 whitespace-nowrap">${fmtMoney(r.total_cost)}</td>
@@ -424,17 +381,9 @@ async function dashboardPage() {
         </tr>
       `;
     }).join("") || `
-      <tr><td class="py-6 text-center text-black/50" colspan="10">No projects match these filters.</td></tr>
+      <tr><td class="py-6 text-center text-black/50" colspan="9">No projects match these filters.</td></tr>
     `;
   }
-
-  document.getElementById("statusPills").addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-status]");
-    if (!btn) return;
-    state.status = btn.getAttribute("data-status");
-    renderStatusPills();
-    renderTable();
-  });
 
   document.getElementById("searchInput").addEventListener("input", (e) => {
     state.q = e.target.value;
@@ -450,10 +399,218 @@ async function dashboardPage() {
     renderTable();
   });
 
-  renderStatusPills();
   renderTable();
 }
 
+async function assignmentPage() {
+  // Load list of QBO projects
+  const projects = await api("/assignment/projects");
+
+  const bodyHtml = `
+    <div class="card p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="text-lg font-extrabold">Assignment</div>
+          <div class="text-sm text-black/60">Connect QuickBooks projects to a PM + Crew, and set dates + status.</div>
+        </div>
+        <div id="assignMsg" class="text-sm min-h-[1.25rem]"></div>
+      </div>
+
+      <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <div class="label mb-1">Project (QBO Customer)</div>
+          <select id="projectSelect" class="input">
+            <option value="">Select a project…</option>
+            ${projects.map(p => `<option value="${p.id}">${escapeHtml(p.display_name || p.qbo_id)}</option>`).join("")}
+          </select>
+          <div class="text-xs text-black/50 mt-1">Only customers marked as projects in QBO are shown.</div>
+        </div>
+
+        <div>
+          <div class="label mb-1">Status</div>
+          <select id="statusSelect" class="input" disabled>
+            <option value="not_started">not_started</option>
+            <option value="in_progress">in_progress</option>
+            <option value="completed">completed</option>
+          </select>
+        </div>
+
+        <div>
+          <div class="label mb-1">Start date</div>
+          <input id="startDate" type="date" class="input" disabled />
+        </div>
+
+        <div>
+          <div class="label mb-1">End date</div>
+          <input id="endDate" type="date" class="input" disabled />
+        </div>
+
+        <div>
+          <div class="label mb-1">Project Managers</div>
+          <div id="pmBox" class="rounded-2xl border border-black/10 bg-white/40 p-3 text-sm text-black/50">Select a project first.</div>
+        </div>
+
+        <div>
+          <div class="label mb-1">Work Crews</div>
+          <div id="crewBox" class="rounded-2xl border border-black/10 bg-white/40 p-3 text-sm text-black/50">Select a project first.</div>
+        </div>
+      </div>
+
+      <div class="mt-4 flex justify-end gap-2">
+        <button id="saveAssignBtn" class="btn-primary" disabled>Save assignment</button>
+      </div>
+    </div>
+  `;
+
+  setShell({
+    title: "Assign",
+    subtitle: "Manage PM/Crew assignments + project timeline.",
+    bodyHtml,
+    showLogout: true
+  });
+
+  const projectSelect = document.getElementById("projectSelect");
+  const statusSelect = document.getElementById("statusSelect");
+  const startDate = document.getElementById("startDate");
+  const endDate = document.getElementById("endDate");
+  const pmBox = document.getElementById("pmBox");
+  const crewBox = document.getElementById("crewBox");
+  const saveBtn = document.getElementById("saveAssignBtn");
+  const msg = document.getElementById("assignMsg");
+
+  let bundle = null;
+
+  function setMsg(text, ok=false) {
+    msg.textContent = text || "";
+    msg.className = ok ? "text-sm text-green-700 min-h-[1.25rem]" : "text-sm text-red-700 min-h-[1.25rem]";
+  }
+
+  function enableInputs(on) {
+    statusSelect.disabled = !on;
+    startDate.disabled = !on;
+    endDate.disabled = !on;
+    saveBtn.disabled = !on;
+  }
+
+  function renderMultiSelect(container, items, activeIds, primaryId, kind) {
+    const rows = items.map(it => {
+      const id = it.id;
+      const label = kind === "pm"
+        ? `${(it.first_name || "")} ${(it.last_name || "")}`.trim() || (it.email || `PM #${id}`)
+        : `${it.name}${it.code ? ` (${it.code})` : ""}`;
+
+      const checked = activeIds.has(String(id)) ? "checked" : "";
+      const primaryChecked = String(primaryId || "") === String(id) ? "checked" : "";
+      return `
+        <label class="flex items-center justify-between gap-2 py-1">
+          <span class="flex items-center gap-2">
+            <input type="checkbox" class="h-4 w-4" data-${kind}-id="${id}" ${checked}/>
+            <span class="font-semibold">${escapeHtml(label)}</span>
+          </span>
+          <span class="flex items-center gap-2 text-xs text-black/60">
+            <span>Primary</span>
+            <input type="radio" name="${kind}-primary" class="h-4 w-4" data-${kind}-primary="${id}" ${primaryChecked}/>
+          </span>
+        </label>
+      `;
+    }).join("") || `<div class="text-sm text-black/50">None found.</div>`;
+
+    container.innerHTML = `
+      <div class="text-xs font-bold text-black/60 mb-2">Select ${kind === "pm" ? "PMs" : "Crews"} (check = assigned)</div>
+      <div class="max-h-[260px] overflow-auto pr-1">${rows}</div>
+      <div class="text-xs text-black/50 mt-2">Tip: set Primary even if you only assign one.</div>
+    `;
+  }
+
+  projectSelect.addEventListener("change", async () => {
+    setMsg("");
+    bundle = null;
+    pmBox.innerHTML = `<div class="text-sm text-black/50">Loading…</div>`;
+    crewBox.innerHTML = `<div class="text-sm text-black/50">Loading…</div>`;
+    enableInputs(false);
+
+    const qbo_customer_id = projectSelect.value;
+    if (!qbo_customer_id) {
+      pmBox.innerHTML = `<div class="text-sm text-black/50">Select a project first.</div>`;
+      crewBox.innerHTML = `<div class="text-sm text-black/50">Select a project first.</div>`;
+      return;
+    }
+
+    try {
+      bundle = await api(`/assignment/bundle?qbo_customer_id=${encodeURIComponent(qbo_customer_id)}`);
+
+      statusSelect.value = bundle.project.status || "not_started";
+      startDate.value = bundle.project.start_date || "";
+      endDate.value = bundle.project.end_date || "";
+
+      const activePmIds = new Set((bundle.active_project_managers || []).map(x => String(x.project_manager_id)));
+      const primaryPm = (bundle.active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null;
+
+      const activeCrewIds = new Set((bundle.active_work_crews || []).map(x => String(x.work_crew_id)));
+      const primaryCrew = (bundle.active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null;
+
+      renderMultiSelect(pmBox, bundle.project_managers || [], activePmIds, primaryPm, "pm");
+      renderMultiSelect(crewBox, bundle.work_crews || [], activeCrewIds, primaryCrew, "crew");
+
+      enableInputs(true);
+    } catch (e) {
+      console.error(e);
+      setMsg("Failed to load assignment data.");
+      pmBox.innerHTML = `<div class="text-sm text-black/50">Select a project first.</div>`;
+      crewBox.innerHTML = `<div class="text-sm text-black/50">Select a project first.</div>`;
+    }
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    if (!bundle) return;
+
+    setMsg("");
+    saveBtn.disabled = true;
+
+    const qbo_customer_id = Number(projectSelect.value);
+    const status = statusSelect.value;
+    const start_date = startDate.value || null;
+    const end_date = endDate.value || null;
+
+    const pmIds = Array.from(document.querySelectorAll("[data-pm-id]"))
+      .filter(x => x.checked).map(x => Number(x.getAttribute("data-pm-id")));
+
+    const pmPrimaryEl = document.querySelector("[data-pm-primary]:checked");
+    const primaryPmId = pmPrimaryEl ? Number(pmPrimaryEl.getAttribute("data-pm-primary")) : null;
+
+    const crewIds = Array.from(document.querySelectorAll("[data-crew-id]"))
+      .filter(x => x.checked).map(x => Number(x.getAttribute("data-crew-id")));
+
+    const crewPrimaryEl = document.querySelector("[data-crew-primary]:checked");
+    const primaryCrewId = crewPrimaryEl ? Number(crewPrimaryEl.getAttribute("data-crew-primary")) : null;
+
+    const payload = {
+      qbo_customer_id,
+      status,
+      start_date,
+      end_date,
+      project_manager_ids: pmIds,
+      primary_project_manager_id: primaryPmId,
+      work_crew_ids: crewIds,
+      primary_work_crew_id: primaryCrewId
+    };
+
+    try {
+      await api("/assignment/save", { method: "POST", body: JSON.stringify(payload) });
+      setMsg("Saved.", true);
+    } catch (e) {
+      console.error(e);
+      setMsg("Save failed. Make sure primary is included in the checked assignments.");
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  function escapeHtml(s) {
+    return String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  }
+}
 
 async function usersPage() {
   const users = await api("/users");
@@ -1345,6 +1502,7 @@ async function route() {
 
   if (hash === "#/login") return loginPage();
   if (hash === "#/dashboard") return dashboardPage();
+  if (hash === "#/assignment") return assignmentPage();
   if (hash === "#/users") return usersPage();
   if (hash === "#/teams") return teamsPage();
   if (hash === "#/quickbooks") return quickBooksPage();
