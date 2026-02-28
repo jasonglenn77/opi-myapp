@@ -16,9 +16,26 @@ export async function teamsPage(routeFn) {
     childrenByParent.get(k).push(c);
   });
 
+  function colorDot(color) {
+    if (!color) return "";
+    return `
+      <span
+        class="inline-block h-2.5 w-2.5 rounded-full ring-2 ring-black/10"
+        style="background:${color}"
+        title="${color}"
+        aria-label="Color ${color}"
+      ></span>
+    `;
+  }
+
   const pmRows = pms.map(pm => `
     <tr class="border-b border-black/5">
-      <td class="py-2 pr-3 font-semibold">${(pm.first_name || "")} ${(pm.last_name || "")}</td>
+      <td class="py-2 pr-3">
+        <div class="flex items-center gap-2">
+          ${colorDot(pm.color)}
+          <div class="font-semibold">${(pm.first_name || "")} ${(pm.last_name || "")}</div>
+        </div>
+      </td>
       <td class="py-2 pr-3">${pm.email || ""}</td>
       <td class="py-2 pr-3">${pm.phone || ""}</td>
       <td class="py-2 pr-3">${pm.is_active ? "Active" : "Disabled"}</td>
@@ -33,7 +50,10 @@ export async function teamsPage(routeFn) {
     return `
       <tr class="border-b border-black/5">
         <td class="py-2 pr-3">
-          <div style="padding-left:${indent}px" class="font-semibold">${c.name}</div>
+          <div style="padding-left:${indent}px" class="flex items-center gap-2">
+            ${colorDot(c.color)}
+            <span class="font-semibold">${c.name}</span>
+          </div>
         </td>
         <td class="py-2 pr-3">${c.code || ""}</td>
         <td class="py-2 pr-3">${c.is_active ? "Active" : "Disabled"}</td>
@@ -126,6 +146,14 @@ export async function teamsPage(routeFn) {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div><div class="label mb-1">Email</div><input id="pmEmail" class="input" type="email" /></div>
             <div><div class="label mb-1">Phone</div><input id="pmPhone" class="input" /></div>
+
+            <div>
+              <div class="label mb-1">Color</div>
+              <div class="flex items-center gap-2">
+                <input id="pmColor" type="color" class="h-10 w-14 rounded-xl border border-black/15 bg-white p-1" />
+                <button type="button" id="pmColorClear" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Clear</button>
+              </div>
+            </div>
           </div>
 
           <label class="flex items-center gap-2 text-sm text-black/70">
@@ -167,6 +195,14 @@ export async function teamsPage(routeFn) {
             </div>
           </div>
 
+          <div>
+            <div class="label mb-1">Color</div>
+            <div class="flex items-center gap-2">
+              <input id="crewColor" type="color" class="h-10 w-14 rounded-xl border border-black/15 bg-white p-1" />
+              <button type="button" id="crewColorClear" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Clear</button>
+            </div>
+          </div>
+
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div><div class="label mb-1">Sort order</div><input id="crewSort" type="number" class="input" value="0" /></div>
             <label class="flex items-center gap-2 text-sm text-black/70 mt-6">
@@ -193,6 +229,35 @@ setShell({
   showLogout: true,
   routeFn 
 });
+
+  // --- Color controls (must be after setShell because DOM now exists) ---
+  const pmColorEl = document.getElementById("pmColor");
+  const pmColorClearBtn = document.getElementById("pmColorClear");
+  const crewColorEl = document.getElementById("crewColor");
+  const crewColorClearBtn = document.getElementById("crewColorClear");
+
+  pmColorClearBtn.addEventListener("click", () => {
+    pmColorEl.value = "#000000";
+    pmColorEl.dataset.cleared = "1";
+  });
+  crewColorClearBtn.addEventListener("click", () => {
+    crewColorEl.value = "#000000";
+    crewColorEl.dataset.cleared = "1";
+  });
+
+  pmColorEl.addEventListener("input", () => {
+    delete pmColorEl.dataset.cleared;
+  });
+  crewColorEl.addEventListener("input", () => {
+    delete crewColorEl.dataset.cleared;
+  });
+
+  function getPmColorForPayload() {
+    return pmColorEl.dataset.cleared === "1" ? null : (pmColorEl.value || null);
+  }
+  function getCrewColorForPayload() {
+    return crewColorEl.dataset.cleared === "1" ? null : (crewColorEl.value || null);
+  }
 
   // Modal helpers
   function openModal(modalEl) {
@@ -236,6 +301,8 @@ setShell({
     document.getElementById("pmEmail").value = "";
     document.getElementById("pmPhone").value = "";
     document.getElementById("pmActive").checked = true;
+    pmColorEl.value = "#000000"; // optional default
+    pmColorEl.dataset.cleared = "1";
     openModal(pmModal);
   });
 
@@ -254,6 +321,14 @@ setShell({
       document.getElementById("pmEmail").value = pm.email || "";
       document.getElementById("pmPhone").value = pm.phone || "";
       document.getElementById("pmActive").checked = !!pm.is_active;
+      if (pm.color) {
+        pmColorEl.value = pm.color;
+        delete pmColorEl.dataset.cleared;
+      } else {
+        // keep it "cleared" so Save sends null
+        pmColorEl.value = "#000000";      // placeholder
+        pmColorEl.dataset.cleared = "1";  // means null
+      }
       openModal(pmModal);
     });
   });
@@ -285,6 +360,7 @@ setShell({
       last_name: document.getElementById("pmLast").value.trim() || null,
       email: document.getElementById("pmEmail").value.trim() || null,
       phone: document.getElementById("pmPhone").value.trim() || null,
+      color: getPmColorForPayload(),
       is_active: document.getElementById("pmActive").checked,
     };
 
@@ -310,6 +386,8 @@ setShell({
     document.getElementById("crewParent").value = "";
     document.getElementById("crewSort").value = "0";
     document.getElementById("crewActive").checked = true;
+    crewColorEl.value = "#000000"; // optional default
+    crewColorEl.dataset.cleared = "1";
     openModal(crewModal);
   });
 
@@ -328,6 +406,13 @@ setShell({
       document.getElementById("crewParent").value = c.parent_id ? String(c.parent_id) : "";
       document.getElementById("crewSort").value = String(c.sort_order || 0);
       document.getElementById("crewActive").checked = !!c.is_active;
+      if (c.color) {
+        crewColorEl.value = c.color;
+        delete crewColorEl.dataset.cleared;
+      } else {
+        crewColorEl.value = "#000000";      // placeholder
+        crewColorEl.dataset.cleared = "1";  // means null
+      }
       openModal(crewModal);
     });
   });
@@ -360,6 +445,7 @@ setShell({
       name: document.getElementById("crewName").value.trim(),
       code: document.getElementById("crewCode").value.trim() || null,
       parent_id: parentVal ? Number(parentVal) : null,
+      color: getCrewColorForPayload(),
       sort_order: Number(document.getElementById("crewSort").value || 0),
       is_active: document.getElementById("crewActive").checked,
     };

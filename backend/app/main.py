@@ -6,6 +6,7 @@ from passlib.context import CryptContext
 from .db import db_check
 from sqlalchemy import text
 
+import re
 import uuid
 from typing import Optional
 
@@ -19,6 +20,17 @@ app.include_router(projects_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
+HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+def validate_hex_color(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "":
+        return None
+    if not HEX_COLOR.match(value):
+        raise HTTPException(status_code=400, detail="Invalid color (must be #RRGGBB)")
+    return value
 
 class LoginRequest(BaseModel):
     email: str
@@ -45,6 +57,7 @@ class ProjectManagerCreateRequest(BaseModel):
     last_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    color: Optional[str] = None
     is_active: bool = True
 
 class ProjectManagerUpdateRequest(BaseModel):
@@ -52,12 +65,14 @@ class ProjectManagerUpdateRequest(BaseModel):
     last_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    color: Optional[str] = None
     is_active: Optional[bool] = None
 
 class WorkCrewCreateRequest(BaseModel):
     name: str
     code: Optional[str] = None
     parent_id: Optional[int] = None
+    color: Optional[str] = None
     is_active: bool = True
     sort_order: int = 0
 
@@ -65,6 +80,7 @@ class WorkCrewUpdateRequest(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
     parent_id: Optional[int] = None
+    color: Optional[str] = None
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
 
@@ -436,7 +452,7 @@ def list_project_managers(_admin=Depends(require_admin)):
     from .db import engine
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, first_name, last_name, email, phone, is_active, created_at, updated_at
+            SELECT id, first_name, last_name, email, phone, color, is_active, created_at, updated_at
             FROM project_managers
             ORDER BY id DESC
         """)).mappings().all()
@@ -451,17 +467,19 @@ def create_project_manager(req: ProjectManagerCreateRequest, _admin=Depends(requ
     last_name = (req.last_name or "").strip() or None
     email = (req.email or "").strip().lower() or None
     phone = (req.phone or "").strip() or None
-
+    color = validate_hex_color(req.color)
+    
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO project_managers (first_name, last_name, email, phone, is_active)
-                VALUES (:first_name, :last_name, :email, :phone, :is_active)
+                INSERT INTO project_managers (first_name, last_name, email, phone, color, is_active)
+                VALUES (:first_name, :last_name, :email, :phone, :color, :is_active)
             """), {
                 "first_name": first_name,
                 "last_name": last_name,
                 "email": email,
                 "phone": phone,
+                "color": color,
                 "is_active": 1 if req.is_active else 0,
             })
     except Exception:
@@ -492,6 +510,10 @@ def update_project_manager(pm_id: int, req: ProjectManagerUpdateRequest, _admin=
     if "phone" in req.__fields_set__:
         updates.append("phone = :phone")
         params["phone"] = (req.phone or "").strip() or None
+    
+    if "color" in req.__fields_set__:
+        updates.append("color = :color")
+        params["color"] = validate_hex_color(req.color)
 
     if req.is_active is not None:
         updates.append("is_active = :is_active")
@@ -542,7 +564,7 @@ def list_work_crews(_admin=Depends(require_admin)):
     from .db import engine
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, name, code, parent_id, is_active, sort_order, created_at, updated_at
+            SELECT id, name, code, parent_id, color, is_active, sort_order, created_at, updated_at
             FROM work_crews
             ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, sort_order, id
         """)).mappings().all()
@@ -559,6 +581,7 @@ def create_work_crew(req: WorkCrewCreateRequest, _admin=Depends(require_admin)):
 
     code = (req.code or "").strip() or None
     parent_id = req.parent_id
+    color = validate_hex_color(req.color)
 
     if parent_id is not None:
         with engine.connect() as conn:
@@ -571,12 +594,13 @@ def create_work_crew(req: WorkCrewCreateRequest, _admin=Depends(require_admin)):
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO work_crews (name, code, parent_id, is_active, sort_order)
-                VALUES (:name, :code, :parent_id, :is_active, :sort_order)
+                INSERT INTO work_crews (name, code, parent_id, color, is_active, sort_order)
+                VALUES (:name, :code, :parent_id, :color, :is_active, :sort_order)
             """), {
                 "name": name,
                 "code": code,
                 "parent_id": parent_id,
+                "color": color,
                 "is_active": 1 if req.is_active else 0,
                 "sort_order": int(req.sort_order or 0),
             })
@@ -603,6 +627,10 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(re
     if "code" in req.__fields_set__:
         updates.append("code = :code")
         params["code"] = (req.code or "").strip() or None
+    
+    if "color" in req.__fields_set__:
+        updates.append("color = :color")
+        params["color"] = validate_hex_color(req.color)
 
     if req.sort_order is not None:
         updates.append("sort_order = :sort_order")

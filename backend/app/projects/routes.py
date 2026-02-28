@@ -5,6 +5,8 @@ from sqlalchemy import text
 from app.db import engine
 from datetime import date, datetime, timedelta
 
+import json
+
 from app.auth import get_current_user
 from .service import (
     list_assignable_projects,
@@ -264,35 +266,36 @@ def schedule(
         p.start_date,
         p.end_date,
         p.status AS project_status,
-
-        wc.id AS work_crew_id,
-        wc.code AS work_crew_code,
-
         qc.display_name AS project_name,
 
-        pm.id AS project_manager_id,
-        TRIM(CONCAT(
-          COALESCE(LEFT(pm.first_name, 1), ''),
-          COALESCE(LEFT(pm.last_name, 1), '')
-        )) AS pm_initials
+        -- crews as JSON array
+        COALESCE((
+          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(wc2.code) ORDER BY pwc2.is_primary DESC, wc2.sort_order, wc2.id), ']') AS JSON)
+          FROM myapp.project_work_crews pwc2
+          JOIN myapp.work_crews wc2 ON wc2.id = pwc2.work_crew_id
+          WHERE pwc2.project_id = p.id
+            AND pwc2.unassigned_at IS NULL
+            AND wc2.is_active = 1
+        ), JSON_ARRAY()) AS work_crew_codes,
+
+        -- PM initials as JSON array
+        COALESCE((
+          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(
+            TRIM(CONCAT(
+              COALESCE(LEFT(pm2.first_name, 1), ''),
+              COALESCE(LEFT(pm2.last_name, 1), '')
+            ))
+          ) ORDER BY ppm2.is_primary DESC, pm2.id), ']') AS JSON)
+          FROM myapp.project_project_managers ppm2
+          JOIN myapp.project_managers pm2 ON pm2.id = ppm2.project_manager_id
+          WHERE ppm2.project_id = p.id
+            AND ppm2.unassigned_at IS NULL
+            AND pm2.is_active = 1
+        ), JSON_ARRAY()) AS pm_initials
 
       FROM myapp.projects p
       JOIN myapp.qbo_customers qc
         ON qc.id = p.qbo_customer_id
-
-      LEFT JOIN myapp.project_work_crews pwc
-        ON pwc.project_id = p.id
-        AND pwc.unassigned_at IS NULL
-        AND pwc.is_primary = 1
-      LEFT JOIN myapp.work_crews wc
-        ON wc.id = pwc.work_crew_id
-
-      LEFT JOIN myapp.project_project_managers ppm
-        ON ppm.project_id = p.id
-        AND ppm.unassigned_at IS NULL
-        AND ppm.is_primary = 1
-      LEFT JOIN myapp.project_managers pm
-        ON pm.id = ppm.project_manager_id
 
       WHERE
         p.start_date IS NOT NULL
@@ -300,7 +303,7 @@ def schedule(
         AND p.start_date <= :week_end
         AND p.end_date >= :week_start
 
-      ORDER BY wc.sort_order, wc.code, p.start_date, p.id
+      ORDER BY p.start_date, p.id
     """)
 
     with engine.connect() as conn:
@@ -311,7 +314,30 @@ def schedule(
         ).mappings().all()
 
     crews = [dict(r) for r in crews_rows]
-    assignments = [dict(r) for r in assignment_rows]
+
+    assignments = []
+    for r in assignment_rows:
+        row = dict(r)
+        # parse arrays
+        for k in ("work_crew_codes", "pm_initials"):
+            v = row.get(k)
+            if v is None:
+                row[k] = []
+            elif isinstance(v, (list, tuple)):
+                row[k] = list(v)
+            elif isinstance(v, (bytes, bytearray)):
+                try:
+                    row[k] = json.loads(v.decode("utf-8"))
+                except Exception:
+                    row[k] = []
+            elif isinstance(v, str):
+                try:
+                    row[k] = json.loads(v)
+                except Exception:
+                    row[k] = []
+            else:
+                row[k] = []
+        assignments.append(row)
 
     return {
         "week_start": ws.isoformat(),

@@ -181,6 +181,53 @@ export async function projectsPage(routeFn) {
     return st ? st : "";
   }
 
+  // Shared KPI color classes (used by KPI buttons + status pills)
+  const KPI_STYLES = {
+    needs_assignment: {
+      wrap: "bg-kpi-attention-bg border-kpi-attention-bd",
+      label: "text-kpi-attention-text",
+      num: "text-kpi-attention-num",
+    },
+    not_started: {
+      wrap: "bg-kpi-notStarted-bg border-kpi-notStarted-bd",
+      label: "text-kpi-notStarted-text",
+      num: "text-kpi-notStarted-num",
+    },
+    in_progress: {
+      wrap: "bg-kpi-inProgress-bg border-kpi-inProgress-bd",
+      label: "text-kpi-inProgress-text",
+      num: "text-kpi-inProgress-num",
+    },
+    completed: {
+      wrap: "bg-kpi-completed-bg border-kpi-completed-bd",
+      label: "text-kpi-completed-text",
+      num: "text-kpi-completed-num",
+    },
+    all: {
+      wrap: "bg-kpi-total-bg border-kpi-total-bd",
+      label: "text-kpi-total-text",
+      num: "text-kpi-total-num",
+    },
+    showing: {
+      wrap: "bg-kpi-showing-bg border-kpi-showing-bd",
+      label: "text-kpi-showing-text",
+      num: "text-kpi-showing-num",
+    },
+  };
+
+  function statusPill(r) {
+    const key = bucketOf(r);              // maps to needs_assignment/not_started/etc
+    const label = statusLabelOf(r);
+    const s = KPI_STYLES[key] || KPI_STYLES.all;
+
+    // pill: subtle, professional, matches KPI tints
+    return `
+      <span class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold whitespace-nowrap ${s.wrap} ${s.label}">
+        ${escapeHtml(label || "—")}
+      </span>
+    `;
+  }
+
   function filtered() {
     const q = normalize(state.q);
     return rows.filter((r) => {
@@ -248,18 +295,21 @@ export async function projectsPage(routeFn) {
         (key !== "all" && key !== "showing" && state.kpiFilter === key);
 
       const clickable = key !== "showing";
+      const s = KPI_STYLES[key] || KPI_STYLES.all;
 
       return `
         <button
           type="button"
-          class="rounded-xl border border-black/10 px-4 py-3 text-center ${
-            selected ? "bg-black/10" : "bg-black/5"
-          } ${clickable ? "hover:bg-black/10 cursor-pointer" : "cursor-default"}"
+          class="rounded-xl border px-4 py-3 text-center transition
+                 hover:brightness-95
+                 ${s.wrap}
+                 ${clickable ? "cursor-pointer" : "cursor-default"}
+                 ${selected ? "ring-2 ring-ink-800/10" : ""}"
           ${clickable ? `data-kpi="${key}"` : ""}
           ${clickable ? `aria-pressed="${selected ? "true" : "false"}"` : ""}
         >
-          <div class="text-xs font-bold text-black/60">${label}</div>
-          <div class="pt-1 text-2xl font-extrabold leading-tight">${value}</div>
+          <div class="text-xs font-semibold tracking-wide ${s.label}">${label}</div>
+          <div class="pt-1 text-2xl font-extrabold leading-tight ${s.num}">${value}</div>
         </button>
       `;
     }
@@ -284,7 +334,7 @@ export async function projectsPage(routeFn) {
             ${escapeHtml(r.project_name || "")}
           </td>
 
-          <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(statusLabel)}</td>
+          <td class="py-2 px-3 text-left whitespace-nowrap">${statusPill(r)}</td>
           <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(fmtDateOnly(r.start_date))}</td>
           <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(fmtDateOnly(r.end_date))}</td>
           <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(r.primary_project_manager || "")}</td>
