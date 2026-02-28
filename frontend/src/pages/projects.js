@@ -38,10 +38,10 @@ export async function projectsPage(routeFn) {
   }
 
   const bodyHtml = `
-    <div class="h-full flex flex-col min-h-0 gap-4">
+    <div class="h-full min-h-0 flex flex-col gap-4">
       <!-- KPI card (fixed height) -->
-      <div class="card p-5">
-        <div class="flex items-start justify-between gap-3">
+      <div class="card p-5 shrink-0">
+        <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div>
             <div class="text-lg font-extrabold">Projects</div>
             <div class="text-sm text-black/60">Status and totals</div>
@@ -49,15 +49,15 @@ export async function projectsPage(routeFn) {
 
           <div class="flex items-center gap-2">
             <div class="text-sm font-semibold text-black/60 whitespace-nowrap">Search</div>
-            <input id="searchInput" class="input w-64" placeholder="Name, status, PM, crew" />
+            <input id="searchInput" class="input w-full sm:w-64" placeholder="Name, status, PM, crew" />
           </div>
         </div>
 
         <div class="mt-3 kpi-grid" id="kpiGrid"></div>
       </div>
 
-      <!-- TABLE card must fill remaining height -->
-      <div class="card p-5 flex flex-col min-h-0 flex-1">
+      <!-- TABLE card fills remaining height (and is height-bounded) -->
+      <div class="card p-5 flex flex-col flex-1 min-h-0 overflow-hidden">
         <div class="flex items-end justify-between gap-3">
           <div>
             <div class="text-lg font-extrabold">Projects</div>
@@ -66,12 +66,14 @@ export async function projectsPage(routeFn) {
           <div class="text-sm text-black/60" id="rowCount">—</div>
         </div>
 
-        <!-- table frame fills remaining height inside this card -->
-        <div class="mt-4 border border-black/5 bg-white/40 rounded-2xl overflow-hidden flex-1 min-h-0">
-          <!-- Column layout so we can pin a horizontal scrollbar at the bottom -->
+        <!-- Table frame consumes remaining height in this card -->
+        <div class="mt-4 border border-black/5 bg-white/40 rounded-2xl flex-1 min-h-0 overflow-hidden">
           <div class="flex flex-col h-full min-h-0">
-            <!-- Main scroller: vertical scroll lives here. Hide horizontal so we don't get 2 bars. -->
-            <div id="tableScroller" class="table-scroll flex-1 min-h-0 overflow-auto overflow-x-hidden">
+            <!-- Vertical scroll lives here -->
+            <div
+              id="tableScroller"
+              class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain [-webkit-overflow-scrolling:touch]"
+            >
               <table id="projectsTable" class="text-sm border-collapse w-full min-w-[1500px]">
                 <thead class="sticky top-0 z-20 bg-white shadow-sm text-left text-black/60 border-b border-black/10">
                   <tr>
@@ -95,7 +97,7 @@ export async function projectsPage(routeFn) {
               </table>
             </div>
 
-            <!-- Sticky horizontal scrollbar (always visible) -->
+            <!-- Sticky horizontal scrollbar pinned to bottom -->
             <div id="hScroll" class="hscrollbar">
               <div id="hScrollInner" class="hscrollbar-inner"></div>
             </div>
@@ -111,6 +113,7 @@ export async function projectsPage(routeFn) {
     bodyHtml,
     showLogout: true,
     routeFn,
+    scrollMode: "viewport", // this page has an inner scroll region, so keep page scroll disabled
   });
 
   function syncStickyHScroll() {

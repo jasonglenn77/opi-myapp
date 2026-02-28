@@ -156,7 +156,8 @@ export async function quickBooksPage(routeFn) {
     subtitle: "Connection + manual sync controls.",
     bodyHtml,
     showLogout: true,
-    routeFn
+    routeFn,
+    scrollMode: "page",
   });
 
   // Connect / Reconnect: get auth_url from backend and open it

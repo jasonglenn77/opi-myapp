@@ -12,18 +12,18 @@ export function showShell() {
 
 export function brandHeader() {
   return `
-  <div class="flex items-center gap-3">
+  <div class="flex items-center gap-3 min-w-0">
     <img
       src="/assets/opi-wordmark-light.webp"
       alt="Company Logo"
       loading="eager"
       decoding="sync"
       fetchpriority="high"
-      class="h-11 w-11 rounded-2xl shadow-soft object-contain"
+      class="h-10 w-10 sm:h-11 sm:w-11 rounded-2xl shadow-soft object-contain"
     />
-    <div>
-      <div class="text-white font-extrabold leading-tight">OnPoint Installers</div>
-      <div class="text-white/60 text-xs">Internal Ops Portal</div>
+    <div class="min-w-0">
+      <div class="text-white font-extrabold leading-tight truncate">OnPoint Installers</div>
+      <div class="text-white/60 text-xs truncate">Internal Ops Portal</div>
     </div>
   </div>`;
 }
@@ -48,7 +48,7 @@ export function bindGlobalHandlers(routeFn) {
   }
 }
 
-export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true, routeFn }) {
+export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true, routeFn, scrollMode = "page", }) {
   showShell();
   bindGlobalHandlers(routeFn);
 
@@ -64,7 +64,15 @@ export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout 
 
   if (pageTitle) pageTitle.textContent = title;
   if (pageSubtitle) pageSubtitle.textContent = subtitle;
+
+  // ✅ Inject page HTML FIRST
   if (pageBody) pageBody.innerHTML = bodyHtml;
+
+  // ✅ Then apply scroll policy
+  if (pageBody) {
+    pageBody.classList.remove("overflow-auto", "overflow-hidden");
+    pageBody.classList.add(scrollMode === "viewport" ? "overflow-hidden" : "overflow-auto");
+  }
 
   const sidebar = document.getElementById("sidebar");
   if (sidebar) sidebar.classList.remove("hidden");

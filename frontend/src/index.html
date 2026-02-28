@@ -11,32 +11,32 @@
   <div id="app">
 
     <!-- Login-only root (no header/sidebar, so nothing can flash) -->
-    <div id="authRoot" class="min-h-screen flex items-center justify-center px-4"></div>
+    <div id="authRoot" class="h-full min-h-[100vh] overflow-auto flex items-center justify-center px-4"></div>
 
     <!-- App shell root (header + sidebar + body). Hidden until logged in -->
-    <div id="shellRoot" class="min-h-screen hidden">
+    <div id="shellRoot" class="h-full min-h-[100vh] hidden flex flex-col">
       <!-- Persistent top bar -->
       <div class="border-b border-white/10 bg-ink-900/60 backdrop-blur">
-        <div class="mx-auto max-w-6xl px-4 py-4 flex items-center justify-between">
+        <div class="w-full px-3 sm:px-4 lg:px-6 2xl:px-10 py-4 flex items-center justify-between gap-3">
           <div id="brandSlot"></div>
-          <button id="logoutBtn" class="btn-outline">Log out</button>
+          <button id="logoutBtn" class="btn-outline shrink-0">Log out</button>
         </div>
       </div>
 
       <!-- Persistent shell -->
-      <div class="mx-auto max-w-6xl px-4 py-6 h-[calc(100vh-72px)] flex flex-col">
-        <!-- Page header (fixed) -->
-        <div class="mb-5">
-          <div id="pageTitle" class="text-2xl font-extrabold"></div>
-          <div id="pageSubtitle" class="text-white/60 text-sm"></div>
+      <div class="w-full flex-1 min-h-0 px-3 sm:px-4 lg:px-6 2xl:px-10 py-5 sm:py-6 flex flex-col">
+        <!-- Page header (fixed within shell) -->
+        <div class="mb-5 shrink-0">
+          <div id="pageTitle" class="text-xl sm:text-2xl lg:text-3xl font-extrabold"></div>
+          <div id="pageSubtitle" class="text-white/60 text-sm sm:text-base"></div>
         </div>
 
         <!-- Main area fills remaining height -->
-        <div class="grid grid-cols-12 gap-4 flex-1 min-h-0">
-          <aside id="sidebar" class="col-span-12 md:col-span-3 min-h-0">
-            <div class="card p-4">
+        <div class="grid grid-cols-12 grid-rows-[minmax(0,1fr)] gap-4 lg:gap-6 flex-1 min-h-0">
+          <aside id="sidebar" class="col-span-12 lg:col-span-3 xl:col-span-2 min-h-0">
+            <div class="card p-4 lg:sticky lg:top-6">
               <div class="text-xs font-bold text-black/60 mb-2">Navigation</div>
-              <nav class="space-y-2">
+              <nav class="space-y-1">
                 <a href="#/dashboard" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Dashboard</a>
                 <a href="#/projects" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Projects</a>
                 <a href="#/schedule" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Schedule</a>
@@ -48,7 +48,8 @@
             </div>
           </aside>
 
-          <main id="pageBody" class="col-span-12 md:col-span-9 min-h-0 h-full"></main>
+          <!-- IMPORTANT: remove h-full, keep min-h-0, let it stretch by grid -->
+          <main id="pageBody" class="col-span-12 lg:col-span-9 xl:col-span-10 min-h-0 overflow-auto"></main>
         </div>
       </div>
     </div>
