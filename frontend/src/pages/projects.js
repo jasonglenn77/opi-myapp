@@ -88,9 +88,11 @@ export async function projectsPage(routeFn) {
                     ${th("total_cost", "Cost")}
                     ${th("total_profit", "Profit")}
                     ${th("profit_margin", "Margin")}
-                    ${th("project_create_dttm", "Created")}
-                    ${th("project_lastupdate_dttm", "Last updated")}
-                    ${th("total_transaction_ct", "Txns")}
+                    ${th("actions", "Files")}
+                    ${th("total_transaction_ct", "trans_ct")}
+                    <!-- ${th("project_create_dttm", "Created")}
+                    ${th("project_lastupdate_dttm", "Last updated")} -->
+
                   </tr>
                 </thead>
                 <tbody id="projectsBody"></tbody>
@@ -100,6 +102,73 @@ export async function projectsPage(routeFn) {
             <!-- Sticky horizontal scrollbar pinned to bottom -->
             <div id="hScroll" class="hscrollbar">
               <div id="hScrollInner" class="hscrollbar-inner"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="fileModal" class="fixed inset-0 z-50 hidden">
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-[2px]" data-close-file-modal="1"></div>
+
+        <div class="absolute inset-x-4 top-6 bottom-6 mx-auto max-w-6xl">
+          <div class="h-full rounded-3xl border border-black/10 bg-white shadow-2xl overflow-hidden flex flex-col">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-black/10">
+              <div>
+                <div id="fileModalTitle" class="text-lg font-extrabold">Project Files</div>
+                <div id="fileModalSubtitle" class="text-sm text-black/60">Preview and file details</div>
+              </div>
+              <button
+                type="button"
+                id="fileModalClose"
+                class="inline-flex items-center rounded-xl border border-black/10 px-3 py-2 text-sm text-black/60 font-semibold hover:bg-black/5"
+              >
+                Close
+              </button>
+            </div>
+
+            <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
+              <div class="border-r border-black/10 overflow-y-auto bg-black/[0.02]">
+                <div id="fileList" class="p-3 space-y-2"></div>
+              </div>
+
+              <div class="min-w-0 flex flex-col">
+                <div class="flex-1 min-h-0 bg-black/[0.03] flex items-center justify-center p-4">
+                  <div id="filePreview" class="w-full h-full flex items-center justify-center"></div>
+                </div>
+
+                <div class="border-t border-black/10 p-4">
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <div class="text-black/50">Filename</div>
+                      <div id="metaFilename" class="font-semibold break-all"></div>
+                    </div>
+                    <div>
+                      <div class="text-black/50">Uploaded</div>
+                      <div id="metaCreatedAt" class="font-semibold"></div>
+                    </div>
+                    <div>
+                      <div class="text-black/50">Type</div>
+                      <div id="metaContentType" class="font-semibold"></div>
+                    </div>
+                    <div>
+                      <div class="text-black/50">Size</div>
+                      <div id="metaSize" class="font-semibold"></div>
+                    </div>
+                  </div>
+
+                  <div class="mt-4">
+                    <a
+                      id="openFileLink"
+                      href="#"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="inline-flex items-center rounded-xl bg-black text-white px-4 py-2 text-sm font-semibold hover:opacity-90"
+                    >
+                      Open full file
+                    </a>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -345,16 +414,40 @@ export async function projectsPage(routeFn) {
           <td class="py-2 px-3 text-left whitespace-nowrap">${fmtMoney(r.total_cost)}</td>
           <td class="py-2 px-3 text-left whitespace-nowrap">${fmtMoney(r.total_profit)}</td>
           <td class="py-2 px-3 text-left whitespace-nowrap">${fmtPct(r.profit_margin)}</td>
+          <td class="py-2 px-3 text-left whitespace-nowrap">
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 transition"
+                data-upload-project="${escapeHtml(String(r.qbo_customer_id || ""))}"
+                data-project-name="${escapeHtml(r.project_name || "")}"
+              >
+                Upload
+              </button>
 
-          <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(fmtDateOnly(r.project_create_dttm))}</td>
-          <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(fmtDateOnly(r.project_lastupdate_dttm))}</td>
+              <button
+                type="button"
+                class="inline-flex items-center rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-black/75 hover:bg-black/5 transition ${Number(r.file_count || 0) > 0 ? "" : "opacity-60"}"
+                data-view-files="${escapeHtml(String(r.qbo_customer_id || ""))}"
+                data-project-name="${escapeHtml(r.project_name || "")}"
+              >
+                View
+                <span class="ml-2 inline-flex min-w-5 items-center justify-center rounded-full bg-black/5 px-1.5 py-0.5 text-[11px] font-bold">
+                  ${Number(r.file_count || 0)}
+                </span>
+              </button>
+            </div>
+          </td>
           <td class="py-2 px-3 text-left whitespace-nowrap">${r.total_transaction_ct ?? ""}</td>
+
+          <!-- <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(fmtDateOnly(r.project_create_dttm))}</td>
+          <td class="py-2 px-3 text-left whitespace-nowrap">${escapeHtml(fmtDateOnly(r.project_lastupdate_dttm))}</td>-->
         </tr>
       `;
         })
         .join("") ||
       `
-      <tr><td class="py-6 text-center text-black/50" colspan="14">No projects match these filters.</td></tr>
+      <tr><td class="py-6 text-center text-black/50" colspan="15">No projects match these filters.</td></tr>
     `;
     syncStickyHScroll();
   }
@@ -383,6 +476,225 @@ export async function projectsPage(routeFn) {
       state.sortDir = "asc";
     }
     renderTable();
+  });
+
+  document.getElementById("projectsBody").addEventListener("click", async (e) => {
+    const uploadBtn = e.target.closest("[data-upload-project]");
+    if (uploadBtn) {
+      const qboCustomerId = uploadBtn.getAttribute("data-upload-project");
+      if (!qboCustomerId) {
+        alert("This project is missing qbo_customer_id.");
+        return;
+      }
+
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/jpeg,image/png,image/webp,application/pdf";
+
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+
+        const fd = new FormData();
+        fd.append("file", file);
+
+        try {
+          await api(`/projects/${qboCustomerId}/files`, {
+            method: "POST",
+            body: fd,
+          });
+
+          const row = rows.find(x => String(x.qbo_customer_id) === String(qboCustomerId));
+          if (row) row.file_count = Number(row.file_count || 0) + 1;
+
+          renderTable();
+        } catch (err) {
+          alert(`Upload failed: ${err.message}`);
+        }
+      };
+
+      input.click();
+      return;
+    }
+
+    const viewBtn = e.target.closest("[data-view-files]");
+    if (viewBtn) {
+      const qboCustomerId = viewBtn.getAttribute("data-view-files");
+      const projectName = viewBtn.getAttribute("data-project-name") || "Project Files";
+
+      if (!qboCustomerId) {
+        alert("This project is missing qbo_customer_id.");
+        return;
+      }
+
+      try {
+        const res = await api(`/projects/${qboCustomerId}/files`);
+        const files = res.files || [];
+
+        if (!files.length) {
+          alert("No files uploaded for this project yet.");
+          return;
+        }
+
+        openFileModal(projectName, files, 0);
+      } catch (err) {
+        alert(`Could not load files: ${err.message}`);
+      }
+    }
+  });
+
+  const modalState = {
+    projectName: "",
+    files: [],
+    activeIndex: 0,
+  };
+
+  function fmtDateTime(v) {
+    if (!v) return "";
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) return String(v);
+    return d.toLocaleString();
+  }
+
+  function fmtBytes(bytes) {
+    const n = Number(bytes || 0);
+    if (!n) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    let value = n;
+    let i = 0;
+    while (value >= 1024 && i < units.length - 1) {
+      value /= 1024;
+      i += 1;
+    }
+    return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+  }
+
+  function isImageFile(file) {
+    return (file.content_type || "").startsWith("image/");
+  }
+
+  function escapeAttr(v) {
+    return escapeHtml(String(v ?? ""));
+  }
+
+  function openFileModal(projectName, files, startIndex = 0) {
+    modalState.projectName = projectName || "Project Files";
+    modalState.files = files || [];
+    modalState.activeIndex = startIndex;
+
+    document.getElementById("fileModalTitle").textContent = modalState.projectName;
+    document.getElementById("fileModalSubtitle").textContent = `${modalState.files.length} file${modalState.files.length === 1 ? "" : "s"}`;
+    document.getElementById("fileModal").classList.remove("hidden");
+
+    renderFileModal();
+  }
+
+  function closeFileModal() {
+    document.getElementById("fileModal").classList.add("hidden");
+    document.getElementById("filePreview").innerHTML = "";
+    document.getElementById("fileList").innerHTML = "";
+  }
+
+  function renderFileModal() {
+    const files = modalState.files;
+    const active = files[modalState.activeIndex];
+    if (!active) {
+      closeFileModal();
+      return;
+    }
+
+    const listEl = document.getElementById("fileList");
+    listEl.innerHTML = files.map((f, idx) => {
+      const selected = idx === modalState.activeIndex;
+      const thumb = isImageFile(f)
+        ? `<img src="${escapeAttr(f.url)}" alt="${escapeAttr(f.original_filename || "")}" class="h-12 w-12 rounded-xl object-cover border border-black/10 bg-white" />`
+        : `<div class="h-12 w-12 rounded-xl border border-black/10 bg-white flex items-center justify-center text-xs font-bold text-black/50">FILE</div>`;
+
+      return `
+        <button
+          type="button"
+          data-file-index="${idx}"
+          class="w-full text-left rounded-2xl border px-3 py-3 transition hover:bg-white ${selected ? "bg-white border-black/15 shadow-sm" : "border-transparent"}"
+        >
+          <div class="flex items-center gap-3">
+            ${thumb}
+            <div class="min-w-0">
+              <div class="font-semibold truncate">${escapeHtml(f.original_filename || "Untitled")}</div>
+              <div class="text-xs text-black/50">${escapeHtml(fmtDateTime(f.created_at))}</div>
+            </div>
+          </div>
+        </button>
+      `;
+    }).join("");
+
+    const previewEl = document.getElementById("filePreview");
+    if (isImageFile(active)) {
+      previewEl.innerHTML = `
+        <img
+          src="${escapeAttr(active.url)}"
+          alt="${escapeAttr(active.original_filename || "")}"
+          class="max-w-full max-h-full object-contain rounded-2xl shadow-sm"
+        />
+      `;
+    } else if ((active.content_type || "") === "application/pdf") {
+      previewEl.innerHTML = `
+        <iframe
+          src="${escapeAttr(active.url)}"
+          class="w-full h-full rounded-2xl bg-white"
+          title="${escapeAttr(active.original_filename || "PDF")}"
+        ></iframe>
+      `;
+    } else {
+      previewEl.innerHTML = `
+        <div class="text-center text-black/60">
+          <div class="text-lg font-bold">Preview unavailable</div>
+          <div class="mt-1 text-sm">Open the file in a new tab.</div>
+        </div>
+      `;
+    }
+
+    document.getElementById("metaFilename").textContent = active.original_filename || "";
+    document.getElementById("metaCreatedAt").textContent = fmtDateTime(active.created_at);
+    document.getElementById("metaContentType").textContent = active.content_type || "";
+    document.getElementById("metaSize").textContent = fmtBytes(active.size_bytes);
+
+    const openLink = document.getElementById("openFileLink");
+    openLink.href = active.url;
+  }
+
+  document.getElementById("fileModalClose").addEventListener("click", closeFileModal);
+
+  document.getElementById("fileModal").addEventListener("click", (e) => {
+    if (e.target.closest("[data-close-file-modal='1']")) {
+      closeFileModal();
+      return;
+    }
+
+    const fileBtn = e.target.closest("[data-file-index]");
+    if (fileBtn) {
+      modalState.activeIndex = Number(fileBtn.getAttribute("data-file-index"));
+      renderFileModal();
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    const modal = document.getElementById("fileModal");
+    if (modal.classList.contains("hidden")) return;
+
+    if (e.key === "Escape") {
+      closeFileModal();
+      return;
+    }
+
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      modalState.activeIndex = Math.min(modalState.activeIndex + 1, modalState.files.length - 1);
+      renderFileModal();
+    }
+
+    if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      modalState.activeIndex = Math.max(modalState.activeIndex - 1, 0);
+      renderFileModal();
+    }
   });
 
   renderTable();

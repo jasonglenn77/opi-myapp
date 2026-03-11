@@ -5,6 +5,10 @@ app.onpointinstallers.com {
     @api path /api/*
     reverse_proxy @api backend:8000
 
+    request_body {
+        max_size 20MB
+    }
+
     root * /usr/share/caddy
     file_server
 }

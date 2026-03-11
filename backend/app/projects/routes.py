@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy import text
@@ -13,7 +13,9 @@ from .service import (
     get_assignment_bundle,
     save_project_assignment,
     list_project_events,
+    ensure_project_row_for_qbo_customer,
 )
+from app.s3 import s3_client, AWS_BUCKET, build_project_file_key, signed_file_url
 
 router = APIRouter(prefix="/api", tags=["projects"])
 
@@ -112,6 +114,7 @@ def projects(user=Depends(get_current_user)):
       GROUP BY COALESCE(t.customer_qbo_id, lt.project_qbo_id)
     )
     SELECT
+      p.qbo_customer_id AS qbo_customer_id,
       ip.start_date AS start_date,
       ip.end_date AS end_date,
       pm.primary_pm_name AS primary_project_manager,
@@ -121,6 +124,7 @@ def projects(user=Depends(get_current_user)):
       p.balance_with_jobs AS project_balance,
       p.meta_create_time AS project_create_dttm,
       p.meta_last_updated_time AS project_lastupdate_dttm,
+      COALESCE(pf.file_count, 0) AS file_count,
                
       CASE WHEN ip.id IS NULL THEN 1 ELSE 0 END AS needs_assignment,
       COALESCE(ip.status, 'not_started') AS project_status,
@@ -193,6 +197,14 @@ def projects(user=Depends(get_current_user)):
       ON wc.project_id = ip.id
     LEFT JOIN txn_rollup r
       ON r.project_qbo_id = p.qbo_id
+    LEFT JOIN (
+      SELECT
+        qbo_customer_id,
+        COUNT(*) AS file_count
+      FROM myapp.project_files
+      GROUP BY qbo_customer_id
+    ) pf
+      ON pf.qbo_customer_id = p.qbo_customer_id
     ORDER BY p.meta_last_updated_time DESC
     """)
 
@@ -345,3 +357,119 @@ def schedule(
         "crews": crews,
         "assignments": assignments,
     }
+
+@router.post("/projects/{qbo_customer_id}/files")
+async def upload_project_file(
+    qbo_customer_id: int,
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    allowed_types = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "application/pdf",
+    }
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is required")
+
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    contents = await file.read()
+    size_bytes = len(contents)
+
+    max_size = 10 * 1024 * 1024  # 10 MB
+    if size_bytes > max_size:
+        raise HTTPException(status_code=400, detail="File too large (max 10 MB)")
+
+    from app.db import engine
+    with engine.begin() as conn:
+        project_id = ensure_project_row_for_qbo_customer(conn, qbo_customer_id)
+
+        s3_key = build_project_file_key(qbo_customer_id, file.filename)
+
+        s3_client.put_object(
+            Bucket=AWS_BUCKET,
+            Key=s3_key,
+            Body=contents,
+            ContentType=file.content_type,
+        )
+
+        conn.execute(text("""
+            INSERT INTO project_files (
+                project_id,
+                qbo_customer_id,
+                s3_bucket,
+                s3_key,
+                original_filename,
+                content_type,
+                size_bytes,
+                uploaded_by_user_id
+            )
+            VALUES (
+                :project_id,
+                :qbo_customer_id,
+                :s3_bucket,
+                :s3_key,
+                :original_filename,
+                :content_type,
+                :size_bytes,
+                :uploaded_by_user_id
+            )
+        """), {
+            "project_id": project_id,
+            "qbo_customer_id": qbo_customer_id,
+            "s3_bucket": AWS_BUCKET,
+            "s3_key": s3_key,
+            "original_filename": file.filename,
+            "content_type": file.content_type,
+            "size_bytes": size_bytes,
+            "uploaded_by_user_id": int(user["id"]),
+        })
+
+        file_id = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+
+    return {
+        "ok": True,
+        "file": {
+            "id": int(file_id),
+            "project_id": project_id,
+            "qbo_customer_id": qbo_customer_id,
+            "filename": file.filename,
+            "content_type": file.content_type,
+            "size_bytes": size_bytes,
+            "s3_key": s3_key,
+            "url": signed_file_url(s3_key),
+        }
+    }
+
+
+@router.get("/projects/{qbo_customer_id}/files")
+def list_project_files(qbo_customer_id: int, user=Depends(get_current_user)):
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT
+                id,
+                project_id,
+                qbo_customer_id,
+                s3_bucket,
+                s3_key,
+                original_filename,
+                content_type,
+                size_bytes,
+                uploaded_by_user_id,
+                created_at
+            FROM project_files
+            WHERE qbo_customer_id = :qbo_customer_id
+            ORDER BY created_at DESC, id DESC
+        """), {"qbo_customer_id": qbo_customer_id}).mappings().all()
+
+    files = []
+    for r in rows:
+        d = dict(r)
+        d["url"] = signed_file_url(d["s3_key"])
+        files.append(d)
+
+    return {"files": files}

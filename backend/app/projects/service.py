@@ -16,7 +16,7 @@ def list_assignable_projects():
         """)).mappings().all()
     return [dict(r) for r in rows]
 
-def _ensure_project_row(conn, qbo_customer_id: int) -> int:
+def ensure_project_row_for_qbo_customer(conn, qbo_customer_id: int) -> int:
     # Create projects row if missing; return projects.id
     row = conn.execute(text("""
         SELECT id FROM projects WHERE qbo_customer_id = :cid LIMIT 1
@@ -129,7 +129,7 @@ def save_project_assignment(req, actor_user_id: int) -> Dict[str, Any]:
     end_date = (req.end_date or "").strip() or None
 
     with engine.begin() as conn:
-        project_id = _ensure_project_row(conn, int(req.qbo_customer_id))
+        project_id = ensure_project_row_for_qbo_customer(conn, int(req.qbo_customer_id))
 
         # --- load previous project fields
         prev = conn.execute(text("""
