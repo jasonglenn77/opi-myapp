@@ -66,10 +66,15 @@ def get_assignment_bundle(qbo_customer_id: int):
             """), {"pid": project_id}).mappings().all()
 
             crews_active = conn.execute(text("""
-                SELECT work_crew_id, is_primary
-                FROM project_work_crews
-                WHERE project_id = :pid AND unassigned_at IS NULL
-                ORDER BY is_primary DESC, work_crew_id
+                SELECT pwc.work_crew_id, pwc.is_primary
+                FROM project_work_crews pwc
+                JOIN work_crews wc
+                  ON wc.id = pwc.work_crew_id
+                WHERE pwc.project_id = :pid
+                  AND pwc.unassigned_at IS NULL
+                  AND wc.is_active = 1
+                  AND wc.parent_id IS NOT NULL
+                ORDER BY pwc.is_primary DESC, pwc.work_crew_id
             """), {"pid": project_id}).mappings().all()
 
         # Options lists
@@ -84,7 +89,8 @@ def get_assignment_bundle(qbo_customer_id: int):
             SELECT id, name, code, parent_id, is_active, sort_order
             FROM work_crews
             WHERE is_active = 1
-            ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, sort_order, id
+              AND parent_id IS NOT NULL
+            ORDER BY COALESCE(parent_id, id), sort_order, id
         """)).mappings().all()
 
     return {

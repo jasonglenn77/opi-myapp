@@ -51,6 +51,87 @@ def assignment_save(req: AssignmentSaveRequest, user=Depends(get_current_user)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/assignment/table")
+def assignment_table(user=Depends(get_current_user)):
+    sql = text("""
+    SELECT
+      p.id AS qbo_customer_id,
+      p.display_name AS project_name,
+      DATE(p.meta_create_time) AS project_create_date,
+
+      ip.status AS project_status,
+      ip.start_date AS start_date,
+      ip.end_date AS end_date,
+
+      pm.primary_pm_name AS primary_project_manager,
+      wc.primary_crew_name AS primary_work_crew,
+
+      COALESCE(pm.all_pm_names, '') AS all_project_managers,
+      COALESCE(wc.all_crew_names, '') AS all_work_crews
+
+    FROM myapp.qbo_customers p
+
+    LEFT JOIN myapp.projects ip
+      ON ip.qbo_customer_id = p.id
+
+    LEFT JOIN (
+      SELECT
+        ppm.project_id,
+        MAX(
+          CASE
+            WHEN ppm.is_primary = 1
+            THEN TRIM(CONCAT(COALESCE(pm.first_name,''), ' ', COALESCE(pm.last_name,'')))
+            ELSE NULL
+          END
+        ) AS primary_pm_name,
+        GROUP_CONCAT(
+          DISTINCT TRIM(CONCAT(COALESCE(pm.first_name,''), ' ', COALESCE(pm.last_name,'')))
+          ORDER BY ppm.is_primary DESC, pm.last_name, pm.first_name, pm.id
+          SEPARATOR ', '
+        ) AS all_pm_names
+      FROM myapp.project_project_managers ppm
+      JOIN myapp.project_managers pm
+        ON pm.id = ppm.project_manager_id
+      WHERE ppm.unassigned_at IS NULL
+        AND pm.is_active = 1
+      GROUP BY ppm.project_id
+    ) pm
+      ON pm.project_id = ip.id
+
+    LEFT JOIN (
+      SELECT
+        pwc.project_id,
+        MAX(
+          CASE
+            WHEN pwc.is_primary = 1
+            THEN wc.name
+            ELSE NULL
+          END
+        ) AS primary_crew_name,
+        GROUP_CONCAT(
+          DISTINCT wc.name
+          ORDER BY pwc.is_primary DESC, wc.sort_order, wc.id
+          SEPARATOR ', '
+        ) AS all_crew_names
+      FROM myapp.project_work_crews pwc
+      JOIN myapp.work_crews wc
+        ON wc.id = pwc.work_crew_id
+      WHERE pwc.unassigned_at IS NULL
+        AND wc.is_active = 1
+        AND wc.parent_id IS NOT NULL
+      GROUP BY pwc.project_id
+    ) wc
+      ON wc.project_id = ip.id
+
+    WHERE p.is_project = 1
+    ORDER BY p.meta_create_time DESC, p.display_name
+    """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+
+    return {"projects": [dict(r) for r in rows]}
+
 @router.get("/projects/{qbo_customer_id}/events")
 def project_events(qbo_customer_id: int, user=Depends(get_current_user)):
     return list_project_events(qbo_customer_id=qbo_customer_id)
