@@ -37,6 +37,14 @@ TRANSACTION_ENTITIES = [
     "TimeActivity",
 ]
 
+SALES_TRANSACTION_ENTITIES = {
+    "Estimate",
+    "Invoice",
+    "SalesReceipt",
+    "CreditMemo",
+    "RefundReceipt",
+}
+
 def _basic_auth_header() -> str:
     raw = f"{QBO_CLIENT_ID}:{QBO_CLIENT_SECRET}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("utf-8")
@@ -216,6 +224,58 @@ def qbo_init_tables() -> None:
               INDEX idx_line_customer (realm_id, line_customer_qbo_id),
               INDEX idx_line_item (realm_id, item_qbo_id),
               CONSTRAINT fk_line_txn FOREIGN KEY (transaction_id) REFERENCES qbo_transactions(id)
+                ON DELETE CASCADE
+            ) ENGINE=InnoDB
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS qbo_sales_transaction_lines (
+              id BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+              realm_id VARCHAR(32) NOT NULL,
+              transaction_id BIGINT NOT NULL,
+
+              transaction_entity_type VARCHAR(40) NOT NULL,   -- Estimate, Invoice, etc
+              transaction_qbo_id VARCHAR(32) NOT NULL,
+              project_customer_qbo_id VARCHAR(32) NULL,
+
+              line_num INT NULL,
+              line_key VARCHAR(64) NOT NULL,                  -- QBO Line.Id or fallback idx path
+              parent_line_key VARCHAR(64) NULL,               -- for child lines under GroupLineDetail
+              line_level VARCHAR(20) NOT NULL,                -- parent / child
+
+              detail_type VARCHAR(80) NULL,
+              description VARCHAR(4000) NULL,
+
+              group_item_qbo_id VARCHAR(32) NULL,
+              group_item_name VARCHAR(255) NULL,
+
+              item_qbo_id VARCHAR(32) NULL,
+              item_name VARCHAR(255) NULL,
+              account_qbo_id VARCHAR(32) NULL,
+
+              qty DECIMAL(18,4) NULL,
+              unit_price DECIMAL(18,4) NULL,
+              amount DECIMAL(18,2) NULL,
+              cost_amount DECIMAL(18,2) NULL,
+              service_date DATE NULL,
+
+              linked_txn_qbo_id VARCHAR(32) NULL,
+              linked_txn_type VARCHAR(40) NULL,
+              linked_txn_line_key VARCHAR(64) NULL,
+
+              raw_json JSON NOT NULL,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+              UNIQUE KEY uq_sales_line (realm_id, transaction_id, line_key),
+              KEY idx_sales_project (realm_id, project_customer_qbo_id),
+              KEY idx_sales_item (realm_id, item_qbo_id),
+              KEY idx_sales_txn (realm_id, transaction_entity_type, transaction_qbo_id),
+              KEY idx_sales_linked (realm_id, linked_txn_qbo_id, linked_txn_line_key),
+              KEY idx_sales_parent (realm_id, transaction_id, parent_line_key),
+
+              CONSTRAINT fk_sales_line_txn FOREIGN KEY (transaction_id)
+                REFERENCES qbo_transactions(id)
                 ON DELETE CASCADE
             ) ENGINE=InnoDB
         """))
@@ -488,10 +548,276 @@ def fetch_entities_incremental(
 
     return all_rows
 
-def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) -> tuple[int, int]:
+def upsert_sales_transaction_lines(
+    conn,
+    realm_id: str,
+    entity: str,
+    transaction_id: int,
+    transaction_qbo_id: str,
+    project_customer_qbo_id: Optional[str],
+    lines: list[dict],
+) -> int:
+    if entity not in SALES_TRANSACTION_ENTITIES:
+        return 0
+
+    upserted = 0
+
+    for idx, line in enumerate(lines):
+        if not isinstance(line, dict):
+            continue
+
+        line_key = str(line.get("Id") or f"idx:{idx}")
+        line_num = line.get("LineNum")
+        detail_type = line.get("DetailType")
+        description = line.get("Description")
+        amount = _parse_decimal(line.get("Amount"))
+        cost_amount = _parse_decimal(line.get("CostAmount"))
+
+        linked_txn_qbo_id, linked_txn_type, linked_txn_line_key = _first_linked_txn(line)
+
+        group_item_qbo_id = None
+        group_item_name = None
+        item_qbo_id = None
+        item_name = None
+        account_qbo_id = None
+        qty = None
+        unit_price = None
+        service_date = None
+
+        # top-level detail object, when present
+        detail_obj = None
+        if isinstance(detail_type, str) and detail_type:
+            detail_obj = line.get(detail_type) or {}
+
+        if detail_type == "SalesItemLineDetail" and isinstance(detail_obj, dict):
+            item_qbo_id = _ref_value(detail_obj.get("ItemRef"))
+            item_name = _ref_name(detail_obj.get("ItemRef"))
+            account_qbo_id = _ref_value(detail_obj.get("ItemAccountRef"))
+            qty = _parse_decimal(detail_obj.get("Qty"))
+            unit_price = _parse_decimal(detail_obj.get("UnitPrice"))
+            service_date = detail_obj.get("ServiceDate")
+
+        elif detail_type == "GroupLineDetail" and isinstance(detail_obj, dict):
+            group_item_qbo_id = _ref_value(detail_obj.get("GroupItemRef"))
+            group_item_name = _ref_name(detail_obj.get("GroupItemRef"))
+            qty = _parse_decimal(detail_obj.get("Quantity"))
+
+        conn.execute(text("""
+            INSERT INTO qbo_sales_transaction_lines (
+              realm_id, transaction_id,
+              transaction_entity_type, transaction_qbo_id, project_customer_qbo_id,
+              line_num, line_key, parent_line_key, line_level,
+              detail_type, description,
+              group_item_qbo_id, group_item_name,
+              item_qbo_id, item_name, account_qbo_id,
+              qty, unit_price, amount, cost_amount, service_date,
+              linked_txn_qbo_id, linked_txn_type, linked_txn_line_key,
+              raw_json
+            )
+            VALUES (
+              :realm_id, :transaction_id,
+              :transaction_entity_type, :transaction_qbo_id, :project_customer_qbo_id,
+              :line_num, :line_key, :parent_line_key, :line_level,
+              :detail_type, :description,
+              :group_item_qbo_id, :group_item_name,
+              :item_qbo_id, :item_name, :account_qbo_id,
+              :qty, :unit_price, :amount, :cost_amount, :service_date,
+              :linked_txn_qbo_id, :linked_txn_type, :linked_txn_line_key,
+              CAST(:raw AS JSON)
+            )
+            ON DUPLICATE KEY UPDATE
+              transaction_entity_type = VALUES(transaction_entity_type),
+              transaction_qbo_id = VALUES(transaction_qbo_id),
+              project_customer_qbo_id = VALUES(project_customer_qbo_id),
+              line_num = VALUES(line_num),
+              parent_line_key = VALUES(parent_line_key),
+              line_level = VALUES(line_level),
+              detail_type = VALUES(detail_type),
+              description = VALUES(description),
+              group_item_qbo_id = VALUES(group_item_qbo_id),
+              group_item_name = VALUES(group_item_name),
+              item_qbo_id = VALUES(item_qbo_id),
+              item_name = VALUES(item_name),
+              account_qbo_id = VALUES(account_qbo_id),
+              qty = VALUES(qty),
+              unit_price = VALUES(unit_price),
+              amount = VALUES(amount),
+              cost_amount = VALUES(cost_amount),
+              service_date = VALUES(service_date),
+              linked_txn_qbo_id = VALUES(linked_txn_qbo_id),
+              linked_txn_type = VALUES(linked_txn_type),
+              linked_txn_line_key = VALUES(linked_txn_line_key),
+              raw_json = VALUES(raw_json)
+        """), {
+            "realm_id": realm_id,
+            "transaction_id": transaction_id,
+            "transaction_entity_type": entity,
+            "transaction_qbo_id": transaction_qbo_id,
+            "project_customer_qbo_id": project_customer_qbo_id,
+            "line_num": line_num,
+            "line_key": line_key,
+            "parent_line_key": None,
+            "line_level": "parent",
+            "detail_type": detail_type,
+            "description": description,
+            "group_item_qbo_id": group_item_qbo_id,
+            "group_item_name": group_item_name,
+            "item_qbo_id": item_qbo_id,
+            "item_name": item_name,
+            "account_qbo_id": account_qbo_id,
+            "qty": qty,
+            "unit_price": unit_price,
+            "amount": amount,
+            "cost_amount": cost_amount,
+            "service_date": service_date,
+            "linked_txn_qbo_id": linked_txn_qbo_id,
+            "linked_txn_type": linked_txn_type,
+            "linked_txn_line_key": linked_txn_line_key,
+            "raw": json.dumps(line),
+        })
+        upserted += 1
+
+        # Flatten child lines under GroupLineDetail.Line[]
+        if detail_type == "GroupLineDetail" and isinstance(detail_obj, dict):
+            child_lines = detail_obj.get("Line") or []
+            for child_idx, child in enumerate(child_lines):
+                if not isinstance(child, dict):
+                    continue
+
+                child_key = str(child.get("Id") or f"{line_key}:child:{child_idx}")
+                child_line_num = child.get("LineNum")
+                child_detail_type = child.get("DetailType")
+                child_description = child.get("Description")
+                child_amount = _parse_decimal(child.get("Amount"))
+                child_cost_amount = _parse_decimal(child.get("CostAmount"))
+
+                c_linked_txn_qbo_id, c_linked_txn_type, c_linked_txn_line_key = _first_linked_txn(child)
+
+                child_item_qbo_id = None
+                child_item_name = None
+                child_account_qbo_id = None
+                child_qty = None
+                child_unit_price = None
+                child_service_date = None
+
+                child_detail_obj = None
+                if isinstance(child_detail_type, str) and child_detail_type:
+                    child_detail_obj = child.get(child_detail_type) or {}
+
+                if child_detail_type == "SalesItemLineDetail" and isinstance(child_detail_obj, dict):
+                    child_item_qbo_id = _ref_value(child_detail_obj.get("ItemRef"))
+                    child_item_name = _ref_name(child_detail_obj.get("ItemRef"))
+                    child_account_qbo_id = _ref_value(child_detail_obj.get("ItemAccountRef"))
+                    child_qty = _parse_decimal(child_detail_obj.get("Qty"))
+                    child_unit_price = _parse_decimal(child_detail_obj.get("UnitPrice"))
+                    child_service_date = child_detail_obj.get("ServiceDate")
+
+                conn.execute(text("""
+                    INSERT INTO qbo_sales_transaction_lines (
+                      realm_id, transaction_id,
+                      transaction_entity_type, transaction_qbo_id, project_customer_qbo_id,
+                      line_num, line_key, parent_line_key, line_level,
+                      detail_type, description,
+                      group_item_qbo_id, group_item_name,
+                      item_qbo_id, item_name, account_qbo_id,
+                      qty, unit_price, amount, cost_amount, service_date,
+                      linked_txn_qbo_id, linked_txn_type, linked_txn_line_key,
+                      raw_json
+                    )
+                    VALUES (
+                      :realm_id, :transaction_id,
+                      :transaction_entity_type, :transaction_qbo_id, :project_customer_qbo_id,
+                      :line_num, :line_key, :parent_line_key, :line_level,
+                      :detail_type, :description,
+                      :group_item_qbo_id, :group_item_name,
+                      :item_qbo_id, :item_name, :account_qbo_id,
+                      :qty, :unit_price, :amount, :cost_amount, :service_date,
+                      :linked_txn_qbo_id, :linked_txn_type, :linked_txn_line_key,
+                      CAST(:raw AS JSON)
+                    )
+                    ON DUPLICATE KEY UPDATE
+                      transaction_entity_type = VALUES(transaction_entity_type),
+                      transaction_qbo_id = VALUES(transaction_qbo_id),
+                      project_customer_qbo_id = VALUES(project_customer_qbo_id),
+                      line_num = VALUES(line_num),
+                      parent_line_key = VALUES(parent_line_key),
+                      line_level = VALUES(line_level),
+                      detail_type = VALUES(detail_type),
+                      description = VALUES(description),
+                      group_item_qbo_id = VALUES(group_item_qbo_id),
+                      group_item_name = VALUES(group_item_name),
+                      item_qbo_id = VALUES(item_qbo_id),
+                      item_name = VALUES(item_name),
+                      account_qbo_id = VALUES(account_qbo_id),
+                      qty = VALUES(qty),
+                      unit_price = VALUES(unit_price),
+                      amount = VALUES(amount),
+                      cost_amount = VALUES(cost_amount),
+                      service_date = VALUES(service_date),
+                      linked_txn_qbo_id = VALUES(linked_txn_qbo_id),
+                      linked_txn_type = VALUES(linked_txn_type),
+                      linked_txn_line_key = VALUES(linked_txn_line_key),
+                      raw_json = VALUES(raw_json)
+                """), {
+                    "realm_id": realm_id,
+                    "transaction_id": transaction_id,
+                    "transaction_entity_type": entity,
+                    "transaction_qbo_id": transaction_qbo_id,
+                    "project_customer_qbo_id": project_customer_qbo_id,
+                    "line_num": child_line_num,
+                    "line_key": child_key,
+                    "parent_line_key": line_key,
+                    "line_level": "child",
+                    "detail_type": child_detail_type,
+                    "description": child_description,
+                    "group_item_qbo_id": group_item_qbo_id,
+                    "group_item_name": group_item_name,
+                    "item_qbo_id": child_item_qbo_id,
+                    "item_name": child_item_name,
+                    "account_qbo_id": child_account_qbo_id,
+                    "qty": child_qty,
+                    "unit_price": child_unit_price,
+                    "amount": child_amount,
+                    "cost_amount": child_cost_amount,
+                    "service_date": child_service_date,
+                    "linked_txn_qbo_id": c_linked_txn_qbo_id,
+                    "linked_txn_type": c_linked_txn_type,
+                    "linked_txn_line_key": c_linked_txn_line_key,
+                    "raw": json.dumps(child),
+                })
+                upserted += 1
+
+    return upserted
+
+def _ref_value(obj: Any) -> Optional[str]:
+    if isinstance(obj, dict) and obj.get("value"):
+        return str(obj.get("value"))
+    return None
+
+
+def _ref_name(obj: Any) -> Optional[str]:
+    if isinstance(obj, dict) and obj.get("name"):
+        return str(obj.get("name"))
+    return None
+
+
+def _first_linked_txn(line: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    linked = line.get("LinkedTxn") or []
+    if isinstance(linked, list) and linked:
+        first = linked[0]
+        if isinstance(first, dict):
+            return (
+                str(first.get("TxnId")) if first.get("TxnId") else None,
+                str(first.get("TxnType")) if first.get("TxnType") else None,
+                str(first.get("TxnLineId")) if first.get("TxnLineId") else None,
+            )
+    return None, None, None
+
+def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) -> tuple[int, int, int]:
     qbo_init_tables()
     upserted_txns = 0
     upserted_lines = 0
+    upserted_sales_lines = 0
 
     with engine.begin() as conn:
         for t in txns:
@@ -591,119 +917,135 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
             if not transaction_id:
                 continue
 
-            # Upsert lines
             lines = t.get("Line", []) or []
-            for idx, line in enumerate(lines):
-                if not isinstance(line, dict):
-                    continue
 
-                line_key = str(line.get("Id") or f"idx:{idx}")
-                detail_type = line.get("DetailType")
-                description = line.get("Description")
-                amount = _parse_decimal(line.get("Amount"))
-
-                # NEW: CostAmount (line-level)
-                cost_amount = _parse_decimal(line.get("CostAmount"))
-
-                line_customer_qbo_id = None
-                account_qbo_id = None
-                item_qbo_id = None
-                class_qbo_id = None
-                department_qbo_id = None
-                vendor_qbo_id_line = None
-                qty = None
-                unit_price = None
-                billable_status = None
-
-                detail_obj = None
-                if isinstance(detail_type, str) and detail_type:
-                    detail_obj = line.get(detail_type) or {}
-
-                if isinstance(detail_obj, dict):
-                    # Project/job linkage is often HERE for Bills/Purchases
-                    cref2 = detail_obj.get("CustomerRef") or {}
-                    if isinstance(cref2, dict) and cref2.get("value"):
-                        line_customer_qbo_id = str(cref2["value"])
-
-                    aref = detail_obj.get("AccountRef") or {}
-                    if isinstance(aref, dict) and aref.get("value"):
-                        account_qbo_id = str(aref["value"])
-
-                    iref = detail_obj.get("ItemRef") or {}
-                    if isinstance(iref, dict) and iref.get("value"):
-                        item_qbo_id = str(iref["value"])
-
-                    clref = detail_obj.get("ClassRef") or {}
-                    if isinstance(clref, dict) and clref.get("value"):
-                        class_qbo_id = str(clref["value"])
-
-                    dref = detail_obj.get("DepartmentRef") or {}
-                    if isinstance(dref, dict) and dref.get("value"):
-                        department_qbo_id = str(dref["value"])
-
-                    vref2 = detail_obj.get("VendorRef") or {}
-                    if isinstance(vref2, dict) and vref2.get("value"):
-                        vendor_qbo_id_line = str(vref2["value"])
-
-                    qty = _parse_decimal(detail_obj.get("Qty"))
-                    unit_price = _parse_decimal(detail_obj.get("UnitPrice"))
-                    billable_status = detail_obj.get("BillableStatus")
-
+            if entity in SALES_TRANSACTION_ENTITIES:
                 conn.execute(text("""
-                    INSERT INTO qbo_transaction_lines (
-                      realm_id, transaction_id, line_key,
-                      detail_type, description, amount, cost_amount,
-                      line_customer_qbo_id, account_qbo_id, item_qbo_id,
-                      class_qbo_id, department_qbo_id, vendor_qbo_id,
-                      qty, unit_price, billable_status,
-                      raw_json
-                    )
-                    VALUES (
-                      :realm_id, :transaction_id, :line_key,
-                      :detail_type, :description, :amount, :cost_amount,
-                      :line_customer_qbo_id, :account_qbo_id, :item_qbo_id,
-                      :class_qbo_id, :department_qbo_id, :vendor_qbo_id,
-                      :qty, :unit_price, :billable_status,
-                      CAST(:raw AS JSON)
-                    )
-                    ON DUPLICATE KEY UPDATE
-                      detail_type = VALUES(detail_type),
-                      description = VALUES(description),
-                      amount = VALUES(amount),
-                      cost_amount = VALUES(cost_amount),
-                      line_customer_qbo_id = VALUES(line_customer_qbo_id),
-                      account_qbo_id = VALUES(account_qbo_id),
-                      item_qbo_id = VALUES(item_qbo_id),
-                      class_qbo_id = VALUES(class_qbo_id),
-                      department_qbo_id = VALUES(department_qbo_id),
-                      vendor_qbo_id = VALUES(vendor_qbo_id),
-                      qty = VALUES(qty),
-                      unit_price = VALUES(unit_price),
-                      billable_status = VALUES(billable_status),
-                      raw_json = VALUES(raw_json)
-                """), {
-                    "realm_id": realm_id,
-                    "transaction_id": transaction_id,
-                    "line_key": line_key,
-                    "detail_type": detail_type,
-                    "description": description,
-                    "amount": amount,
-                    "cost_amount": cost_amount,
-                    "line_customer_qbo_id": line_customer_qbo_id,
-                    "account_qbo_id": account_qbo_id,
-                    "item_qbo_id": item_qbo_id,
-                    "class_qbo_id": class_qbo_id,
-                    "department_qbo_id": department_qbo_id,
-                    "vendor_qbo_id": vendor_qbo_id_line,
-                    "qty": qty,
-                    "unit_price": unit_price,
-                    "billable_status": billable_status,
-                    "raw": json.dumps(line),
-                })
-                upserted_lines += 1
+                    DELETE FROM qbo_sales_transaction_lines
+                    WHERE transaction_id = :transaction_id
+                """), {"transaction_id": transaction_id})
 
-    return upserted_txns, upserted_lines
+            # Sales-side docs go only into qbo_sales_transaction_lines
+            upserted_sales_lines += upsert_sales_transaction_lines(
+                conn=conn,
+                realm_id=realm_id,
+                entity=entity,
+                transaction_id=transaction_id,
+                transaction_qbo_id=qbo_id,
+                project_customer_qbo_id=customer_qbo_id,
+                lines=lines,
+            )
 
+            # Option A:
+            # Only non-sales entities go into qbo_transaction_lines
+            if entity not in SALES_TRANSACTION_ENTITIES:
+                for idx, line in enumerate(lines):
+                    if not isinstance(line, dict):
+                        continue
+
+                    line_key = str(line.get("Id") or f"idx:{idx}")
+                    detail_type = line.get("DetailType")
+                    description = line.get("Description")
+                    amount = _parse_decimal(line.get("Amount"))
+                    cost_amount = _parse_decimal(line.get("CostAmount"))
+
+                    line_customer_qbo_id = None
+                    account_qbo_id = None
+                    item_qbo_id = None
+                    class_qbo_id = None
+                    department_qbo_id = None
+                    vendor_qbo_id_line = None
+                    qty = None
+                    unit_price = None
+                    billable_status = None
+
+                    detail_obj = None
+                    if isinstance(detail_type, str) and detail_type:
+                        detail_obj = line.get(detail_type) or {}
+
+                    if isinstance(detail_obj, dict):
+                        cref2 = detail_obj.get("CustomerRef") or {}
+                        if isinstance(cref2, dict) and cref2.get("value"):
+                            line_customer_qbo_id = str(cref2["value"])
+
+                        aref = detail_obj.get("AccountRef") or {}
+                        if isinstance(aref, dict) and aref.get("value"):
+                            account_qbo_id = str(aref["value"])
+
+                        iref = detail_obj.get("ItemRef") or {}
+                        if isinstance(iref, dict) and iref.get("value"):
+                            item_qbo_id = str(iref["value"])
+
+                        clref = detail_obj.get("ClassRef") or {}
+                        if isinstance(clref, dict) and clref.get("value"):
+                            class_qbo_id = str(clref["value"])
+
+                        dref = detail_obj.get("DepartmentRef") or {}
+                        if isinstance(dref, dict) and dref.get("value"):
+                            department_qbo_id = str(dref["value"])
+
+                        vref2 = detail_obj.get("VendorRef") or {}
+                        if isinstance(vref2, dict) and vref2.get("value"):
+                            vendor_qbo_id_line = str(vref2["value"])
+
+                        qty = _parse_decimal(detail_obj.get("Qty"))
+                        unit_price = _parse_decimal(detail_obj.get("UnitPrice"))
+                        billable_status = detail_obj.get("BillableStatus")
+
+                    conn.execute(text("""
+                        INSERT INTO qbo_transaction_lines (
+                          realm_id, transaction_id, line_key,
+                          detail_type, description, amount, cost_amount,
+                          line_customer_qbo_id, account_qbo_id, item_qbo_id,
+                          class_qbo_id, department_qbo_id, vendor_qbo_id,
+                          qty, unit_price, billable_status,
+                          raw_json
+                        )
+                        VALUES (
+                          :realm_id, :transaction_id, :line_key,
+                          :detail_type, :description, :amount, :cost_amount,
+                          :line_customer_qbo_id, :account_qbo_id, :item_qbo_id,
+                          :class_qbo_id, :department_qbo_id, :vendor_qbo_id,
+                          :qty, :unit_price, :billable_status,
+                          CAST(:raw AS JSON)
+                        )
+                        ON DUPLICATE KEY UPDATE
+                          detail_type = VALUES(detail_type),
+                          description = VALUES(description),
+                          amount = VALUES(amount),
+                          cost_amount = VALUES(cost_amount),
+                          line_customer_qbo_id = VALUES(line_customer_qbo_id),
+                          account_qbo_id = VALUES(account_qbo_id),
+                          item_qbo_id = VALUES(item_qbo_id),
+                          class_qbo_id = VALUES(class_qbo_id),
+                          department_qbo_id = VALUES(department_qbo_id),
+                          vendor_qbo_id = VALUES(vendor_qbo_id),
+                          qty = VALUES(qty),
+                          unit_price = VALUES(unit_price),
+                          billable_status = VALUES(billable_status),
+                          raw_json = VALUES(raw_json)
+                    """), {
+                        "realm_id": realm_id,
+                        "transaction_id": transaction_id,
+                        "line_key": line_key,
+                        "detail_type": detail_type,
+                        "description": description,
+                        "amount": amount,
+                        "cost_amount": cost_amount,
+                        "line_customer_qbo_id": line_customer_qbo_id,
+                        "account_qbo_id": account_qbo_id,
+                        "item_qbo_id": item_qbo_id,
+                        "class_qbo_id": class_qbo_id,
+                        "department_qbo_id": department_qbo_id,
+                        "vendor_qbo_id": vendor_qbo_id_line,
+                        "qty": qty,
+                        "unit_price": unit_price,
+                        "billable_status": billable_status,
+                        "raw": json.dumps(line),
+                    })
+                    upserted_lines += 1
+
+    return upserted_txns, upserted_lines, upserted_sales_lines
 
 def run_transactions_sync(triggered_by: str = "manual") -> dict:
     run_id = log_sync_start("transactions", triggered_by)
@@ -718,14 +1060,16 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
         fetched_total = 0
         upserted_txns_total = 0
         upserted_lines_total = 0
+        upserted_sales_lines_total = 0
 
         for entity in TRANSACTION_ENTITIES:
             rows = fetch_entities_incremental(realm_id, access_token, entity=entity, since=since)
             fetched_total += len(rows)
 
-            up_txn, up_line = upsert_transactions_and_lines(realm_id, entity, rows)
+            up_txn, up_line, up_sales_line = upsert_transactions_and_lines(realm_id, entity, rows)
             upserted_txns_total += up_txn
             upserted_lines_total += up_line
+            upserted_sales_lines_total += up_sales_line
 
         log_sync_finish(run_id, True, fetched=fetched_total, upserted=upserted_txns_total)
         return {
@@ -735,8 +1079,61 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             "fetched_total": fetched_total,
             "transactions_upserted": upserted_txns_total,
             "lines_upserted": upserted_lines_total,
+            "sales_lines_upserted": upserted_sales_lines_total,
             "run_id": run_id,
         }
     except Exception as e:
         log_sync_finish(run_id, False, error_message=str(e))
         raise
+
+def backfill_sales_lines_from_existing():
+    qbo_init_tables()
+
+    total = 0
+
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT id, realm_id, entity_type, qbo_id, customer_qbo_id, raw_json
+            FROM qbo_transactions
+            WHERE entity_type IN ('Estimate', 'Invoice', 'SalesReceipt', 'CreditMemo', 'RefundReceipt')
+        """)).mappings().all()
+
+        for r in rows:
+            transaction_id = r["id"]
+            realm_id = r["realm_id"]
+            entity = r["entity_type"]
+            qbo_id = r["qbo_id"]
+            customer_qbo_id = r["customer_qbo_id"]
+            raw = r["raw_json"]
+
+            if not raw:
+                continue
+
+            if isinstance(raw, dict):
+                t = raw
+            elif isinstance(raw, (str, bytes, bytearray)):
+                t = json.loads(raw)
+            else:
+                continue
+            
+            lines = t.get("Line", []) or []
+
+            # wipe existing (important)
+            conn.execute(text("""
+                DELETE FROM qbo_sales_transaction_lines
+                WHERE transaction_id = :transaction_id
+            """), {"transaction_id": transaction_id})
+
+            inserted = upsert_sales_transaction_lines(
+                conn=conn,
+                realm_id=realm_id,
+                entity=entity,
+                transaction_id=transaction_id,
+                transaction_qbo_id=qbo_id,
+                project_customer_qbo_id=customer_qbo_id,
+                lines=lines,
+            )
+
+            total += inserted
+
+    return {"sales_lines_backfilled": total}
