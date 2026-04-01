@@ -192,6 +192,26 @@ export async function assignmentPage(routeFn) {
     return [...set].sort((a, b) => a.localeCompare(b));
   }
 
+  async function saveMiscFields(row) {
+    await ensureBundle(row);
+    const bundle = row._bundle;
+    const payload = {
+      qbo_customer_id: Number(row.qbo_customer_id),
+      status: bundle.project?.status || "not_started",
+      start_date: bundle.project?.start_date || null,
+      end_date: bundle.project?.end_date || null,
+      wire_guidance: row.wire_guidance || 0,
+      travel_days: row.travel_days || 0,
+      overage_days: row.overage_days || 0,
+      project_manager_ids: (bundle.active_project_managers || []).map(x => Number(x.project_manager_id)),
+      primary_project_manager_id: (bundle.active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
+      work_crew_ids: (bundle.active_work_crews || []).map(x => Number(x.work_crew_id)),
+      primary_work_crew_id: (bundle.active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+    };
+    await api("/assignment/save", { method: "POST", body: JSON.stringify(payload) });
+    setMsg(`Saved ${row.project_name}.`, true);
+  }
+
   function filterIcon(active = false) {
     return `
       <svg class="shrink-0 size-3.5 ${active ? "text-black" : ""}" xmlns="http://www.w3.org/2000/svg" width="24" height="24"
@@ -357,7 +377,7 @@ export async function assignmentPage(routeFn) {
 
           <div class="flex items-center gap-2">
             <div class="text-sm font-semibold text-black/60 whitespace-nowrap">Search</div>
-            <input id="searchInput" class="input w-full sm:w-72" placeholder="Project, status, PM, crew" />
+            <input id="searchInput" class="input w-full sm:w-72" placeholder="Project" />
           </div>
         </div>
 
@@ -376,6 +396,9 @@ export async function assignmentPage(routeFn) {
                     ${th("project_status", "Project Status")}
                     ${th("start_date", "Start Date")}
                     ${th("end_date", "End Date")}
+                    ${th("wire_guidance", "Wire Guidance")}
+                    ${th("travel_days", "Travel Days")}
+                    ${th("overage_days", "Overage Days")}
                     ${th("primary_project_manager", "Project Manager")}
                     ${th("primary_work_crew", "Work Crew")}
                     ${th("project_create_date", "QB Create Dt")}
@@ -541,6 +564,51 @@ export async function assignmentPage(routeFn) {
     `;
   }
 
+  function renderWireGuidanceCell(row) {
+    return `
+      <input
+        type="checkbox"
+        class="h-4 w-4 cursor-pointer"
+        data-wire-check="${row.qbo_customer_id}"
+        ${row.wire_guidance ? "checked" : ""}
+      />
+    `;
+  }
+
+  function renderTravelDaysCell(row) {
+    if (isEditing(row.qbo_customer_id, "travel_days")) {
+      return `
+        <select class="input w-24" data-travel-select="${row.qbo_customer_id}" onchange="void(0)">
+          <option value="0" ${!row.travel_days ? "selected" : ""}>None</option>
+          <option value="2" ${row.travel_days == 2 ? "selected" : ""}>2 days</option>
+          <option value="4" ${row.travel_days == 4 ? "selected" : ""}>4 days</option>
+        </select>
+      `;
+    }
+    return `
+      <button type="button" class="inline-flex min-h-[32px] min-w-[80px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
+        data-edit-cell="${row.qbo_customer_id}" data-field="travel_days">
+        ${row.travel_days ? `${row.travel_days} days` : `<span class="text-black/35">—</span>`}
+      </button>
+    `;
+  }
+
+  function renderOverageDaysCell(row) {
+    if (isEditing(row.qbo_customer_id, "overage_days")) {
+      return `
+        <input type="number" min="0" step="1" class="input w-24"
+          data-overage-input="${row.qbo_customer_id}"
+          value="${row.overage_days || 0}" />
+      `;
+    }
+    return `
+      <button type="button" class="inline-flex min-h-[32px] min-w-[80px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
+        data-edit-cell="${row.qbo_customer_id}" data-field="overage_days">
+        ${row.overage_days ? `${row.overage_days} days` : `<span class="text-black/35">—</span>`}
+      </button>
+    `;
+  }
+
   function renderDateEditor(row, field) {
     const currentIso = isoToInput(row[field]);
     const displayVal = formatMmDdYyyy(row[field]);
@@ -666,6 +734,9 @@ export async function assignmentPage(routeFn) {
       ${th("project_status", "Project Status")}
       ${th("start_date", "Start Date")}
       ${th("end_date", "End Date")}
+      ${th("wire_guidance", "Wire Guidance")}
+      ${th("travel_days", "Travel Days")}
+      ${th("overage_days", "Overage Days")}
       ${th("primary_project_manager", "Project Manager")}
       ${th("primary_work_crew", "Work Crew")}
       ${th("project_create_date", "QB Create Dt")}
@@ -741,6 +812,18 @@ export async function assignmentPage(routeFn) {
                   </button>`}
             </td>
 
+            <td class="py-2 px-3 text-center">
+              ${renderWireGuidanceCell(row)}
+            </td>
+
+            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "travel_days")}">
+              ${renderTravelDaysCell(row)}
+            </td>
+
+            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "overage_days")}">
+              ${renderOverageDaysCell(row)}
+            </td>
+
             <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "primary_project_manager")}"
                 data-cell="${row.qbo_customer_id}"
                 data-field="primary_project_manager">
@@ -786,7 +869,7 @@ export async function assignmentPage(routeFn) {
         `;
       }).join("") || `
         <tr>
-          <td class="py-6 text-center text-black/50" colspan="7">No projects match these filters.</td>
+          <td class="py-6 text-center text-black/50" colspan="10">No projects match these filters.</td>
         </tr>
       `;
 
@@ -1057,6 +1140,19 @@ export async function assignmentPage(routeFn) {
       return;
     }
 
+    // Wire guidance checkbox — saves immediately on click
+    const wireCheck = e.target.closest("[data-wire-check]");
+    if (wireCheck) {
+      const rowId = wireCheck.getAttribute("data-wire-check");
+      const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+      if (row) {
+        row.wire_guidance = wireCheck.checked ? 1 : 0;
+        await saveMiscFields(row);
+        flashCell(row.qbo_customer_id, "wire_guidance");
+      }
+      return;
+    }
+
     const saveAssignment = e.target.closest("[data-save-assignment]");
     if (saveAssignment) {
       await saveAssignmentField(
@@ -1068,6 +1164,21 @@ export async function assignmentPage(routeFn) {
   });
 
   document.getElementById("assignmentBody").addEventListener("change", async (e) => {
+      // Travel days dropdown
+      const travelSelect = e.target.closest("[data-travel-select]");
+      if (travelSelect) {
+        const rowId = travelSelect.getAttribute("data-travel-select");
+        const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+        if (row) {
+          row.travel_days = Number(travelSelect.value);
+          await saveMiscFields(row);
+          clearEditing();
+          flashCell(row.qbo_customer_id, "travel_days");
+        }
+        return;
+      }
+
+    // Date picker (native calendar)
     const picker = e.target.closest("[data-date-picker]");
     if (picker) {
       const rowId = picker.getAttribute("data-date-picker");
@@ -1083,34 +1194,72 @@ export async function assignmentPage(routeFn) {
   });
 
   document.getElementById("assignmentBody").addEventListener("keydown", async (e) => {
-    const textInput = e.target.closest("[data-date-text]");
-    if (textInput && e.key === "Enter") {
-      e.preventDefault();
-      const rowId = textInput.getAttribute("data-date-text");
-      const field = textInput.getAttribute("data-date-field");
-      const iso = mmddyyyyToIso(textInput.value);
-
-      if (!textInput.value.trim()) {
-        await saveDateField(rowId, field, "");
+      // Overage days — save on Enter
+      const overageInput = e.target.closest("[data-overage-input]");
+      if (overageInput && e.key === "Enter") {
+        e.preventDefault();
+        const rowId = overageInput.getAttribute("data-overage-input");
+        const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+        if (row) {
+          row.overage_days = Math.max(0, parseInt(overageInput.value) || 0);
+          try {
+            await saveMiscFields(row);
+            flashCell(row.qbo_customer_id, "overage_days");
+          } catch (err) {
+            setMsg("Could not update overage days.");
+          }
+          clearEditing();
+        }
         return;
       }
 
-      if (!iso) {
-        setMsg("Please enter the date as mm-dd-yyyy.");
-        return;
+      // Date text — save on Enter
+      const textInput = e.target.closest("[data-date-text]");
+      if (textInput && e.key === "Enter") {
+        e.preventDefault();
+        const rowId = textInput.getAttribute("data-date-text");
+        const field = textInput.getAttribute("data-date-field");
+        const iso = mmddyyyyToIso(textInput.value);
+
+        if (!textInput.value.trim()) {
+          await saveDateField(rowId, field, "");
+          return;
+        }
+
+        if (!iso) {
+          setMsg("Please enter the date as mm-dd-yyyy.");
+          return;
+        }
+
+        await saveDateField(rowId, field, iso);
       }
 
-      await saveDateField(rowId, field, iso);
-    }
-
-    if (e.key === "Escape") {
-      clearEditing();
-      state.openFilter = null;
-      renderAll();
-    }
-  });
+      if (e.key === "Escape") {
+        clearEditing();
+        state.openFilter = null;
+        renderAll();
+      }
+    });
 
   document.getElementById("assignmentBody").addEventListener("focusout", async (e) => {
+    // Overage days — save when user clicks away
+    const overageInput = e.target.closest("[data-overage-input]");
+    if (overageInput) {
+      const rowId = overageInput.getAttribute("data-overage-input");
+      const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+      if (row) {
+        row.overage_days = Math.max(0, parseInt(overageInput.value) || 0);
+        try {
+          await saveMiscFields(row);
+          flashCell(row.qbo_customer_id, "overage_days");
+        } catch (err) {
+          setMsg("Could not update overage days.");
+        }
+        clearEditing();
+      }
+      return;
+    }
+
     const textInput = e.target.closest("[data-date-text]");
     if (!textInput) return;
 
@@ -1216,13 +1365,18 @@ export async function assignmentPage(routeFn) {
     const clickedInsideActiveEditor = activeEditorCell?.contains(e.target);
 
     // close open cell editors when clicking outside the active editor
+    const clickedTravelSelect = e.target.closest("[data-travel-select]");
+    const clickedOverageInput = e.target.closest("[data-overage-input]");
+    
     if (
       state.editing.field &&
       !clickedInsideActiveEditor &&
       !clickedEditCell &&
       !clickedStatusChoice &&
       !clickedAssignmentSave &&
-      !clickedAssignmentCancel
+      !clickedAssignmentCancel &&
+      !clickedTravelSelect &&
+      !clickedOverageInput
     ) {
       clearEditing();
       renderAll();

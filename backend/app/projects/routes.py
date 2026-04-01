@@ -24,6 +24,9 @@ class AssignmentSaveRequest(BaseModel):
     status: str
     start_date: Optional[str] = None   # "YYYY-MM-DD"
     end_date: Optional[str] = None     # "YYYY-MM-DD"
+    wire_guidance: int = 0
+    travel_days: int = 0
+    overage_days: int = 0
     project_manager_ids: List[int] = []
     primary_project_manager_id: Optional[int] = None
     work_crew_ids: List[int] = []
@@ -62,6 +65,9 @@ def assignment_table(user=Depends(get_current_user)):
       ip.status AS project_status,
       ip.start_date AS start_date,
       ip.end_date AS end_date,
+      ip.wire_guidance AS wire_guidance,
+      ip.travel_days AS travel_days,
+      ip.overage_days AS overage_days,
 
       pm.primary_pm_name AS primary_project_manager,
       wc.primary_crew_name AS primary_work_crew,
@@ -358,6 +364,9 @@ def schedule(
         p.id AS project_id,
         p.start_date,
         p.end_date,
+        p.wire_guidance,
+        p.travel_days,
+        p.overage_days,
         p.status AS project_status,
         qc.display_name AS project_name,
 
@@ -393,17 +402,23 @@ def schedule(
       WHERE
         p.start_date IS NOT NULL
         AND p.end_date IS NOT NULL
-        AND p.start_date <= :week_end
-        AND p.end_date >= :week_start
+        AND p.start_date <= :week_end_plus
+        AND p.end_date >= :week_start_minus
 
       ORDER BY p.start_date, p.id
     """)
+
+    week_start_minus = (ws - timedelta(days=4)).isoformat()
+    week_end_plus = (we + timedelta(days=21)).isoformat()
 
     with engine.connect() as conn:
         crews_rows = conn.execute(crews_sql).mappings().all()
         assignment_rows = conn.execute(
             assignments_sql,
-            {"week_start": ws.isoformat(), "week_end": we.isoformat()},
+            {
+                "week_start_minus": week_start_minus,
+                "week_end_plus": week_end_plus,
+            },
         ).mappings().all()
 
     crews = [dict(r) for r in crews_rows]

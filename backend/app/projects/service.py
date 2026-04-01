@@ -46,7 +46,8 @@ def get_assignment_bundle(qbo_customer_id: int):
 
         # Project layer (may not exist yet)
         proj = conn.execute(text("""
-            SELECT id, qbo_customer_id, start_date, end_date, status
+            SELECT id, qbo_customer_id, start_date, end_date, status,
+                wire_guidance, travel_days, overage_days
             FROM projects
             WHERE qbo_customer_id = :cid
             LIMIT 1
@@ -101,6 +102,9 @@ def get_assignment_bundle(qbo_customer_id: int):
             "start_date": None,
             "end_date": None,
             "status": "not_started",
+            "wire_guidance": 0,
+            "travel_days": 0,
+            "overage_days": 0,
         },
         "active_project_managers": [dict(r) for r in pms_active],
         "active_work_crews": [dict(r) for r in crews_active],
@@ -152,10 +156,15 @@ def save_project_assignment(req, actor_user_id: int) -> Dict[str, Any]:
         # --- update project row
         conn.execute(text("""
             UPDATE projects
-            SET start_date = :sd, end_date = :ed, status = :st
+            SET start_date = :sd, end_date = :ed, status = :st,
+                wire_guidance = :wg, travel_days = :td, overage_days = :od
             WHERE id = :pid
-        """), {"sd": start_date, "ed": end_date, "st": status, "pid": project_id})
-
+        """), {
+            "sd": start_date, "ed": end_date, "st": status, "pid": project_id,
+            "wg": getattr(req, "wire_guidance", 0) or 0,
+            "td": getattr(req, "travel_days", 0) or 0,
+            "od": getattr(req, "overage_days", 0) or 0,
+        })
         # Log field changes
         if prev_start != start_date or prev_end != end_date:
             conn.execute(text("""

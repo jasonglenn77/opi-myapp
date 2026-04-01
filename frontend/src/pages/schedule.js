@@ -134,32 +134,62 @@ export async function schedulePage(routeFn) {
 
       const start = parseYmd(a.start_date);
       const end = parseYmd(a.end_date);
-
-      const from = start > state.weekStart ? start : state.weekStart;
-      const to = end < weekEnd ? end : weekEnd;
-      if (from > to) continue;
+      const travelDays = a.travel_days || 0;
+      const overageDays = a.overage_days || 0;
+      const halfTravel = travelDays / 2; // 1 before+after for 2, 2 before+after for 4
 
       const pmsForItem = Array.isArray(a.pm_initials)
         ? a.pm_initials.map(x => String(x || "").trim().toUpperCase()).filter(Boolean)
         : [];
 
-      for (
-        let d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-        d <= to;
-        d.setDate(d.getDate() + 1)
-      ) {
-        const ds = ymd(d);
+      const baseItem = {
+        project_id: a.project_id,
+        project: a.project_name || "",
+        status: a.project_status || "",
+        start_date: a.start_date,
+        end_date: a.end_date,
+        crews: crewCodes,
+        pms: pmsForItem,
+      };
 
-        for (const crewCode of crewCodes) {
-          pushItem(crewCode, ds, {
-            project_id: a.project_id,
-            project: a.project_name || "",
-            status: a.project_status || "",
-            start_date: a.start_date,
-            end_date: a.end_date,
-            crews: crewCodes,
-            pms: pmsForItem,
-          });
+      for (const crewCode of crewCodes) {
+        // Travel days BEFORE start
+        for (let i = halfTravel; i >= 1; i--) {
+          const d = addDays(start, -i);
+          const ds = ymd(d);
+          if (d >= state.weekStart && d <= weekEnd) {
+            pushItem(crewCode, ds, { ...baseItem, project: "Travel", cellType: "travel" });
+          }
+        }
+
+        // Regular project days
+        for (
+          let d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+          d <= end;
+          d.setDate(d.getDate() + 1)
+        ) {
+          const ds = ymd(d);
+          if (d >= state.weekStart && d <= weekEnd) {
+            pushItem(crewCode, ds, { ...baseItem, cellType: "project" });
+          }
+        }
+
+        // Overage days (after end)
+        for (let i = 1; i <= overageDays; i++) {
+          const d = addDays(end, i);
+          const ds = ymd(d);
+          if (d >= state.weekStart && d <= weekEnd) {
+            pushItem(crewCode, ds, { ...baseItem, cellType: "overage" });
+          }
+        }
+
+        // Travel day AFTER overage
+        for (let i = 1; i <= halfTravel; i++) {
+          const d = addDays(end, overageDays + i);
+          const ds = ymd(d);
+          if (d >= state.weekStart && d <= weekEnd) {
+            pushItem(crewCode, ds, { ...baseItem, project: "Travel", cellType: "travel" });
+          }
         }
       }
     }
@@ -207,6 +237,15 @@ export async function schedulePage(routeFn) {
 
           const assignmentsHtml = items
             .map((it) => {
+              const isTravel  = it.cellType === "travel";
+              const isOverage = it.cellType === "overage";
+
+              const wrapClass = isTravel
+                ? "bg-gray-100 rounded px-1 py-0.5 text-gray-400 italic text-xs"
+                : isOverage
+                ? "bg-orange-50 border border-orange-200 rounded px-1 py-0.5 text-orange-700 text-xs"
+                : "";
+
               const pmList = Array.isArray(it.pms) ? it.pms : [];
               const pmBadges = pmList.length
                 ? pmList.map((pm) => {
@@ -220,7 +259,7 @@ export async function schedulePage(routeFn) {
                     >${escapeHtml(pm)}</span>`;
                   }).join("")
                 : `<span class="text-black/30">—</span>`;
-              
+
               const tip = encodeURIComponent(JSON.stringify({
                 project: it.project,
                 status: it.status,
@@ -231,9 +270,10 @@ export async function schedulePage(routeFn) {
               }));
 
               return `
-                <div class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 items-start py-1">
-                  <div class="flex flex-wrap gap-1">${pmBadges}</div>
-                  <div class="font-semibold cursor-pointer hover:underline whitespace-normal break-words" data-proj-tip="${tip}">
+                <div class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 items-start py-1 ${wrapClass}">
+                  <div class="flex flex-wrap gap-1">${isTravel ? "" : pmBadges}</div>
+                  <div class="font-semibold ${isTravel ? "" : "cursor-pointer hover:underline"} whitespace-normal break-words"
+                    ${isTravel ? "" : `data-proj-tip="${tip}"`}>
                     ${escapeHtml(it.project)}
                   </div>
                 </div>
