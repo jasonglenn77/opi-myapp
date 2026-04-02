@@ -441,7 +441,7 @@ export async function assignmentPage(routeFn) {
             <button
               id="clearFiltersBtn"
               type="button"
-              class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5 whitespace-nowrap"
+              class="inline-flex items-center rounded-xl border border-black/10 bg-gray-200 px-3 py-2 text-sm font-semibold hover:bg-black/5 whitespace-nowrap"
             >
               Clear Filters
             </button>
@@ -570,16 +570,16 @@ export async function assignmentPage(routeFn) {
           ${statusPill(row.project_status)}
         </button>
 
-        <div class="absolute left-0 top-9 z-50 w-60 rounded-xl border border-black/10 bg-white p-2 shadow-xl">
+        <div class="absolute left-0 top-9 z-50 min-w-[170px] w-max max-w-[220px] rounded-xl border border-black/10 bg-white p-2 shadow-xl">
           <div class="flex flex-col gap-1">
             ${STATUS_OPTIONS.map((opt) => `
               <button
                 type="button"
-                class="block w-full rounded-lg px-2 py-2 text-left hover:bg-black/[0.04]"
+                class="inline-flex w-full rounded-lg px-2 py-2 text-left hover:bg-black/[0.04]"
                 data-pick-status="${row.qbo_customer_id}"
                 data-status-value="${opt.value}"
               >
-                <span class="block">
+                <span class="inline-flex">
                   ${statusPill(opt.value)}
                 </span>
               </button>
@@ -723,8 +723,8 @@ export async function assignmentPage(routeFn) {
     }).join("");
 
     return `
-      <div class="relative inline-block">
-        <div class="absolute left-0 top-7 z-50 w-[340px] rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+      <div class="relative inline-block w-full">
+        <div class="absolute left-0 top-7 z-[100] w-[340px] max-w-[420px] rounded-xl border border-black/10 bg-white p-3 shadow-xl">
           <div class="text-xs font-bold text-black/50 mb-2">${isPm ? "Project Managers" : "Work Crews"}</div>
           <div class="max-h-[240px] overflow-auto pr-1">
             ${rowsHtml || `<div class="text-sm text-black/50">None found.</div>`}
@@ -804,10 +804,10 @@ export async function assignmentPage(routeFn) {
               `}
             </td>
 
-            <td class="py-2 px-2 overflow-hidden ${cellClass(row, "primary_project_manager")}"
+            <td class="py-2 px-2 overflow-visible ${cellClass(row, "primary_project_manager")}"
                 data-cell="${row.qbo_customer_id}"
                 data-field="primary_project_manager">
-              <div class="relative">
+              <div class="relative z-100">
                 ${isEditing(row.qbo_customer_id, "primary_project_manager")
                   ? renderAssignmentEditor(row, "primary_project_manager")
                   : `<button
@@ -823,10 +823,10 @@ export async function assignmentPage(routeFn) {
               </div>
             </td>
 
-            <td class="py-2 px-2 overflow-hidden ${cellClass(row, "primary_work_crew")}"
+            <td class="py-2 px-2 overflow-visible ${cellClass(row, "primary_work_crew")}"
                 data-cell="${row.qbo_customer_id}"
                 data-field="primary_work_crew">
-              <div class="relative w-full">
+              <div class="relative w-full z-100">
                 ${isEditing(row.qbo_customer_id, "primary_work_crew")
                   ? renderAssignmentEditor(row, "primary_work_crew")
                   : `<button
