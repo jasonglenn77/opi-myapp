@@ -1,3 +1,4 @@
+// Main page for managing project assignments. Shows a table of projects with inline editing, sorting, and filtering.
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
@@ -28,6 +29,9 @@ export async function assignmentPage(routeFn) {
       project_create_date_to: "",
       primary_project_manager: "",
       primary_work_crew: "",
+      wire_guidance: "",
+      travel_days: "",
+      overage_days: "",
     },
   };
 
@@ -230,6 +234,9 @@ export async function assignmentPage(routeFn) {
     if (key === "project_create_date") return !!(state.filters.project_create_date_from || state.filters.project_create_date_to);
     if (key === "primary_project_manager") return !!state.filters.primary_project_manager;
     if (key === "primary_work_crew") return !!state.filters.primary_work_crew;
+    if (key === "wire_guidance") return !!state.filters.wire_guidance;
+    if (key === "travel_days") return !!state.filters.travel_days;
+    if (key === "overage_days") return !!state.filters.overage_days;
     return false;
   }
 
@@ -311,12 +318,64 @@ export async function assignmentPage(routeFn) {
       `;
     }
 
-    if (key === "start_date" || key === "end_date" || key === "project_create_date") {
-      const fromKey = `${key}_from`;
+    if (key === "wire_guidance") {
+      return `
+        <div class="absolute right-0 top-8 z-50 w-52 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+          <div class="text-xs font-bold text-black/50 mb-2">Filter Wire</div>
+          <select class="input" data-filter-select="wire_guidance">
+            <option value="">All</option>
+            <option value="yes" ${state.filters.wire_guidance === "yes" ? "selected" : ""}>Yes</option>
+            <option value="no" ${state.filters.wire_guidance === "no" ? "selected" : ""}>No</option>
+          </select>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="wire_guidance">Clear</button>
+            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
+          </div>
+        </div>
+      `;
+    }
+
+    if (key === "travel_days") {
+      return `
+        <div class="absolute right-0 top-8 z-50 w-52 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+          <div class="text-xs font-bold text-black/50 mb-2">Filter Travel</div>
+          <select class="input" data-filter-select="travel_days">
+            <option value="">All</option>
+            <option value="none" ${state.filters.travel_days === "none" ? "selected" : ""}>None</option>
+            <option value="2" ${state.filters.travel_days === "2" ? "selected" : ""}>2 days</option>
+            <option value="4" ${state.filters.travel_days === "4" ? "selected" : ""}>4 days</option>
+          </select>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="travel_days">Clear</button>
+            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
+          </div>
+        </div>
+      `;
+    }
+
+    if (key === "overage_days") {
+      return `
+        <div class="absolute right-0 top-8 z-50 w-52 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+          <div class="text-xs font-bold text-black/50 mb-2">Filter Overage</div>
+          <select class="input" data-filter-select="overage_days">
+            <option value="">All</option>
+            <option value="none" ${state.filters.overage_days === "none" ? "selected" : ""}>None</option>
+            <option value="has" ${state.filters.overage_days === "has" ? "selected" : ""}>Has overage</option>
+          </select>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="overage_days">Clear</button>
+            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
+          </div>
+        </div>
+      `;
+    }
+
+    if (key === "start_date" || key === "end_date" || key === "project_create_date") {      const fromKey = `${key}_from`;
       const toKey = `${key}_to`;
+      const menuAlign = key === "project_create_date" ? "right-0 translate-x-0" : "right-0";
 
       return `
-        <div class="absolute right-0 top-8 z-50 w-72 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+        <div class="absolute top-8 z-50 w-72 rounded-xl border border-black/10 bg-white p-3 shadow-xl" style="right:0; left:auto;">
           <div class="text-xs font-bold text-black/50 mb-2">Filter ${escapeHtml(key.replaceAll("_", " "))}</div>
           <div class="space-y-2">
             <div>
@@ -341,7 +400,7 @@ export async function assignmentPage(routeFn) {
 
   function th(key, label) {
     return `
-      <th class="py-2 px-3 whitespace-nowrap text-left align-middle">
+      <th class="py-2 px-3 text-left align-middle overflow-visible" style="min-width:fit-content;">
         <div class="relative inline-flex items-center gap-2">
           <button
             type="button"
@@ -365,55 +424,54 @@ export async function assignmentPage(routeFn) {
       </th>
     `;
   }
-  
+
   const bodyHtml = `
-    <div class="h-full min-h-0 flex flex-col gap-4">
-      <div class="card p-5 flex flex-col flex-1 min-h-0 overflow-hidden">
-        <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+    <div class="card flex flex-col overflow-hidden" style="height:calc(100vh - 180px); min-height:400px;">
+
+      <!-- Fixed card header: title, subtitle, search. Never scrolls. -->
+      <div id="assignCardHeader" class="shrink-0 px-5 pt-5 pb-3 border-b border-black/10">
+        <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-2">
           <div>
             <div class="text-lg font-extrabold">Assignments</div>
             <div class="text-sm text-black/60">Sort columns, filter from the funnel button, and edit directly in the row.</div>
           </div>
-
           <div class="flex items-center gap-2">
             <div class="text-sm font-semibold text-black/60 whitespace-nowrap">Search</div>
-            <input id="searchInput" class="input w-full sm:w-72" placeholder="Project" />
-          </div>
-        </div>
-
-        <div id="assignPageMsg" class="mt-1 text-sm min-h-[1rem]"></div>
-
-        <div class="mt-4 border border-black/5 bg-white/40 rounded-2xl flex-1 min-h-0 overflow-hidden">
-          <div class="flex flex-col h-full min-h-0">
-            <div
-              id="tableScroller"
-              class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain [-webkit-overflow-scrolling:touch]"
+            <input id="searchInput" class="input w-full sm:w-72" placeholder="Project Name" />
+            <button
+              id="clearFiltersBtn"
+              type="button"
+              class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5 whitespace-nowrap"
             >
-              <table id="assignmentTable" class="text-sm border-collapse w-full min-w-[1500px]">
-                <thead class="sticky top-0 z-40 bg-white shadow-sm text-left text-black/60 border-b border-black/10">
-                  <tr>
-                    ${th("project_name", "Project Name")}
-                    ${th("project_status", "Project Status")}
-                    ${th("start_date", "Start Date")}
-                    ${th("end_date", "End Date")}
-                    ${th("wire_guidance", "Wire Guidance")}
-                    ${th("travel_days", "Travel Days")}
-                    ${th("overage_days", "Overage Days")}
-                    ${th("primary_project_manager", "Project Manager")}
-                    ${th("primary_work_crew", "Work Crew")}
-                    ${th("project_create_date", "QB Create Dt")}
-                  </tr>
-                </thead>
-                <tbody id="assignmentBody"></tbody>
-              </table>
-            </div>
-
-            <div id="hScroll" class="hscrollbar">
-              <div id="hScrollInner" class="hscrollbar-inner"></div>
-            </div>
+              Clear Filters
+            </button>
           </div>
         </div>
+        <div id="assignPageMsg" class="text-sm min-h-[1rem]"></div>
       </div>
+
+      <!-- Single scroll container: both axes scroll here, nothing else does.
+           thead sticky top-0 works because this div is the scroll ancestor. -->
+      <div id="assignTableScroll" class="flex-1 overflow-auto">
+        <table id="assignmentTable" class="text-sm border-collapse w-full" style="min-width:900px;">
+          <thead id="assignThead" class="text-left text-black/60 border-b border-black/10 sticky top-0 z-20 bg-white">
+            <tr>
+              ${th("project_name", "Project Name")}
+              ${th("project_status", "Status")}
+              ${th("primary_project_manager", "PM")}
+              ${th("primary_work_crew", "Work Crew")}
+              ${th("start_date", "Start Date")}
+              ${th("end_date", "End Date")}
+              ${th("wire_guidance", "Wire")}
+              ${th("travel_days", "Travel")}
+              ${th("overage_days", "Overage")}
+              ${th("project_create_date", "QB Created")}
+            </tr>
+          </thead>
+          <tbody id="assignmentBody"></tbody>
+        </table>
+      </div>
+
     </div>
   `;
 
@@ -423,41 +481,7 @@ export async function assignmentPage(routeFn) {
     bodyHtml,
     showLogout: true,
     routeFn,
-    scrollMode: "viewport",
   });
-
-  function syncStickyHScroll() {
-    const scroller = document.getElementById("tableScroller");
-    const hScroll = document.getElementById("hScroll");
-    const hInner = document.getElementById("hScrollInner");
-    const table = document.getElementById("assignmentTable");
-    if (!scroller || !hScroll || !hInner || !table) return;
-    hInner.style.width = `${table.scrollWidth}px`;
-    hScroll.scrollLeft = scroller.scrollLeft;
-  }
-
-  function bindStickyHScroll() {
-    const scroller = document.getElementById("tableScroller");
-    const hScroll = document.getElementById("hScroll");
-    if (!scroller || !hScroll) return;
-
-    let lock = false;
-    scroller.addEventListener("scroll", () => {
-      if (lock) return;
-      lock = true;
-      hScroll.scrollLeft = scroller.scrollLeft;
-      lock = false;
-    });
-
-    hScroll.addEventListener("scroll", () => {
-      if (lock) return;
-      lock = true;
-      scroller.scrollLeft = hScroll.scrollLeft;
-      lock = false;
-    });
-
-    window.addEventListener("resize", syncStickyHScroll);
-  }
 
   function inDateRange(isoValue, fromValue, toValue) {
     if (!fromValue && !toValue) return true;
@@ -490,17 +514,19 @@ export async function assignmentPage(routeFn) {
         if (!all.includes(normalize(state.filters.primary_work_crew))) return false;
       }
 
+      if (state.filters.wire_guidance === "yes" && !r.wire_guidance) return false;
+      if (state.filters.wire_guidance === "no" && r.wire_guidance) return false;
+
+      if (state.filters.travel_days === "none" && r.travel_days) return false;
+      if (state.filters.travel_days === "2" && Number(r.travel_days) !== 2) return false;
+      if (state.filters.travel_days === "4" && Number(r.travel_days) !== 4) return false;
+
+      if (state.filters.overage_days === "none" && r.overage_days) return false;
+      if (state.filters.overage_days === "has" && !r.overage_days) return false;
+
       if (!q) return true;
 
-      return (
-        normalize(r.project_name).includes(q) ||
-        normalize(statusLabel(r.project_status)).includes(q) ||
-        normalize(r.all_project_managers).includes(q) ||
-        normalize(r.all_work_crews).includes(q) ||
-        normalize(formatMmDdYyyy(r.start_date)).includes(q) ||
-        normalize(formatMmDdYyyy(r.end_date)).includes(q) ||
-        normalize(formatMmDdYyyy(r.project_create_date)).includes(q)
-      );
+      return normalize(r.project_name).includes(q);
     });
   }
 
@@ -586,7 +612,7 @@ export async function assignmentPage(routeFn) {
       `;
     }
     return `
-      <button type="button" class="inline-flex min-h-[32px] min-w-[80px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
+      <button type="button" class="inline-flex min-h-[32px] min-w-[60px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
         data-edit-cell="${row.qbo_customer_id}" data-field="travel_days">
         ${row.travel_days ? `${row.travel_days} days` : `<span class="text-black/35">—</span>`}
       </button>
@@ -602,7 +628,7 @@ export async function assignmentPage(routeFn) {
       `;
     }
     return `
-      <button type="button" class="inline-flex min-h-[32px] min-w-[80px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
+      <button type="button" class="inline-flex min-h-[32px] min-w-[60px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
         data-edit-cell="${row.qbo_customer_id}" data-field="overage_days">
         ${row.overage_days ? `${row.overage_days} days` : `<span class="text-black/35">—</span>`}
       </button>
@@ -731,15 +757,15 @@ export async function assignmentPage(routeFn) {
 
     theadRow.innerHTML = `
       ${th("project_name", "Project Name")}
-      ${th("project_status", "Project Status")}
+      ${th("project_status", "Status")}
+      ${th("primary_project_manager", "PM")}
+      ${th("primary_work_crew", "Work Crew")}
       ${th("start_date", "Start Date")}
       ${th("end_date", "End Date")}
-      ${th("wire_guidance", "Wire Guidance")}
-      ${th("travel_days", "Travel Days")}
-      ${th("overage_days", "Overage Days")}
-      ${th("primary_project_manager", "Project Manager")}
-      ${th("primary_work_crew", "Work Crew")}
-      ${th("project_create_date", "QB Create Dt")}
+      ${th("wire_guidance", "Wire")}
+      ${th("travel_days", "Travel")}
+      ${th("overage_days", "Overage")}
+      ${th("project_create_date", "QB Created")}
     `;
   }
 
@@ -764,11 +790,11 @@ export async function assignmentPage(routeFn) {
 
         return `
           <tr class="border-b border-black/5">
-            <td class="py-2 px-3 font-semibold whitespace-nowrap">
+            <td class="py-2 px-2 font-semibold whitespace-nowrap">
               ${escapeHtml(row.project_name || "")}
             </td>
 
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "project_status")}"
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "project_status")}"
                 data-cell="${row.qbo_customer_id}"
                 data-field="project_status">
               ${isEditing(row.qbo_customer_id, "project_status") ? renderStatusEditor(row) : `
@@ -778,53 +804,7 @@ export async function assignmentPage(routeFn) {
               `}
             </td>
 
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "start_date")}"
-                data-cell="${row.qbo_customer_id}"
-                data-field="start_date">
-              ${isEditing(row.qbo_customer_id, "start_date")
-                ? renderDateEditor(row, "start_date")
-                : `<button
-                    type="button"
-                    class="inline-flex min-h-[32px] min-w-[120px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
-                    data-edit-cell="${row.qbo_customer_id}"
-                    data-field="start_date"
-                  >
-                    ${row.start_date
-                      ? escapeHtml(formatMmDdYyyy(row.start_date))
-                      : `<span class="text-black/35">—</span>`}
-                  </button>`}
-            </td>
-
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "end_date")}"
-                data-cell="${row.qbo_customer_id}"
-                data-field="end_date">
-              ${isEditing(row.qbo_customer_id, "end_date")
-                ? renderDateEditor(row, "end_date")
-                : `<button
-                    type="button"
-                    class="inline-flex min-h-[32px] min-w-[120px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
-                    data-edit-cell="${row.qbo_customer_id}"
-                    data-field="end_date"
-                  >
-                    ${row.end_date
-                      ? escapeHtml(formatMmDdYyyy(row.end_date))
-                      : `<span class="text-black/35">—</span>`}
-                  </button>`}
-            </td>
-
-            <td class="py-2 px-3 text-center">
-              ${renderWireGuidanceCell(row)}
-            </td>
-
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "travel_days")}">
-              ${renderTravelDaysCell(row)}
-            </td>
-
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "overage_days")}">
-              ${renderOverageDaysCell(row)}
-            </td>
-
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "primary_project_manager")}"
+            <td class="py-2 px-2 overflow-hidden ${cellClass(row, "primary_project_manager")}"
                 data-cell="${row.qbo_customer_id}"
                 data-field="primary_project_manager">
               <div class="relative">
@@ -832,7 +812,7 @@ export async function assignmentPage(routeFn) {
                   ? renderAssignmentEditor(row, "primary_project_manager")
                   : `<button
                       type="button"
-                      class="inline-flex min-h-[32px] min-w-[180px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
+                      class="inline-flex min-h-[32px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left whitespace-normal break-words"
                       data-edit-cell="${row.qbo_customer_id}"
                       data-field="primary_project_manager"
                     >
@@ -843,15 +823,15 @@ export async function assignmentPage(routeFn) {
               </div>
             </td>
 
-            <td class="py-2 px-3 whitespace-nowrap ${cellClass(row, "primary_work_crew")}"
+            <td class="py-2 px-2 overflow-hidden ${cellClass(row, "primary_work_crew")}"
                 data-cell="${row.qbo_customer_id}"
                 data-field="primary_work_crew">
-              <div class="relative">
+              <div class="relative w-full">
                 ${isEditing(row.qbo_customer_id, "primary_work_crew")
                   ? renderAssignmentEditor(row, "primary_work_crew")
                   : `<button
                       type="button"
-                      class="inline-flex min-h-[32px] min-w-[180px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
+                      class="w-full min-h-[32px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left whitespace-normal break-words"
                       data-edit-cell="${row.qbo_customer_id}"
                       data-field="primary_work_crew"
                     >
@@ -862,7 +842,53 @@ export async function assignmentPage(routeFn) {
               </div>
             </td>
 
-            <td class="py-2 px-3 whitespace-nowrap">
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "start_date")}"
+                data-cell="${row.qbo_customer_id}"
+                data-field="start_date">
+              ${isEditing(row.qbo_customer_id, "start_date")
+                ? renderDateEditor(row, "start_date")
+                : `<button
+                    type="button"
+                    class="inline-flex min-h-[32px] min-w-[100px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
+                    data-edit-cell="${row.qbo_customer_id}"
+                    data-field="start_date"
+                  >
+                    ${row.start_date
+                      ? escapeHtml(formatMmDdYyyy(row.start_date))
+                      : `<span class="text-black/35">—</span>`}
+                  </button>`}
+            </td>
+
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "end_date")}"
+                data-cell="${row.qbo_customer_id}"
+                data-field="end_date">
+              ${isEditing(row.qbo_customer_id, "end_date")
+                ? renderDateEditor(row, "end_date")
+                : `<button
+                    type="button"
+                    class="inline-flex min-h-[32px] min-w-[100px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
+                    data-edit-cell="${row.qbo_customer_id}"
+                    data-field="end_date"
+                  >
+                    ${row.end_date
+                      ? escapeHtml(formatMmDdYyyy(row.end_date))
+                      : `<span class="text-black/35">—</span>`}
+                  </button>`}
+            </td>
+
+            <td class="py-2 px-2 text-center">
+              ${renderWireGuidanceCell(row)}
+            </td>
+
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "travel_days")}">
+              ${renderTravelDaysCell(row)}
+            </td>
+
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "overage_days")}">
+              ${renderOverageDaysCell(row)}
+            </td>
+
+            <td class="py-2 px-2 whitespace-nowrap">
               ${escapeHtml(formatMmDdYyyy(row.project_create_date))}
             </td>
           </tr>
@@ -872,8 +898,6 @@ export async function assignmentPage(routeFn) {
           <td class="py-6 text-center text-black/50" colspan="10">No projects match these filters.</td>
         </tr>
       `;
-
-    syncStickyHScroll();
   }
 
   async function beginEdit(rowId, field) {
@@ -1067,6 +1091,26 @@ export async function assignmentPage(routeFn) {
 
   document.getElementById("searchInput").addEventListener("input", (e) => {
     state.q = e.target.value || "";
+    renderAll();
+  });
+
+  document.getElementById("clearFiltersBtn").addEventListener("click", () => {
+    state.q = "";
+    state.filters.project_name = "";
+    state.filters.project_status = "";
+    state.filters.start_date_from = "";
+    state.filters.start_date_to = "";
+    state.filters.end_date_from = "";
+    state.filters.end_date_to = "";
+    state.filters.project_create_date_from = "";
+    state.filters.project_create_date_to = "";
+    state.filters.primary_project_manager = "";
+    state.filters.primary_work_crew = "";
+    state.filters.wire_guidance = "";
+    state.filters.travel_days = "";
+    state.filters.overage_days = "";
+    state.openFilter = null;
+    document.getElementById("searchInput").value = "";
     renderAll();
   });
 
@@ -1321,6 +1365,12 @@ export async function assignmentPage(routeFn) {
       } else if (key === "project_create_date") {
         state.filters.project_create_date_from = "";
         state.filters.project_create_date_to = "";
+      } else if (key === "wire_guidance") {
+        state.filters.wire_guidance = "";
+      } else if (key === "travel_days") {
+        state.filters.travel_days = "";
+      } else if (key === "overage_days") {
+        state.filters.overage_days = "";
       }
 
       renderAll();
@@ -1384,6 +1434,4 @@ export async function assignmentPage(routeFn) {
   });
 
   renderAll();
-  bindStickyHScroll();
-  setTimeout(syncStickyHScroll, 0);
 }

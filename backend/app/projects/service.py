@@ -1,3 +1,4 @@
+# This file defines service functions for managing projects and assignments, including listing assignable projects, fetching project assignment bundles, saving project assignments, and listing project events. It uses SQLAlchemy for database interactions and includes validation and logging of changes.
 from sqlalchemy import text
 from app.db import engine
 from datetime import datetime

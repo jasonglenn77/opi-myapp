@@ -1,3 +1,4 @@
+<!-- Main HTML template for the app. The JS will manage showing/hiding the auth vs shell roots, and injecting content into the shell when logged in. -->
 <!doctype html>
 <html>
 <head>
@@ -15,9 +16,9 @@
     <div id="authRoot" class="h-full min-h-[100vh] overflow-auto flex items-center justify-center px-4"></div>
 
     <!-- App shell root (header + sidebar + body). Hidden until logged in -->
-    <div id="shellRoot" class="h-full min-h-[100vh] hidden flex flex-col">
+    <div id="shellRoot" class="min-h-[100vh] hidden">
       <!-- Persistent top bar -->
-      <div class="border-b border-white/10 bg-ink-900/60 backdrop-blur">
+      <div id="topBar" class="sticky top-0 z-50 border-b border-white/10 bg-ink-900/60 backdrop-blur">
         <div class="w-full px-3 sm:px-4 lg:px-6 2xl:px-10 py-4 flex items-center justify-between gap-3">
           <div id="brandSlot"></div>
           <button id="logoutBtn" class="btn-outline shrink-0">Log out</button>
@@ -25,32 +26,52 @@
       </div>
 
       <!-- Persistent shell -->
-      <div class="w-full flex-1 min-h-0 px-3 sm:px-4 lg:px-6 2xl:px-10 py-5 sm:py-6 flex flex-col">
-        <!-- Page header (fixed within shell) -->
-        <div class="mb-5 shrink-0">
+      <div class="w-full px-3 sm:px-4 lg:px-6 2xl:px-10 py-5 sm:py-6">
+        <!-- Page header -->
+        <div class="mb-5">
           <div id="pageTitle" class="text-xl sm:text-2xl lg:text-3xl font-extrabold"></div>
           <div id="pageSubtitle" class="text-white/60 text-sm sm:text-base"></div>
         </div>
 
-        <!-- Main area fills remaining height -->
-        <div class="grid grid-cols-12 grid-rows-[minmax(0,1fr)] gap-4 lg:gap-6 flex-1 min-h-0">
-          <aside id="sidebar" class="col-span-12 lg:col-span-3 xl:col-span-2 min-h-0">
-            <div class="card p-4 lg:sticky lg:top-6">
-              <div class="text-xs font-bold text-black/60 mb-2">Navigation</div>
-              <nav class="space-y-1">
-                <a href="#/dashboard" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Dashboard</a>
-                <a href="#/projects" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Projects</a>
-                <a href="#/schedule" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Schedule</a>
-                <a href="#/assignment" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Assignment</a>
-                <a href="#/users" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Users</a>
-                <a href="#/teams" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">Teams</a>
-                <a href="#/quickbooks" class="block rounded-xl px-3 py-2 hover:bg-black/5 font-semibold">QuickBooks</a>
+        <!-- Sidebar + content -->
+        <div class="flex gap-4 lg:gap-6 items-start">
+          <aside id="sidebar" class="hidden lg:block shrink-0 sticky" style="width:48px; top:84px; transition: width 0.2s ease;">
+            <div class="card overflow-hidden" style="width:100%;">
+              <div id="navLabel" class="text-xs font-bold text-black/60 px-3 pt-3 pb-1 whitespace-nowrap overflow-hidden" style="opacity:0; transition: opacity 0.15s ease;">Navigation</div>
+              <nav class="py-1">
+                <a href="#/dashboard" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Dashboard</span>
+                </a>
+                <a href="#/projects" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Projects</span>
+                </a>
+                <a href="#/schedule" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Schedule</span>
+                </a>
+                <a href="#/assignment" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Assignment</span>
+                </a>
+                <a href="#/users" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Users</span>
+                </a>
+                <a href="#/teams" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M3 20c0-3 2.7-5 6-5s6 2 6 5"/><path d="M16 15c2 0 5 1 5 4"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Teams</span>
+                </a>
+                <a href="#/quickbooks" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
+                  <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">QuickBooks</span>
+                </a>
               </nav>
             </div>
           </aside>
 
-          <!-- IMPORTANT: remove h-full, keep min-h-0, let it stretch by grid -->
-          <main id="pageBody" class="col-span-12 lg:col-span-9 xl:col-span-10 min-h-0 overflow-auto"></main>
+          <main id="pageBody" class="flex-1 min-w-0"></main>
         </div>
       </div>
     </div>

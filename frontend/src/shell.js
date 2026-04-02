@@ -1,3 +1,4 @@
+// Shell management: showing/hiding auth vs main UI, setting page title/subtitle/body, binding global handlers, etc.
 import { clearToken } from "./api.js";
 
 export function showAuth() {
@@ -48,7 +49,46 @@ export function bindGlobalHandlers(routeFn) {
   }
 }
 
-export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true, routeFn, scrollMode = "page", }) {
+function bindSidebarHover() {
+  const sidebar = document.getElementById("sidebar");
+  if (!sidebar || sidebar.dataset.hoverBound) return;
+  sidebar.dataset.hoverBound = "1";
+
+  const COLLAPSED = "48px";
+  const EXPANDED  = "180px";
+
+  sidebar.addEventListener("mouseenter", () => {
+    sidebar.style.width = EXPANDED;
+    document.getElementById("navLabel").style.opacity = "1";
+    document.querySelectorAll(".nav-label").forEach(el => el.style.opacity = "1");
+  });
+
+  sidebar.addEventListener("mouseleave", () => {
+    sidebar.style.width = COLLAPSED;
+    document.getElementById("navLabel").style.opacity = "0";
+    document.querySelectorAll(".nav-label").forEach(el => el.style.opacity = "0");
+  });
+}
+
+function updateStickyOffsets() {
+  const topBar = document.getElementById("topBar");
+  const topBarH = topBar ? topBar.getBoundingClientRect().height : 65;
+
+  // Sidebar only — assignment card/thead are no longer viewport-sticky.
+  const sidebar = document.getElementById("sidebar");
+  if (sidebar) sidebar.style.top = (topBarH + 20) + "px";
+
+  // Dynamically size the assignment card to fill remaining viewport height.
+  const card = document.querySelector("#pageBody .card");
+  if (card && card.querySelector("#assignTableScroll")) {
+    const top = card.getBoundingClientRect().top;
+    const available = window.innerHeight - top - 24;
+    card.style.height = Math.max(400, available) + "px";
+  }
+}
+window.addEventListener("resize", updateStickyOffsets);
+
+export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout = true, routeFn }) {
   showShell();
   bindGlobalHandlers(routeFn);
 
@@ -68,16 +108,13 @@ export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout 
   // ✅ Inject page HTML FIRST
   if (pageBody) pageBody.innerHTML = bodyHtml;
 
-  // ✅ Then apply scroll policy
-  if (pageBody) {
-    pageBody.classList.remove("overflow-auto", "overflow-hidden");
-    pageBody.classList.add(scrollMode === "viewport" ? "overflow-hidden" : "overflow-auto");
-  }
-
   const sidebar = document.getElementById("sidebar");
   if (sidebar) sidebar.classList.remove("hidden");
 
+  bindSidebarHover();
   bindNavHandlers(routeFn);
+
+  window.setTimeout(updateStickyOffsets, 0);
 
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn) logoutBtn.classList.toggle("hidden", !showLogout);
