@@ -28,6 +28,7 @@ class AssignmentSaveRequest(BaseModel):
     wire_guidance: int = 0
     travel_days: int = 0
     overage_days: int = 0
+    equipment_type: Optional[str] = None
     project_manager_ids: List[int] = []
     primary_project_manager_id: Optional[int] = None
     work_crew_ids: List[int] = []
@@ -69,6 +70,7 @@ def assignment_table(user=Depends(get_current_user)):
       ip.wire_guidance AS wire_guidance,
       ip.travel_days AS travel_days,
       ip.overage_days AS overage_days,
+      ip.equipment_type AS equipment_type,
 
       pm.primary_pm_name AS primary_project_manager,
       wc.primary_crew_name AS primary_work_crew,
@@ -322,14 +324,17 @@ def projects(user=Depends(get_current_user)):
 
 @router.get("/schedule")
 def schedule(
-    week_start: Optional[str] = Query(None, description="YYYY-MM-DD (Monday preferred)"),
+    week_start: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    week_end: Optional[str] = Query(None, description="YYYY-MM-DD"),
     user=Depends(get_current_user),
 ):
     """
     Returns:
       - active work crews
-      - project assignments (primary crew + primary PM) that overlap the requested week
+      - project assignments that overlap the requested visible date range
+
     Frontend expands each assignment across days between start_date/end_date.
+    The client currently sends the full month grid range as week_start/week_end.
     """
 
     def parse_ymd(s: str) -> date:
@@ -338,10 +343,18 @@ def schedule(
     def monday_of(d: date) -> date:
         return d - timedelta(days=d.weekday())  # Monday=0
 
-    # Determine week start (Monday)
+    # Default to current week if caller sends nothing
     today = date.today()
-    ws = monday_of(today) if not week_start else monday_of(parse_ymd(week_start))
-    we = ws + timedelta(days=6)
+    visible_start = monday_of(today) if not week_start else parse_ymd(week_start)
+    visible_end = (
+        visible_start + timedelta(days=6)
+        if not week_end
+        else parse_ymd(week_end)
+    )
+
+    # Safety: normalize in case params are reversed
+    if visible_end < visible_start:
+        visible_start, visible_end = visible_end, visible_start
 
     # 1) Load crews (active) in a stable order
     crews_sql = text("""
@@ -355,11 +368,7 @@ def schedule(
         id
     """)
 
-    # 2) Load assignments that overlap the week
-    # - projects table has: start_date, end_date, status, qbo_customer_id
-    # - primary crew from project_work_crews
-    # - primary pm from project_project_managers
-    # - project name from qbo_customers.display_name
+    # 2) Load assignments that overlap the visible range
     assignments_sql = text("""
       SELECT
         p.id AS project_id,
@@ -368,6 +377,7 @@ def schedule(
         p.wire_guidance,
         p.travel_days,
         p.overage_days,
+        p.equipment_type,
         p.status AS project_status,
         qc.display_name AS project_name,
 
@@ -403,22 +413,24 @@ def schedule(
       WHERE
         p.start_date IS NOT NULL
         AND p.end_date IS NOT NULL
-        AND p.start_date <= :week_end_plus
-        AND p.end_date >= :week_start_minus
+        AND COALESCE(p.status, '') <> 'canceled'
+        AND p.start_date <= :range_end_plus
+        AND p.end_date >= :range_start_minus
 
       ORDER BY p.start_date, p.id
     """)
 
-    week_start_minus = (ws - timedelta(days=4)).isoformat()
-    week_end_plus = (we + timedelta(days=21)).isoformat()
+    # Keep the same scheduling buffer behavior you already had
+    range_start_minus = (visible_start - timedelta(days=4)).isoformat()
+    range_end_plus = (visible_end + timedelta(days=21)).isoformat()
 
     with engine.connect() as conn:
         crews_rows = conn.execute(crews_sql).mappings().all()
         assignment_rows = conn.execute(
             assignments_sql,
             {
-                "week_start_minus": week_start_minus,
-                "week_end_plus": week_end_plus,
+                "range_start_minus": range_start_minus,
+                "range_end_plus": range_end_plus,
             },
         ).mappings().all()
 
@@ -427,7 +439,6 @@ def schedule(
     assignments = []
     for r in assignment_rows:
         row = dict(r)
-        # parse arrays
         for k in ("work_crew_codes", "pm_initials"):
             v = row.get(k)
             if v is None:
@@ -449,8 +460,8 @@ def schedule(
         assignments.append(row)
 
     return {
-        "week_start": ws.isoformat(),
-        "week_end": we.isoformat(),
+        "week_start": visible_start.isoformat(),
+        "week_end": visible_end.isoformat(),
         "crews": crews,
         "assignments": assignments,
     }

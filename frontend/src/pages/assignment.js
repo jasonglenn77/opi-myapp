@@ -32,6 +32,7 @@ export async function assignmentPage(routeFn) {
       wire_guidance: "",
       travel_days: "",
       overage_days: "",
+      equipment_type: "",
     },
   };
 
@@ -39,6 +40,7 @@ export async function assignmentPage(routeFn) {
     { value: "not_started", label: "Not Started" },
     { value: "in_progress", label: "In Progress" },
     { value: "completed", label: "Completed" },
+    { value: "canceled", label: "Canceled" },
   ];
 
   const KPI_STYLES = {
@@ -57,6 +59,10 @@ export async function assignmentPage(routeFn) {
     completed: {
       wrap: "bg-kpi-completed-bg border-kpi-completed-bd",
       label: "text-kpi-completed-text",
+    },
+    canceled: {
+      wrap: "bg-red-50 border-red-200",
+      label: "text-red-700",
     },
     all: {
       wrap: "bg-kpi-total-bg border-kpi-total-bd",
@@ -107,6 +113,7 @@ export async function assignmentPage(routeFn) {
     if (v === "not_started") return "Not Started";
     if (v === "in_progress") return "In Progress";
     if (v === "completed") return "Completed";
+    if (v === "canceled") return "Canceled";
     return String(v);
   }
 
@@ -115,6 +122,7 @@ export async function assignmentPage(routeFn) {
     if (v === "not_started") return "not_started";
     if (v === "in_progress") return "in_progress";
     if (v === "completed") return "completed";
+    if (v === "canceled") return "canceled";
     return "all";
   }
 
@@ -207,6 +215,7 @@ export async function assignmentPage(routeFn) {
       wire_guidance: row.wire_guidance || 0,
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
+      equipment_type: row.equipment_type || null,
       project_manager_ids: (bundle.active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (bundle.active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       work_crew_ids: (bundle.active_work_crews || []).map(x => Number(x.work_crew_id)),
@@ -237,6 +246,7 @@ export async function assignmentPage(routeFn) {
     if (key === "wire_guidance") return !!state.filters.wire_guidance;
     if (key === "travel_days") return !!state.filters.travel_days;
     if (key === "overage_days") return !!state.filters.overage_days;
+    if (key === "equipment_type") return !!state.filters.equipment_type;
     return false;
   }
 
@@ -275,6 +285,7 @@ export async function assignmentPage(routeFn) {
             <option value="Not Started" ${state.filters.project_status === "Not Started" ? "selected" : ""}>Not Started</option>
             <option value="In Progress" ${state.filters.project_status === "In Progress" ? "selected" : ""}>In Progress</option>
             <option value="Completed" ${state.filters.project_status === "Completed" ? "selected" : ""}>Completed</option>
+            <option value="Canceled" ${state.filters.project_status === "Canceled" ? "selected" : ""}>Canceled</option>
           </select>
           <div class="mt-3 flex justify-end gap-2">
             <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="project_status">Clear</button>
@@ -343,6 +354,7 @@ export async function assignmentPage(routeFn) {
             <option value="">All</option>
             <option value="none" ${state.filters.travel_days === "none" ? "selected" : ""}>None</option>
             <option value="2" ${state.filters.travel_days === "2" ? "selected" : ""}>2 days</option>
+            <option value="3" ${state.filters.travel_days === "3" ? "selected" : ""}>3 days</option>
             <option value="4" ${state.filters.travel_days === "4" ? "selected" : ""}>4 days</option>
           </select>
           <div class="mt-3 flex justify-end gap-2">
@@ -364,6 +376,25 @@ export async function assignmentPage(routeFn) {
           </select>
           <div class="mt-3 flex justify-end gap-2">
             <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="overage_days">Clear</button>
+            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
+          </div>
+        </div>
+      `;
+    }
+
+    if (key === "equipment_type") {
+      return `
+        <div class="absolute right-0 top-8 z-50 w-56 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+          <div class="text-xs font-bold text-black/50 mb-2">Filter Equip</div>
+          <select class="input" data-filter-select="equipment_type">
+            <option value="">All</option>
+            <option value="none" ${state.filters.equipment_type === "none" ? "selected" : ""}>None</option>
+            <option value="Equip" ${state.filters.equipment_type === "Equip" ? "selected" : ""}>Equip</option>
+            <option value="No Equip" ${state.filters.equipment_type === "No Equip" ? "selected" : ""}>No Equip</option>
+            <option value="Electric" ${state.filters.equipment_type === "Electric" ? "selected" : ""}>Electric</option>
+          </select>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="equipment_type">Clear</button>
             <button type="button" class="btn-primary" data-close-filter="1">Done</button>
           </div>
         </div>
@@ -465,6 +496,7 @@ export async function assignmentPage(routeFn) {
               ${th("wire_guidance", "Wire")}
               ${th("travel_days", "Travel")}
               ${th("overage_days", "Overage")}
+              ${th("equipment_type", "Equip")}
               ${th("project_create_date", "QB Created")}
             </tr>
           </thead>
@@ -519,11 +551,15 @@ export async function assignmentPage(routeFn) {
 
       if (state.filters.travel_days === "none" && r.travel_days) return false;
       if (state.filters.travel_days === "2" && Number(r.travel_days) !== 2) return false;
+      if (state.filters.travel_days === "3" && Number(r.travel_days) !== 3) return false;
       if (state.filters.travel_days === "4" && Number(r.travel_days) !== 4) return false;
 
       if (state.filters.overage_days === "none" && r.overage_days) return false;
       if (state.filters.overage_days === "has" && !r.overage_days) return false;
 
+      if (state.filters.equipment_type === "none" && r.equipment_type) return false;
+      if (state.filters.equipment_type && state.filters.equipment_type !== "none" && r.equipment_type !== state.filters.equipment_type) return false;
+      
       if (!q) return true;
 
       return normalize(r.project_name).includes(q);
@@ -537,6 +573,7 @@ export async function assignmentPage(routeFn) {
     if (key === "project_create_date") return isoToInput(r.project_create_date);
     if (key === "primary_project_manager") return r.all_project_managers || "";
     if (key === "primary_work_crew") return r.all_work_crews || "";
+    if (key === "equipment_type") return r.equipment_type || "";
     return r[key] ?? "";
   }
 
@@ -607,6 +644,7 @@ export async function assignmentPage(routeFn) {
         <select class="input w-24" data-travel-select="${row.qbo_customer_id}" onchange="void(0)">
           <option value="0" ${!row.travel_days ? "selected" : ""}>None</option>
           <option value="2" ${row.travel_days == 2 ? "selected" : ""}>2 days</option>
+          <option value="3" ${row.travel_days == 3 ? "selected" : ""}>3 days</option>
           <option value="4" ${row.travel_days == 4 ? "selected" : ""}>4 days</option>
         </select>
       `;
@@ -631,6 +669,32 @@ export async function assignmentPage(routeFn) {
       <button type="button" class="inline-flex min-h-[32px] min-w-[60px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
         data-edit-cell="${row.qbo_customer_id}" data-field="overage_days">
         ${row.overage_days ? `${row.overage_days} days` : `<span class="text-black/35">—</span>`}
+      </button>
+    `;
+  }
+
+  function renderEquipmentTypeCell(row) {
+    if (isEditing(row.qbo_customer_id, "equipment_type")) {
+      return `
+        <select class="input w-32" data-equipment-select="${row.qbo_customer_id}">
+          <option value="" ${!row.equipment_type ? "selected" : ""}>None</option>
+          <option value="Equip" ${row.equipment_type === "Equip" ? "selected" : ""}>Equip</option>
+          <option value="No Equip" ${row.equipment_type === "No Equip" ? "selected" : ""}>No Equip</option>
+          <option value="Electric" ${row.equipment_type === "Electric" ? "selected" : ""}>Electric</option>
+        </select>
+      `;
+    }
+
+    return `
+      <button
+        type="button"
+        class="inline-flex min-h-[32px] min-w-[80px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
+        data-edit-cell="${row.qbo_customer_id}"
+        data-field="equipment_type"
+      >
+        ${row.equipment_type
+          ? escapeHtml(row.equipment_type)
+          : `<span class="text-black/35">—</span>`}
       </button>
     `;
   }
@@ -765,6 +829,7 @@ export async function assignmentPage(routeFn) {
       ${th("wire_guidance", "Wire")}
       ${th("travel_days", "Travel")}
       ${th("overage_days", "Overage")}
+      ${th("equipment_type", "Equip")}
       ${th("project_create_date", "QB Created")}
     `;
   }
@@ -888,6 +953,12 @@ export async function assignmentPage(routeFn) {
               ${renderOverageDaysCell(row)}
             </td>
 
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "equipment_type")}"
+                data-cell="${row.qbo_customer_id}"
+                data-field="equipment_type">
+              ${renderEquipmentTypeCell(row)}
+            </td>
+
             <td class="py-2 px-2 whitespace-nowrap">
               ${escapeHtml(formatMmDdYyyy(row.project_create_date))}
             </td>
@@ -895,7 +966,7 @@ export async function assignmentPage(routeFn) {
         `;
       }).join("") || `
         <tr>
-          <td class="py-6 text-center text-black/50" colspan="10">No projects match these filters.</td>
+          <td class="py-6 text-center text-black/50" colspan="11">No projects match these filters.</td>
         </tr>
       `;
   }
@@ -1012,6 +1083,10 @@ export async function assignmentPage(routeFn) {
       primary_project_manager_id: (bundle.active_project_managers || []).find((x) => x.is_primary)?.project_manager_id || null,
       work_crew_ids: (bundle.active_work_crews || []).map((x) => Number(x.work_crew_id)),
       primary_work_crew_id: (bundle.active_work_crews || []).find((x) => x.is_primary)?.work_crew_id || null,
+      equipment_type: bundle.project?.equipment_type || row.equipment_type || null,
+      wire_guidance: row.wire_guidance || 0,
+      travel_days: row.travel_days || 0,
+      overage_days: row.overage_days || 0,
     };
 
     try {
@@ -1039,6 +1114,10 @@ export async function assignmentPage(routeFn) {
       primary_project_manager_id: (bundle.active_project_managers || []).find((x) => x.is_primary)?.project_manager_id || null,
       work_crew_ids: (bundle.active_work_crews || []).map((x) => Number(x.work_crew_id)),
       primary_work_crew_id: (bundle.active_work_crews || []).find((x) => x.is_primary)?.work_crew_id || null,
+      equipment_type: bundle.project?.equipment_type || row.equipment_type || null,
+      wire_guidance: row.wire_guidance || 0,
+      travel_days: row.travel_days || 0,
+      overage_days: row.overage_days || 0,
     };
 
     try {
@@ -1078,6 +1157,10 @@ export async function assignmentPage(routeFn) {
       primary_project_manager_id: isPm ? primaryId : ((bundle.active_project_managers || []).find((x) => x.is_primary)?.project_manager_id || null),
       work_crew_ids: isPm ? (bundle.active_work_crews || []).map((x) => Number(x.work_crew_id)) : ids,
       primary_work_crew_id: isPm ? ((bundle.active_work_crews || []).find((x) => x.is_primary)?.work_crew_id || null) : primaryId,
+      equipment_type: bundle.project?.equipment_type || row.equipment_type || null,
+      wire_guidance: row.wire_guidance || 0,
+      travel_days: row.travel_days || 0,
+      overage_days: row.overage_days || 0,
     };
 
     try {
@@ -1109,6 +1192,7 @@ export async function assignmentPage(routeFn) {
     state.filters.wire_guidance = "";
     state.filters.travel_days = "";
     state.filters.overage_days = "";
+    state.filters.equipment_type = "";
     state.openFilter = null;
     document.getElementById("searchInput").value = "";
     renderAll();
@@ -1218,6 +1302,19 @@ export async function assignmentPage(routeFn) {
           await saveMiscFields(row);
           clearEditing();
           flashCell(row.qbo_customer_id, "travel_days");
+        }
+        return;
+      }
+
+      const equipmentSelect = e.target.closest("[data-equipment-select]");
+      if (equipmentSelect) {
+        const rowId = equipmentSelect.getAttribute("data-equipment-select");
+        const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+        if (row) {
+          row.equipment_type = equipmentSelect.value || null;
+          await saveMiscFields(row);
+          clearEditing();
+          flashCell(row.qbo_customer_id, "equipment_type");
         }
         return;
       }
@@ -1371,6 +1468,8 @@ export async function assignmentPage(routeFn) {
         state.filters.travel_days = "";
       } else if (key === "overage_days") {
         state.filters.overage_days = "";
+      } else if (key === "equipment_type") {
+        state.filters.equipment_type = "";
       }
 
       renderAll();
@@ -1417,6 +1516,7 @@ export async function assignmentPage(routeFn) {
     // close open cell editors when clicking outside the active editor
     const clickedTravelSelect = e.target.closest("[data-travel-select]");
     const clickedOverageInput = e.target.closest("[data-overage-input]");
+    const clickedEquipmentSelect = e.target.closest("[data-equipment-select]");
     
     if (
       state.editing.field &&
@@ -1426,7 +1526,8 @@ export async function assignmentPage(routeFn) {
       !clickedAssignmentSave &&
       !clickedAssignmentCancel &&
       !clickedTravelSelect &&
-      !clickedOverageInput
+      !clickedOverageInput &&
+      !clickedEquipmentSelect
     ) {
       clearEditing();
       renderAll();

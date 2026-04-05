@@ -160,26 +160,33 @@ export async function schedulePage(routeFn) {
       const end = parseYmd(a.end_date);
       const travelDays = a.travel_days || 0;
       const overageDays = a.overage_days || 0;
-      const halfTravel = travelDays / 2;
+      
+      const travelBefore = Math.ceil(travelDays / 2);
+      const travelAfter = Math.floor(travelDays / 2);
 
       const pmsForItem = Array.isArray(a.pm_initials)
         ? a.pm_initials.map(x => String(x || "").trim().toUpperCase()).filter(Boolean)
         : [];
+      
+      const equipmentSuffix = a.equipment_type ? ` (${a.equipment_type})` : "";
 
       const baseItem = {
         project_id: a.project_id,
-        project: a.project_name || "",
+        project: `${a.project_name || ""}${equipmentSuffix}`,
         status: a.project_status || "",
         start_date: a.start_date,
         end_date: a.end_date,
         crews: crewCodes,
         pms: pmsForItem,
         wire_guidance: a.wire_guidance,
+        travel_days: Number(a.travel_days || 0),
+        overage_days: Number(a.overage_days || 0),
+        equipment_type: a.equipment_type || "",
       };
 
       for (const crewCode of crewCodes) {
         // Travel days BEFORE start
-        for (let i = halfTravel; i >= 1; i--) {
+        for (let i = travelBefore; i >= 1; i--) {
           const d = addDays(start, -i);
           if (d >= monthStart && d <= monthEnd) {
             pushItem(crewCode, ymd(d), { ...baseItem, project: "Travel", cellType: "travel" });
@@ -205,8 +212,8 @@ export async function schedulePage(routeFn) {
           }
         }
 
-        // Travel day AFTER overage
-        for (let i = 1; i <= halfTravel; i++) {
+        // Travel days AFTER overage
+        for (let i = 1; i <= travelAfter; i++) {
           const d = addDays(end, overageDays + i);
           if (d >= monthStart && d <= monthEnd) {
             pushItem(crewCode, ymd(d), { ...baseItem, project: "Travel", cellType: "travel" });
@@ -241,6 +248,7 @@ export async function schedulePage(routeFn) {
 
         // 👉 NEW: detect if this is the project's START DATE
         const isStartDate = it.start_date === ymd(currentDate);
+        const isEndDate   = it.end_date === ymd(currentDate);
 
         // 👉 NEW: wire guidance flag
         const hasWire = !!it.wire_guidance;
@@ -251,6 +259,9 @@ export async function schedulePage(routeFn) {
           wrapClass = "bg-gray-300 rounded px-1 py-0.5 text-gray-800 italic text-center font-semibold border border-gray-400";
         } else if (isOverage) {
           wrapClass = "bg-orange-50 border border-orange-200 rounded px-0.5 py-px text-orange-700";
+        } else if (isEndDate) {
+          wrapClass = "bg-green-500 text-white rounded px-0.5 py-px font-extrabold";
+        
         } else if (isStartDate) {
           // 👉 NEW: highlight ONLY on start date
           wrapClass = hasWire
@@ -281,6 +292,10 @@ export async function schedulePage(routeFn) {
           end_date: it.end_date,
           crews: it.crews || [crewCode].filter(Boolean),
           pms: it.pms || [],
+          wire_guidance: !!it.wire_guidance,
+          travel_days: Number(it.travel_days || 0),
+          overage_days: Number(it.overage_days || 0),
+          equipment_type: it.equipment_type || "",
         }));
 
         return `
@@ -432,12 +447,30 @@ export async function schedulePage(routeFn) {
         const data = JSON.parse(decodeURIComponent(raw));
         const crews = (data.crews || []).join(", ") || "—";
         const pms   = (data.pms   || []).join(", ") || "—";
+
+        function formatTooltipDate(iso) {
+          if (!iso) return "—";
+          const [y, m, d] = String(iso).slice(0, 10).split("-");
+          if (!y || !m || !d) return "—";
+          return `${m}/${d}/${String(y).slice(-2)}`;
+        }        
+
+        const dates = `${formatTooltipDate(data.start_date)} → ${formatTooltipDate(data.end_date)}`;
+        const wire = data.wire_guidance ? "Yes" : "No";
+        const travel = Number(data.travel_days || 0) ? `${Number(data.travel_days)} day${Number(data.travel_days) === 1 ? "" : "s"}` : "None";
+        const overage = Number(data.overage_days || 0) ? `${Number(data.overage_days)} day${Number(data.overage_days) === 1 ? "" : "s"}` : "None";
+        const equip = data.equipment_type || "None";
+
         const html = `
           ${data.project ? `<div class="font-extrabold mb-1">${escapeHtml(data.project)}</div>` : ""}
           <div class="text-black/70"><span class="font-semibold">Status:</span> ${escapeHtml(data.status || "—")}</div>
-          <div class="text-black/70"><span class="font-semibold">Dates:</span> ${escapeHtml(`${data.start_date || "—"} → ${data.end_date || "—"}`)}</div>
-          <div class="text-black/70"><span class="font-semibold">Crews:</span> ${escapeHtml(crews)}</div>
           <div class="text-black/70"><span class="font-semibold">PMs:</span> ${escapeHtml(pms)}</div>
+          <div class="text-black/70"><span class="font-semibold">Crews:</span> ${escapeHtml(crews)}</div>
+          <div class="text-black/70"><span class="font-semibold">Dates:</span> ${escapeHtml(dates)}</div>
+          <div class="text-black/70"><span class="font-semibold">Wire:</span> ${escapeHtml(wire)}</div>
+          <div class="text-black/70"><span class="font-semibold">Travel:</span> ${escapeHtml(travel)}</div>
+          <div class="text-black/70"><span class="font-semibold">Overage:</span> ${escapeHtml(overage)}</div>
+          <div class="text-black/70"><span class="font-semibold">Equip:</span> ${escapeHtml(equip)}</div>
         `;
         showTip(html, e.clientX, e.clientY);
       });

@@ -4,7 +4,7 @@ from app.db import engine
 from datetime import datetime
 from typing import Any, Dict
 
-ALLOWED_STATUS = {"not_started", "in_progress", "completed"}
+ALLOWED_STATUS = {"not_started", "in_progress", "completed", "canceled"}
 
 def list_assignable_projects():
     with engine.connect() as conn:
@@ -48,7 +48,7 @@ def get_assignment_bundle(qbo_customer_id: int):
         # Project layer (may not exist yet)
         proj = conn.execute(text("""
             SELECT id, qbo_customer_id, start_date, end_date, status,
-                wire_guidance, travel_days, overage_days
+                wire_guidance, travel_days, overage_days, equipment_type
             FROM projects
             WHERE qbo_customer_id = :cid
             LIMIT 1
@@ -106,6 +106,7 @@ def get_assignment_bundle(qbo_customer_id: int):
             "wire_guidance": 0,
             "travel_days": 0,
             "overage_days": 0,
+            "equipment_type": None,
         },
         "active_project_managers": [dict(r) for r in pms_active],
         "active_work_crews": [dict(r) for r in crews_active],
@@ -158,13 +159,15 @@ def save_project_assignment(req, actor_user_id: int) -> Dict[str, Any]:
         conn.execute(text("""
             UPDATE projects
             SET start_date = :sd, end_date = :ed, status = :st,
-                wire_guidance = :wg, travel_days = :td, overage_days = :od
+                wire_guidance = :wg, travel_days = :td, overage_days = :od,
+                equipment_type = :eq
             WHERE id = :pid
         """), {
             "sd": start_date, "ed": end_date, "st": status, "pid": project_id,
             "wg": getattr(req, "wire_guidance", 0) or 0,
             "td": getattr(req, "travel_days", 0) or 0,
             "od": getattr(req, "overage_days", 0) or 0,
+            "eq": getattr(req, "equipment_type", None) or None,
         })
         # Log field changes
         if prev_start != start_date or prev_end != end_date:
