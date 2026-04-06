@@ -1,3 +1,4 @@
+# projects/routes.py
 # This file defines API routes related to projects and assignments, including listing projects, managing project assignments, uploading files, and fetching project events. It uses FastAPI for routing and SQLAlchemy for database interactions.
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
@@ -12,7 +13,7 @@ from app.auth import get_current_user
 from .service import (
     list_assignable_projects,
     get_assignment_bundle,
-    save_project_assignment,
+    save_schedule_item,
     list_project_events,
     ensure_project_row_for_qbo_customer,
 )
@@ -20,11 +21,12 @@ from app.s3 import s3_client, AWS_BUCKET, build_project_file_key, signed_file_ur
 
 router = APIRouter(prefix="/api", tags=["projects"])
 
-class AssignmentSaveRequest(BaseModel):
+class ScheduleItemSaveRequest(BaseModel):
+    schedule_item_id: Optional[int] = None
     qbo_customer_id: int
     status: str
-    start_date: Optional[str] = None   # "YYYY-MM-DD"
-    end_date: Optional[str] = None     # "YYYY-MM-DD"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     wire_guidance: int = 0
     travel_days: int = 0
     overage_days: int = 0
@@ -50,9 +52,9 @@ def assignment_bundle(qbo_customer_id: int, user=Depends(get_current_user)):
     return get_assignment_bundle(qbo_customer_id=qbo_customer_id)
 
 @router.post("/assignment/save")
-def assignment_save(req: AssignmentSaveRequest, user=Depends(get_current_user)):
+def assignment_save(req: ScheduleItemSaveRequest, user=Depends(get_current_user)):
     try:
-        return save_project_assignment(req=req, actor_user_id=int(user["id"]))
+        return save_schedule_item(req=req, actor_user_id=int(user["id"]))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -60,17 +62,18 @@ def assignment_save(req: AssignmentSaveRequest, user=Depends(get_current_user)):
 def assignment_table(user=Depends(get_current_user)):
     sql = text("""
     SELECT
-      p.id AS qbo_customer_id,
-      p.display_name AS project_name,
-      DATE(p.meta_create_time) AS project_create_date,
+      psi.id AS schedule_item_id,
+      qc.id AS qbo_customer_id,
+      qc.display_name AS project_name,
+      DATE(qc.meta_create_time) AS project_create_date,
 
-      ip.status AS project_status,
-      ip.start_date AS start_date,
-      ip.end_date AS end_date,
-      ip.wire_guidance AS wire_guidance,
-      ip.travel_days AS travel_days,
-      ip.overage_days AS overage_days,
-      ip.equipment_type AS equipment_type,
+      psi.status AS project_status,
+      psi.start_date AS start_date,
+      psi.end_date AS end_date,
+      psi.wire_guidance AS wire_guidance,
+      psi.travel_days AS travel_days,
+      psi.overage_days AS overage_days,
+      psi.equipment_type AS equipment_type,
 
       pm.primary_pm_name AS primary_project_manager,
       wc.primary_crew_name AS primary_work_crew,
@@ -78,62 +81,65 @@ def assignment_table(user=Depends(get_current_user)):
       COALESCE(pm.all_pm_names, '') AS all_project_managers,
       COALESCE(wc.all_crew_names, '') AS all_work_crews
 
-    FROM myapp.qbo_customers p
+    FROM myapp.qbo_customers qc
 
-    LEFT JOIN myapp.projects ip
-      ON ip.qbo_customer_id = p.id
+    LEFT JOIN myapp.projects p
+      ON p.qbo_customer_id = qc.id
+
+    LEFT JOIN myapp.project_schedule_items psi
+      ON psi.project_id = p.id
 
     LEFT JOIN (
       SELECT
-        ppm.project_id,
+        spm.schedule_item_id,
         MAX(
           CASE
-            WHEN ppm.is_primary = 1
+            WHEN spm.is_primary = 1
             THEN TRIM(CONCAT(COALESCE(pm.first_name,''), ' ', COALESCE(pm.last_name,'')))
             ELSE NULL
           END
         ) AS primary_pm_name,
         GROUP_CONCAT(
           DISTINCT TRIM(CONCAT(COALESCE(pm.first_name,''), ' ', COALESCE(pm.last_name,'')))
-          ORDER BY ppm.is_primary DESC, pm.last_name, pm.first_name, pm.id
+          ORDER BY spm.is_primary DESC, pm.last_name, pm.first_name, pm.id
           SEPARATOR ', '
         ) AS all_pm_names
-      FROM myapp.project_project_managers ppm
+      FROM myapp.project_schedule_item_project_managers spm
       JOIN myapp.project_managers pm
-        ON pm.id = ppm.project_manager_id
-      WHERE ppm.unassigned_at IS NULL
+        ON pm.id = spm.project_manager_id
+      WHERE spm.unassigned_at IS NULL
         AND pm.is_active = 1
-      GROUP BY ppm.project_id
+      GROUP BY spm.schedule_item_id
     ) pm
-      ON pm.project_id = ip.id
+      ON pm.schedule_item_id = psi.id
 
     LEFT JOIN (
       SELECT
-        pwc.project_id,
+        swc.schedule_item_id,
         MAX(
           CASE
-            WHEN pwc.is_primary = 1
+            WHEN swc.is_primary = 1
             THEN wc.name
             ELSE NULL
           END
         ) AS primary_crew_name,
         GROUP_CONCAT(
           DISTINCT wc.name
-          ORDER BY pwc.is_primary DESC, wc.sort_order, wc.id
+          ORDER BY swc.is_primary DESC, wc.sort_order, wc.id
           SEPARATOR ', '
         ) AS all_crew_names
-      FROM myapp.project_work_crews pwc
+      FROM myapp.project_schedule_item_work_crews swc
       JOIN myapp.work_crews wc
-        ON wc.id = pwc.work_crew_id
-      WHERE pwc.unassigned_at IS NULL
+        ON wc.id = swc.work_crew_id
+      WHERE swc.unassigned_at IS NULL
         AND wc.is_active = 1
         AND wc.parent_id IS NOT NULL
-      GROUP BY pwc.project_id
+      GROUP BY swc.schedule_item_id
     ) wc
-      ON wc.project_id = ip.id
+      ON wc.schedule_item_id = psi.id
 
-    WHERE p.is_project = 1
-    ORDER BY p.meta_create_time DESC, p.display_name
+    WHERE qc.is_project = 1
+    ORDER BY qc.display_name, psi.start_date, psi.id
     """)
 
     with engine.connect() as conn:
@@ -371,53 +377,54 @@ def schedule(
     # 2) Load assignments that overlap the visible range
     assignments_sql = text("""
       SELECT
+        psi.id AS schedule_item_id,
         p.id AS project_id,
-        p.start_date,
-        p.end_date,
-        p.wire_guidance,
-        p.travel_days,
-        p.overage_days,
-        p.equipment_type,
-        p.status AS project_status,
+        psi.start_date,
+        psi.end_date,
+        psi.wire_guidance,
+        psi.travel_days,
+        psi.overage_days,
+        psi.equipment_type,
+        psi.status AS project_status,
         qc.display_name AS project_name,
 
-        -- crews as JSON array
         COALESCE((
-          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(wc2.code) ORDER BY pwc2.is_primary DESC, wc2.sort_order, wc2.id), ']') AS JSON)
-          FROM myapp.project_work_crews pwc2
-          JOIN myapp.work_crews wc2 ON wc2.id = pwc2.work_crew_id
-          WHERE pwc2.project_id = p.id
-            AND pwc2.unassigned_at IS NULL
+          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(wc2.code) ORDER BY swc2.is_primary DESC, wc2.sort_order, wc2.id), ']') AS JSON)
+          FROM myapp.project_schedule_item_work_crews swc2
+          JOIN myapp.work_crews wc2 ON wc2.id = swc2.work_crew_id
+          WHERE swc2.schedule_item_id = psi.id
+            AND swc2.unassigned_at IS NULL
             AND wc2.is_active = 1
         ), JSON_ARRAY()) AS work_crew_codes,
 
-        -- PM initials as JSON array
         COALESCE((
           SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(
             TRIM(CONCAT(
               COALESCE(LEFT(pm2.first_name, 1), ''),
               COALESCE(LEFT(pm2.last_name, 1), '')
             ))
-          ) ORDER BY ppm2.is_primary DESC, pm2.id), ']') AS JSON)
-          FROM myapp.project_project_managers ppm2
-          JOIN myapp.project_managers pm2 ON pm2.id = ppm2.project_manager_id
-          WHERE ppm2.project_id = p.id
-            AND ppm2.unassigned_at IS NULL
+          ) ORDER BY spm2.is_primary DESC, pm2.id), ']') AS JSON)
+          FROM myapp.project_schedule_item_project_managers spm2
+          JOIN myapp.project_managers pm2 ON pm2.id = spm2.project_manager_id
+          WHERE spm2.schedule_item_id = psi.id
+            AND spm2.unassigned_at IS NULL
             AND pm2.is_active = 1
         ), JSON_ARRAY()) AS pm_initials
 
-      FROM myapp.projects p
+      FROM myapp.project_schedule_items psi
+      JOIN myapp.projects p
+        ON p.id = psi.project_id
       JOIN myapp.qbo_customers qc
         ON qc.id = p.qbo_customer_id
 
       WHERE
-        p.start_date IS NOT NULL
-        AND p.end_date IS NOT NULL
-        AND COALESCE(p.status, '') <> 'canceled'
-        AND p.start_date <= :range_end_plus
-        AND p.end_date >= :range_start_minus
+        psi.start_date IS NOT NULL
+        AND psi.end_date IS NOT NULL
+        AND COALESCE(psi.status, '') <> 'canceled'
+        AND psi.start_date <= :range_end_plus
+        AND psi.end_date >= :range_start_minus
 
-      ORDER BY p.start_date, p.id
+      ORDER BY psi.start_date, psi.id
     """)
 
     # Keep the same scheduling buffer behavior you already had

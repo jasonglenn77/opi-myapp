@@ -1,4 +1,4 @@
-// Main page for managing project assignments. Shows a table of projects with inline editing, sorting, and filtering.
+// Assignment page: table view of projects with inline editing, sorting, and filtering.
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
@@ -69,6 +69,19 @@ export async function assignmentPage(routeFn) {
       label: "text-kpi-total-text",
     },
   };
+
+  let nextTempId = 1;
+
+  function rowKey(row) {
+    if (row.schedule_item_id != null) return `si:${row.schedule_item_id}`;
+    if (!row._tempRowId) row._tempRowId = `tmp:${nextTempId++}`;
+    return row._tempRowId;
+  }
+
+  function getBundleItem(row) {
+    const items = row._bundle?.schedule_items || [];
+    return items.find(x => String(x.id) === String(row.schedule_item_id)) || null;
+  }
 
   function normalize(v) {
     return (v ?? "").toString().trim().toLowerCase();
@@ -173,6 +186,9 @@ export async function assignmentPage(routeFn) {
     renderAll();
     try {
       row._bundle = await api(`/assignment/bundle?qbo_customer_id=${encodeURIComponent(row.qbo_customer_id)}`);
+      const item = getBundleItem(row);
+      row._active_project_managers = item?.active_project_managers || [];
+      row._active_work_crews = item?.active_work_crews || [];
       return row._bundle;
     } finally {
       row._loadingBundle = false;
@@ -204,25 +220,139 @@ export async function assignmentPage(routeFn) {
     return [...set].sort((a, b) => a.localeCompare(b));
   }
 
-  async function saveMiscFields(row) {
+  function addScheduleRow(baseRow) {
+    const newRow = {
+      qbo_customer_id: baseRow.qbo_customer_id,
+      schedule_item_id: null,
+      _tempRowId: `tmp:${nextTempId++}`,
+      project_name: baseRow.project_name,
+      project_create_date: baseRow.project_create_date,
+
+      project_status: "",
+      start_date: null,
+      end_date: null,
+      wire_guidance: 0,
+      travel_days: 0,
+      overage_days: 0,
+      equipment_type: null,
+
+      primary_project_manager: "",
+      primary_work_crew: "",
+      all_project_managers: "",
+      all_work_crews: "",
+
+      _bundle: baseRow._bundle || null,
+      _loadingBundle: false,
+      _active_project_managers: [],
+      _active_work_crews: [],
+    };
+
+    const idx = rows.indexOf(baseRow);
+    if (idx >= 0) rows.splice(idx + 1, 0, newRow);
+    else rows.push(newRow);
+
+    renderAll();
+  }
+
+  async function saveMiscFields(row, flashField = null) {
     await ensureBundle(row);
-    const bundle = row._bundle;
+
     const payload = {
+      schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
-      status: bundle.project?.status || "not_started",
-      start_date: bundle.project?.start_date || null,
-      end_date: bundle.project?.end_date || null,
+      status: row.project_status || "not_started",
+      start_date: row.start_date || null,
+      end_date: row.end_date || null,
       wire_guidance: row.wire_guidance || 0,
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
-      project_manager_ids: (bundle.active_project_managers || []).map(x => Number(x.project_manager_id)),
-      primary_project_manager_id: (bundle.active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
-      work_crew_ids: (bundle.active_work_crews || []).map(x => Number(x.work_crew_id)),
-      primary_work_crew_id: (bundle.active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+      project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
+      primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
+      work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
+      primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
     };
-    await api("/assignment/save", { method: "POST", body: JSON.stringify(payload) });
+
+    await savePayload(row, payload, flashField || "project_status");
     setMsg(`Saved ${row.project_name}.`, true);
+  }
+
+  function syncDisplayFieldsFromActiveAssignments(row) {
+    const bundle = row._bundle || {};
+
+    const pmById = new Map((bundle.project_managers || []).map((x) => [String(x.id), x]));
+    const crewById = new Map((bundle.work_crews || []).map((x) => [String(x.id), x]));
+
+    const activePms = [...(row._active_project_managers || [])];
+    const activeCrews = [...(row._active_work_crews || [])];
+
+    activePms.sort((a, b) => (Number(b.is_primary) - Number(a.is_primary)) || (Number(a.project_manager_id) - Number(b.project_manager_id)));
+    activeCrews.sort((a, b) => (Number(b.is_primary) - Number(a.is_primary)) || (Number(a.work_crew_id) - Number(b.work_crew_id)));
+
+    row.all_project_managers = activePms.map((x) => {
+      const pm = pmById.get(String(x.project_manager_id));
+      if (!pm) return `PM #${x.project_manager_id}`;
+      return `${pm.first_name || ""} ${pm.last_name || ""}`.trim() || pm.email || `PM #${x.project_manager_id}`;
+    }).filter(Boolean).join(", ");
+
+    row.all_work_crews = activeCrews.map((x) => {
+      const crew = crewById.get(String(x.work_crew_id));
+      return crew ? crew.name : `Crew #${x.work_crew_id}`;
+    }).filter(Boolean).join(", ");
+
+    const primaryPm = activePms.find((x) => x.is_primary);
+    const primaryCrew = activeCrews.find((x) => x.is_primary);
+
+    row.primary_project_manager = primaryPm
+      ? (row.all_project_managers.split(",")[0] || "").trim()
+      : "";
+    row.primary_work_crew = primaryCrew
+      ? (row.all_work_crews.split(",")[0] || "").trim()
+      : "";
+  }
+
+  function upsertBundleItem(row, payload, projectId) {
+    if (!row._bundle) return;
+
+    if (!row._bundle.project) {
+      row._bundle.project = {
+        id: projectId || null,
+        qbo_customer_id: Number(row.qbo_customer_id),
+      };
+    } else if (projectId != null) {
+      row._bundle.project.id = Number(projectId);
+    }
+
+    if (!Array.isArray(row._bundle.schedule_items)) {
+      row._bundle.schedule_items = [];
+    }
+
+    const updatedItem = {
+      id: row.schedule_item_id,
+      project_id: projectId || row._bundle?.project?.id || null,
+      status: payload.status,
+      start_date: payload.start_date,
+      end_date: payload.end_date,
+      wire_guidance: payload.wire_guidance || 0,
+      travel_days: payload.travel_days || 0,
+      overage_days: payload.overage_days || 0,
+      equipment_type: payload.equipment_type || null,
+      active_project_managers: row._active_project_managers || [],
+      active_work_crews: row._active_work_crews || [],
+    };
+
+    const idx = row._bundle.schedule_items.findIndex(
+      (item) => String(item.id) === String(row.schedule_item_id)
+    );
+
+    if (idx >= 0) {
+      row._bundle.schedule_items[idx] = {
+        ...row._bundle.schedule_items[idx],
+        ...updatedItem,
+      };
+    } else {
+      row._bundle.schedule_items.push(updatedItem);
+    }
   }
 
   function filterIcon(active = false) {
@@ -578,21 +708,50 @@ export async function assignmentPage(routeFn) {
   }
 
   function sorted(list) {
-    const dir = state.sortDir === "asc" ? 1 : -1;
-    return [...list].sort((a, b) => {
-      const va = sortValue(a, state.sortKey);
-      const vb = sortValue(b, state.sortKey);
+    const decorated = list.map((row, idx) => ({ row, idx }));
 
-      if (va == null && vb == null) return 0;
-      if (va == null || va === "") return 1;
-      if (vb == null || vb === "") return -1;
+    decorated.sort((aWrap, bWrap) => {
+      const a = aWrap.row;
+      const b = bWrap.row;
 
-      return String(va).localeCompare(String(vb)) * dir;
+      const projectCmp = String(a.project_name || "").localeCompare(String(b.project_name || ""));
+      if (projectCmp !== 0) return projectCmp;
+
+      const aDate = parseIsoDate(a.start_date);
+      const bDate = parseIsoDate(b.start_date);
+
+      // blank start_date rows go last within the same project
+      if (!aDate && !bDate) {
+        // preserve insertion order for undated rows
+        return aWrap.idx - bWrap.idx;
+      }
+      if (!aDate) return 1;
+      if (!bDate) return -1;
+
+      // both dated: chronological order
+      const startCmp = aDate.getTime() - bDate.getTime();
+      if (startCmp !== 0) return startCmp;
+
+      // tie-break by end_date
+      const aEnd = parseIsoDate(a.end_date);
+      const bEnd = parseIsoDate(b.end_date);
+
+      if (!aEnd && !bEnd) return aWrap.idx - bWrap.idx;
+      if (!aEnd) return 1;
+      if (!bEnd) return -1;
+
+      const endCmp = aEnd.getTime() - bEnd.getTime();
+      if (endCmp !== 0) return endCmp;
+
+      // final stable tie-breaker
+      return aWrap.idx - bWrap.idx;
     });
+
+    return decorated.map((x) => x.row);
   }
 
   function cellClass(row, field, extra = "") {
-    const flashed = isFlashed(row.qbo_customer_id, field);
+    const flashed = isFlashed(rowKey(row), field);
     return `${extra} ${flashed ? "bg-emerald-50 ring-1 ring-emerald-200" : ""}`.trim();
   }
 
@@ -613,7 +772,7 @@ export async function assignmentPage(routeFn) {
               <button
                 type="button"
                 class="inline-flex w-full rounded-lg px-2 py-2 text-left hover:bg-black/[0.04]"
-                data-pick-status="${row.qbo_customer_id}"
+                data-pick-status="${rowKey(row)}"
                 data-status-value="${opt.value}"
               >
                 <span class="inline-flex">
@@ -632,16 +791,16 @@ export async function assignmentPage(routeFn) {
       <input
         type="checkbox"
         class="h-4 w-4 cursor-pointer"
-        data-wire-check="${row.qbo_customer_id}"
+        data-wire-check="${rowKey(row)}"
         ${row.wire_guidance ? "checked" : ""}
       />
     `;
   }
 
   function renderTravelDaysCell(row) {
-    if (isEditing(row.qbo_customer_id, "travel_days")) {
+    if (isEditing(rowKey(row), "travel_days")) {
       return `
-        <select class="input w-24" data-travel-select="${row.qbo_customer_id}" onchange="void(0)">
+        <select class="input w-24" data-travel-select="${rowKey(row)}" onchange="void(0)">
           <option value="0" ${!row.travel_days ? "selected" : ""}>None</option>
           <option value="2" ${row.travel_days == 2 ? "selected" : ""}>2 days</option>
           <option value="3" ${row.travel_days == 3 ? "selected" : ""}>3 days</option>
@@ -651,32 +810,32 @@ export async function assignmentPage(routeFn) {
     }
     return `
       <button type="button" class="inline-flex min-h-[32px] min-w-[60px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
-        data-edit-cell="${row.qbo_customer_id}" data-field="travel_days">
+        data-edit-cell="${rowKey(row)}" data-field="travel_days">
         ${row.travel_days ? `${row.travel_days} days` : `<span class="text-black/35">—</span>`}
       </button>
     `;
   }
 
   function renderOverageDaysCell(row) {
-    if (isEditing(row.qbo_customer_id, "overage_days")) {
+    if (isEditing(rowKey(row), "overage_days")) {
       return `
         <input type="number" min="0" step="1" class="input w-24"
-          data-overage-input="${row.qbo_customer_id}"
+          data-overage-input="${rowKey(row)}"
           value="${row.overage_days || 0}" />
       `;
     }
     return `
       <button type="button" class="inline-flex min-h-[32px] min-w-[60px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
-        data-edit-cell="${row.qbo_customer_id}" data-field="overage_days">
+        data-edit-cell="${rowKey(row)}" data-field="overage_days">
         ${row.overage_days ? `${row.overage_days} days` : `<span class="text-black/35">—</span>`}
       </button>
     `;
   }
 
   function renderEquipmentTypeCell(row) {
-    if (isEditing(row.qbo_customer_id, "equipment_type")) {
+    if (isEditing(rowKey(row), "equipment_type")) {
       return `
-        <select class="input w-32" data-equipment-select="${row.qbo_customer_id}">
+        <select class="input w-32" data-equipment-select="${rowKey(row)}">
           <option value="" ${!row.equipment_type ? "selected" : ""}>None</option>
           <option value="Equip" ${row.equipment_type === "Equip" ? "selected" : ""}>Equip</option>
           <option value="No Equip" ${row.equipment_type === "No Equip" ? "selected" : ""}>No Equip</option>
@@ -689,7 +848,7 @@ export async function assignmentPage(routeFn) {
       <button
         type="button"
         class="inline-flex min-h-[32px] min-w-[80px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03]"
-        data-edit-cell="${row.qbo_customer_id}"
+        data-edit-cell="${rowKey(row)}"
         data-field="equipment_type"
       >
         ${row.equipment_type
@@ -708,7 +867,7 @@ export async function assignmentPage(routeFn) {
         <input
           type="text"
           class="input w-[120px]"
-          data-date-text="${row.qbo_customer_id}"
+          data-date-text="${rowKey(row)}"
           data-date-field="${field}"
           placeholder="mm-dd-yyyy"
           value="${escapeHtml(displayVal)}"
@@ -716,7 +875,7 @@ export async function assignmentPage(routeFn) {
         <button
           type="button"
           class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-black/10 bg-white hover:bg-black/5"
-          data-open-date-picker="${row.qbo_customer_id}"
+          data-open-date-picker="${rowKey(row)}"
           data-date-field="${field}"
           aria-label="Open calendar"
         >
@@ -727,7 +886,7 @@ export async function assignmentPage(routeFn) {
         <input
           type="date"
           class="sr-only"
-          data-date-picker="${row.qbo_customer_id}"
+          data-date-picker="${rowKey(row)}"
           data-date-field="${field}"
           value="${escapeHtml(currentIso)}"
         />
@@ -744,7 +903,15 @@ export async function assignmentPage(routeFn) {
     }
 
     const items = isPm ? (bundle.project_managers || []) : (bundle.work_crews || []);
-    const activeItems = isPm ? (bundle.active_project_managers || []) : (bundle.active_work_crews || []);
+    const bundleItem = getBundleItem(row);
+    const activeItems = isPm
+      ? ((row._active_project_managers && row._active_project_managers.length)
+          ? row._active_project_managers
+          : (bundleItem?.active_project_managers || []))
+      : ((row._active_work_crews && row._active_work_crews.length)
+          ? row._active_work_crews
+          : (bundleItem?.active_work_crews || []));
+
     const activeIdSet = new Set(
       activeItems.map((x) => String(isPm ? x.project_manager_id : x.work_crew_id))
     );
@@ -763,7 +930,7 @@ export async function assignmentPage(routeFn) {
             <input
               type="checkbox"
               class="h-4 w-4"
-              data-assign-check="${row.qbo_customer_id}"
+              data-assign-check="${rowKey(row)}"
               data-assign-field="${field}"
               data-id="${id}"
               ${activeIdSet.has(String(id)) ? "checked" : ""}
@@ -774,9 +941,9 @@ export async function assignmentPage(routeFn) {
             <span>Primary</span>
             <input
               type="radio"
-              name="primary-${field}-${row.qbo_customer_id}"
+              name="primary-${field}-${rowKey(row)}"
               class="h-4 w-4"
-              data-assign-primary="${row.qbo_customer_id}"
+              data-assign-primary="${rowKey(row)}"
               data-assign-field="${field}"
               data-id="${id}"
               ${String(primaryId || "") === String(id) ? "checked" : ""}
@@ -804,7 +971,7 @@ export async function assignmentPage(routeFn) {
             <button
               type="button"
               class="btn-primary"
-              data-save-assignment="${row.qbo_customer_id}"
+              data-save-assignment="${rowKey(row)}"
               data-assign-field="${field}"
             >
               Apply
@@ -844,7 +1011,7 @@ export async function assignmentPage(routeFn) {
 
     const rowCountEl = document.getElementById("rowCount");
     if (rowCountEl) {
-      rowCountEl.textContent = `${list.length} projects`;
+      rowCountEl.textContent = `${list.length} schedule items`;
     }
 
     const tbody = document.getElementById("assignmentBody");
@@ -856,29 +1023,38 @@ export async function assignmentPage(routeFn) {
         return `
           <tr class="border-b border-black/5">
             <td class="py-2 px-2 font-semibold whitespace-nowrap">
-              ${escapeHtml(row.project_name || "")}
+              <div class="flex items-center gap-2">
+                <span>${escapeHtml(row.project_name || "")}</span>
+                <button
+                  type="button"
+                  class="inline-flex items-center rounded-lg border border-black/10 px-2 py-0.5 text-[11px] font-semibold hover:bg-black/5"
+                  data-add-schedule-row="${rowKey(row)}"
+                >
+                  + Row
+                </button>
+              </div>
             </td>
 
             <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "project_status")}"
-                data-cell="${row.qbo_customer_id}"
+                data-cell="${rowKey(row)}"
                 data-field="project_status">
-              ${isEditing(row.qbo_customer_id, "project_status") ? renderStatusEditor(row) : `
-                <button type="button" class="inline-flex items-center" data-edit-cell="${row.qbo_customer_id}" data-field="project_status">
+              ${isEditing(rowKey(row), "project_status") ? renderStatusEditor(row) : `
+                <button type="button" class="inline-flex items-center" data-edit-cell="${rowKey(row)}" data-field="project_status">
                   ${statusPill(row.project_status)}
                 </button>
               `}
             </td>
 
             <td class="py-2 px-2 overflow-visible ${cellClass(row, "primary_project_manager")}"
-                data-cell="${row.qbo_customer_id}"
+                data-cell="${rowKey(row)}"
                 data-field="primary_project_manager">
               <div class="relative z-100">
-                ${isEditing(row.qbo_customer_id, "primary_project_manager")
+                ${isEditing(rowKey(row), "primary_project_manager")
                   ? renderAssignmentEditor(row, "primary_project_manager")
                   : `<button
                       type="button"
                       class="inline-flex min-h-[32px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left whitespace-normal break-words"
-                      data-edit-cell="${row.qbo_customer_id}"
+                      data-edit-cell="${rowKey(row)}"
                       data-field="primary_project_manager"
                     >
                       ${pmDisplay
@@ -889,15 +1065,15 @@ export async function assignmentPage(routeFn) {
             </td>
 
             <td class="py-2 px-2 overflow-visible ${cellClass(row, "primary_work_crew")}"
-                data-cell="${row.qbo_customer_id}"
+                data-cell="${rowKey(row)}"
                 data-field="primary_work_crew">
               <div class="relative w-full z-100">
-                ${isEditing(row.qbo_customer_id, "primary_work_crew")
+                ${isEditing(rowKey(row), "primary_work_crew")
                   ? renderAssignmentEditor(row, "primary_work_crew")
                   : `<button
                       type="button"
                       class="w-full min-h-[32px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left whitespace-normal break-words"
-                      data-edit-cell="${row.qbo_customer_id}"
+                      data-edit-cell="${rowKey(row)}"
                       data-field="primary_work_crew"
                     >
                       ${crewDisplay
@@ -908,14 +1084,14 @@ export async function assignmentPage(routeFn) {
             </td>
 
             <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "start_date")}"
-                data-cell="${row.qbo_customer_id}"
+                data-cell="${rowKey(row)}"
                 data-field="start_date">
-              ${isEditing(row.qbo_customer_id, "start_date")
+              ${isEditing(rowKey(row), "start_date")
                 ? renderDateEditor(row, "start_date")
                 : `<button
                     type="button"
                     class="inline-flex min-h-[32px] min-w-[100px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
-                    data-edit-cell="${row.qbo_customer_id}"
+                    data-edit-cell="${rowKey(row)}"
                     data-field="start_date"
                   >
                     ${row.start_date
@@ -925,14 +1101,14 @@ export async function assignmentPage(routeFn) {
             </td>
 
             <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "end_date")}"
-                data-cell="${row.qbo_customer_id}"
+                data-cell="${rowKey(row)}"
                 data-field="end_date">
-              ${isEditing(row.qbo_customer_id, "end_date")
+              ${isEditing(rowKey(row), "end_date")
                 ? renderDateEditor(row, "end_date")
                 : `<button
                     type="button"
                     class="inline-flex min-h-[32px] min-w-[100px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
-                    data-edit-cell="${row.qbo_customer_id}"
+                    data-edit-cell="${rowKey(row)}"
                     data-field="end_date"
                   >
                     ${row.end_date
@@ -954,7 +1130,7 @@ export async function assignmentPage(routeFn) {
             </td>
 
             <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "equipment_type")}"
-                data-cell="${row.qbo_customer_id}"
+                data-cell="${rowKey(row)}"
                 data-field="equipment_type">
               ${renderEquipmentTypeCell(row)}
             </td>
@@ -972,7 +1148,7 @@ export async function assignmentPage(routeFn) {
   }
 
   async function beginEdit(rowId, field) {
-    const row = rows.find((x) => String(x.qbo_customer_id) === String(rowId));
+    const row = rows.find((x) => rowKey(x) === String(rowId));
     if (!row) return;
 
     state.openFilter = null;
@@ -1001,92 +1177,63 @@ export async function assignmentPage(routeFn) {
   }
 
   async function savePayload(row, payload, flashField) {
-    await api("/assignment/save", {
+    const result = await api("/assignment/save", {
       method: "POST",
       body: JSON.stringify(payload),
     });
 
+    const oldRowKey = rowKey(row);
+
+    if (result?.schedule_item_id != null) {
+      row.schedule_item_id = Number(result.schedule_item_id);
+    }
+
     row.project_status = payload.status || null;
     row.start_date = payload.start_date || null;
     row.end_date = payload.end_date || null;
+    row.wire_guidance = payload.wire_guidance ? 1 : 0;
+    row.travel_days = Number(payload.travel_days || 0);
+    row.overage_days = Number(payload.overage_days || 0);
+    row.equipment_type = payload.equipment_type || null;
 
-    if (row._bundle) {
-      const pmMap = new Map(
-        (row._bundle.project_managers || []).map((x) => [
-          String(x.id),
-          `${(x.first_name || "")} ${(x.last_name || "")}`.trim() || x.email || `PM #${x.id}`,
-        ])
-      );
+    row._active_project_managers = (payload.project_manager_ids || []).map((id) => ({
+      project_manager_id: Number(id),
+      is_primary: Number(id) === Number(payload.primary_project_manager_id) ? 1 : 0,
+    }));
 
-      const crewMap = new Map(
-        (row._bundle.work_crews || []).map((x) => [
-          String(x.id),
-          `${x.name}${x.code ? ` (${x.code})` : ""}`,
-        ])
-      );
+    row._active_work_crews = (payload.work_crew_ids || []).map((id) => ({
+      work_crew_id: Number(id),
+      is_primary: Number(id) === Number(payload.primary_work_crew_id) ? 1 : 0,
+    }));
 
-      row.all_project_managers = (payload.project_manager_ids || [])
-        .map((id) => pmMap.get(String(id)) || "")
-        .filter(Boolean)
-        .join(", ");
-
-      row.all_work_crews = (payload.work_crew_ids || [])
-        .map((id) => crewMap.get(String(id)) || "")
-        .filter(Boolean)
-        .join(", ");
-
-      row.primary_project_manager = payload.primary_project_manager_id
-        ? (pmMap.get(String(payload.primary_project_manager_id)) || "")
-        : "";
-
-      row.primary_work_crew = payload.primary_work_crew_id
-        ? (crewMap.get(String(payload.primary_work_crew_id)) || "")
-        : "";
-
-      row._bundle = {
-        ...row._bundle,
-        project: {
-          ...(row._bundle.project || {}),
-          status: payload.status,
-          start_date: payload.start_date,
-          end_date: payload.end_date,
-        },
-        active_project_managers: (payload.project_manager_ids || []).map((id) => ({
-          project_manager_id: id,
-          is_primary: Number(id) === Number(payload.primary_project_manager_id) ? 1 : 0,
-        })),
-        active_work_crews: (payload.work_crew_ids || []).map((id) => ({
-          work_crew_id: id,
-          is_primary: Number(id) === Number(payload.primary_work_crew_id) ? 1 : 0,
-        })),
-      };
-    }
+    syncDisplayFieldsFromActiveAssignments(row);
+    upsertBundleItem(row, payload, result?.project_id || null);
 
     clearEditing();
     renderAll();
-    flashCell(row.qbo_customer_id, flashField);
+    flashCell(oldRowKey, flashField);
   }
 
   async function saveStatus(rowId, newStatus) {
-    const row = rows.find((x) => String(x.qbo_customer_id) === String(rowId));
+    const row = rows.find((x) => rowKey(x) === String(rowId));
     if (!row) return;
 
     await ensureBundle(row);
 
-    const bundle = row._bundle;
     const payload = {
+      schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
       status: newStatus,
-      start_date: bundle.project.start_date || null,
-      end_date: bundle.project.end_date || null,
-      project_manager_ids: (bundle.active_project_managers || []).map((x) => Number(x.project_manager_id)),
-      primary_project_manager_id: (bundle.active_project_managers || []).find((x) => x.is_primary)?.project_manager_id || null,
-      work_crew_ids: (bundle.active_work_crews || []).map((x) => Number(x.work_crew_id)),
-      primary_work_crew_id: (bundle.active_work_crews || []).find((x) => x.is_primary)?.work_crew_id || null,
-      equipment_type: bundle.project?.equipment_type || row.equipment_type || null,
+      start_date: row.start_date || null,
+      end_date: row.end_date || null,
       wire_guidance: row.wire_guidance || 0,
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
+      equipment_type: row.equipment_type || null,
+      project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
+      primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
+      work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
+      primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
     };
 
     try {
@@ -1099,25 +1246,25 @@ export async function assignmentPage(routeFn) {
   }
 
   async function saveDateField(rowId, field, isoValue) {
-    const row = rows.find((x) => String(x.qbo_customer_id) === String(rowId));
+    const row = rows.find((x) => rowKey(x) === String(rowId));
     if (!row) return;
 
     await ensureBundle(row);
 
-    const bundle = row._bundle;
     const payload = {
+      schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
-      status: bundle.project.status || "not_started",
-      start_date: field === "start_date" ? (isoValue || null) : (bundle.project.start_date || null),
-      end_date: field === "end_date" ? (isoValue || null) : (bundle.project.end_date || null),
-      project_manager_ids: (bundle.active_project_managers || []).map((x) => Number(x.project_manager_id)),
-      primary_project_manager_id: (bundle.active_project_managers || []).find((x) => x.is_primary)?.project_manager_id || null,
-      work_crew_ids: (bundle.active_work_crews || []).map((x) => Number(x.work_crew_id)),
-      primary_work_crew_id: (bundle.active_work_crews || []).find((x) => x.is_primary)?.work_crew_id || null,
-      equipment_type: bundle.project?.equipment_type || row.equipment_type || null,
+      status: row.project_status || "not_started",
+      start_date: field === "start_date" ? (isoValue || null) : (row.start_date || null),
+      end_date: field === "end_date" ? (isoValue || null) : (row.end_date || null),
       wire_guidance: row.wire_guidance || 0,
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
+      equipment_type: row.equipment_type || null,
+      project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
+      primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
+      work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
+      primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
     };
 
     try {
@@ -1130,12 +1277,11 @@ export async function assignmentPage(routeFn) {
   }
 
   async function saveAssignmentField(rowId, field) {
-    const row = rows.find((x) => String(x.qbo_customer_id) === String(rowId));
+    const row = rows.find((x) => rowKey(x) === String(rowId));
     if (!row) return;
 
     await ensureBundle(row);
 
-    const bundle = row._bundle;
     const isPm = field === "primary_project_manager";
 
     const checkedSelector = `[data-assign-check="${rowId}"][data-assign-field="${field}"]`;
@@ -1149,18 +1295,27 @@ export async function assignmentPage(routeFn) {
     const primaryId = primaryEl ? Number(primaryEl.getAttribute("data-id")) : null;
 
     const payload = {
+      schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
-      status: bundle.project.status || "not_started",
-      start_date: bundle.project.start_date || null,
-      end_date: bundle.project.end_date || null,
-      project_manager_ids: isPm ? ids : (bundle.active_project_managers || []).map((x) => Number(x.project_manager_id)),
-      primary_project_manager_id: isPm ? primaryId : ((bundle.active_project_managers || []).find((x) => x.is_primary)?.project_manager_id || null),
-      work_crew_ids: isPm ? (bundle.active_work_crews || []).map((x) => Number(x.work_crew_id)) : ids,
-      primary_work_crew_id: isPm ? ((bundle.active_work_crews || []).find((x) => x.is_primary)?.work_crew_id || null) : primaryId,
-      equipment_type: bundle.project?.equipment_type || row.equipment_type || null,
+      status: row.project_status || "not_started",
+      start_date: row.start_date || null,
+      end_date: row.end_date || null,
       wire_guidance: row.wire_guidance || 0,
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
+      equipment_type: row.equipment_type || null,
+      project_manager_ids: isPm
+        ? ids
+        : (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
+      primary_project_manager_id: isPm
+        ? primaryId
+        : ((row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null),
+      work_crew_ids: isPm
+        ? (row._active_work_crews || []).map(x => Number(x.work_crew_id))
+        : ids,
+      primary_work_crew_id: isPm
+        ? ((row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null)
+        : primaryId,
     };
 
     try {
@@ -1236,6 +1391,17 @@ export async function assignmentPage(routeFn) {
   });
 
   document.getElementById("assignmentBody").addEventListener("click", async (e) => {
+    const addRowBtn = e.target.closest("[data-add-schedule-row]");
+    if (addRowBtn) {
+      const rowId = addRowBtn.getAttribute("data-add-schedule-row");
+      const row = rows.find((x) => rowKey(x) === String(rowId));
+      if (row) {
+        await ensureBundle(row);
+        addScheduleRow(row);
+      }
+      return;
+    }
+    
     const cancelEditor = e.target.closest("[data-cancel-editor]");
     if (cancelEditor) {
       clearEditing();
@@ -1272,11 +1438,10 @@ export async function assignmentPage(routeFn) {
     const wireCheck = e.target.closest("[data-wire-check]");
     if (wireCheck) {
       const rowId = wireCheck.getAttribute("data-wire-check");
-      const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+      const row = rows.find(x => rowKey(x) === String(rowId));
       if (row) {
         row.wire_guidance = wireCheck.checked ? 1 : 0;
         await saveMiscFields(row);
-        flashCell(row.qbo_customer_id, "wire_guidance");
       }
       return;
     }
@@ -1296,12 +1461,11 @@ export async function assignmentPage(routeFn) {
       const travelSelect = e.target.closest("[data-travel-select]");
       if (travelSelect) {
         const rowId = travelSelect.getAttribute("data-travel-select");
-        const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+        const row = rows.find(x => rowKey(x) === String(rowId));
         if (row) {
           row.travel_days = Number(travelSelect.value);
           await saveMiscFields(row);
           clearEditing();
-          flashCell(row.qbo_customer_id, "travel_days");
         }
         return;
       }
@@ -1309,12 +1473,11 @@ export async function assignmentPage(routeFn) {
       const equipmentSelect = e.target.closest("[data-equipment-select]");
       if (equipmentSelect) {
         const rowId = equipmentSelect.getAttribute("data-equipment-select");
-        const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+        const row = rows.find(x => rowKey(x) === String(rowId));
         if (row) {
           row.equipment_type = equipmentSelect.value || null;
           await saveMiscFields(row);
           clearEditing();
-          flashCell(row.qbo_customer_id, "equipment_type");
         }
         return;
       }
@@ -1340,12 +1503,11 @@ export async function assignmentPage(routeFn) {
       if (overageInput && e.key === "Enter") {
         e.preventDefault();
         const rowId = overageInput.getAttribute("data-overage-input");
-        const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+        const row = rows.find(x => rowKey(x) === String(rowId));
         if (row) {
           row.overage_days = Math.max(0, parseInt(overageInput.value) || 0);
           try {
             await saveMiscFields(row);
-            flashCell(row.qbo_customer_id, "overage_days");
           } catch (err) {
             setMsg("Could not update overage days.");
           }
@@ -1387,12 +1549,11 @@ export async function assignmentPage(routeFn) {
     const overageInput = e.target.closest("[data-overage-input]");
     if (overageInput) {
       const rowId = overageInput.getAttribute("data-overage-input");
-      const row = rows.find(x => String(x.qbo_customer_id) === String(rowId));
+      const row = rows.find(x => rowKey(x) === String(rowId));
       if (row) {
         row.overage_days = Math.max(0, parseInt(overageInput.value) || 0);
         try {
           await saveMiscFields(row);
-          flashCell(row.qbo_customer_id, "overage_days");
         } catch (err) {
           setMsg("Could not update overage days.");
         }

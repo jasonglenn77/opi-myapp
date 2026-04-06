@@ -1,3 +1,4 @@
+// Schedule page: month view by crew, with PM badges and tooltips.
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
@@ -171,6 +172,7 @@ export async function schedulePage(routeFn) {
       const equipmentSuffix = a.equipment_type ? ` (${a.equipment_type})` : "";
 
       const baseItem = {
+        schedule_item_id: a.schedule_item_id,
         project_id: a.project_id,
         project: `${a.project_name || ""}${equipmentSuffix}`,
         status: a.project_status || "",
