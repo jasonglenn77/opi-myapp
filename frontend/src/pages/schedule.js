@@ -71,6 +71,7 @@ export async function schedulePage(routeFn) {
   const state = {
     year: now.getFullYear(),
     month: now.getMonth(), // 0-indexed
+    crewView: "condensed", // "condensed" | "all"
   };
 
   // --- fetch + render
@@ -229,7 +230,8 @@ export async function schedulePage(routeFn) {
       return weeks.some(week => week.some(d => (inner.get(ymd(d)) || []).length > 0));
     }
 
-    const visibleCrews = crewList.filter(c => crewHasAnyThisMonth(c.code || ""));
+    const condensedCrews = crewList.filter(c => crewHasAnyThisMonth(c.code || ""));
+    const visibleCrews = state.crewView === "all" ? crewList : condensedCrews;
 
     // Build the fixed day-of-week header row (Mon–Sun)
     const dayHeaderRow = `
@@ -393,6 +395,12 @@ export async function schedulePage(routeFn) {
                 class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold bg-white hover:bg-black/5"
               />
 
+              <button
+                id="toggleCrewView"
+                class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5"
+              >
+                ${state.crewView === "all" ? "Show Condensed" : "Show All"}
+              </button>
               <button id="prevMonth" class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">← Prev</button>
               <button id="todayBtn" class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">Today</button>
               <button id="nextMonth" class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">Next →</button>
@@ -521,6 +529,14 @@ export async function schedulePage(routeFn) {
 
         state.year = year;
         state.month = month - 1; // input is 1-based, JS month is 0-based
+        loadAndRender();
+      };
+    }
+    
+    const toggleCrewViewBtn = document.getElementById("toggleCrewView");
+    if (toggleCrewViewBtn) {
+      toggleCrewViewBtn.onclick = () => {
+        state.crewView = state.crewView === "all" ? "condensed" : "all";
         loadAndRender();
       };
     }
