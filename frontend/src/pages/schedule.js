@@ -185,6 +185,7 @@ export async function schedulePage(routeFn) {
         travel_days: Number(a.travel_days || 0),
         overage_days: Number(a.overage_days || 0),
         equipment_type: a.equipment_type || "",
+        notes: a.notes || "",
       };
 
       for (const crewCode of crewCodes) {
@@ -300,6 +301,7 @@ export async function schedulePage(routeFn) {
           travel_days: Number(it.travel_days || 0),
           overage_days: Number(it.overage_days || 0),
           equipment_type: it.equipment_type || "",
+          notes: it.notes || "",
         }));
 
         return `
@@ -470,6 +472,7 @@ export async function schedulePage(routeFn) {
         const travel = Number(data.travel_days || 0) ? `${Number(data.travel_days)} day${Number(data.travel_days) === 1 ? "" : "s"}` : "None";
         const overage = Number(data.overage_days || 0) ? `${Number(data.overage_days)} day${Number(data.overage_days) === 1 ? "" : "s"}` : "None";
         const equip = data.equipment_type || "None";
+        const notes = data.notes || "None";
 
         const html = `
           ${data.project ? `<div class="font-extrabold mb-1">${escapeHtml(data.project)}</div>` : ""}
@@ -481,6 +484,7 @@ export async function schedulePage(routeFn) {
           <div class="text-black/70"><span class="font-semibold">Travel:</span> ${escapeHtml(travel)}</div>
           <div class="text-black/70"><span class="font-semibold">Overage:</span> ${escapeHtml(overage)}</div>
           <div class="text-black/70"><span class="font-semibold">Equip:</span> ${escapeHtml(equip)}</div>
+          <div class="text-black/70 mt-1"><span class="font-semibold">Notes:</span> ${escapeHtml(notes)}</div>
         `;
         showTip(html, e.clientX, e.clientY);
       });

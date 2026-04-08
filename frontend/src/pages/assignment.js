@@ -236,6 +236,7 @@ export async function assignmentPage(routeFn) {
       overage_days: 0,
       equipment_type: null,
       notes: "",
+      is_extra_row: 1,
 
       primary_project_manager: "",
       primary_work_crew: "",
@@ -255,8 +256,8 @@ export async function assignmentPage(routeFn) {
     renderAll();
   }
 
-  function isNewUnsavedRow(row) {
-    return row.schedule_item_id == null && !!row._tempRowId;
+  function canDeleteRow(row) {
+    return row.is_extra_row === 1 || (row.schedule_item_id == null && !!row._tempRowId);
   }
 
   async function saveMiscFields(row, flashField = null) {
@@ -344,6 +345,7 @@ export async function assignmentPage(routeFn) {
       overage_days: payload.overage_days || 0,
       equipment_type: payload.equipment_type || null,
       notes: payload.notes || null,
+      is_extra_row: row.is_extra_row || 0,
       active_project_managers: row._active_project_managers || [],
       active_work_crews: row._active_work_crews || [],
     };
@@ -1067,7 +1069,7 @@ export async function assignmentPage(routeFn) {
                 >
                   + Row
                 </button>
-                ${isNewUnsavedRow(row) ? `
+                ${canDeleteRow(row) ? `
                   <button
                     type="button"
                     class="inline-flex items-center rounded-lg border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-50"
@@ -1460,11 +1462,33 @@ export async function assignmentPage(routeFn) {
     if (removeRowBtn) {
       const rowId = removeRowBtn.getAttribute("data-remove-schedule-row");
       const idx = rows.findIndex((x) => rowKey(x) === String(rowId));
-      if (idx >= 0 && rows[idx].schedule_item_id == null) {
+      if (idx < 0) return;
+
+      const row = rows[idx];
+
+      // Unsaved extra row: remove locally only
+      if (row.schedule_item_id == null) {
         rows.splice(idx, 1);
         clearEditing();
         renderAll();
+        return;
       }
+
+      // Saved extra row: delete through backend
+      try {
+        await api(`/assignment/schedule-item/${row.schedule_item_id}`, {
+          method: "DELETE",
+        });
+
+        rows.splice(idx, 1);
+        clearEditing();
+        renderAll();
+        setMsg("Row deleted.", true);
+      } catch (err) {
+        console.error(err);
+        setMsg("Could not delete row.");
+      }
+
       return;
     }
     

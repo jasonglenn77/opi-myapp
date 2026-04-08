@@ -68,6 +68,7 @@ def get_assignment_bundle(qbo_customer_id: int):
                     overage_days,
                     equipment_type,
                     notes,
+                    is_extra_row,
                     sort_order
                 FROM project_schedule_items
                 WHERE project_id = :pid
@@ -187,7 +188,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
         if schedule_item_id:
             prior_item = conn.execute(text("""
-                SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, sort_order
+                SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, is_extra_row, sort_order
                 FROM project_schedule_items
                 WHERE id = :sid AND project_id = :pid
                 LIMIT 1
@@ -248,9 +249,9 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
             conn.execute(text("""
                 INSERT INTO project_schedule_items
-                    (project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, sort_order)
+                    (project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, is_extra_row,sort_order)
                 VALUES
-                    (:pid, :st, :sd, :ed, :wg, :td, :od, :eq, :notes, :so)
+                    (:pid, :st, :sd, :ed, :wg, :td, :od, :eq, :notes, :is_extra_row, :so)
             """), {
                 "pid": project_id,
                 "st": status,
@@ -261,6 +262,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 "od": getattr(req, "overage_days", 0) or 0,
                 "eq": getattr(req, "equipment_type", None) or None,
                 "notes": getattr(req, "notes", None) or None,
+                "is_extra_row": 1,
                 "so": int(next_sort_order or 1),
             })
             sid = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
@@ -304,7 +306,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             })
 
         new_item = conn.execute(text("""
-            SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, sort_order
+            SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, is_extra_row, sort_order
             FROM project_schedule_items
             WHERE id = :sid
             LIMIT 1
@@ -335,6 +337,28 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
         )
 
     return {"ok": True, "project_id": project_id, "schedule_item_id": sid}
+
+def delete_schedule_item(schedule_item_id: int, actor_user_id: int):
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT id, project_id, is_extra_row
+            FROM project_schedule_items
+            WHERE id = :sid
+            LIMIT 1
+        """), {"sid": int(schedule_item_id)}).mappings().first()
+
+        if not row:
+            raise ValueError("Schedule item not found")
+
+        if not row["is_extra_row"]:
+            raise ValueError("Cannot delete main project row")
+
+        conn.execute(text("""
+            DELETE FROM project_schedule_items
+            WHERE id = :sid
+        """), {"sid": int(schedule_item_id)})
+
+    return {"ok": True}
 
 def list_project_events(qbo_customer_id: int):
     with engine.connect() as conn:

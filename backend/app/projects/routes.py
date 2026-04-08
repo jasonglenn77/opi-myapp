@@ -59,6 +59,14 @@ def assignment_save(req: ScheduleItemSaveRequest, user=Depends(get_current_user)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.delete("/assignment/schedule-item/{schedule_item_id}")
+def delete_schedule_item(schedule_item_id: int, user=Depends(get_current_user)):
+    from .service import delete_schedule_item as delete_schedule_item_service
+    try:
+        return delete_schedule_item_service(schedule_item_id, int(user["id"]))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @router.get("/assignment/table")
 def assignment_table(user=Depends(get_current_user)):
     sql = text("""
@@ -76,6 +84,7 @@ def assignment_table(user=Depends(get_current_user)):
       psi.overage_days AS overage_days,
       psi.equipment_type AS equipment_type,
       psi.notes AS notes,
+      psi.is_extra_row AS is_extra_row,
 
       pm.primary_pm_name AS primary_project_manager,
       wc.primary_crew_name AS primary_work_crew,
@@ -387,6 +396,7 @@ def schedule(
         psi.travel_days,
         psi.overage_days,
         psi.equipment_type,
+        psi.notes,
         psi.status AS project_status,
         qc.display_name AS project_name,
 
