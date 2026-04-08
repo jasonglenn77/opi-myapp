@@ -235,6 +235,7 @@ export async function assignmentPage(routeFn) {
       travel_days: 0,
       overage_days: 0,
       equipment_type: null,
+      notes: "",
 
       primary_project_manager: "",
       primary_work_crew: "",
@@ -254,6 +255,10 @@ export async function assignmentPage(routeFn) {
     renderAll();
   }
 
+  function isNewUnsavedRow(row) {
+    return row.schedule_item_id == null && !!row._tempRowId;
+  }
+
   async function saveMiscFields(row, flashField = null) {
     await ensureBundle(row);
 
@@ -271,6 +276,7 @@ export async function assignmentPage(routeFn) {
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
       primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+      notes: row.notes || null,
     };
 
     await savePayload(row, payload, flashField || "project_status");
@@ -337,6 +343,7 @@ export async function assignmentPage(routeFn) {
       travel_days: payload.travel_days || 0,
       overage_days: payload.overage_days || 0,
       equipment_type: payload.equipment_type || null,
+      notes: payload.notes || null,
       active_project_managers: row._active_project_managers || [],
       active_work_crews: row._active_work_crews || [],
     };
@@ -382,6 +389,47 @@ export async function assignmentPage(routeFn) {
 
   function sortArrow(key) {
     return state.sortKey === key ? (state.sortDir === "asc" ? " ▲" : " ▼") : "";
+  }
+
+  function compareValues(a, b, key) {
+    const av = sortValue(a, key);
+    const bv = sortValue(b, key);
+
+    const aDate = ["start_date", "end_date", "project_create_date"].includes(key) ? parseIsoDate(av) : null;
+    const bDate = ["start_date", "end_date", "project_create_date"].includes(key) ? parseIsoDate(bv) : null;
+
+    if (aDate || bDate) {
+      if (!aDate && !bDate) return 0;
+      if (!aDate) return 1;
+      if (!bDate) return -1;
+      return aDate.getTime() - bDate.getTime();
+    }
+
+    const aNumKeys = ["wire_guidance", "travel_days", "overage_days"];
+    if (aNumKeys.includes(key)) {
+      return Number(av || 0) - Number(bv || 0);
+    }
+
+    return String(av || "").localeCompare(String(bv || ""));
+  }
+
+  function sorted(list) {
+    const decorated = list.map((row, idx) => ({ row, idx }));
+
+    decorated.sort((aWrap, bWrap) => {
+      const cmp = compareValues(aWrap.row, bWrap.row, state.sortKey);
+      if (cmp !== 0) {
+        return state.sortDir === "asc" ? cmp : -cmp;
+      }
+
+      // stable fallback
+      const projectCmp = String(aWrap.row.project_name || "").localeCompare(String(bWrap.row.project_name || ""));
+      if (projectCmp !== 0) return projectCmp;
+
+      return aWrap.idx - bWrap.idx;
+    });
+
+    return decorated.map((x) => x.row);
   }
 
   function renderFilterMenu(key) {
@@ -608,7 +656,10 @@ export async function assignmentPage(routeFn) {
             </button>
           </div>
         </div>
-        <div id="assignPageMsg" class="text-sm min-h-[1rem]"></div>
+        <div class="flex items-center justify-between gap-3">
+          <div id="rowCount" class="text-sm font-semibold text-black/60">Showing 0 records</div>
+          <div id="assignPageMsg" class="text-sm min-h-[1rem]"></div>
+        </div>
       </div>
 
       <!-- Single scroll container: both axes scroll here, nothing else does.
@@ -627,6 +678,7 @@ export async function assignmentPage(routeFn) {
               ${th("travel_days", "Travel")}
               ${th("overage_days", "Overage")}
               ${th("equipment_type", "Equip")}
+              ${th("notes", "Notes")}
               ${th("project_create_date", "QB Created")}
             </tr>
           </thead>
@@ -705,49 +757,6 @@ export async function assignmentPage(routeFn) {
     if (key === "primary_work_crew") return r.all_work_crews || "";
     if (key === "equipment_type") return r.equipment_type || "";
     return r[key] ?? "";
-  }
-
-  function sorted(list) {
-    const decorated = list.map((row, idx) => ({ row, idx }));
-
-    decorated.sort((aWrap, bWrap) => {
-      const a = aWrap.row;
-      const b = bWrap.row;
-
-      const projectCmp = String(a.project_name || "").localeCompare(String(b.project_name || ""));
-      if (projectCmp !== 0) return projectCmp;
-
-      const aDate = parseIsoDate(a.start_date);
-      const bDate = parseIsoDate(b.start_date);
-
-      // blank start_date rows go last within the same project
-      if (!aDate && !bDate) {
-        // preserve insertion order for undated rows
-        return aWrap.idx - bWrap.idx;
-      }
-      if (!aDate) return 1;
-      if (!bDate) return -1;
-
-      // both dated: chronological order
-      const startCmp = aDate.getTime() - bDate.getTime();
-      if (startCmp !== 0) return startCmp;
-
-      // tie-break by end_date
-      const aEnd = parseIsoDate(a.end_date);
-      const bEnd = parseIsoDate(b.end_date);
-
-      if (!aEnd && !bEnd) return aWrap.idx - bWrap.idx;
-      if (!aEnd) return 1;
-      if (!bEnd) return -1;
-
-      const endCmp = aEnd.getTime() - bEnd.getTime();
-      if (endCmp !== 0) return endCmp;
-
-      // final stable tie-breaker
-      return aWrap.idx - bWrap.idx;
-    });
-
-    return decorated.map((x) => x.row);
   }
 
   function cellClass(row, field, extra = "") {
@@ -854,6 +863,31 @@ export async function assignmentPage(routeFn) {
         ${row.equipment_type
           ? escapeHtml(row.equipment_type)
           : `<span class="text-black/35">—</span>`}
+      </button>
+    `;
+  }
+
+  function renderNotesCell(row) {
+    if (isEditing(rowKey(row), "notes")) {
+      return `
+        <input
+          type="text"
+          class="input w-56"
+          data-notes-input="${rowKey(row)}"
+          value="${escapeHtml(row.notes || "")}"
+          placeholder="Add note"
+        />
+      `;
+    }
+
+    return `
+      <button
+        type="button"
+        class="inline-flex min-h-[32px] min-w-[120px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left"
+        data-edit-cell="${rowKey(row)}"
+        data-field="notes"
+      >
+        ${row.notes ? escapeHtml(row.notes) : `<span class="text-black/35">—</span>`}
       </button>
     `;
   }
@@ -997,6 +1031,7 @@ export async function assignmentPage(routeFn) {
       ${th("travel_days", "Travel")}
       ${th("overage_days", "Overage")}
       ${th("equipment_type", "Equip")}
+      ${th("notes", "Notes")}
       ${th("project_create_date", "QB Created")}
     `;
   }
@@ -1011,7 +1046,7 @@ export async function assignmentPage(routeFn) {
 
     const rowCountEl = document.getElementById("rowCount");
     if (rowCountEl) {
-      rowCountEl.textContent = `${list.length} schedule items`;
+      rowCountEl.textContent = `Showing ${list.length} records`;
     }
 
     const tbody = document.getElementById("assignmentBody");
@@ -1032,6 +1067,15 @@ export async function assignmentPage(routeFn) {
                 >
                   + Row
                 </button>
+                ${isNewUnsavedRow(row) ? `
+                  <button
+                    type="button"
+                    class="inline-flex items-center rounded-lg border border-red-200 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-50"
+                    data-remove-schedule-row="${rowKey(row)}"
+                  >
+                    - Row
+                  </button>
+                ` : ""}
               </div>
             </td>
 
@@ -1135,6 +1179,12 @@ export async function assignmentPage(routeFn) {
               ${renderEquipmentTypeCell(row)}
             </td>
 
+            <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "notes")}"
+                data-cell="${rowKey(row)}"
+                data-field="notes">
+              ${renderNotesCell(row)}
+            </td>
+
             <td class="py-2 px-2 whitespace-nowrap">
               ${escapeHtml(formatMmDdYyyy(row.project_create_date))}
             </td>
@@ -1142,7 +1192,7 @@ export async function assignmentPage(routeFn) {
         `;
       }).join("") || `
         <tr>
-          <td class="py-6 text-center text-black/50" colspan="11">No projects match these filters.</td>
+          <td class="py-6 text-center text-black/50" colspan="12">No projects match these filters.</td>
         </tr>
       `;
   }
@@ -1195,6 +1245,7 @@ export async function assignmentPage(routeFn) {
     row.travel_days = Number(payload.travel_days || 0);
     row.overage_days = Number(payload.overage_days || 0);
     row.equipment_type = payload.equipment_type || null;
+    row.notes = payload.notes || null;
 
     row._active_project_managers = (payload.project_manager_ids || []).map((id) => ({
       project_manager_id: Number(id),
@@ -1230,6 +1281,7 @@ export async function assignmentPage(routeFn) {
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
+      notes: row.notes || null,
       project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
@@ -1261,6 +1313,7 @@ export async function assignmentPage(routeFn) {
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
+      notes: row.notes || null,
       project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
@@ -1304,6 +1357,7 @@ export async function assignmentPage(routeFn) {
       travel_days: row.travel_days || 0,
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
+      notes: row.notes || null,
       project_manager_ids: isPm
         ? ids
         : (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
@@ -1398,6 +1452,18 @@ export async function assignmentPage(routeFn) {
       if (row) {
         await ensureBundle(row);
         addScheduleRow(row);
+      }
+      return;
+    }
+
+    const removeRowBtn = e.target.closest("[data-remove-schedule-row]");
+    if (removeRowBtn) {
+      const rowId = removeRowBtn.getAttribute("data-remove-schedule-row");
+      const idx = rows.findIndex((x) => rowKey(x) === String(rowId));
+      if (idx >= 0 && rows[idx].schedule_item_id == null) {
+        rows.splice(idx, 1);
+        clearEditing();
+        renderAll();
       }
       return;
     }
@@ -1544,6 +1610,25 @@ export async function assignmentPage(routeFn) {
       }
     });
 
+  document.getElementById("assignmentBody").addEventListener("keydown", async (e) => {
+    const notesInput = e.target.closest("[data-notes-input]");
+    if (notesInput && e.key === "Enter") {
+      e.preventDefault();
+      const rowId = notesInput.getAttribute("data-notes-input");
+      const row = rows.find(x => rowKey(x) === String(rowId));
+      if (row) {
+        row.notes = notesInput.value.trim() || null;
+        try {
+          await saveMiscFields(row, "notes");
+        } catch (err) {
+          setMsg("Could not update notes.");
+        }
+        clearEditing();
+      }
+      return;
+    }
+  });
+
   document.getElementById("assignmentBody").addEventListener("focusout", async (e) => {
     // Overage days — save when user clicks away
     const overageInput = e.target.closest("[data-overage-input]");
@@ -1586,6 +1671,23 @@ export async function assignmentPage(routeFn) {
     }
 
     await saveDateField(rowId, field, iso);
+  });
+
+  document.getElementById("assignmentBody").addEventListener("focusout", async (e) => {
+    const notesInput = e.target.closest("[data-notes-input]");
+    if (!notesInput) return;
+
+    const rowId = notesInput.getAttribute("data-notes-input");
+    const row = rows.find(x => rowKey(x) === String(rowId));
+    if (row) {
+      row.notes = notesInput.value.trim() || null;
+      try {
+        await saveMiscFields(row, "notes");
+      } catch (err) {
+        setMsg("Could not update notes.");
+      }
+      clearEditing();
+    }
   });
 
   document.querySelector("#assignmentTable thead").addEventListener("click", (e) => {

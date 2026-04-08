@@ -35,6 +35,7 @@ class ScheduleItemSaveRequest(BaseModel):
     primary_project_manager_id: Optional[int] = None
     work_crew_ids: List[int] = []
     primary_work_crew_id: Optional[int] = None
+    notes: Optional[str] = None
 
 @router.get("/assignment/projects")
 def assignment_projects(user=Depends(get_current_user)):
@@ -74,6 +75,7 @@ def assignment_table(user=Depends(get_current_user)):
       psi.travel_days AS travel_days,
       psi.overage_days AS overage_days,
       psi.equipment_type AS equipment_type,
+      psi.notes AS notes,
 
       pm.primary_pm_name AS primary_project_manager,
       wc.primary_crew_name AS primary_work_crew,

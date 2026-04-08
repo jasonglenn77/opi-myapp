@@ -71,7 +71,7 @@ export async function schedulePage(routeFn) {
   const state = {
     year: now.getFullYear(),
     month: now.getMonth(), // 0-indexed
-    crewView: "condensed", // "condensed" | "all"
+    crewView: "all", // "condensed" | "all"
   };
 
   // --- fetch + render
@@ -397,7 +397,7 @@ export async function schedulePage(routeFn) {
 
               <button
                 id="toggleCrewView"
-                class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5"
+                class="bg-blue-300 text-gray-500 rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-blue-400"
               >
                 ${state.crewView === "all" ? "Show Condensed" : "Show All"}
               </button>
@@ -532,7 +532,7 @@ export async function schedulePage(routeFn) {
         loadAndRender();
       };
     }
-    
+
     const toggleCrewViewBtn = document.getElementById("toggleCrewView");
     if (toggleCrewViewBtn) {
       toggleCrewViewBtn.onclick = () => {

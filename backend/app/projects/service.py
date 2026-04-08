@@ -67,6 +67,7 @@ def get_assignment_bundle(qbo_customer_id: int):
                     travel_days,
                     overage_days,
                     equipment_type,
+                    notes,
                     sort_order
                 FROM project_schedule_items
                 WHERE project_id = :pid
@@ -186,7 +187,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
         if schedule_item_id:
             prior_item = conn.execute(text("""
-                SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, sort_order
+                SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, sort_order
                 FROM project_schedule_items
                 WHERE id = :sid AND project_id = :pid
                 LIMIT 1
@@ -223,7 +224,8 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                     wire_guidance = :wg,
                     travel_days = :td,
                     overage_days = :od,
-                    equipment_type = :eq
+                    equipment_type = :eq,
+                    notes = :notes
                 WHERE id = :sid
             """), {
                 "sid": int(schedule_item_id),
@@ -234,6 +236,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 "td": getattr(req, "travel_days", 0) or 0,
                 "od": getattr(req, "overage_days", 0) or 0,
                 "eq": getattr(req, "equipment_type", None) or None,
+                "notes": getattr(req, "notes", None) or None,
             })
             sid = int(schedule_item_id)
         else:
@@ -245,9 +248,9 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
             conn.execute(text("""
                 INSERT INTO project_schedule_items
-                    (project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, sort_order)
+                    (project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, sort_order)
                 VALUES
-                    (:pid, :st, :sd, :ed, :wg, :td, :od, :eq, :so)
+                    (:pid, :st, :sd, :ed, :wg, :td, :od, :eq, :notes, :so)
             """), {
                 "pid": project_id,
                 "st": status,
@@ -257,6 +260,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 "td": getattr(req, "travel_days", 0) or 0,
                 "od": getattr(req, "overage_days", 0) or 0,
                 "eq": getattr(req, "equipment_type", None) or None,
+                "notes": getattr(req, "notes", None) or None,
                 "so": int(next_sort_order or 1),
             })
             sid = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
@@ -300,7 +304,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             })
 
         new_item = conn.execute(text("""
-            SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, sort_order
+            SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, sort_order
             FROM project_schedule_items
             WHERE id = :sid
             LIMIT 1
