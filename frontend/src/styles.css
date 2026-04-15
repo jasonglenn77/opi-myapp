@@ -9,6 +9,10 @@
   body { @apply bg-ink-900 text-white overflow-y-auto; }
 }
 
+@layer utilities {
+  .cursor-pointer { cursor: pointer; }
+}
+
 /* Reusable UI pieces */
 @layer components {
   .card { @apply bg-white text-ink-900 rounded-2xl shadow-soft border border-black/5; }

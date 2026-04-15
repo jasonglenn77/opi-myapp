@@ -129,7 +129,7 @@ export async function projectsPage(routeFn) {
     const hr   = "mt-1.5 pt-1.5 border-t border-black/5";
 
     document.getElementById("kpiStrip").innerHTML = `
-      <div class="${card}">
+      <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="estimate">
         <div class="${lbl}">Estimate</div>
         <div class="${main}">${$$(el)}</div>
         <div class="${sub}">Contract amount</div>
@@ -139,7 +139,7 @@ export async function projectsPage(routeFn) {
         </div>
       </div>
 
-      <div class="${card}">
+      <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="invoice">
         <div class="${lbl}">Invoice</div>
         <div class="${main}">${$$(inv)}</div>
         <div class="${sub}">Billed to date</div>
@@ -157,7 +157,7 @@ export async function projectsPage(routeFn) {
         </div>
       </div>
 
-      <div class="${card}">
+      <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="expense">
         <div class="${lbl}">Expense</div>
         <div class="${main}">${$$(exp)}</div>
         <div class="${sub}">Costs posted</div>
@@ -167,7 +167,7 @@ export async function projectsPage(routeFn) {
         </div>
       </div>
 
-      <div class="${card}">
+      <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="profit">
         <div class="${lbl}">Profit</div>
         <div class="flex items-baseline gap-1">
           <div class="text-lg font-extrabold leading-tight ${ap > 0 ? "text-emerald-700" : ap < 0 ? "text-red-600" : "text-ink-900"}">${$$(ap)}</div>
@@ -433,6 +433,35 @@ export async function projectsPage(routeFn) {
           </table>
         </div>
 
+      </div>
+    </div>
+
+    <!-- Financials by-item modal -->
+    <div id="finModal" class="fixed inset-0 z-50 hidden">
+      <div class="absolute inset-0 bg-black/50 backdrop-blur-[2px]" data-close-fin-modal="1"></div>
+        <div class="absolute inset-x-4 top-8 bottom-8 mx-auto max-w-7xl flex flex-col">
+          <div class="h-full rounded-3xl border border-black/10 bg-white shadow-2xl overflow-hidden flex flex-col text-ink-900"> 
+
+          <!-- Modal header -->
+          <div class="shrink-0 flex items-center justify-between px-6 py-4 border-b border-black/10">
+            <div>
+              <div id="finModalTitle" class="text-base font-extrabold"></div>
+              <div id="finModalSubtitle" class="text-xs text-black/50 mt-0.5"></div>
+            </div>
+            <button type="button" id="finModalClose"
+              class="inline-flex items-center rounded-xl border border-black/10 px-3 py-2 text-sm text-black/60 font-semibold hover:bg-black/5">
+              Close
+            </button>
+          </div>
+
+          <!-- Modal body — no overflow here; finModalBody manages its own scroll -->
+          <div class="flex-1 min-h-0 flex flex-col overflow-hidden px-6 pb-6 pt-4">
+            <div id="finModalBody" class="flex-1 min-h-0 flex flex-col text-sm text-black/50">
+              Loading…
+            </div>
+          </div>
+
+        </div>
       </div>
     </div>
 
@@ -966,6 +995,387 @@ export async function projectsPage(routeFn) {
     if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
       modalState.activeIndex = Math.max(modalState.activeIndex - 1, 0);
       renderFileModal();
+    }
+  });
+
+  // ── Financials by-item modal ───────────────────────────────────────────────
+
+  function closeFinModal() {
+    document.getElementById("finModal").classList.add("hidden");
+  }
+
+async function openFinancialsModal(cardKey, filteredList) {
+    const FIXED_ROWS = [
+      { key: "estimate_line", label: "Estimate"            },
+      { key: "invoice_line",  label: "Invoice"             },
+      { key: "estimate_cost", label: "Estimate Cost Basis" },
+      { key: "expense_line",  label: "Expense"             },
+    ];
+
+    const isFiltered = filteredList.length !== rows.length;
+    const scopeLabel = isFiltered
+      ? `${filteredList.length} of ${rows.length} projects (filtered)`
+      : `All ${rows.length} projects`;
+
+    // ── Build active-filter chip summary ───────────────────────────────────────
+    const FILTER_LABELS = {
+      project_name:         "Project",
+      all_statuses:         "Status",
+      all_project_managers: "Manager",
+      all_work_crews:       "Crew",
+      all_start_dates:      "Start Date",
+      all_end_dates:        "End Date",
+      estimate_cost_amt:    "Est. Cost",
+      estimate_line_amt:    "Est. Amount",
+      invoice_line_amt:     "Invoice",
+      invoice_balance_amt:  "AR Balance",
+      expense_line_amt:     "Expense",
+      actual_profit:        "Actual Profit",
+      actual_profit_pct:    "Actual Profit %",
+      projected_profit:     "Proj. Profit",
+      projected_profit_pct: "Proj. Profit %",
+    };
+
+    function activeFilterChips() {
+      if (!isFiltered) return "";
+      const chips = [];
+
+      // Text search
+      if (state.q && state.q.trim()) {
+        chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:#f1f5f9;border:1px solid rgba(0,0,0,0.1);border-radius:999px;font-size:11px;color:rgba(0,0,0,0.6);white-space:nowrap;">
+          <span style="font-weight:600;color:rgba(0,0,0,0.45);">Search</span>
+          <span>${escapeHtml(state.q.trim())}</span>
+        </span>`);
+      }
+
+      // Column filters
+      for (const [key, val] of Object.entries(state.filters)) {
+        const label = FILTER_LABELS[key] || key;
+        if (typeof val === "string" && val.trim()) {
+          // Status needs human-readable label
+          const display = key === "all_statuses"
+            ? val.split(",").map(s => s.trim() === "not_started" ? "Not Started" : s.trim() === "in_progress" ? "In Progress" : s.trim() === "completed" ? "Completed" : s.trim() === "canceled" ? "Canceled" : s.trim()).join(", ")
+            : escapeHtml(val.trim());
+          chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:#f1f5f9;border:1px solid rgba(0,0,0,0.1);border-radius:999px;font-size:11px;color:rgba(0,0,0,0.6);white-space:nowrap;">
+            <span style="font-weight:600;color:rgba(0,0,0,0.45);">${escapeHtml(label)}</span>
+            <span>${display}</span>
+          </span>`);
+        } else if (val && typeof val === "object") {
+          if ("from" in val || "to" in val) {
+            const parts = [];
+            if (val.from) parts.push(`from ${escapeHtml(val.from)}`);
+            if (val.to)   parts.push(`to ${escapeHtml(val.to)}`);
+            if (parts.length) chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:#f1f5f9;border:1px solid rgba(0,0,0,0.1);border-radius:999px;font-size:11px;color:rgba(0,0,0,0.6);white-space:nowrap;">
+              <span style="font-weight:600;color:rgba(0,0,0,0.45);">${escapeHtml(label)}</span>
+              <span>${parts.join(" ")}</span>
+            </span>`);
+          } else if ("min" in val || "max" in val) {
+            const parts = [];
+            if (val.min !== "" && val.min != null) parts.push(`≥ ${escapeHtml(String(val.min))}`);
+            if (val.max !== "" && val.max != null) parts.push(`≤ ${escapeHtml(String(val.max))}`);
+            if (parts.length) chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:#f1f5f9;border:1px solid rgba(0,0,0,0.1);border-radius:999px;font-size:11px;color:rgba(0,0,0,0.6);white-space:nowrap;">
+              <span style="font-weight:600;color:rgba(0,0,0,0.45);">${escapeHtml(label)}</span>
+              <span>${parts.join(" ")}</span>
+            </span>`);
+          }
+        }
+      }
+
+      if (!chips.length) return "";
+      return `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;">
+        <span style="font-size:11px;font-weight:600;color:rgba(0,0,0,0.35);white-space:nowrap;">Filters:</span>
+        ${chips.join("")}
+      </div>`;
+    }
+
+    document.getElementById("finModalTitle").textContent    = "Financial Breakdown by Item Type";
+    document.getElementById("finModalSubtitle").textContent = scopeLabel;
+
+    // Inject filter chips directly after the subtitle (clear any previous chips first)
+    const existingChips = document.getElementById("finModalFilterChips");
+    if (existingChips) existingChips.remove();
+    const subtitleEl = document.getElementById("finModalSubtitle");
+    if (subtitleEl && isFiltered) {
+      const chipsDiv = document.createElement("div");
+      chipsDiv.id = "finModalFilterChips";
+      chipsDiv.innerHTML = activeFilterChips();
+      subtitleEl.insertAdjacentElement("afterend", chipsDiv);
+    }
+
+    document.getElementById("finModalBody").innerHTML =
+      `<div style="display:flex;align-items:center;justify-content:center;height:8rem;color:rgba(0,0,0,0.4);font-size:14px;">Loading…</div>`;
+    document.getElementById("finModal").classList.remove("hidden");
+
+    const qboIds = filteredList.map(r => r.project_qbo_id).filter(Boolean);
+
+    let data;
+    try {
+      data = await api("/projects/financials/by-item", {
+        method: "POST",
+        body:   JSON.stringify({ project_qbo_ids: qboIds }),
+      });
+    } catch (err) {
+      document.getElementById("finModalBody").innerHTML =
+        `<div style="padding:24px;">
+          <div style="color:#dc2626;font-weight:700;font-size:13px;margin-bottom:6px;">Failed to load data</div>
+          <div style="color:#ef4444;font-size:11px;font-family:monospace;word-break:break-all;">${escapeHtml(String(err.message))}</div>
+        </div>`;
+      return;
+    }
+
+    const ITEM_ORDER = [
+      "Contract Labor", "Materials", "Mgmt Travel",
+      "Lodging", "Buffer", "Rentals", "Propane",
+    ];
+    const allItems   = data.items || [];
+    const showItems  = ITEM_ORDER.filter(i => allItems.includes(i));
+    const extraItems = allItems.filter(i => !ITEM_ORDER.includes(i));
+    const items      = [...showItems, ...extraItems];
+
+    if (!items.length) {
+      document.getElementById("finModalBody").innerHTML =
+        `<div style="display:flex;align-items:center;justify-content:center;height:8rem;color:rgba(0,0,0,0.4);font-size:14px;">No item data found.</div>`;
+      return;
+    }
+
+    // ── Build pivot table ──────────────────────────────────────────────────────
+    // Three separate <table> elements — one each for header, body, footer —
+    // all using table-layout:fixed with identical explicit column widths.
+    // This is the only approach that reliably aligns columns while allowing
+    // the body to scroll independently.
+
+    const BB = "2px solid rgba(0,0,0,0.13)";
+    const bT = `border-top:${BB};`;
+    const bB = `border-bottom:${BB};`;
+    const bL = `border-left:${BB};`;
+    const bR = `border-right:${BB};`;
+
+    const shTL = `${bT}${bL} border-radius:8px 0 0 0;`;
+    const shTM = bT;
+    const shTR = `${bT}${bR} border-radius:0 8px 0 0;`;
+    const chL  = bL;   const chR  = bR;
+    const dL   = bL;   const dR   = bR;
+    const bcL  = `${bB}${bL} border-radius:0 0 0 8px;`;
+    const bcM  = bB;
+    const bcR  = `${bB}${bR} border-radius:0 0 8px 0;`;
+    const ttL  = `${bT}${bB}${bL} border-radius:8px 0 0 8px;`;
+    const ttM  = `${bT}${bB}`;
+    const ttR  = `${bT}${bB}${bR} border-radius:0 8px 8px 0;`;
+
+    // Column widths in px — fixed layout, stamped identically on every row
+    // across all three tables so columns are guaranteed to align.
+    // Total = 160 + 90+90+130 + 10 + 110+90+130 + 10 + 115+130 = 1065px
+    // At max-w-7xl (1280px) with 48px horizontal padding → ~1232px available → fits fine.
+    const PX = {
+      label: 160,
+      est:    90, inv:   90, dA:  130,
+      gap:    10,
+      ec:    110, exp:   90, dB:  130,
+      gap2:   10,
+      aP:    115, pP:   130,
+    };
+    const keys = ["label","est","inv","dA","gap","ec","exp","dB","gap2","aP","pP"];
+    const cw = k => `width:${PX[k]}px; min-width:${PX[k]}px; max-width:${PX[k]}px;`;
+
+    // Shared table style — fixed layout so columns are sized from widths, not content
+    const tbl = (id="") =>
+      `<table ${id ? `id="${id}"` : ""} style="width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0;" cellpadding="0" cellspacing="0">`;
+
+    const tdBase = `padding:6px 8px; font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;`;
+    const tdBold = `padding:7px 8px; font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:700;`;
+
+    // ── Cell renderers ─────────────────────────────────────────────────────────
+    function vCell(v, bg, xs="", k="est") {
+      const txt = v!==0 ? $$(v) : '<span style="color:rgba(0,0,0,0.25)">—</span>';
+      return `<td style="${cw(k)} ${tdBase} text-align:right; color:rgba(0,0,0,0.70); background:${bg}; ${xs}">${txt}</td>`;
+    }
+    function dfCell(diff, base, bg, xs="", invert=false, k="dA") {
+      if (diff===0) return `<td style="${cw(k)} ${tdBase} text-align:right; color:rgba(0,0,0,0.25); background:${bg}; ${xs}">—</td>`;
+      const good=invert?diff<0:diff>0, color=good?"#047857":"#dc2626", sign=good?"+":"−";
+      const pct=base!==0?` <span style="font-size:10px;font-weight:400">(${((diff/Math.abs(base))*100).toFixed(1)}%)</span>`:"";
+      return `<td style="${cw(k)} ${tdBase} text-align:right; font-weight:600; color:${color}; background:${bg}; ${xs}">${sign}${$$(Math.abs(diff))}${pct}</td>`;
+    }
+    function prCell(profit, inv, bg, xs="", k="aP") {
+      if (profit===0) return `<td style="${cw(k)} ${tdBase} text-align:right; color:rgba(0,0,0,0.25); background:${bg}; ${xs}">—</td>`;
+      const color=profit>0?"#047857":"#dc2626", sign=profit>0?"+":"−";
+      const pct=inv!==0?` <span style="font-size:10px;font-weight:400">(${((profit/Math.abs(inv))*100).toFixed(1)}%)</span>`:"";
+      return `<td style="${cw(k)} ${tdBase} text-align:right; font-weight:600; color:${color}; background:${bg}; ${xs}">${sign}${$$(Math.abs(profit))}${pct}</td>`;
+    }
+    function tvCell(v, bg, xs="", k="est") {
+      const txt = v!==0 ? $$(v) : '<span style="color:rgba(0,0,0,0.25)">—</span>';
+      return `<td style="${cw(k)} ${tdBold} text-align:right; color:#1a1a2e; background:${bg}; ${xs}">${txt}</td>`;
+    }
+    function tdfCell(diff, base, bg, xs="", invert=false, k="dA") {
+      if (diff===0) return `<td style="${cw(k)} ${tdBold} text-align:right; color:rgba(0,0,0,0.25); background:${bg}; ${xs}">—</td>`;
+      const good=invert?diff<0:diff>0, color=good?"#047857":"#dc2626", sign=good?"+":"−";
+      const pct=base!==0?` <span style="font-size:10px;font-weight:400">(${((diff/Math.abs(base))*100).toFixed(1)}%)</span>`:"";
+      return `<td style="${cw(k)} ${tdBold} text-align:right; color:${color}; background:${bg}; ${xs}">${sign}${$$(Math.abs(diff))}${pct}</td>`;
+    }
+    function tprCell(profit, inv, bg, xs="", k="aP") {
+      if (profit===0) return `<td style="${cw(k)} ${tdBold} text-align:right; color:rgba(0,0,0,0.25); background:${bg}; ${xs}">—</td>`;
+      const color=profit>0?"#047857":"#dc2626", sign=profit>0?"+":"−";
+      const pct=inv!==0?` <span style="font-size:10px;font-weight:400">(${((profit/Math.abs(inv))*100).toFixed(1)}%)</span>`:"";
+      return `<td style="${cw(k)} ${tdBold} text-align:right; color:${color}; background:${bg}; ${xs}">${sign}${$$(Math.abs(profit))}${pct}</td>`;
+    }
+
+    // ── Header table ───────────────────────────────────────────────────────────
+    const headerTableHTML = `
+      ${tbl("fin-hdr-tbl")}
+        <thead>
+          <tr>
+            <th style="${cw("label")} background:#fff; padding:0;"></th>
+            <th style="${cw("est")}   padding:5px 4px 4px; text-align:right;  font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#f8fafc; ${shTL}"></th>
+            <th style="${cw("inv")}   padding:5px 8px 4px; text-align:center; font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#f8fafc; ${shTM}">Contract</th>
+            <th style="${cw("dA")}    padding:5px 4px 4px; text-align:left;   font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#f8fafc; ${shTR}"></th>
+            <th style="${cw("gap")}   background:#fff; padding:0;"></th>
+            <th style="${cw("ec")}    padding:5px 4px 4px; text-align:right;  font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#fff7ed; ${shTL}"></th>
+            <th style="${cw("exp")}   padding:5px 8px 4px; text-align:center; font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#fff7ed; ${shTM}">Cost</th>
+            <th style="${cw("dB")}    padding:5px 4px 4px; text-align:left;   font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#fff7ed; ${shTR}"></th>
+            <th style="${cw("gap2")}  background:#fff; padding:0;"></th>
+            <th style="${cw("aP")}    padding:5px 8px 4px; text-align:center; font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#f0fdf4; ${shTL}">Profit</th>
+            <th style="${cw("pP")}    padding:5px 4px 4px; text-align:left;   font-size:10px; font-weight:700; color:rgba(0,0,0,0.45); letter-spacing:.06em; text-transform:uppercase; background:#f0fdf4; ${shTR}"></th>
+          </tr>
+          <tr>
+            <th style="${cw("label")} padding:6px 8px; text-align:left; font-size:11px; font-weight:700; color:rgba(0,0,0,0.45); border-bottom:1px solid rgba(0,0,0,0.08); background:#fff;">Item</th>
+            <th style="${cw("est")}   padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f8fafc; ${chL}">Estimate</th>
+            <th style="${cw("inv")}   padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f8fafc;">Invoice</th>
+            <th style="${cw("dA")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f8fafc; ${chR}">Difference</th>
+            <th style="${cw("gap")}   border-bottom:1px solid rgba(0,0,0,0.08); background:#fff;"></th>
+            <th style="${cw("ec")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#fff7ed; ${chL}">Est. Cost Basis</th>
+            <th style="${cw("exp")}   padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#fff7ed;">Expense</th>
+            <th style="${cw("dB")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#fff7ed; ${chR}">Difference</th>
+            <th style="${cw("gap2")}  border-bottom:1px solid rgba(0,0,0,0.08); background:#fff;"></th>
+            <th style="${cw("aP")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f0fdf4; ${chL}">Actual Profit</th>
+            <th style="${cw("pP")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f0fdf4; ${chR}">Projected Profit</th>
+          </tr>
+        </thead>
+      </table>`;
+
+    // ── Body rows ──────────────────────────────────────────────────────────────
+    let totEst=0, totInv=0, totEc=0, totExp=0;
+
+    const bodyRowsHTML = items.map((item, i) => {
+      const est = Number((data["estimate_line"]  || {})[item] || 0);
+      const inv = Number((data["invoice_line"]   || {})[item] || 0);
+      const ec  = Number((data["estimate_cost"]  || {})[item] || 0);
+      const exp = Number((data["expense_line"]   || {})[item] || 0);
+      totEst+=est; totInv+=inv; totEc+=ec; totExp+=exp;
+
+      const diffA=inv-est, diffB=exp-ec, aP=inv-exp, pP=inv-ec;
+      const bgA = i%2 ? "#f1f5f9" : "#f8fafc";
+      const bgB = i%2 ? "#feecdb" : "#fff7ed";
+      const bgC = i%2 ? "#dcfce7" : "#f0fdf4";
+
+      return `
+        <tr style="border-bottom:1px solid rgba(0,0,0,0.05);">
+          <td style="${cw("label")} padding:6px 8px; font-size:12px; font-weight:600; color:#1a1a2e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; background:#fff;">${escapeHtml(item)}</td>
+          ${vCell(est,bgA,dL,"est")}    ${vCell(inv,bgA,"","inv")}    ${dfCell(diffA,est,bgA,dR,false,"dA")}
+          <td style="${cw("gap")} background:#fff;"></td>
+          ${vCell(ec,bgB,dL,"ec")}      ${vCell(exp,bgB,"","exp")}    ${dfCell(diffB,ec,bgB,dR,true,"dB")}
+          <td style="${cw("gap2")} background:#fff;"></td>
+          ${prCell(aP,inv,bgC,dL,"aP")}  ${prCell(pP,inv,bgC,dR,"pP")}
+        </tr>`;
+    }).join("");
+
+    const closerRow = `
+      <tr>
+        <td style="${cw("label")} background:#fff; padding-bottom:3px;"></td>
+        <td style="${cw("est")}  background:#f8fafc; padding-bottom:3px; ${bcL}"></td>
+        <td style="${cw("inv")}  background:#f8fafc; padding-bottom:3px; ${bcM}"></td>
+        <td style="${cw("dA")}   background:#f8fafc; padding-bottom:3px; ${bcR}"></td>
+        <td style="${cw("gap")}  background:#fff;"></td>
+        <td style="${cw("ec")}   background:#fff7ed; padding-bottom:3px; ${bcL}"></td>
+        <td style="${cw("exp")}  background:#fff7ed; padding-bottom:3px; ${bcM}"></td>
+        <td style="${cw("dB")}   background:#fff7ed; padding-bottom:3px; ${bcR}"></td>
+        <td style="${cw("gap2")} background:#fff;"></td>
+        <td style="${cw("aP")}   background:#f0fdf4; padding-bottom:3px; ${bcL}"></td>
+        <td style="${cw("pP")}   background:#f0fdf4; padding-bottom:3px; ${bcR}"></td>
+      </tr>`;
+
+    const bodyTableHTML = `
+      ${tbl("fin-body-tbl")}
+        <tbody>
+          ${bodyRowsHTML}
+          ${closerRow}
+        </tbody>
+      </table>`;
+
+    // ── Footer totals table ────────────────────────────────────────────────────
+    const tDA=totInv-totEst, tDB=totExp-totEc, tAP=totInv-totExp, tPP=totInv-totEc;
+
+    const footerTableHTML = `
+      ${tbl("fin-ftr-tbl")}
+        <tbody>
+          <tr>
+            <td style="${cw("label")} padding:7px 8px; font-size:12px; font-weight:700; color:#1a1a2e; background:#fff;">Total</td>
+            ${tvCell(totEst,"#e2e8f0",ttL,"est")}   ${tvCell(totInv,"#e2e8f0",ttM,"inv")}   ${tdfCell(tDA,totEst,"#e2e8f0",ttR,false,"dA")}
+            <td style="${cw("gap")} background:#fff;"></td>
+            ${tvCell(totEc,"#fed7aa",ttL,"ec")}     ${tvCell(totExp,"#fed7aa",ttM,"exp")}    ${tdfCell(tDB,totEc,"#fed7aa",ttR,true,"dB")}
+            <td style="${cw("gap2")} background:#fff;"></td>
+            ${tprCell(tAP,totInv,"#bbf7d0",ttL,"aP")}   ${tprCell(tPP,totInv,"#bbf7d0",ttR,"pP")}
+          </tr>
+        </tbody>
+      </table>`;
+
+    // ── Assemble ───────────────────────────────────────────────────────────────
+    // Outer div uses max-height:100% (not height:100%) so it is only as tall as
+    // its content when rows are few — totals snap directly under the body table.
+    // When rows overflow the modal height, the body div scrolls and totals still
+    // sit directly below the last visible row.
+    document.getElementById("finModalBody").innerHTML = `
+      <div style="display:flex; flex-direction:column; max-height:100%; overflow:hidden;">
+
+        <!-- Fixed header -->
+        <div id="fin-hdr" style="flex-shrink:0; overflow:hidden;">
+          ${headerTableHTML}
+        </div>
+
+        <!-- Scrollable body — flex:1 with min-height:0 allows it to shrink when
+             content fits, and scroll when content overflows max-height -->
+        <div id="fin-body" style="flex:1 1 auto; overflow-y:auto; overflow-x:hidden; min-height:0;">
+          ${bodyTableHTML}
+        </div>
+
+        <!-- Totals — always directly under body, 8px visual gap -->
+        <div id="fin-ftr" style="flex-shrink:0; overflow:hidden; margin-top:8px;">
+          ${footerTableHTML}
+        </div>
+
+      </div>`;
+
+    // Compensate header + footer for scrollbar width so columns stay aligned
+    requestAnimationFrame(() => {
+      const body = document.getElementById("fin-body");
+      const hdr  = document.getElementById("fin-hdr");
+      const ftr  = document.getElementById("fin-ftr");
+      if (!body || !hdr || !ftr) return;
+      function syncPad() {
+        const sb = body.offsetWidth - body.clientWidth;
+        hdr.style.paddingRight = sb > 0 ? sb + "px" : "0";
+        ftr.style.paddingRight = sb > 0 ? sb + "px" : "0";
+      }
+      syncPad();
+      new ResizeObserver(syncPad).observe(body);
+    });
+  }
+  // ── KPI card click handler ─────────────────────────────────────────────────
+  document.getElementById("kpiStrip").addEventListener("click", e => {
+    const card = e.target.closest("[data-kpi-card]");
+    if (!card) return;
+    const cardKey = card.getAttribute("data-kpi-card");
+    // Pass the currently-filtered list so the modal scopes to what's visible
+    const currentList = sorted(filtered());
+    openFinancialsModal(cardKey, currentList);
+  });
+
+  // ── Financials modal close handlers ───────────────────────────────────────
+  document.getElementById("finModalClose").addEventListener("click", closeFinModal);
+  document.getElementById("finModal").addEventListener("click", e => {
+    if (e.target.closest("[data-close-fin-modal='1']")) closeFinModal();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !document.getElementById("finModal").classList.contains("hidden")) {
+      closeFinModal();
     }
   });
 

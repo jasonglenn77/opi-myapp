@@ -353,8 +353,6 @@ def projects(user=Depends(get_current_user)):
       COALESCE(sr.estimate_line_amt, 0)              AS estimate_line_amt,
       COALESCE(sr.invoice_line_amt,  0)              AS invoice_line_amt,
       COALESCE(er.expense_line_amt,  0)              AS expense_line_amt,
-
-      -- AR balance outstanding (QBO-maintained, most accurate source)
       qc.balance_with_jobs                           AS invoice_balance_amt,
 
       -- Balance: Invoice - Expense
@@ -422,7 +420,7 @@ def projects(user=Depends(get_current_user)):
     total_estimate_line  = sum(float(p.get("estimate_line_amt") or 0) for p in projects)
     total_invoice        = sum(float(p.get("invoice_line_amt")  or 0) for p in projects)
     total_expense        = sum(float(p.get("expense_line_amt")  or 0) for p in projects)
-    total_invoice_bal    = sum(float(p.get("invoice_balance_amt") or 0) for p in projects)
+    total_invoice_bal    = sum(float(p.get("invoice_balance_amt")  or 0) for p in projects)
     total_actual_profit  = total_invoice - total_expense
     total_proj_profit    = total_invoice - total_estimate_cost
 
@@ -440,6 +438,128 @@ def projects(user=Depends(get_current_user)):
             "projected_profit_pct":  (total_proj_profit  / total_invoice) if total_invoice else None,
         },
         "projects": projects[:1000],
+    }
+
+
+class FinancialsByItemRequest(BaseModel):
+    project_qbo_ids: List[str] = []   # empty = all projects
+
+@router.post("/projects/financials/by-item")
+def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_current_user)):
+    """
+    Returns a pivot table of financial amounts broken down by item_name.
+    Rows: estimate_line, estimate_cost, invoice, expense
+    Columns: the item names found in the data (ordered by a fixed priority list)
+
+    If project_qbo_ids is provided, restricts to those projects only.
+    """
+    ITEM_ORDER = [
+        "Contract Labor",
+        "Materials",
+        "Mgmt Travel",
+        "Lodging",
+        "Buffer",
+        "Rentals",
+        "Propane",
+    ]
+
+    # Build an optional IN-filter clause
+    ids = [str(x).strip() for x in req.project_qbo_ids if x]
+    if ids:
+        # Parameterised safely
+        placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
+        id_filter_sales   = f"AND qc.qbo_id IN ({placeholders})"
+        id_filter_expense = f"AND qc.qbo_id IN ({placeholders})"
+        id_params = {f"id{i}": v for i, v in enumerate(ids)}
+    else:
+        id_filter_sales   = ""
+        id_filter_expense = ""
+        id_params = {}
+
+    sales_sql = text(f"""
+        SELECT
+            qt.entity_type,
+            COALESCE(qstl.item_name, 'Other')       AS item_name,
+            SUM(COALESCE(qstl.amount,      0))       AS line_amount,
+            SUM(COALESCE(qstl.cost_amount, 0))       AS cost_amount
+        FROM myapp.qbo_customers qc
+        INNER JOIN myapp.qbo_transactions qt
+            ON qt.customer_qbo_id = qc.qbo_id
+            AND qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
+        LEFT JOIN myapp.qbo_sales_transaction_lines qstl
+            ON qstl.transaction_id = qt.id
+            AND qstl.line_level = 'child'
+        WHERE qc.is_project = 1
+          {id_filter_sales}
+        GROUP BY qt.entity_type, COALESCE(qstl.item_name, 'Other')
+    """)
+
+    expense_sql = text(f"""
+        SELECT
+            COALESCE(item_names.item_name, 'Other') AS item_name,
+            SUM(COALESCE(qtl.amount, 0))            AS line_amount
+        FROM myapp.qbo_customers qc
+        INNER JOIN myapp.qbo_transaction_lines qtl
+            ON qtl.line_customer_qbo_id = qc.qbo_id
+        INNER JOIN myapp.qbo_transactions qt
+            ON qt.id = qtl.transaction_id
+            AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder')
+        LEFT JOIN (
+            SELECT item_qbo_id, MAX(item_name) AS item_name
+            FROM myapp.qbo_sales_transaction_lines
+            WHERE line_level = 'child'
+              AND item_qbo_id IS NOT NULL
+            GROUP BY item_qbo_id
+        ) item_names ON item_names.item_qbo_id = qtl.item_qbo_id
+        WHERE qc.is_project = 1
+          {id_filter_expense}
+        GROUP BY COALESCE(item_names.item_name, 'Other')
+    """)
+
+    with engine.connect() as conn:
+        sales_rows   = conn.execute(sales_sql,   id_params).mappings().all()
+        expense_rows = conn.execute(expense_sql, id_params).mappings().all()
+
+    # Collect all item names seen in the data, ordered by ITEM_ORDER then alphabetical
+    item_names_seen = set()
+    for r in sales_rows:
+        item_names_seen.add(r["item_name"])
+    for r in expense_rows:
+        item_names_seen.add(r["item_name"])
+
+    ordered_items = [i for i in ITEM_ORDER if i in item_names_seen]
+    other_items   = sorted(i for i in item_names_seen if i not in ITEM_ORDER)
+    all_items     = ordered_items + other_items
+
+    # Build lookup dicts
+    # estimate_line[item] = amount, estimate_cost[item] = cost_amount
+    estimate_line = {}
+    estimate_cost = {}
+    invoice_line  = {}
+
+    for r in sales_rows:
+        item = r["item_name"]
+        if r["entity_type"] == "Estimate":
+            estimate_line[item] = estimate_line.get(item, 0) + float(r["line_amount"] or 0)
+            estimate_cost[item] = estimate_cost.get(item, 0) + float(r["cost_amount"] or 0)
+        elif r["entity_type"] == "Invoice":
+            invoice_line[item]  = invoice_line.get(item, 0)  + float(r["line_amount"] or 0)
+
+    expense_line = {}
+    for r in expense_rows:
+        item = r["item_name"]
+        expense_line[item] = expense_line.get(item, 0) + float(r["line_amount"] or 0)
+
+    # Build the pivot structure the frontend expects
+    def row_data(lookup):
+        return {item: round(lookup.get(item, 0), 2) for item in all_items}
+
+    return {
+        "items":         all_items,
+        "estimate_line": row_data(estimate_line),
+        "estimate_cost": row_data(estimate_cost),
+        "invoice_line":  row_data(invoice_line),
+        "expense_line":  row_data(expense_line),
     }
 
 
