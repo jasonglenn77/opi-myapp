@@ -105,6 +105,7 @@ export async function projectsPage(routeFn) {
     const inv = list.reduce((s, r) => s + Number(r.invoice_line_amt     || 0), 0);
     const exp = list.reduce((s, r) => s + Number(r.expense_line_amt     || 0), 0);
     const bal = list.reduce((s, r) => s + Number(r.invoice_balance_amt  || 0), 0);
+    const openInv = list.reduce((s, r) => s + Number(r.open_invoice_count  || 0), 0);
     const ap  = inv - exp;
     const apP = inv !== 0 ? ap / inv : null;
     const pp  = inv - ec;
@@ -152,6 +153,7 @@ export async function projectsPage(routeFn) {
             <div class="text-right">
               <div class="${sub}">AR Balance</div>
               <div class="text-sm font-bold ${bal > 0 ? "text-amber-600" : "text-black/50"}">${$$(bal)}</div>
+              ${openInv > 0 ? `<div class="${sub} mt-0.5">${openInv} open invoice${openInv === 1 ? "" : "s"}</div>` : ""}
             </div>
           </div>
         </div>
@@ -461,8 +463,33 @@ export async function projectsPage(routeFn) {
             </div>
           </div>
 
-        </div>
+</div>
       </div>
+    </div>
+
+    <!-- AR Balance drill-down modal — sibling of finModal, not nested inside it -->
+    <div id="arModal" class="fixed inset-0 z-[60] hidden">
+      <div class="absolute inset-0" id="arModalBackdrop"></div>
+      <div id="arModalPanel"
+        class="absolute bg-white rounded-2xl shadow-2xl border border-black/10 flex flex-col text-ink-900"
+        style="width:680px; max-width:calc(100vw - 32px);">
+
+        <!-- AR modal header -->
+        <div class="shrink-0 flex items-center justify-between px-5 py-3 border-b border-black/10">
+          <div>
+            <div class="text-sm font-extrabold">Open AR Invoices</div>
+            <div id="arModalSubtitle" class="text-xs text-black/40 mt-0.5"></div>
+          </div>
+          <button type="button" id="arModalClose"
+            class="inline-flex items-center rounded-xl border border-black/10 px-3 py-1.5 text-xs text-black/60 font-semibold hover:bg-black/5">
+            Close
+          </button>
+        </div>
+
+        <!-- AR modal body — is itself the scroll container so sticky thead works correctly -->
+        <div id="arModalBody" class="flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24">
+          Loading…
+        </div>      </div>
     </div>
 
     <!-- File modal -->
@@ -562,10 +589,10 @@ export async function projectsPage(routeFn) {
         ${th("all_work_crews",       "Crew")}
         ${th("all_start_dates",      "Start")}
         ${th("all_end_dates",        "End")}
-        ${th("estimate_cost_amt",    "Est.Cost",    true)}
         ${th("estimate_line_amt",    "Est.Amt",     true)}
         ${th("invoice_line_amt",     "Invoice",     true)}
         ${th("invoice_balance_amt",  "AR Bal.",      true)}
+        ${th("estimate_cost_amt",    "Est.Cost",    true)}
         ${th("expense_line_amt",     "Expense",     true)}
         ${th("actual_profit",        "Act.Profit",  true)}
         ${th("actual_profit_pct",    "Act.%",       true)}
@@ -579,7 +606,6 @@ export async function projectsPage(routeFn) {
     document.getElementById("rowCount").textContent =
       `Showing ${list.length} project${list.length === 1 ? "" : "s"}`;
 
-    // FIX #4: text-xs on table, py-1.5 px-2 on all tds
     document.getElementById("projectsBody").innerHTML =
       list.map(r => `
         <tr class="border-b border-black/5 hover:bg-black/[0.015] transition-colors">
@@ -611,10 +637,10 @@ export async function projectsPage(routeFn) {
           <td class="py-1.5 px-2 text-xs whitespace-nowrap">${escapeHtml(r.all_start_dates || "—")}</td>
           <td class="py-1.5 px-2 text-xs whitespace-nowrap">${escapeHtml(r.all_end_dates   || "—")}</td>
 
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.estimate_cost_amt)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums text-black/60">${fmtAmt(r.estimate_line_amt)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold">${fmtAmt(r.invoice_line_amt)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${Number(r.invoice_balance_amt||0) > 0 ? "text-amber-600 font-semibold" : "text-black/40"}">${fmtAmt(r.invoice_balance_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.estimate_cost_amt)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.expense_line_amt)}</td>
 
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.actual_profit)}">${fmtSigned(r.actual_profit)}</td>
@@ -1016,6 +1042,9 @@ async function openFinancialsModal(cardKey, filteredList) {
     const scopeLabel = isFiltered
       ? `${filteredList.length} of ${rows.length} projects (filtered)`
       : `All ${rows.length} projects`;
+    // AR summary — computed from the already-loaded filteredList rows
+    const arBalance    = filteredList.reduce((s, r) => s + Number(r.invoice_balance_amt || 0), 0);
+    const arOpenCount  = filteredList.reduce((s, r) => s + Number(r.open_invoice_count  || 0), 0);
 
     // ── Build active-filter chip summary ───────────────────────────────────────
     const FILTER_LABELS = {
@@ -1091,15 +1120,43 @@ async function openFinancialsModal(cardKey, filteredList) {
     document.getElementById("finModalTitle").textContent    = "Financial Breakdown by Item Type";
     document.getElementById("finModalSubtitle").textContent = scopeLabel;
 
-    // Inject filter chips directly after the subtitle (clear any previous chips first)
-    const existingChips = document.getElementById("finModalFilterChips");
-    if (existingChips) existingChips.remove();
+    // Clear any previous injected elements
+    document.getElementById("finModalFilterChips")?.remove();
+    document.getElementById("finModalArSummary")?.remove();
+
     const subtitleEl = document.getElementById("finModalSubtitle");
-    if (subtitleEl && isFiltered) {
+
+    // Filter chips — injected directly after the subtitle
+    if (isFiltered) {
       const chipsDiv = document.createElement("div");
       chipsDiv.id = "finModalFilterChips";
       chipsDiv.innerHTML = activeFilterChips();
       subtitleEl.insertAdjacentElement("afterend", chipsDiv);
+    }
+
+    // AR summary pill — clickable button that opens the AR drill-down modal
+    if (arBalance > 0) {
+      const arDiv = document.createElement("div");
+      arDiv.id = "finModalArSummary";
+      arDiv.innerHTML = `
+        <button id="finModalArBtn" type="button"
+          style="display:inline-flex;align-items:center;gap:10px;margin-top:5px;padding:3px 10px;background:#fffbeb;border:1px solid #fcd34d;border-radius:999px;cursor:pointer;transition:opacity 0.15s;"
+          onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'">
+          <span style="font-size:11px;font-weight:600;color:#92400e;">AR Balance</span>
+          <span style="font-size:12px;font-weight:700;color:#b45309;">${$$(arBalance)}</span>
+          ${arOpenCount > 0
+            ? `<span style="font-size:11px;color:#a16207;border-left:1px solid #fcd34d;padding-left:10px;">${arOpenCount} open invoice${arOpenCount === 1 ? "" : "s"}</span>`
+            : ""}
+          <span style="font-size:10px;color:#a16207;opacity:0.6;">↗</span>
+        </button>`;
+      const anchorEl = document.getElementById("finModalFilterChips") || subtitleEl;
+      anchorEl.insertAdjacentElement("afterend", arDiv);
+
+      // Attach click handler after the element is in the DOM
+      document.getElementById("finModalArBtn").addEventListener("click", e => {
+        const qboIds = filteredList.map(r => r.project_qbo_id).filter(Boolean);
+        openArModal(e.currentTarget, qboIds);
+      });
     }
 
     document.getElementById("finModalBody").innerHTML =
@@ -1376,6 +1433,211 @@ async function openFinancialsModal(cardKey, filteredList) {
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && !document.getElementById("finModal").classList.contains("hidden")) {
       closeFinModal();
+    }
+  });
+
+  // ── AR Balance modal ────────────────────────────────────────────────────────
+
+  let _arResizeObserver = null; // stored here so closeArModal can disconnect it
+
+  function closeArModal() {
+    document.getElementById("arModal").classList.add("hidden");
+    if (_arResizeObserver) { _arResizeObserver.disconnect(); _arResizeObserver = null; }
+  }
+
+async function openArModal(triggerEl, qboIds = []) {
+    const modal = document.getElementById("arModal");
+    const panel = document.getElementById("arModalPanel");
+    const body  = document.getElementById("arModalBody");
+    const sub   = document.getElementById("arModalSubtitle");
+
+    // Sort state — default by due_date ascending
+    let arSortKey = "due_date";
+    let arSortDir = "asc";
+
+    // Disconnect any previous resize observer before setting up a new one
+    if (_arResizeObserver) { _arResizeObserver.disconnect(); _arResizeObserver = null; }
+
+    // Compute and apply panel position + maxHeight.
+    // No fixed height — panel sizes to content, capped by maxHeight.
+    function positionPanel() {
+      if (!triggerEl) return;
+      const rect      = triggerEl.getBoundingClientRect();
+      const panelTop  = rect.bottom + 8;
+      const finInner  = document.querySelector("#finModal .rounded-3xl");
+      const finBottom = finInner ? finInner.getBoundingClientRect().bottom - 40 : window.innerHeight - 56;
+      const maxH      = Math.max(120, finBottom - panelTop);
+
+      panel.style.top       = `${panelTop}px`;
+      panel.style.left      = `${rect.left}px`;
+      panel.style.width     = "780px";
+      panel.style.height    = "";           // no fixed height — sizes to content
+      panel.style.maxHeight = `${maxH}px`;
+      panel.style.transform = "";
+    }
+
+    positionPanel();
+
+    // Watch finModal for size changes and reposition the AR panel accordingly
+    const finInner = document.querySelector("#finModal .rounded-3xl");
+    if (finInner) {
+      _arResizeObserver = new ResizeObserver(() => positionPanel());
+      _arResizeObserver.observe(finInner);
+    }
+
+    body.className = "flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24";
+    body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">Loading…</div>`;
+    modal.classList.remove("hidden");
+
+    let data;
+    try {
+      // POST with qboIds so the endpoint only returns invoices for filtered projects
+      data = await api("/projects/ar-balance", {
+        method: "POST",
+        body:   JSON.stringify({ project_qbo_ids: qboIds }),
+      });
+    } catch (err) {
+      body.innerHTML = `<div class="p-4 text-red-500 text-xs">${escapeHtml(String(err.message))}</div>`;
+      return;
+    }
+
+    const invoices = data.invoices || [];
+    const today    = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const totalBal = invoices.reduce((s, r) => s + Number(r.balance_amt || 0), 0);
+    sub.textContent = `${invoices.length} open invoice${invoices.length === 1 ? "" : "s"} · ${$$(totalBal)} outstanding`;
+
+    if (!invoices.length) {
+      body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">No open invoices.</div>`;
+      return;
+    }
+
+    function daysOverdue(dueDateStr) {
+      if (!dueDateStr) return null;
+      const due = new Date(dueDateStr);
+      due.setHours(0, 0, 0, 0);
+      return Math.floor((today - due) / 86400000);
+    }
+
+    function fmtDate(d) {
+      if (!d) return "—";
+      const [y, m, day] = d.split("-");
+      return new Date(+y, +m - 1, +day).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    }
+
+    // Enrich each invoice with computed days value for sorting
+    const enriched = invoices.map(r => ({
+      ...r,
+      _days: daysOverdue(r.due_date),
+    }));
+
+    function renderArTable() {
+      // Reset body to plain scroll container before rendering table
+      body.className = "flex-1 min-h-0 overflow-y-auto";
+
+      // Sort
+      const sorted = [...enriched].sort((a, b) => {
+        let av, bv;
+        if (arSortKey === "project_name") {
+          av = (a.project_name || "").toLowerCase();
+          bv = (b.project_name || "").toLowerCase();
+        } else if (arSortKey === "txn_date") {
+          av = a.txn_date || "";
+          bv = b.txn_date || "";
+        } else if (arSortKey === "due_date") {
+          av = a.due_date || "";
+          bv = b.due_date || "";
+        } else if (arSortKey === "balance_amt") {
+          av = Number(a.balance_amt || 0);
+          bv = Number(b.balance_amt || 0);
+        } else if (arSortKey === "sales_term_name") {
+          av = (a.sales_term_name || "").toLowerCase();
+          bv = (b.sales_term_name || "").toLowerCase();
+        } else if (arSortKey === "_days") {
+          av = a._days ?? -Infinity;
+          bv = b._days ?? -Infinity;
+        }
+        if (av < bv) return arSortDir === "asc" ? -1 : 1;
+        if (av > bv) return arSortDir === "asc" ? 1 : -1;
+        return 0;
+      });
+
+      const rows = sorted.map((r, i) => {
+        const days     = r._days;
+        const overdue  = days !== null && days > 0;
+        const dueToday = days === 0;
+        const rowBg    = i % 2 ? "background:#fafafa;" : "";
+
+        let overdueCell;
+        if (days === null) {
+          overdueCell = `<td class="py-2 px-3 text-right text-black/30 whitespace-nowrap">—</td>`;
+        } else if (overdue) {
+          overdueCell = `<td class="py-2 px-3 text-right font-semibold whitespace-nowrap" style="color:#dc2626;">${days}d overdue</td>`;
+        } else if (dueToday) {
+          overdueCell = `<td class="py-2 px-3 text-right font-semibold whitespace-nowrap" style="color:#d97706;">Due today</td>`;
+        } else {
+          overdueCell = `<td class="py-2 px-3 text-right whitespace-nowrap" style="color:#059669;">Due in ${Math.abs(days)}d</td>`;
+        }
+
+        return `
+          <tr style="border-bottom:1px solid rgba(0,0,0,0.05); ${rowBg}">
+            <td class="py-2 px-3 font-semibold text-ink-900 whitespace-nowrap"
+                style="max-width:220px;overflow:hidden;text-overflow:ellipsis;"
+                title="${escapeHtml(r.project_name || "")}">${escapeHtml(r.project_name || "—")}</td>
+            <td class="py-2 px-3 text-right text-black/50 whitespace-nowrap">${fmtDate(r.txn_date)}</td>
+            <td class="py-2 px-3 text-right text-black/50 whitespace-nowrap">${fmtDate(r.due_date)}</td>
+            <td class="py-2 px-3 text-right tabular-nums font-semibold whitespace-nowrap" style="color:#b45309;">${$$(Number(r.balance_amt || 0))}</td>
+            <td class="py-2 px-3 text-right text-black/40 whitespace-nowrap">${escapeHtml(r.sales_term_name || "—")}</td>
+            ${overdueCell}
+          </tr>`;
+      }).join("");
+
+      function thStyle(key, align = "right") {
+        const active = arSortKey === key;
+        const arrow  = active ? (arSortDir === "asc" ? " ▲" : " ▼") : "";
+        return `<th class="py-2 px-3 text-${align} text-[10px] font-bold uppercase tracking-wide whitespace-nowrap cursor-pointer select-none ${active ? "text-black/70" : "text-black/40"} hover:text-black/60"
+                    data-ar-sort="${key}">${key === "project_name" ? "Project" : key === "txn_date" ? "Invoice Sent" : key === "due_date" ? "Due Date" : key === "balance_amt" ? "Balance" : key === "sales_term_name" ? "Sales Term" : "Days Overdue"}${arrow}</th>`;
+      }
+
+      body.innerHTML = `
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+          <thead style="position:sticky; top:0; z-index:1; background:#f8fafc;">
+            <tr style="border-bottom:2px solid rgba(0,0,0,0.08);">
+              ${thStyle("project_name",    "left")}
+              ${thStyle("txn_date",        "right")}
+              ${thStyle("due_date",        "right")}
+              ${thStyle("balance_amt",     "right")}
+              ${thStyle("sales_term_name", "right")}
+              ${thStyle("_days",           "right")}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+
+      // Attach sort click handlers after innerHTML is set
+      body.querySelectorAll("[data-ar-sort]").forEach(th => {
+        th.addEventListener("click", () => {
+          const key = th.getAttribute("data-ar-sort");
+          if (arSortKey === key) {
+            arSortDir = arSortDir === "asc" ? "desc" : "asc";
+          } else {
+            arSortKey = key;
+            arSortDir = "asc";
+          }
+          renderArTable();
+        });
+      });
+    }
+
+    renderArTable();
+  }
+
+  document.getElementById("arModalClose").addEventListener("click", closeArModal);
+  document.getElementById("arModalBackdrop").addEventListener("click", closeArModal);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !document.getElementById("arModal").classList.contains("hidden")) {
+      closeArModal();
     }
   });
 

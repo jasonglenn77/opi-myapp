@@ -208,6 +208,22 @@ def projects(user=Depends(get_current_user)):
         AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder')
       WHERE qc.is_project = 1
     ),
+               
+    -- ----------------------------------------------------------------
+    -- AR lines: one row per Invoice transaction per project
+    -- Captures balance, due date, and sales term at invoice level
+    -- ----------------------------------------------------------------
+    ar_lines AS (
+      SELECT
+        qc.qbo_id                AS project_qbo_id,
+        qt.id                    AS transaction_id,
+        qt.balance_amt
+      FROM myapp.qbo_customers qc
+      INNER JOIN myapp.qbo_transactions qt
+        ON qt.customer_qbo_id = qc.qbo_id
+        AND qt.entity_type = 'Invoice'
+      WHERE qc.is_project = 1
+    ),
 
     -- ----------------------------------------------------------------
     -- Roll up sales lines per project
@@ -232,7 +248,19 @@ def projects(user=Depends(get_current_user)):
       FROM expense_lines
       GROUP BY project_qbo_id
     ),
-
+                  
+    -- ----------------------------------------------------------------
+    -- Roll up AR lines per project
+    -- ----------------------------------------------------------------
+    ar_rollup AS (
+      SELECT
+        project_qbo_id,
+        SUM(COALESCE(balance_amt, 0))                              AS invoice_balance_amt,
+        SUM(CASE WHEN balance_amt > 0 THEN 1 ELSE 0 END)          AS open_invoice_count
+      FROM ar_lines
+      GROUP BY project_qbo_id
+    ),
+               
     -- ----------------------------------------------------------------
     -- Assignment meta: concatenate all schedule items per project
     -- Mirrors the pattern used in /assignment/table
@@ -322,7 +350,6 @@ def projects(user=Depends(get_current_user)):
       qc.id                                          AS qbo_customer_id,
       qc.qbo_id                                      AS project_qbo_id,
       qc.display_name                                AS project_name,
-      qc.balance_with_jobs                           AS project_balance,
       qc.meta_create_time                            AS project_create_dttm,
       qc.meta_last_updated_time                      AS project_lastupdate_dttm,
 
@@ -353,7 +380,8 @@ def projects(user=Depends(get_current_user)):
       COALESCE(sr.estimate_line_amt, 0)              AS estimate_line_amt,
       COALESCE(sr.invoice_line_amt,  0)              AS invoice_line_amt,
       COALESCE(er.expense_line_amt,  0)              AS expense_line_amt,
-      qc.balance_with_jobs                           AS invoice_balance_amt,
+      COALESCE(ar.invoice_balance_amt, 0)            AS invoice_balance_amt,
+      COALESCE(ar.open_invoice_count, 0)             AS open_invoice_count,
 
       -- Balance: Invoice - Expense
       (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0))
@@ -398,6 +426,9 @@ def projects(user=Depends(get_current_user)):
     LEFT JOIN expense_rollup er
       ON er.project_qbo_id = qc.qbo_id
 
+    LEFT JOIN ar_rollup ar
+      ON ar.project_qbo_id = qc.qbo_id
+
     LEFT JOIN (
       SELECT qbo_customer_id, COUNT(*) AS file_count
       FROM myapp.project_files
@@ -421,6 +452,7 @@ def projects(user=Depends(get_current_user)):
     total_invoice        = sum(float(p.get("invoice_line_amt")  or 0) for p in projects)
     total_expense        = sum(float(p.get("expense_line_amt")  or 0) for p in projects)
     total_invoice_bal    = sum(float(p.get("invoice_balance_amt")  or 0) for p in projects)
+    total_open_invoices  = sum(int(p.get("open_invoice_count") or 0) for p in projects)
     total_actual_profit  = total_invoice - total_expense
     total_proj_profit    = total_invoice - total_estimate_cost
 
@@ -432,6 +464,7 @@ def projects(user=Depends(get_current_user)):
             "total_invoice":         total_invoice,
             "total_invoice_bal":     total_invoice_bal,
             "total_expense":         total_expense,
+            "total_open_invoices":   total_open_invoices,
             "total_actual_profit":   total_actual_profit,
             "actual_profit_pct":     (total_actual_profit / total_invoice) if total_invoice else None,
             "total_proj_profit":     total_proj_profit,
@@ -440,6 +473,44 @@ def projects(user=Depends(get_current_user)):
         "projects": projects[:1000],
     }
 
+class ArBalanceRequest(BaseModel):
+    project_qbo_ids: List[str] = []
+
+@router.post("/projects/ar-balance")
+def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
+    """
+    Returns open Invoice transactions for the given projects.
+    If project_qbo_ids is empty, returns all projects.
+    """
+    sql = text("""
+        SELECT
+            qc.qbo_id          AS project_qbo_id,
+            qc.display_name    AS project_name,
+            qt.balance_amt,
+            qt.txn_date,
+            qt.due_date,
+            qt.sales_term_name
+        FROM myapp.qbo_transactions qt
+        JOIN myapp.qbo_customers qc
+            ON qt.customer_qbo_id = qc.qbo_id
+        WHERE qc.is_project = 1
+          AND qt.entity_type = 'Invoice'
+          AND qt.balance_amt > 0
+          AND (
+            :no_filter = 1
+            OR qc.qbo_id IN :qbo_ids
+          )
+        ORDER BY qt.due_date, qt.balance_amt DESC, qc.display_name
+    """)
+
+    qbo_ids = req.project_qbo_ids
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {
+            "no_filter": 1 if not qbo_ids else 0,
+            "qbo_ids":   tuple(qbo_ids) if qbo_ids else ("",),
+        }).mappings().all()
+
+    return {"invoices": [dict(r) for r in rows]}
 
 class FinancialsByItemRequest(BaseModel):
     project_qbo_ids: List[str] = []   # empty = all projects
