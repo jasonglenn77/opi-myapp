@@ -594,10 +594,10 @@ export async function projectsPage(routeFn) {
         ${th("invoice_balance_amt",  "AR Bal.",      true)}
         ${th("estimate_cost_amt",    "Est.Cost",    true)}
         ${th("expense_line_amt",     "Expense",     true)}
-        ${th("actual_profit",        "Act.Profit",  true)}
-        ${th("actual_profit_pct",    "Act.%",       true)}
         ${th("projected_profit",     "Proj.Profit", true)}
         ${th("projected_profit_pct", "Proj.%",      true)}
+        ${th("actual_profit",        "Act.Profit",  true)}
+        ${th("actual_profit_pct",    "Act.%",       true)}
         <th class="py-1.5 px-2 text-left align-middle font-bold text-xs whitespace-nowrap">Files</th>
       </tr>`;
   }
@@ -643,10 +643,10 @@ export async function projectsPage(routeFn) {
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.estimate_cost_amt)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.expense_line_amt)}</td>
 
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.actual_profit)}">${fmtSigned(r.actual_profit)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.actual_profit_pct)}">${fmtPctSigned(r.actual_profit_pct)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.projected_profit)}">${fmtSigned(r.projected_profit)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.projected_profit_pct)}">${fmtPctSigned(r.projected_profit_pct)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.actual_profit)}">${fmtSigned(r.actual_profit)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.actual_profit_pct)}">${fmtPctSigned(r.actual_profit_pct)}</td>
 
           <td class="py-1.5 px-2 text-xs whitespace-nowrap">
             <div class="flex items-center gap-1.5">
@@ -1302,8 +1302,8 @@ async function openFinancialsModal(cardKey, filteredList) {
             <th style="${cw("exp")}   padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#fff7ed;">Expense</th>
             <th style="${cw("dB")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#fff7ed; ${chR}">Difference</th>
             <th style="${cw("gap2")}  border-bottom:1px solid rgba(0,0,0,0.08); background:#fff;"></th>
-            <th style="${cw("aP")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f0fdf4; ${chL}">Actual Profit</th>
-            <th style="${cw("pP")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f0fdf4; ${chR}">Projected Profit</th>
+            <th style="${cw("aP")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f0fdf4; ${chL}">Projected Profit</th>
+            <th style="${cw("pP")}    padding:6px 8px; text-align:right; font-size:11px; font-weight:700; color:rgba(0,0,0,0.55); border-bottom:1px solid rgba(0,0,0,0.08); background:#f0fdf4; ${chR}">Actual Profit</th>
           </tr>
         </thead>
       </table>`;
@@ -1330,7 +1330,7 @@ async function openFinancialsModal(cardKey, filteredList) {
           <td style="${cw("gap")} background:#fff;"></td>
           ${vCell(ec,bgB,dL,"ec")}      ${vCell(exp,bgB,"","exp")}    ${dfCell(diffB,ec,bgB,dR,true,"dB")}
           <td style="${cw("gap2")} background:#fff;"></td>
-          ${prCell(aP,inv,bgC,dL,"aP")}  ${prCell(pP,inv,bgC,dR,"pP")}
+          ${prCell(pP,inv,bgC,dL,"aP")}  ${prCell(aP,inv,bgC,dR,"pP")}
         </tr>`;
     }).join("");
 
@@ -1369,7 +1369,7 @@ async function openFinancialsModal(cardKey, filteredList) {
             <td style="${cw("gap")} background:#fff;"></td>
             ${tvCell(totEc,"#fed7aa",ttL,"ec")}     ${tvCell(totExp,"#fed7aa",ttM,"exp")}    ${tdfCell(tDB,totEc,"#fed7aa",ttR,true,"dB")}
             <td style="${cw("gap2")} background:#fff;"></td>
-            ${tprCell(tAP,totInv,"#bbf7d0",ttL,"aP")}   ${tprCell(tPP,totInv,"#bbf7d0",ttR,"pP")}
+            ${tprCell(tPP,totInv,"#bbf7d0",ttL,"aP")}   ${tprCell(tAP,totInv,"#bbf7d0",ttR,"pP")}
           </tr>
         </tbody>
       </table>`;
