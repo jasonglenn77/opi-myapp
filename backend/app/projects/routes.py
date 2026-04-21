@@ -399,14 +399,14 @@ def projects(user=Depends(get_current_user)):
       END                                            AS actual_profit_pct,
 
       -- Projected profit: Invoice - Estimate cost
-      (COALESCE(sr.invoice_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
+      (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
                                                      AS projected_profit,
 
       -- Projected profit %: projected_profit / invoice (NULL if no invoice)
       CASE
-        WHEN COALESCE(sr.invoice_line_amt, 0) = 0 THEN NULL
-        ELSE (COALESCE(sr.invoice_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
-             / COALESCE(sr.invoice_line_amt, 0)
+        WHEN COALESCE(sr.estimate_line_amt, 0) = 0 THEN NULL
+        ELSE (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
+             / COALESCE(sr.estimate_line_amt, 0)
       END                                            AS projected_profit_pct
 
     FROM myapp.qbo_customers qc
@@ -454,7 +454,7 @@ def projects(user=Depends(get_current_user)):
     total_invoice_bal    = sum(float(p.get("invoice_balance_amt")  or 0) for p in projects)
     total_open_invoices  = sum(int(p.get("open_invoice_count") or 0) for p in projects)
     total_actual_profit  = total_invoice - total_expense
-    total_proj_profit    = total_invoice - total_estimate_cost
+    total_proj_profit    = total_estimate_line - total_estimate_cost
 
     return {
         "summary": {
@@ -468,7 +468,7 @@ def projects(user=Depends(get_current_user)):
             "total_actual_profit":   total_actual_profit,
             "actual_profit_pct":     (total_actual_profit / total_invoice) if total_invoice else None,
             "total_proj_profit":     total_proj_profit,
-            "projected_profit_pct":  (total_proj_profit  / total_invoice) if total_invoice else None,
+            "projected_profit_pct":  (total_proj_profit  / total_estimate_line) if total_estimate_line else None,
         },
         "projects": projects[:1000],
     }

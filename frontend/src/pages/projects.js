@@ -1318,7 +1318,7 @@ async function openFinancialsModal(cardKey, filteredList) {
       const exp = Number((data["expense_line"]   || {})[item] || 0);
       totEst+=est; totInv+=inv; totEc+=ec; totExp+=exp;
 
-      const diffA=inv-est, diffB=exp-ec, aP=inv-exp, pP=inv-ec;
+      const diffA=inv-est, diffB=exp-ec, aP=inv-exp, pP=est-ec;
       const bgA = i%2 ? "#f1f5f9" : "#f8fafc";
       const bgB = i%2 ? "#feecdb" : "#fff7ed";
       const bgC = i%2 ? "#dcfce7" : "#f0fdf4";
@@ -1330,7 +1330,7 @@ async function openFinancialsModal(cardKey, filteredList) {
           <td style="${cw("gap")} background:#fff;"></td>
           ${vCell(ec,bgB,dL,"ec")}      ${vCell(exp,bgB,"","exp")}    ${dfCell(diffB,ec,bgB,dR,true,"dB")}
           <td style="${cw("gap2")} background:#fff;"></td>
-          ${prCell(pP,inv,bgC,dL,"aP")}  ${prCell(aP,inv,bgC,dR,"pP")}
+          ${prCell(pP,est,bgC,dL,"aP")}  ${prCell(aP,inv,bgC,dR,"pP")}
         </tr>`;
     }).join("");
 
