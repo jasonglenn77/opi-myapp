@@ -74,20 +74,57 @@ def _parse_qbo_dt(s: Any) -> Optional[datetime]:
 
 
 def _qbo_query(realm_id: str, access_token: str, query: str) -> dict:
+    """
+    Execute a QBO SELECT query with robust retry.
+
+    Strategy: on 429 (rate limit) or 5xx (transient server error), back off
+    exponentially and retry up to 5 times. We would rather sleep than drop
+    a page of records and silently desync the database.
+
+    On persistent failure we raise — this causes the sync run to be logged
+    as failed, which means `_get_last_successful_sync_time` does NOT advance
+    the watermark, so the next run retries the same window.
+    """
     url = f"{QBO_API_BASE}/v3/company/{realm_id}/query"
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
 
-    with httpx.Client(timeout=60) as client:
-        for attempt in (1, 2):
-            r = client.get(url, headers=headers, params={"query": query})
+    max_attempts = 5
+    last_err: Optional[Exception] = None
 
-            if r.status_code == 429 and attempt == 1:
-                # QBO rate limit hit — brief backoff
-                time.sleep(2)
+    with httpx.Client(timeout=60) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = client.get(url, headers=headers, params={"query": query})
+            except httpx.HTTPError as e:
+                last_err = e
+                # Network-level error: back off and retry
+                if attempt < max_attempts:
+                    time.sleep(min(60, 2 ** attempt))
+                    continue
+                raise
+
+            # Rate limited — QBO asks for up to a 60s cool-down
+            if r.status_code == 429 and attempt < max_attempts:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait_s = float(retry_after) if retry_after else min(60, 2 ** attempt + 5)
+                except ValueError:
+                    wait_s = min(60, 2 ** attempt + 5)
+                time.sleep(wait_s)
+                continue
+
+            # Transient server error — back off and retry
+            if 500 <= r.status_code < 600 and attempt < max_attempts:
+                time.sleep(min(60, 2 ** attempt))
                 continue
 
             r.raise_for_status()
             return r.json()
+
+    # Should be unreachable, but fail loudly rather than return empty
+    if last_err:
+        raise last_err
+    raise RuntimeError(f"QBO query failed after {max_attempts} attempts: {query}")
 
 
 def _get_last_successful_sync_time(sync_type: str) -> Optional[datetime]:
@@ -105,8 +142,12 @@ def _get_last_successful_sync_time(sync_type: str) -> Optional[datetime]:
     return row["finished_at"] if row else None
 
 def _fmt_qbo_dt(dt: datetime) -> str:
-    # QBO query language compares ISO-like strings
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    # CRITICAL: QBO interprets naive datetimes in the *company's local timezone*.
+    # Our watermark (`finished_at`) is stored as UTC (via UTC_TIMESTAMP()), so we
+    # MUST send an explicit offset or QBO will compare UTC-to-local and skip
+    # records within the timezone gap on every incremental sync.
+    # Appending "-00:00" tells QBO "this is UTC, convert as needed".
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + "-00:00"
 
 
 def qbo_init_tables() -> None:
@@ -536,8 +577,13 @@ def fetch_entities_incremental(
     if since:
         where = f" WHERE MetaData.LastUpdatedTime > '{_fmt_qbo_dt(since)}'"
 
+    # CRITICAL: QBO does NOT guarantee a stable order across paginated calls
+    # unless ORDER BY is specified. Without this, records can be skipped or
+    # duplicated when the dataset changes during pagination.
+    order_by = " ORDERBY MetaData.LastUpdatedTime"
+
     while True:
-        q = f"SELECT * FROM {entity}{where} STARTPOSITION {start} MAXRESULTS {int(page_size)}"
+        q = f"SELECT * FROM {entity}{where}{order_by} STARTPOSITION {start} MAXRESULTS {int(page_size)}"
         data = _qbo_query(realm_id, access_token, q)
         rows = data.get("QueryResponse", {}).get(entity, []) or []
         all_rows.extend(rows)
@@ -818,234 +864,295 @@ def upsert_transactions_and_lines(realm_id: str, entity: str, txns: list[dict]) 
     upserted_txns = 0
     upserted_lines = 0
     upserted_sales_lines = 0
+    failed_txns: list[dict] = []
 
-    with engine.begin() as conn:
-        for t in txns:
-            qbo_id = str(t.get("Id") or "")
-            if not qbo_id:
+    # IMPORTANT: commit per-transaction (not per-batch). If one malformed
+    # record throws, we isolate it rather than rolling back every other
+    # transaction in the page. Each `engine.begin()` = one atomic commit
+    # covering the header, sales lines, and expense lines for one record.
+    for t in txns:
+        qbo_id = str(t.get("Id") or "")
+        if not qbo_id:
+            continue
+
+        try:
+            with engine.begin() as conn:
+                _upsert_one_transaction_and_lines_inner(
+                    conn, realm_id, entity, t,
+                    counters := {"txn": 0, "line": 0, "sales_line": 0},
+                )
+            upserted_txns += counters["txn"]
+            upserted_lines += counters["line"]
+            upserted_sales_lines += counters["sales_line"]
+        except Exception as e:
+            # Log and continue — one bad record must never block the rest.
+            # Surface through the run log so ops can triage.
+            failed_txns.append({
+                "entity": entity,
+                "qbo_id": qbo_id,
+                "error": str(e)[:500],
+            })
+            continue
+
+    if failed_txns:
+        # Record failures in a side table for visibility. Creating lazily
+        # so existing deployments don't need a migration step.
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS qbo_sync_errors (
+                      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                      occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      entity_type VARCHAR(40) NOT NULL,
+                      qbo_id VARCHAR(32) NOT NULL,
+                      error_message VARCHAR(1000) NOT NULL,
+                      INDEX idx_err_entity (entity_type, qbo_id)
+                    ) ENGINE=InnoDB
+                """))
+                for f in failed_txns:
+                    conn.execute(text("""
+                        INSERT INTO qbo_sync_errors (entity_type, qbo_id, error_message)
+                        VALUES (:entity_type, :qbo_id, :error_message)
+                    """), {
+                        "entity_type": f["entity"],
+                        "qbo_id": f["qbo_id"],
+                        "error_message": f["error"],
+                    })
+        except Exception:
+            # If even the error logger fails, do not mask the original issue.
+            pass
+
+    return upserted_txns, upserted_lines, upserted_sales_lines
+
+
+def _upsert_one_transaction_and_lines_inner(
+    conn,
+    realm_id: str,
+    entity: str,
+    t: dict,
+    counters: dict,
+) -> None:
+    """Header + lines upsert for a single QBO transaction, all inside one txn."""
+    qbo_id = str(t.get("Id") or "")
+    if not qbo_id:
+        return
+
+    # Header CustomerRef (may be absent for some types)
+    customer_qbo_id = None
+    cref = t.get("CustomerRef") or {}
+    if isinstance(cref, dict) and cref.get("value"):
+        customer_qbo_id = str(cref["value"])
+
+    # Header VendorRef
+    vendor_qbo_id = None
+    vref = t.get("VendorRef") or {}
+    if isinstance(vref, dict) and vref.get("value"):
+        vendor_qbo_id = str(vref["value"])
+
+    txn_date = t.get("TxnDate")
+    doc_number = t.get("DocNumber")
+
+    # DueDate + SalesTermRef.name
+    due_date = t.get("DueDate")
+    sales_term_name = None
+    st = t.get("SalesTermRef") or {}
+    if isinstance(st, dict):
+        sales_term_name = st.get("name")
+
+    currency_code = None
+    cur = t.get("CurrencyRef") or {}
+    if isinstance(cur, dict):
+        currency_code = cur.get("value")
+
+    total_amt = _parse_decimal(t.get("TotalAmt"))
+    balance_amt = _parse_decimal(t.get("Balance"))
+    sync_token = t.get("SyncToken")
+
+    md = t.get("MetaData") or {}
+    meta_create_time = _parse_qbo_dt(md.get("CreateTime")) if isinstance(md, dict) else None
+    meta_last_updated_time = _parse_qbo_dt(md.get("LastUpdatedTime")) if isinstance(md, dict) else None
+
+    res = conn.execute(text("""
+        INSERT INTO qbo_transactions (
+          realm_id, entity_type, qbo_id,
+          customer_qbo_id, vendor_qbo_id,
+          txn_date, due_date, doc_number, currency_code, total_amt, balance_amt,
+          sales_term_name,
+          sync_token, meta_create_time, meta_last_updated_time,
+          raw_json
+        )
+        VALUES (
+          :realm_id, :entity_type, :qbo_id,
+          :customer_qbo_id, :vendor_qbo_id,
+          :txn_date, :due_date, :doc_number, :currency_code, :total_amt, :balance_amt,
+          :sales_term_name,
+          :sync_token, :meta_create_time, :meta_last_updated_time,
+          CAST(:raw AS JSON)
+        )
+        ON DUPLICATE KEY UPDATE
+          id = LAST_INSERT_ID(id),
+          customer_qbo_id = VALUES(customer_qbo_id),
+          vendor_qbo_id = VALUES(vendor_qbo_id),
+          txn_date = VALUES(txn_date),
+          due_date = VALUES(due_date),
+          doc_number = VALUES(doc_number),
+          currency_code = VALUES(currency_code),
+          total_amt = VALUES(total_amt),
+          balance_amt = VALUES(balance_amt),
+          sales_term_name = VALUES(sales_term_name),
+          sync_token = VALUES(sync_token),
+          meta_create_time = VALUES(meta_create_time),
+          meta_last_updated_time = VALUES(meta_last_updated_time),
+          raw_json = VALUES(raw_json)
+    """), {
+        "realm_id": realm_id,
+        "entity_type": entity,
+        "qbo_id": qbo_id,
+        "customer_qbo_id": customer_qbo_id,
+        "vendor_qbo_id": vendor_qbo_id,
+        "txn_date": txn_date,
+        "due_date": due_date,
+        "doc_number": doc_number,
+        "currency_code": currency_code,
+        "total_amt": total_amt,
+        "balance_amt": balance_amt,
+        "sales_term_name": sales_term_name,
+        "sync_token": sync_token,
+        "meta_create_time": meta_create_time,
+        "meta_last_updated_time": meta_last_updated_time,
+        "raw": json.dumps(t),
+    })
+    counters["txn"] += 1
+
+    transaction_id = int(res.lastrowid)
+    if not transaction_id:
+        return
+
+    lines = t.get("Line", []) or []
+
+    if entity in SALES_TRANSACTION_ENTITIES:
+        conn.execute(text("""
+            DELETE FROM qbo_sales_transaction_lines
+            WHERE transaction_id = :transaction_id
+        """), {"transaction_id": transaction_id})
+
+    counters["sales_line"] += upsert_sales_transaction_lines(
+        conn=conn,
+        realm_id=realm_id,
+        entity=entity,
+        transaction_id=transaction_id,
+        transaction_qbo_id=qbo_id,
+        project_customer_qbo_id=customer_qbo_id,
+        lines=lines,
+    )
+
+    # Only non-sales entities go into qbo_transaction_lines
+    if entity not in SALES_TRANSACTION_ENTITIES:
+        for idx, line in enumerate(lines):
+            if not isinstance(line, dict):
                 continue
 
-            # Header CustomerRef (may be absent for some types)
-            customer_qbo_id = None
-            cref = t.get("CustomerRef") or {}
-            if isinstance(cref, dict) and cref.get("value"):
-                customer_qbo_id = str(cref["value"])
+            line_key = str(line.get("Id") or f"idx:{idx}")
+            detail_type = line.get("DetailType")
+            description = line.get("Description")
+            amount = _parse_decimal(line.get("Amount"))
+            cost_amount = _parse_decimal(line.get("CostAmount"))
 
-            # Header VendorRef
-            vendor_qbo_id = None
-            vref = t.get("VendorRef") or {}
-            if isinstance(vref, dict) and vref.get("value"):
-                vendor_qbo_id = str(vref["value"])
+            line_customer_qbo_id = None
+            account_qbo_id = None
+            item_qbo_id = None
+            class_qbo_id = None
+            department_qbo_id = None
+            vendor_qbo_id_line = None
+            qty = None
+            unit_price = None
+            billable_status = None
 
-            txn_date = t.get("TxnDate")
-            doc_number = t.get("DocNumber")
+            detail_obj = None
+            if isinstance(detail_type, str) and detail_type:
+                detail_obj = line.get(detail_type) or {}
 
-            # NEW: DueDate + SalesTermRef.name
-            due_date = t.get("DueDate")  # "YYYY-MM-DD" or None
-            sales_term_name = None
-            st = t.get("SalesTermRef") or {}
-            if isinstance(st, dict):
-                sales_term_name = st.get("name")
+            if isinstance(detail_obj, dict):
+                cref2 = detail_obj.get("CustomerRef") or {}
+                if isinstance(cref2, dict) and cref2.get("value"):
+                    line_customer_qbo_id = str(cref2["value"])
 
-            currency_code = None
-            cur = t.get("CurrencyRef") or {}
-            if isinstance(cur, dict):
-                currency_code = cur.get("value")
+                aref = detail_obj.get("AccountRef") or {}
+                if isinstance(aref, dict) and aref.get("value"):
+                    account_qbo_id = str(aref["value"])
 
-            total_amt = _parse_decimal(t.get("TotalAmt"))
-            balance_amt = _parse_decimal(t.get("Balance"))
-            sync_token = t.get("SyncToken")
+                iref = detail_obj.get("ItemRef") or {}
+                if isinstance(iref, dict) and iref.get("value"):
+                    item_qbo_id = str(iref["value"])
 
-            md = t.get("MetaData") or {}
-            meta_create_time = _parse_qbo_dt(md.get("CreateTime")) if isinstance(md, dict) else None
-            meta_last_updated_time = _parse_qbo_dt(md.get("LastUpdatedTime")) if isinstance(md, dict) else None
+                clref = detail_obj.get("ClassRef") or {}
+                if isinstance(clref, dict) and clref.get("value"):
+                    class_qbo_id = str(clref["value"])
 
-            # Upsert header (and capture transaction_id without an extra SELECT)
-            res = conn.execute(text("""
-                INSERT INTO qbo_transactions (
-                  realm_id, entity_type, qbo_id,
-                  customer_qbo_id, vendor_qbo_id,
-                  txn_date, due_date, doc_number, currency_code, total_amt, balance_amt,
-                  sales_term_name,
-                  sync_token, meta_create_time, meta_last_updated_time,
+                dref = detail_obj.get("DepartmentRef") or {}
+                if isinstance(dref, dict) and dref.get("value"):
+                    department_qbo_id = str(dref["value"])
+
+                vref2 = detail_obj.get("VendorRef") or {}
+                if isinstance(vref2, dict) and vref2.get("value"):
+                    vendor_qbo_id_line = str(vref2["value"])
+
+                qty = _parse_decimal(detail_obj.get("Qty"))
+                unit_price = _parse_decimal(detail_obj.get("UnitPrice"))
+                billable_status = detail_obj.get("BillableStatus")
+
+            conn.execute(text("""
+                INSERT INTO qbo_transaction_lines (
+                  realm_id, transaction_id, line_key,
+                  detail_type, description, amount, cost_amount,
+                  line_customer_qbo_id, account_qbo_id, item_qbo_id,
+                  class_qbo_id, department_qbo_id, vendor_qbo_id,
+                  qty, unit_price, billable_status,
                   raw_json
                 )
                 VALUES (
-                  :realm_id, :entity_type, :qbo_id,
-                  :customer_qbo_id, :vendor_qbo_id,
-                  :txn_date, :due_date, :doc_number, :currency_code, :total_amt, :balance_amt,
-                  :sales_term_name,
-                  :sync_token, :meta_create_time, :meta_last_updated_time,
+                  :realm_id, :transaction_id, :line_key,
+                  :detail_type, :description, :amount, :cost_amount,
+                  :line_customer_qbo_id, :account_qbo_id, :item_qbo_id,
+                  :class_qbo_id, :department_qbo_id, :vendor_qbo_id,
+                  :qty, :unit_price, :billable_status,
                   CAST(:raw AS JSON)
                 )
                 ON DUPLICATE KEY UPDATE
-                  id = LAST_INSERT_ID(id),
-                  customer_qbo_id = VALUES(customer_qbo_id),
+                  detail_type = VALUES(detail_type),
+                  description = VALUES(description),
+                  amount = VALUES(amount),
+                  cost_amount = VALUES(cost_amount),
+                  line_customer_qbo_id = VALUES(line_customer_qbo_id),
+                  account_qbo_id = VALUES(account_qbo_id),
+                  item_qbo_id = VALUES(item_qbo_id),
+                  class_qbo_id = VALUES(class_qbo_id),
+                  department_qbo_id = VALUES(department_qbo_id),
                   vendor_qbo_id = VALUES(vendor_qbo_id),
-                  txn_date = VALUES(txn_date),
-                  due_date = VALUES(due_date),
-                  doc_number = VALUES(doc_number),
-                  currency_code = VALUES(currency_code),
-                  total_amt = VALUES(total_amt),
-                  balance_amt = VALUES(balance_amt),
-                  sales_term_name = VALUES(sales_term_name),
-                  sync_token = VALUES(sync_token),
-                  meta_create_time = VALUES(meta_create_time),
-                  meta_last_updated_time = VALUES(meta_last_updated_time),
+                  qty = VALUES(qty),
+                  unit_price = VALUES(unit_price),
+                  billable_status = VALUES(billable_status),
                   raw_json = VALUES(raw_json)
             """), {
                 "realm_id": realm_id,
-                "entity_type": entity,
-                "qbo_id": qbo_id,
-                "customer_qbo_id": customer_qbo_id,
-                "vendor_qbo_id": vendor_qbo_id,
-                "txn_date": txn_date,
-                "due_date": due_date,
-                "doc_number": doc_number,
-                "currency_code": currency_code,
-                "total_amt": total_amt,
-                "balance_amt": balance_amt,
-                "sales_term_name": sales_term_name,
-                "sync_token": sync_token,
-                "meta_create_time": meta_create_time,
-                "meta_last_updated_time": meta_last_updated_time,
-                "raw": json.dumps(t),
+                "transaction_id": transaction_id,
+                "line_key": line_key,
+                "detail_type": detail_type,
+                "description": description,
+                "amount": amount,
+                "cost_amount": cost_amount,
+                "line_customer_qbo_id": line_customer_qbo_id,
+                "account_qbo_id": account_qbo_id,
+                "item_qbo_id": item_qbo_id,
+                "class_qbo_id": class_qbo_id,
+                "department_qbo_id": department_qbo_id,
+                "vendor_qbo_id": vendor_qbo_id_line,
+                "qty": qty,
+                "unit_price": unit_price,
+                "billable_status": billable_status,
+                "raw": json.dumps(line),
             })
-            upserted_txns += 1
-
-            transaction_id = int(res.lastrowid)
-            if not transaction_id:
-                continue
-
-            lines = t.get("Line", []) or []
-
-            if entity in SALES_TRANSACTION_ENTITIES:
-                conn.execute(text("""
-                    DELETE FROM qbo_sales_transaction_lines
-                    WHERE transaction_id = :transaction_id
-                """), {"transaction_id": transaction_id})
-
-            # Sales-side docs go only into qbo_sales_transaction_lines
-            upserted_sales_lines += upsert_sales_transaction_lines(
-                conn=conn,
-                realm_id=realm_id,
-                entity=entity,
-                transaction_id=transaction_id,
-                transaction_qbo_id=qbo_id,
-                project_customer_qbo_id=customer_qbo_id,
-                lines=lines,
-            )
-
-            # Option A:
-            # Only non-sales entities go into qbo_transaction_lines
-            if entity not in SALES_TRANSACTION_ENTITIES:
-                for idx, line in enumerate(lines):
-                    if not isinstance(line, dict):
-                        continue
-
-                    line_key = str(line.get("Id") or f"idx:{idx}")
-                    detail_type = line.get("DetailType")
-                    description = line.get("Description")
-                    amount = _parse_decimal(line.get("Amount"))
-                    cost_amount = _parse_decimal(line.get("CostAmount"))
-
-                    line_customer_qbo_id = None
-                    account_qbo_id = None
-                    item_qbo_id = None
-                    class_qbo_id = None
-                    department_qbo_id = None
-                    vendor_qbo_id_line = None
-                    qty = None
-                    unit_price = None
-                    billable_status = None
-
-                    detail_obj = None
-                    if isinstance(detail_type, str) and detail_type:
-                        detail_obj = line.get(detail_type) or {}
-
-                    if isinstance(detail_obj, dict):
-                        cref2 = detail_obj.get("CustomerRef") or {}
-                        if isinstance(cref2, dict) and cref2.get("value"):
-                            line_customer_qbo_id = str(cref2["value"])
-
-                        aref = detail_obj.get("AccountRef") or {}
-                        if isinstance(aref, dict) and aref.get("value"):
-                            account_qbo_id = str(aref["value"])
-
-                        iref = detail_obj.get("ItemRef") or {}
-                        if isinstance(iref, dict) and iref.get("value"):
-                            item_qbo_id = str(iref["value"])
-
-                        clref = detail_obj.get("ClassRef") or {}
-                        if isinstance(clref, dict) and clref.get("value"):
-                            class_qbo_id = str(clref["value"])
-
-                        dref = detail_obj.get("DepartmentRef") or {}
-                        if isinstance(dref, dict) and dref.get("value"):
-                            department_qbo_id = str(dref["value"])
-
-                        vref2 = detail_obj.get("VendorRef") or {}
-                        if isinstance(vref2, dict) and vref2.get("value"):
-                            vendor_qbo_id_line = str(vref2["value"])
-
-                        qty = _parse_decimal(detail_obj.get("Qty"))
-                        unit_price = _parse_decimal(detail_obj.get("UnitPrice"))
-                        billable_status = detail_obj.get("BillableStatus")
-
-                    conn.execute(text("""
-                        INSERT INTO qbo_transaction_lines (
-                          realm_id, transaction_id, line_key,
-                          detail_type, description, amount, cost_amount,
-                          line_customer_qbo_id, account_qbo_id, item_qbo_id,
-                          class_qbo_id, department_qbo_id, vendor_qbo_id,
-                          qty, unit_price, billable_status,
-                          raw_json
-                        )
-                        VALUES (
-                          :realm_id, :transaction_id, :line_key,
-                          :detail_type, :description, :amount, :cost_amount,
-                          :line_customer_qbo_id, :account_qbo_id, :item_qbo_id,
-                          :class_qbo_id, :department_qbo_id, :vendor_qbo_id,
-                          :qty, :unit_price, :billable_status,
-                          CAST(:raw AS JSON)
-                        )
-                        ON DUPLICATE KEY UPDATE
-                          detail_type = VALUES(detail_type),
-                          description = VALUES(description),
-                          amount = VALUES(amount),
-                          cost_amount = VALUES(cost_amount),
-                          line_customer_qbo_id = VALUES(line_customer_qbo_id),
-                          account_qbo_id = VALUES(account_qbo_id),
-                          item_qbo_id = VALUES(item_qbo_id),
-                          class_qbo_id = VALUES(class_qbo_id),
-                          department_qbo_id = VALUES(department_qbo_id),
-                          vendor_qbo_id = VALUES(vendor_qbo_id),
-                          qty = VALUES(qty),
-                          unit_price = VALUES(unit_price),
-                          billable_status = VALUES(billable_status),
-                          raw_json = VALUES(raw_json)
-                    """), {
-                        "realm_id": realm_id,
-                        "transaction_id": transaction_id,
-                        "line_key": line_key,
-                        "detail_type": detail_type,
-                        "description": description,
-                        "amount": amount,
-                        "cost_amount": cost_amount,
-                        "line_customer_qbo_id": line_customer_qbo_id,
-                        "account_qbo_id": account_qbo_id,
-                        "item_qbo_id": item_qbo_id,
-                        "class_qbo_id": class_qbo_id,
-                        "department_qbo_id": department_qbo_id,
-                        "vendor_qbo_id": vendor_qbo_id_line,
-                        "qty": qty,
-                        "unit_price": unit_price,
-                        "billable_status": billable_status,
-                        "raw": json.dumps(line),
-                    })
-                    upserted_lines += 1
-
-    return upserted_txns, upserted_lines, upserted_sales_lines
+            counters["line"] += 1
 
 def run_transactions_sync(triggered_by: str = "manual") -> dict:
     run_id = log_sync_start("transactions", triggered_by)
@@ -1053,9 +1160,14 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
         realm_id, access_token = get_valid_access_token()
         since = _get_last_successful_sync_time("transactions")
 
-        # Safety overlap to avoid missing edge updates
+        # Safety overlap to re-pull edge updates. Even with the timezone fix,
+        # we keep a generous overlap because (a) QBO can back-date LastUpdatedTime
+        # on some events (e.g. linked payments altering an Invoice), and
+        # (b) ON DUPLICATE KEY UPDATE makes re-pulling identical rows cheap.
+        # 24 hours is the sweet spot: it absorbs any single missed sync cycle,
+        # covers any residual clock drift, and stays well under QBO rate limits.
         if since:
-            since = since - timedelta(minutes=5)
+            since = since - timedelta(hours=24)
 
         fetched_total = 0
         upserted_txns_total = 0
