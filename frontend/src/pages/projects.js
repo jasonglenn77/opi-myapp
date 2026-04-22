@@ -15,9 +15,9 @@ export async function projectsPage(routeFn) {
     openFilter: null,
     filters: {
       project_name:         "",
-      all_statuses:         "",   // raw DB value
-      all_project_managers: "",
-      all_work_crews:       "",
+      all_statuses:         [],
+      all_project_managers: [],
+      all_work_crews:       [],
       all_start_dates:      { from: "", to: "" },
       all_end_dates:        { from: "", to: "" },
       estimate_cost_amt:    { min: "", max: "" },
@@ -36,8 +36,9 @@ export async function projectsPage(routeFn) {
     "estimate_cost_amt","estimate_line_amt","invoice_line_amt","invoice_balance_amt",
     "expense_line_amt","actual_profit","actual_profit_pct","projected_profit","projected_profit_pct",
   ];
-  const DATE_COLS  = ["all_start_dates","all_end_dates"];
-  const PCT_COLS   = ["actual_profit_pct","projected_profit_pct"];
+  const DATE_COLS        = ["all_start_dates","all_end_dates"];
+  const PCT_COLS         = ["actual_profit_pct","projected_profit_pct"];
+  const MULTISELECT_COLS = ["all_statuses","all_project_managers","all_work_crews"];
 
   // ── formatting ─────────────────────────────────────────────────────────────
 
@@ -205,10 +206,9 @@ export async function projectsPage(routeFn) {
   function isFilterActive(key) {
     const f = state.filters[key];
     if (f == null) return false;
+    if (Array.isArray(f)) return f.length > 0;
     if (typeof f === "object") {
-      // date range
       if ("from" in f) return !!(f.from || f.to);
-      // numeric range
       return !!(f.min || f.max);
     }
     return !!f;
@@ -252,39 +252,33 @@ export async function projectsPage(routeFn) {
           value="${escapeHtml(state.filters[key] || "")}" placeholder="Type to filter…" />
         ${footer}`;
 
-    } else if (key === "all_statuses") {
-      const opts = [
-        { val: "not_started", lbl: "Not Started" },
-        { val: "in_progress", lbl: "In Progress" },
-        { val: "completed",   lbl: "Completed"   },
-        { val: "canceled",    lbl: "Canceled"    },
-      ];
+    } else if (MULTISELECT_COLS.includes(key)) {
+      const titleMap = { all_statuses: "Filter Status", all_project_managers: "Filter PM", all_work_crews: "Filter Crew" };
+      const rawOpts = key === "all_statuses"
+        ? [{ value: "not_started", label: "Not Started" }, { value: "in_progress", label: "In Progress" },
+           { value: "completed", label: "Completed" }, { value: "canceled", label: "Canceled" }]
+        : getOptions(key).map(x => ({ value: x, label: x }));
+      const selected = state.filters[key] || [];
+      const optRows = rawOpts.map(({ value, label }) => {
+        const checked = selected.includes(value);
+        return `
+          <label class="flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-black/[0.04] cursor-pointer select-none">
+            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border ${checked ? "bg-black border-black" : "bg-white border-black/30"}">
+              ${checked ? `<svg class="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>` : ""}
+            </span>
+            <input type="checkbox" class="sr-only"
+              data-portal-multicheck="${key}"
+              data-portal-multicheck-value="${escapeHtml(value)}"
+              ${checked ? "checked" : ""}
+            />
+            <span class="text-xs">${escapeHtml(label)}</span>
+          </label>`;
+      }).join("");
       content = `
-        <div class="text-[10px] font-bold text-black/40 mb-1.5">Filter Status</div>
-        <select class="input text-xs py-1" data-portal-select="${key}">
-          <option value="">All</option>
-          ${opts.map(o => `<option value="${o.val}" ${state.filters[key] === o.val ? "selected" : ""}>${o.lbl}</option>`).join("")}
-        </select>
-        ${footer}`;
-
-    } else if (key === "all_project_managers") {
-      const opts = getOptions("all_project_managers");
-      content = `
-        <div class="text-[10px] font-bold text-black/40 mb-1.5">Filter PM</div>
-        <select class="input text-xs py-1" data-portal-select="${key}">
-          <option value="">All</option>
-          ${opts.map(o => `<option value="${escapeHtml(o)}" ${state.filters[key] === o ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}
-        </select>
-        ${footer}`;
-
-    } else if (key === "all_work_crews") {
-      const opts = getOptions("all_work_crews");
-      content = `
-        <div class="text-[10px] font-bold text-black/40 mb-1.5">Filter Crew</div>
-        <select class="input text-xs py-1" data-portal-select="${key}">
-          <option value="">All</option>
-          ${opts.map(o => `<option value="${escapeHtml(o)}" ${state.filters[key] === o ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}
-        </select>
+        <div class="text-[10px] font-bold text-black/40 mb-1.5">${escapeHtml(titleMap[key])}</div>
+        <div class="flex flex-col gap-0 max-h-[220px] overflow-auto">
+          ${optRows}
+        </div>
         ${footer}`;
 
     } else if (DATE_COLS.includes(key)) {
@@ -691,14 +685,20 @@ export async function projectsPage(routeFn) {
       if (state.filters.project_name &&
           !normalize(r.project_name).includes(normalize(state.filters.project_name))) return false;
 
-      if (state.filters.all_statuses &&
-          !normalize(r.all_statuses || "").includes(state.filters.all_statuses)) return false;
+      if (state.filters.all_statuses.length > 0) {
+        const rowStatuses = (r.all_statuses || "").split(",").map(s => s.trim()).filter(Boolean);
+        if (!state.filters.all_statuses.some(v => rowStatuses.includes(v))) return false;
+      }
 
-      if (state.filters.all_project_managers &&
-          !normalize(r.all_project_managers || "").includes(normalize(state.filters.all_project_managers))) return false;
+      if (state.filters.all_project_managers.length > 0) {
+        const all = normalize(r.all_project_managers || "");
+        if (!state.filters.all_project_managers.some(v => all.includes(normalize(v)))) return false;
+      }
 
-      if (state.filters.all_work_crews &&
-          !normalize(r.all_work_crews || "").includes(normalize(state.filters.all_work_crews))) return false;
+      if (state.filters.all_work_crews.length > 0) {
+        const all = normalize(r.all_work_crews || "");
+        if (!state.filters.all_work_crews.some(v => all.includes(normalize(v)))) return false;
+      }
 
       // Date range filters
       const sf = state.filters.all_start_dates;
@@ -785,9 +785,10 @@ export async function projectsPage(routeFn) {
     const clearBtn = e.target.closest("[data-portal-clear]");
     if (clearBtn) {
       const key = clearBtn.getAttribute("data-portal-clear");
-      if (DATE_COLS.includes(key))    state.filters[key] = { from: "", to: "" };
-      else if (NUMERIC_COLS.includes(key)) state.filters[key] = { min: "", max: "" };
-      else if (key in state.filters)       state.filters[key] = "";
+      if (DATE_COLS.includes(key))              state.filters[key] = { from: "", to: "" };
+      else if (NUMERIC_COLS.includes(key))      state.filters[key] = { min: "", max: "" };
+      else if (MULTISELECT_COLS.includes(key))  state.filters[key] = [];
+      else if (key in state.filters)            state.filters[key] = "";
       state.openFilter = null;
       portal.remove();
       renderAll();
@@ -803,8 +804,32 @@ export async function projectsPage(routeFn) {
     }
   });
 
-  // Dropdown selects
+  // Multi-select checkboxes + dropdown selects
   document.addEventListener("change", e => {
+    const multiCheck = e.target.closest("[data-portal-multicheck]");
+    if (multiCheck) {
+      const key   = multiCheck.getAttribute("data-portal-multicheck");
+      const value = multiCheck.getAttribute("data-portal-multicheck-value");
+      const current = state.filters[key] || [];
+      state.filters[key] = multiCheck.checked
+        ? [...current, value]
+        : current.filter(v => v !== value);
+
+      // Update the visual indicator in-place so the portal stays open
+      const indicator = multiCheck.previousElementSibling;
+      const isChecked = state.filters[key].includes(value);
+      indicator.className = `flex h-4 w-4 shrink-0 items-center justify-center rounded border ${isChecked ? "bg-black border-black" : "bg-white border-black/30"}`;
+      indicator.innerHTML = isChecked
+        ? `<svg class="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`
+        : "";
+
+      const list = sorted(filtered());
+      renderKpiStrip(list);
+      renderBody(list);
+      renderThead();
+      return;
+    }
+
     const sel = e.target.closest("[data-portal-select]");
     if (sel) {
       const key = sel.getAttribute("data-portal-select");
@@ -868,9 +893,10 @@ export async function projectsPage(routeFn) {
     state.openFilter = null;
     document.getElementById("filterMenuPortal")?.remove();
     Object.keys(state.filters).forEach(k => {
-      if (DATE_COLS.includes(k))         state.filters[k] = { from: "", to: "" };
-      else if (NUMERIC_COLS.includes(k)) state.filters[k] = { min: "", max: "" };
-      else                               state.filters[k] = "";
+      if (DATE_COLS.includes(k))              state.filters[k] = { from: "", to: "" };
+      else if (NUMERIC_COLS.includes(k))      state.filters[k] = { min: "", max: "" };
+      else if (MULTISELECT_COLS.includes(k))  state.filters[k] = [];
+      else                                    state.filters[k] = "";
     });
     document.getElementById("searchInput").value = "";
     renderAll();

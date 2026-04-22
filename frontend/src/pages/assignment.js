@@ -20,19 +20,19 @@ export async function assignmentPage(routeFn) {
     flashKey: null,
     filters: {
       project_name: "",
-      project_status: "",
+      project_status: [],
       start_date_from: "",
       start_date_to: "",
       end_date_from: "",
       end_date_to: "",
       project_create_date_from: "",
       project_create_date_to: "",
-      primary_project_manager: "",
-      primary_work_crew: "",
-      wire_guidance: "",
-      travel_days: "",
-      overage_days: "",
-      equipment_type: "",
+      primary_project_manager: [],
+      primary_work_crew: [],
+      wire_guidance: [],
+      travel_days: [],
+      overage_days: [],
+      equipment_type: [],
     },
   };
 
@@ -376,16 +376,16 @@ export async function assignmentPage(routeFn) {
 
   function isFilterActive(key) {
     if (key === "project_name") return !!state.filters.project_name;
-    if (key === "project_status") return !!state.filters.project_status;
+    if (key === "project_status") return state.filters.project_status.length > 0;
     if (key === "start_date") return !!(state.filters.start_date_from || state.filters.start_date_to);
     if (key === "end_date") return !!(state.filters.end_date_from || state.filters.end_date_to);
     if (key === "project_create_date") return !!(state.filters.project_create_date_from || state.filters.project_create_date_to);
-    if (key === "primary_project_manager") return !!state.filters.primary_project_manager;
-    if (key === "primary_work_crew") return !!state.filters.primary_work_crew;
-    if (key === "wire_guidance") return !!state.filters.wire_guidance;
-    if (key === "travel_days") return !!state.filters.travel_days;
-    if (key === "overage_days") return !!state.filters.overage_days;
-    if (key === "equipment_type") return !!state.filters.equipment_type;
+    if (key === "primary_project_manager") return state.filters.primary_project_manager.length > 0;
+    if (key === "primary_work_crew") return state.filters.primary_work_crew.length > 0;
+    if (key === "wire_guidance") return state.filters.wire_guidance.length > 0;
+    if (key === "travel_days") return state.filters.travel_days.length > 0;
+    if (key === "overage_days") return state.filters.overage_days.length > 0;
+    if (key === "equipment_type") return state.filters.equipment_type.length > 0;
     return false;
   }
 
@@ -434,6 +434,39 @@ export async function assignmentPage(routeFn) {
     return decorated.map((x) => x.row);
   }
 
+  function renderMultiSelectMenu(key, title, options, align = "right-0") {
+    if (state.openFilter !== key) return "";
+    const selected = state.filters[key] || [];
+    const optRows = options.map(({ value, label }) => {
+      const checked = selected.includes(value);
+      return `
+        <label class="flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-black/[0.04] cursor-pointer select-none">
+          <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border ${checked ? "bg-black border-black" : "bg-white border-black/30"}">
+            ${checked ? `<svg class="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>` : ""}
+          </span>
+          <input type="checkbox" class="sr-only"
+            data-multiselect-check="${key}"
+            data-multiselect-value="${escapeHtml(value)}"
+            ${checked ? "checked" : ""}
+          />
+          <span class="text-sm">${escapeHtml(label)}</span>
+        </label>
+      `;
+    }).join("");
+    return `
+      <div class="absolute ${align} top-8 z-50 w-64 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
+        <div class="text-xs font-bold text-black/50 mb-2">${escapeHtml(title)}</div>
+        <div class="flex flex-col gap-0 max-h-[240px] overflow-auto">
+          ${optRows}
+        </div>
+        <div class="mt-3 flex justify-end gap-2">
+          <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="${key}">Clear</button>
+          <button type="button" class="btn-primary" data-close-filter="1">Done</button>
+        </div>
+      </div>
+    `;
+  }
+
   function renderFilterMenu(key) {
     if (state.openFilter !== key) return "";
 
@@ -456,137 +489,64 @@ export async function assignmentPage(routeFn) {
     }
 
     if (key === "project_status") {
-      return `
-        <div class="absolute right-0 top-8 z-50 w-64 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Status</div>
-          <select class="input" data-filter-select="project_status">
-            <option value="">All statuses</option>
-            <option value="Needs Attention" ${state.filters.project_status === "Needs Attention" ? "selected" : ""}>Needs Attention</option>
-            <option value="Not Started" ${state.filters.project_status === "Not Started" ? "selected" : ""}>Not Started</option>
-            <option value="In Progress" ${state.filters.project_status === "In Progress" ? "selected" : ""}>In Progress</option>
-            <option value="Completed" ${state.filters.project_status === "Completed" ? "selected" : ""}>Completed</option>
-            <option value="Canceled" ${state.filters.project_status === "Canceled" ? "selected" : ""}>Canceled</option>
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="project_status">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Status", [
+        { value: "Needs Attention", label: "Needs Attention" },
+        { value: "Not Started",     label: "Not Started" },
+        { value: "In Progress",     label: "In Progress" },
+        { value: "Completed",       label: "Completed" },
+        { value: "Canceled",        label: "Canceled" },
+      ]);
     }
 
     if (key === "primary_project_manager") {
-      const options = getPmOptions();
-      return `
-        <div class="absolute right-0 top-8 z-50 w-72 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Project Manager</div>
-          <select class="input" data-filter-select="primary_project_manager">
-            <option value="">All project managers</option>
-            ${options.map((x) => `<option value="${escapeHtml(x)}" ${state.filters.primary_project_manager === x ? "selected" : ""}>${escapeHtml(x)}</option>`).join("")}
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="primary_project_manager">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Project Manager",
+        getPmOptions().map((x) => ({ value: x, label: x }))
+      );
     }
 
     if (key === "primary_work_crew") {
-      const options = getCrewOptions();
-      return `
-        <div class="absolute right-0 top-8 z-50 w-72 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Work Crew</div>
-          <select class="input" data-filter-select="primary_work_crew">
-            <option value="">All work crews</option>
-            ${options.map((x) => `<option value="${escapeHtml(x)}" ${state.filters.primary_work_crew === x ? "selected" : ""}>${escapeHtml(x)}</option>`).join("")}
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="primary_work_crew">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Work Crew",
+        getCrewOptions().map((x) => ({ value: x, label: x }))
+      );
     }
 
     if (key === "wire_guidance") {
-      return `
-        <div class="absolute right-0 top-8 z-50 w-52 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Wire</div>
-          <select class="input" data-filter-select="wire_guidance">
-            <option value="">All</option>
-            <option value="yes" ${state.filters.wire_guidance === "yes" ? "selected" : ""}>Yes</option>
-            <option value="no" ${state.filters.wire_guidance === "no" ? "selected" : ""}>No</option>
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="wire_guidance">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Wire", [
+        { value: "yes", label: "Yes" },
+        { value: "no",  label: "No" },
+      ]);
     }
 
     if (key === "travel_days") {
-      return `
-        <div class="absolute right-0 top-8 z-50 w-52 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Travel</div>
-          <select class="input" data-filter-select="travel_days">
-            <option value="">All</option>
-            <option value="none" ${state.filters.travel_days === "none" ? "selected" : ""}>None</option>
-            <option value="2" ${state.filters.travel_days === "2" ? "selected" : ""}>2 days</option>
-            <option value="3" ${state.filters.travel_days === "3" ? "selected" : ""}>3 days</option>
-            <option value="4" ${state.filters.travel_days === "4" ? "selected" : ""}>4 days</option>
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="travel_days">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Travel", [
+        { value: "none", label: "None" },
+        { value: "2",    label: "2 days" },
+        { value: "3",    label: "3 days" },
+        { value: "4",    label: "4 days" },
+      ]);
     }
 
     if (key === "overage_days") {
-      return `
-        <div class="absolute right-0 top-8 z-50 w-52 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Overage</div>
-          <select class="input" data-filter-select="overage_days">
-            <option value="">All</option>
-            <option value="none" ${state.filters.overage_days === "none" ? "selected" : ""}>None</option>
-            <option value="has" ${state.filters.overage_days === "has" ? "selected" : ""}>Has overage</option>
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="overage_days">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Overage", [
+        { value: "none", label: "None" },
+        { value: "has",  label: "Has overage" },
+      ]);
     }
 
     if (key === "equipment_type") {
-      return `
-        <div class="absolute right-0 top-8 z-50 w-56 rounded-xl border border-black/10 bg-white p-3 shadow-xl">
-          <div class="text-xs font-bold text-black/50 mb-2">Filter Equip</div>
-          <select class="input" data-filter-select="equipment_type">
-            <option value="">All</option>
-            <option value="none" ${state.filters.equipment_type === "none" ? "selected" : ""}>None</option>
-            <option value="Equip" ${state.filters.equipment_type === "Equip" ? "selected" : ""}>Equip</option>
-            <option value="No Equip" ${state.filters.equipment_type === "No Equip" ? "selected" : ""}>No Equip</option>
-            <option value="Electric" ${state.filters.equipment_type === "Electric" ? "selected" : ""}>Electric</option>
-          </select>
-          <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="equipment_type">Clear</button>
-            <button type="button" class="btn-primary" data-close-filter="1">Done</button>
-          </div>
-        </div>
-      `;
+      return renderMultiSelectMenu(key, "Filter Equip", [
+        { value: "none",     label: "None" },
+        { value: "Equip",    label: "Equip" },
+        { value: "No Equip", label: "No Equip" },
+        { value: "Electric", label: "Electric" },
+      ]);
     }
 
-    if (key === "start_date" || key === "end_date" || key === "project_create_date") {      const fromKey = `${key}_from`;
+    if (key === "start_date" || key === "end_date" || key === "project_create_date") {
+      const fromKey = `${key}_from`;
       const toKey = `${key}_to`;
-      const menuAlign = key === "project_create_date" ? "right-0 translate-x-0" : "right-0";
-
       return `
-        <div class="absolute top-8 z-50 w-72 rounded-xl border border-black/10 bg-white p-3 shadow-xl" style="right:0; left:auto;">
+        <div class="absolute top-8 z-50 w-64 rounded-xl border border-black/10 bg-white p-3 shadow-xl" style="right:0; left:auto;">
           <div class="text-xs font-bold text-black/50 mb-2">Filter ${escapeHtml(key.replaceAll("_", " "))}</div>
           <div class="space-y-2">
             <div>
@@ -714,35 +674,52 @@ export async function assignmentPage(routeFn) {
     return rows.filter((r) => {
       if (state.filters.project_name && !normalize(r.project_name).includes(normalize(state.filters.project_name))) return false;
 
-      if (state.filters.project_status && normalize(statusLabel(r.project_status)) !== normalize(state.filters.project_status)) return false;
+      if (state.filters.project_status.length > 0) {
+        const label = normalize(statusLabel(r.project_status));
+        if (!state.filters.project_status.some((v) => normalize(v) === label)) return false;
+      }
 
       if (!inDateRange(r.start_date, state.filters.start_date_from, state.filters.start_date_to)) return false;
       if (!inDateRange(r.end_date, state.filters.end_date_from, state.filters.end_date_to)) return false;
       if (!inDateRange(r.project_create_date, state.filters.project_create_date_from, state.filters.project_create_date_to)) return false;
 
-      if (state.filters.primary_project_manager) {
+      if (state.filters.primary_project_manager.length > 0) {
         const all = normalize(r.all_project_managers || "");
-        if (!all.includes(normalize(state.filters.primary_project_manager))) return false;
+        if (!state.filters.primary_project_manager.some((v) => all.includes(normalize(v)))) return false;
       }
 
-      if (state.filters.primary_work_crew) {
+      if (state.filters.primary_work_crew.length > 0) {
         const all = normalize(r.all_work_crews || "");
-        if (!all.includes(normalize(state.filters.primary_work_crew))) return false;
+        if (!state.filters.primary_work_crew.some((v) => all.includes(normalize(v)))) return false;
       }
 
-      if (state.filters.wire_guidance === "yes" && !r.wire_guidance) return false;
-      if (state.filters.wire_guidance === "no" && r.wire_guidance) return false;
+      if (state.filters.wire_guidance.length > 0) {
+        const isYes = !!r.wire_guidance;
+        const match = (state.filters.wire_guidance.includes("yes") && isYes) ||
+                      (state.filters.wire_guidance.includes("no") && !isYes);
+        if (!match) return false;
+      }
 
-      if (state.filters.travel_days === "none" && r.travel_days) return false;
-      if (state.filters.travel_days === "2" && Number(r.travel_days) !== 2) return false;
-      if (state.filters.travel_days === "3" && Number(r.travel_days) !== 3) return false;
-      if (state.filters.travel_days === "4" && Number(r.travel_days) !== 4) return false;
+      if (state.filters.travel_days.length > 0) {
+        const match = state.filters.travel_days.some((v) =>
+          v === "none" ? !r.travel_days : Number(r.travel_days) === Number(v)
+        );
+        if (!match) return false;
+      }
 
-      if (state.filters.overage_days === "none" && r.overage_days) return false;
-      if (state.filters.overage_days === "has" && !r.overage_days) return false;
+      if (state.filters.overage_days.length > 0) {
+        const match = state.filters.overage_days.some((v) =>
+          v === "none" ? !r.overage_days : v === "has" ? !!r.overage_days : false
+        );
+        if (!match) return false;
+      }
 
-      if (state.filters.equipment_type === "none" && r.equipment_type) return false;
-      if (state.filters.equipment_type && state.filters.equipment_type !== "none" && r.equipment_type !== state.filters.equipment_type) return false;
+      if (state.filters.equipment_type.length > 0) {
+        const match = state.filters.equipment_type.some((v) =>
+          v === "none" ? !r.equipment_type : r.equipment_type === v
+        );
+        if (!match) return false;
+      }
       
       if (!q) return true;
 
@@ -772,7 +749,6 @@ export async function assignmentPage(routeFn) {
         <button
           type="button"
           class="inline-flex items-center"
-          data-close-editor="0"
         >
           ${statusPill(row.project_status)}
         </button>
@@ -1048,7 +1024,8 @@ export async function assignmentPage(routeFn) {
 
     const rowCountEl = document.getElementById("rowCount");
     if (rowCountEl) {
-      rowCountEl.textContent = `Showing ${list.length} records`;
+      const uniqueProjects = new Set(list.map((r) => r.qbo_customer_id)).size;
+      rowCountEl.textContent = `Showing ${uniqueProjects} project${uniqueProjects !== 1 ? "s" : ""} · ${list.length} row${list.length !== 1 ? "s" : ""}`;
     }
 
     const tbody = document.getElementById("assignmentBody");
@@ -1271,30 +1248,39 @@ export async function assignmentPage(routeFn) {
     const row = rows.find((x) => rowKey(x) === String(rowId));
     if (!row) return;
 
-    await ensureBundle(row);
+    const oldStatus = row.project_status;
 
-    const payload = {
-      schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
-      qbo_customer_id: Number(row.qbo_customer_id),
-      status: newStatus,
-      start_date: row.start_date || null,
-      end_date: row.end_date || null,
-      wire_guidance: row.wire_guidance || 0,
-      travel_days: row.travel_days || 0,
-      overage_days: row.overage_days || 0,
-      equipment_type: row.equipment_type || null,
-      notes: row.notes || null,
-      project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
-      primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
-      work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
-      primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
-    };
+    // Immediately reflect the new status so the user doesn't need to refresh.
+    row.project_status = newStatus;
+    clearEditing();
+    renderAll();
 
     try {
+      await ensureBundle(row);
+
+      const payload = {
+        schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
+        qbo_customer_id: Number(row.qbo_customer_id),
+        status: newStatus,
+        start_date: row.start_date || null,
+        end_date: row.end_date || null,
+        wire_guidance: row.wire_guidance || 0,
+        travel_days: row.travel_days || 0,
+        overage_days: row.overage_days || 0,
+        equipment_type: row.equipment_type || null,
+        notes: row.notes || null,
+        project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
+        primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
+        work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
+        primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+      };
+
       await savePayload(row, payload, "project_status");
       setMsg(`Saved ${row.project_name}.`, true);
     } catch (e) {
       console.error(e);
+      row.project_status = oldStatus;
+      renderAll();
       setMsg("Could not update project status.");
     }
   }
@@ -1391,19 +1377,19 @@ export async function assignmentPage(routeFn) {
   document.getElementById("clearFiltersBtn").addEventListener("click", () => {
     state.q = "";
     state.filters.project_name = "";
-    state.filters.project_status = "";
+    state.filters.project_status = [];
     state.filters.start_date_from = "";
     state.filters.start_date_to = "";
     state.filters.end_date_from = "";
     state.filters.end_date_to = "";
     state.filters.project_create_date_from = "";
     state.filters.project_create_date_to = "";
-    state.filters.primary_project_manager = "";
-    state.filters.primary_work_crew = "";
-    state.filters.wire_guidance = "";
-    state.filters.travel_days = "";
-    state.filters.overage_days = "";
-    state.filters.equipment_type = "";
+    state.filters.primary_project_manager = [];
+    state.filters.primary_work_crew = [];
+    state.filters.wire_guidance = [];
+    state.filters.travel_days = [];
+    state.filters.overage_days = [];
+    state.filters.equipment_type = [];
     state.openFilter = null;
     document.getElementById("searchInput").value = "";
     renderAll();
@@ -1430,10 +1416,15 @@ export async function assignmentPage(routeFn) {
   });
 
   document.querySelector("#assignmentTable thead").addEventListener("change", (e) => {
-    const select = e.target.closest("[data-filter-select]");
-    if (select) {
-      const key = select.getAttribute("data-filter-select");
-      state.filters[key] = select.value || "";
+    const multiCheck = e.target.closest("[data-multiselect-check]");
+    if (multiCheck) {
+      e.stopPropagation();
+      const key = multiCheck.getAttribute("data-multiselect-check");
+      const value = multiCheck.getAttribute("data-multiselect-value");
+      const current = state.filters[key] || [];
+      state.filters[key] = multiCheck.checked
+        ? [...current, value]
+        : current.filter((v) => v !== value);
       renderAll();
       return;
     }
@@ -1737,9 +1728,9 @@ export async function assignmentPage(routeFn) {
       const key = clearBtn.getAttribute("data-clear-filter");
 
       if (key === "project_name") state.filters.project_name = "";
-      else if (key === "project_status") state.filters.project_status = "";
-      else if (key === "primary_project_manager") state.filters.primary_project_manager = "";
-      else if (key === "primary_work_crew") state.filters.primary_work_crew = "";
+      else if (key === "project_status") state.filters.project_status = [];
+      else if (key === "primary_project_manager") state.filters.primary_project_manager = [];
+      else if (key === "primary_work_crew") state.filters.primary_work_crew = [];
       else if (key === "start_date") {
         state.filters.start_date_from = "";
         state.filters.start_date_to = "";
@@ -1750,13 +1741,13 @@ export async function assignmentPage(routeFn) {
         state.filters.project_create_date_from = "";
         state.filters.project_create_date_to = "";
       } else if (key === "wire_guidance") {
-        state.filters.wire_guidance = "";
+        state.filters.wire_guidance = [];
       } else if (key === "travel_days") {
-        state.filters.travel_days = "";
+        state.filters.travel_days = [];
       } else if (key === "overage_days") {
-        state.filters.overage_days = "";
+        state.filters.overage_days = [];
       } else if (key === "equipment_type") {
-        state.filters.equipment_type = "";
+        state.filters.equipment_type = [];
       }
 
       renderAll();
