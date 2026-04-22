@@ -9,7 +9,7 @@ from .db import engine
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-change-me")
 JWT_ALG = "HS256"
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
 
 def create_access_token(sub: str) -> str:
     expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRE_MINUTES)

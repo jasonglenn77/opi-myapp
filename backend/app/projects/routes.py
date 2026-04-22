@@ -175,11 +175,10 @@ def projects(user=Depends(get_current_user)):
     WITH
 
     -- ----------------------------------------------------------------
-    -- Dedup sales transactions: for each (customer, entity_type,
-    -- doc_number) keep only the newest (highest numeric qbo_id).
-    -- This discards old invoices/estimates that were replaced by a
-    -- revised version sharing the same DocNumber. Voided transactions
-    -- (total_amt explicitly = 0) are also excluded.
+    -- Dedup sales transactions: scoped to project customers only, then
+    -- per (customer, entity_type, doc_number) keeps only the newest row
+    -- (highest auto-increment id = most recently synced version).
+    -- Voided transactions (total_amt = 0) are excluded.
     -- Rows with no doc_number are treated as unique (no dedup).
     -- ----------------------------------------------------------------
     latest_sales_txns AS (
@@ -189,9 +188,12 @@ def projects(user=Depends(get_current_user)):
                ROW_NUMBER() OVER (
                  PARTITION BY qt.customer_qbo_id, qt.entity_type,
                               COALESCE(qt.doc_number, CONCAT('__nodoc__', qt.qbo_id))
-                 ORDER BY CAST(qt.qbo_id AS UNSIGNED) DESC
+                 ORDER BY qt.id DESC
                ) AS _rn
         FROM myapp.qbo_transactions qt
+        INNER JOIN myapp.qbo_customers qc_proj
+          ON qc_proj.qbo_id = qt.customer_qbo_id
+          AND qc_proj.is_project = 1
         WHERE qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
           AND (qt.total_amt IS NULL OR qt.total_amt > 0)
       ) _ranked
@@ -526,9 +528,12 @@ def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
                        ROW_NUMBER() OVER (
                          PARTITION BY t.customer_qbo_id, t.entity_type,
                                       COALESCE(t.doc_number, CONCAT('__nodoc__', t.qbo_id))
-                         ORDER BY CAST(t.qbo_id AS UNSIGNED) DESC
+                         ORDER BY t.id DESC
                        ) AS _rn
                 FROM myapp.qbo_transactions t
+                INNER JOIN myapp.qbo_customers qc_proj
+                  ON qc_proj.qbo_id = t.customer_qbo_id
+                  AND qc_proj.is_project = 1
                 WHERE t.entity_type = 'Invoice'
                   AND (t.total_amt IS NULL OR t.total_amt > 0)
             ) _ranked
@@ -603,9 +608,12 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
                        ROW_NUMBER() OVER (
                          PARTITION BY t.customer_qbo_id, t.entity_type,
                                       COALESCE(t.doc_number, CONCAT('__nodoc__', t.qbo_id))
-                         ORDER BY CAST(t.qbo_id AS UNSIGNED) DESC
+                         ORDER BY t.id DESC
                        ) AS _rn
                 FROM myapp.qbo_transactions t
+                INNER JOIN myapp.qbo_customers qc_proj
+                  ON qc_proj.qbo_id = t.customer_qbo_id
+                  AND qc_proj.is_project = 1
                 WHERE t.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
                   AND (t.total_amt IS NULL OR t.total_amt > 0)
             ) _ranked
