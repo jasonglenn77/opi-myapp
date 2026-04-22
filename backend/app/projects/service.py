@@ -34,6 +34,27 @@ def ensure_project_row_for_qbo_customer(conn, qbo_customer_id: int) -> int:
     new_id = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
     return int(new_id)
 
+def provision_master_rows_for_all_projects():
+    with engine.begin() as conn:
+        customers = conn.execute(text("""
+            SELECT id FROM qbo_customers WHERE is_project = 1
+        """)).mappings().all()
+
+        for c in customers:
+            project_id = ensure_project_row_for_qbo_customer(conn, int(c["id"]))
+
+            master = conn.execute(text("""
+                SELECT id FROM project_schedule_items
+                WHERE project_id = :pid AND (is_extra_row = 0 OR is_extra_row IS NULL)
+                LIMIT 1
+            """), {"pid": project_id}).mappings().first()
+
+            if not master:
+                conn.execute(text("""
+                    INSERT INTO project_schedule_items (project_id, status, is_extra_row)
+                    VALUES (:pid, 'not_started', 0)
+                """), {"pid": project_id})
+
 def get_assignment_bundle(qbo_customer_id: int):
     with engine.connect() as conn:
         qbo = conn.execute(text("""

@@ -16,6 +16,7 @@ from .service import (
     save_schedule_item,
     list_project_events,
     ensure_project_row_for_qbo_customer,
+    provision_master_rows_for_all_projects,
 )
 from app.s3 import s3_client, AWS_BUCKET, build_project_file_key, signed_file_url
 
@@ -63,6 +64,7 @@ def delete_schedule_item(schedule_item_id: int, user=Depends(get_current_user)):
 
 @router.get("/assignment/table")
 def assignment_table(user=Depends(get_current_user)):
+    provision_master_rows_for_all_projects()
     sql = text("""
     SELECT
       psi.id AS schedule_item_id,
