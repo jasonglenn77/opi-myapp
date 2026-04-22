@@ -175,6 +175,30 @@ def projects(user=Depends(get_current_user)):
     WITH
 
     -- ----------------------------------------------------------------
+    -- Dedup sales transactions: for each (customer, entity_type,
+    -- doc_number) keep only the newest (highest numeric qbo_id).
+    -- This discards old invoices/estimates that were replaced by a
+    -- revised version sharing the same DocNumber. Voided transactions
+    -- (total_amt explicitly = 0) are also excluded.
+    -- Rows with no doc_number are treated as unique (no dedup).
+    -- ----------------------------------------------------------------
+    latest_sales_txns AS (
+      SELECT *
+      FROM (
+        SELECT qt.*,
+               ROW_NUMBER() OVER (
+                 PARTITION BY qt.customer_qbo_id, qt.entity_type,
+                              COALESCE(qt.doc_number, CONCAT('__nodoc__', qt.qbo_id))
+                 ORDER BY CAST(qt.qbo_id AS UNSIGNED) DESC
+               ) AS _rn
+        FROM myapp.qbo_transactions qt
+        WHERE qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
+          AND (qt.total_amt IS NULL OR qt.total_amt > 0)
+      ) _ranked
+      WHERE _rn = 1
+    ),
+
+    -- ----------------------------------------------------------------
     -- SIDE A: Sales lines (Estimates + Invoices + other revenue types)
     -- One row per child sales line, tagged by entity_type
     -- ----------------------------------------------------------------
@@ -185,9 +209,8 @@ def projects(user=Depends(get_current_user)):
         qstl.amount                    AS line_amount,
         qstl.cost_amount               AS line_cost_amount
       FROM myapp.qbo_customers qc
-      INNER JOIN myapp.qbo_transactions qt
+      INNER JOIN latest_sales_txns qt
         ON qt.customer_qbo_id = qc.qbo_id
-        AND qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
       LEFT JOIN myapp.qbo_sales_transaction_lines qstl
         ON qstl.transaction_id = qt.id
         AND qstl.line_level = 'child'
@@ -196,24 +219,28 @@ def projects(user=Depends(get_current_user)):
 
     -- ----------------------------------------------------------------
     -- SIDE B: Expense / cost lines (Bills, Checks, CC charges, etc.)
+    -- VendorCredits are included as negative amounts (they reduce costs).
     -- Joined to customer via line_customer_qbo_id
     -- ----------------------------------------------------------------
     expense_lines AS (
       SELECT
         qc.qbo_id                      AS project_qbo_id,
-        qtl.amount                     AS line_amount
+        CASE
+          WHEN qt.entity_type = 'VendorCredit' THEN -qtl.amount
+          ELSE qtl.amount
+        END                            AS line_amount
       FROM myapp.qbo_customers qc
       INNER JOIN myapp.qbo_transaction_lines qtl
         ON qtl.line_customer_qbo_id = qc.qbo_id
       INNER JOIN myapp.qbo_transactions qt
         ON qt.id = qtl.transaction_id
-        AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder')
+        AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder', 'VendorCredit')
       WHERE qc.is_project = 1
     ),
                
     -- ----------------------------------------------------------------
     -- AR lines: one row per Invoice transaction per project
-    -- Captures balance, due date, and sales term at invoice level
+    -- Uses latest_sales_txns so duplicate/voided invoices are excluded
     -- ----------------------------------------------------------------
     ar_lines AS (
       SELECT
@@ -221,7 +248,7 @@ def projects(user=Depends(get_current_user)):
         qt.id                    AS transaction_id,
         qt.balance_amt
       FROM myapp.qbo_customers qc
-      INNER JOIN myapp.qbo_transactions qt
+      INNER JOIN latest_sales_txns qt
         ON qt.customer_qbo_id = qc.qbo_id
         AND qt.entity_type = 'Invoice'
       WHERE qc.is_project = 1
@@ -492,11 +519,24 @@ def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
             qt.txn_date,
             qt.due_date,
             qt.sales_term_name
-        FROM myapp.qbo_transactions qt
+        FROM (
+            SELECT *
+            FROM (
+                SELECT t.*,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY t.customer_qbo_id, t.entity_type,
+                                      COALESCE(t.doc_number, CONCAT('__nodoc__', t.qbo_id))
+                         ORDER BY CAST(t.qbo_id AS UNSIGNED) DESC
+                       ) AS _rn
+                FROM myapp.qbo_transactions t
+                WHERE t.entity_type = 'Invoice'
+                  AND (t.total_amt IS NULL OR t.total_amt > 0)
+            ) _ranked
+            WHERE _rn = 1
+        ) qt
         JOIN myapp.qbo_customers qc
             ON qt.customer_qbo_id = qc.qbo_id
         WHERE qc.is_project = 1
-          AND qt.entity_type = 'Invoice'
           AND qt.balance_amt > 0
           AND (
             :no_filter = 1
@@ -556,9 +596,21 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
             SUM(COALESCE(qstl.amount,      0))       AS line_amount,
             SUM(COALESCE(qstl.cost_amount, 0))       AS cost_amount
         FROM myapp.qbo_customers qc
-        INNER JOIN myapp.qbo_transactions qt
-            ON qt.customer_qbo_id = qc.qbo_id
-            AND qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
+        INNER JOIN (
+            SELECT *
+            FROM (
+                SELECT t.*,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY t.customer_qbo_id, t.entity_type,
+                                      COALESCE(t.doc_number, CONCAT('__nodoc__', t.qbo_id))
+                         ORDER BY CAST(t.qbo_id AS UNSIGNED) DESC
+                       ) AS _rn
+                FROM myapp.qbo_transactions t
+                WHERE t.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
+                  AND (t.total_amt IS NULL OR t.total_amt > 0)
+            ) _ranked
+            WHERE _rn = 1
+        ) qt ON qt.customer_qbo_id = qc.qbo_id
         LEFT JOIN myapp.qbo_sales_transaction_lines qstl
             ON qstl.transaction_id = qt.id
             AND qstl.line_level = 'child'
@@ -570,13 +622,16 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
     expense_sql = text(f"""
         SELECT
             COALESCE(item_names.item_name, 'Other') AS item_name,
-            SUM(COALESCE(qtl.amount, 0))            AS line_amount
+            SUM(CASE
+                WHEN qt.entity_type = 'VendorCredit' THEN -COALESCE(qtl.amount, 0)
+                ELSE COALESCE(qtl.amount, 0)
+            END)                                    AS line_amount
         FROM myapp.qbo_customers qc
         INNER JOIN myapp.qbo_transaction_lines qtl
             ON qtl.line_customer_qbo_id = qc.qbo_id
         INNER JOIN myapp.qbo_transactions qt
             ON qt.id = qtl.transaction_id
-            AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder')
+            AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder', 'VendorCredit')
         LEFT JOIN (
             SELECT item_qbo_id, MAX(item_name) AS item_name
             FROM myapp.qbo_sales_transaction_lines

@@ -602,7 +602,8 @@ export async function projectsPage(routeFn) {
 
     document.getElementById("projectsBody").innerHTML =
       list.map(r => `
-        <tr class="border-b border-black/5 hover:bg-black/[0.015] transition-colors">
+        <tr class="border-b border-black/5 hover:bg-black/[0.03] transition-colors cursor-pointer"
+            data-project-row="${escapeHtml(String(r.qbo_customer_id || ""))}">
 
           <td class="py-1.5 px-2 font-semibold text-xs bg-white"
               style="position:sticky; left:0; z-index:10; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; box-shadow:2px 0 4px -2px rgba(0,0,0,0.08);"
@@ -946,6 +947,14 @@ export async function projectsPage(routeFn) {
         if (!files.length) { alert("No files uploaded for this project yet."); return; }
         openFileModal(name, files, 0);
       } catch (err) { alert(`Could not load files: ${err.message}`); }
+      return;
+    }
+
+    const rowEl = e.target.closest("[data-project-row]");
+    if (rowEl) {
+      const id  = rowEl.getAttribute("data-project-row");
+      const row = rows.find(r => String(r.qbo_customer_id) === String(id));
+      if (row) openFinancialsModal("estimate", [row], row.project_name || "Project");
     }
   });
 
@@ -1056,7 +1065,7 @@ export async function projectsPage(routeFn) {
     document.getElementById("finModal").classList.add("hidden");
   }
 
-async function openFinancialsModal(cardKey, filteredList) {
+async function openFinancialsModal(cardKey, filteredList, label = null) {
     const FIXED_ROWS = [
       { key: "estimate_line", label: "Estimate"            },
       { key: "invoice_line",  label: "Invoice"             },
@@ -1064,10 +1073,13 @@ async function openFinancialsModal(cardKey, filteredList) {
       { key: "expense_line",  label: "Expense"             },
     ];
 
-    const isFiltered = filteredList.length !== rows.length;
-    const scopeLabel = isFiltered
-      ? `${filteredList.length} of ${rows.length} projects (filtered)`
-      : `All ${rows.length} projects`;
+    const isSingleProject = label !== null;
+    const isFiltered = !isSingleProject && filteredList.length !== rows.length;
+    const scopeLabel = isSingleProject
+      ? label
+      : isFiltered
+        ? `${filteredList.length} of ${rows.length} projects (filtered)`
+        : `All ${rows.length} projects`;
     // AR summary — computed from the already-loaded filteredList rows
     const arBalance    = filteredList.reduce((s, r) => s + Number(r.invoice_balance_amt || 0), 0);
     const arOpenCount  = filteredList.reduce((s, r) => s + Number(r.open_invoice_count  || 0), 0);
@@ -1092,7 +1104,7 @@ async function openFinancialsModal(cardKey, filteredList) {
     };
 
     function activeFilterChips() {
-      if (!isFiltered) return "";
+      if (!isFiltered || isSingleProject) return "";
       const chips = [];
 
       // Text search
@@ -1152,8 +1164,8 @@ async function openFinancialsModal(cardKey, filteredList) {
 
     const subtitleEl = document.getElementById("finModalSubtitle");
 
-    // Filter chips — injected directly after the subtitle
-    if (isFiltered) {
+    // Filter chips — injected directly after the subtitle (not shown for single-project view)
+    if (isFiltered && !isSingleProject) {
       const chipsDiv = document.createElement("div");
       chipsDiv.id = "finModalFilterChips";
       chipsDiv.innerHTML = activeFilterChips();
