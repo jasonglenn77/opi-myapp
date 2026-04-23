@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m py_compile backend/app/projects/routes.py)"
+      "Bash(python -m py_compile backend/app/projects/routes.py)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/dashboard.js /tmp/dashcheck.mjs)",
+      "Bash(node --check /tmp/dashcheck.mjs)"
     ]
   }
 }

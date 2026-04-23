@@ -4,8 +4,14 @@ import { fmtMoney, fmtPct } from "../utils/format.js";
 import { escapeHtml } from "../utils/html.js";
 
 export async function dashboardPage(routeFn) {
-  const data = await api("/dashboard");
-  const rows = data.projects || [];
+  // Dashboard consumes /projects/basic for the Project Timeline (status-by-month chart)
+  // and /dashboard for the existing "Monthly performance" card below.
+  const [basicData, dashData] = await Promise.all([
+    api("/projects/basic"),
+    api("/dashboard"),
+  ]);
+  const rows = dashData.projects || [];
+  const basicRows = basicData.projects || [];
 
   function normalize(v) {
     return (v ?? "").toString().toLowerCase();
@@ -42,25 +48,59 @@ export async function dashboardPage(routeFn) {
   // Weighted margin across completed projects
   const margin = totalIncome === 0 ? null : totalProfit / totalIncome;
 
+  // Status counts for the side cards (from /projects/basic — covers all projects)
+  const needsAttentionCount = basicRows.filter(r => Number(r.needs_assignment) === 1).length;
+  const canceledCount       = basicRows.filter(r => (r.project_status || "").toLowerCase() === "canceled").length;
+
   const bodyHtml = `
     <div class="grid grid-cols-1 gap-4">
 
-      <!-- KPI card -->
+      <!-- Project Timeline — stacked bars by end-date month & status -->
       <div class="card p-5">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <div class="text-lg font-extrabold">KPI</div>
-            <div class="text-sm text-black/60">Completed projects totals</div>
+            <div class="text-lg font-extrabold">Project Timeline</div>
+            <div class="text-sm text-black/60">Project counts by end-date month (2026), stacked by status</div>
           </div>
-          <div class="text-xs text-black/50 whitespace-nowrap">
-            ${completed.length} completed
-          </div>
+          <div class="text-xs text-black/50 whitespace-nowrap" id="timelineRange">—</div>
         </div>
 
-        <div class="mt-4 grid gap-3 sm:grid-cols-3">
-          ${kpiCard("Total Income", fmtMoney(totalIncome))}
-          ${kpiCard("Total Cost", fmtMoney(totalCost))}
-          ${profitCard("Total Profit", fmtMoney(totalProfit), margin)}
+        <div class="mt-4 flex flex-col lg:flex-row gap-3">
+          <!-- Chart panel -->
+          <div class="flex-1 border border-black/10 bg-black/5 rounded-2xl p-3">
+            <!-- Legend -->
+            <div class="flex flex-wrap items-center justify-between gap-2 px-1 pb-2">
+              <div class="text-xs font-bold text-black/60">Legend</div>
+              <div class="flex flex-wrap items-center gap-3 text-xs font-semibold text-black/70">
+                <span class="inline-flex items-center gap-2">
+                  <span class="inline-block h-2.5 w-2.5 rounded-sm border border-black/10" style="background:#64748b"></span>
+                  Not Started
+                </span>
+                <span class="inline-flex items-center gap-2">
+                  <span class="inline-block h-2.5 w-2.5 rounded-sm border border-black/10" style="background:#3b82f6"></span>
+                  In Progress
+                </span>
+                <span class="inline-flex items-center gap-2">
+                  <span class="inline-block h-2.5 w-2.5 rounded-sm border border-black/10" style="background:#4f7f61"></span>
+                  Completed
+                </span>
+              </div>
+            </div>
+
+            <div id="timelineChart" class="w-full"></div>
+          </div>
+
+          <!-- Side cards: Needs Attention (top) + Canceled (bottom) -->
+          <div class="flex flex-col gap-3 lg:w-44">
+            <div class="rounded-2xl border bg-kpi-attention-bg border-kpi-attention-bd p-4 flex-1 flex flex-col justify-center items-center">
+              <div class="text-xs font-bold text-kpi-attention-text uppercase tracking-wide">Needs Attention</div>
+              <div class="mt-1 text-3xl font-extrabold text-kpi-attention-num leading-tight">${needsAttentionCount}</div>
+            </div>
+            <div class="rounded-2xl border bg-red-50 border-red-200 p-4 flex-1 flex flex-col justify-center items-center">
+              <div class="text-xs font-bold text-red-700 uppercase tracking-wide">Canceled</div>
+              <div class="mt-1 text-3xl font-extrabold text-red-900 leading-tight">${canceledCount}</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -102,12 +142,179 @@ export async function dashboardPage(routeFn) {
   `;
 
   setShell({
-    title: "Dashboard",
-    subtitle: "KPI snapshot for completed projects.",
+    title: "Projects",
+    subtitle: "Project timeline and monthly performance.",
     bodyHtml,
     showLogout: true,
     routeFn,
   });
+
+  // ----------------------------
+  // Project Timeline — stacked bar chart (2026, counts by status)
+  // ----------------------------
+  function renderTimeline() {
+    const host = document.getElementById("timelineChart");
+    const d3 = window.d3;
+    if (!host || !d3) return;
+    host.innerHTML = "";
+
+    const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const STATUS_KEYS   = ["not_started", "in_progress", "completed"];  // bottom → top
+    const STATUS_COLORS = {
+      not_started: "#64748b",  // slate-500 (matches the "not_started" pill family)
+      in_progress: "#3b82f6",  // blue-500  (matches the "in_progress" pill family)
+      completed:   "#4f7f61",  // brand-500 (matches the "completed" pill family)
+    };
+    const STATUS_LABELS = {
+      not_started: "Not Started",
+      in_progress: "In Progress",
+      completed:   "Completed",
+    };
+
+    // Bucket 2026 projects by end-date month × status
+    const buckets = MONTH_LABELS.map((label, idx) => ({
+      month: idx + 1, label,
+      not_started: 0, in_progress: 0, completed: 0, total: 0,
+    }));
+
+    for (const r of basicRows) {
+      const d = parseYmd(r.end_date);
+      if (!d) continue;
+      if (d.getUTCFullYear() !== 2026) continue;
+      const s = (r.project_status || "").toLowerCase();
+      if (!STATUS_KEYS.includes(s)) continue;   // ignore canceled / unknown
+      const b = buckets[d.getUTCMonth()];
+      b[s] += 1;
+      b.total += 1;
+    }
+
+    const totalProjects = buckets.reduce((s, b) => s + b.total, 0);
+    const rangeEl = document.getElementById("timelineRange");
+    if (rangeEl) rangeEl.textContent = `${totalProjects} project${totalProjects === 1 ? "" : "s"} ending in 2026`;
+
+    const w = host.clientWidth || 800;
+    const h = 200;
+    const margin = { top: 22, right: 24, bottom: 28, left: 40 };
+    const innerW = Math.max(320, w) - margin.left - margin.right;
+    const innerH = h - margin.top - margin.bottom;
+
+    const svg = d3.select(host).append("svg")
+      .attr("width", w).attr("height", h).style("display", "block");
+    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const x = d3.scaleBand()
+      .domain(buckets.map(b => b.label))
+      .range([0, innerW])
+      .padding(0.22);
+
+    const yMax = Math.max(1, d3.max(buckets, b => b.total) || 0);
+    const y = d3.scaleLinear()
+      .domain([0, yMax]).nice()
+      .range([innerH, 0]);
+
+    // Gridlines
+    g.append("g")
+      .call(d3.axisLeft(y).ticks(5).tickSize(-innerW).tickFormat(""))
+      .call(gg => gg.selectAll("line").attr("stroke", "rgba(0,0,0,.06)"))
+      .call(gg => gg.select(".domain").remove());
+
+    // Topmost non-zero status per bucket — only that segment gets rounded top corners
+    const topmostKey = b => {
+      for (let i = STATUS_KEYS.length - 1; i >= 0; i--) {
+        if (b[STATUS_KEYS[i]] > 0) return STATUS_KEYS[i];
+      }
+      return null;
+    };
+    // Path builder: optionally rounds just the top two corners
+    const segPath = (x0, y0, w, hh, topRounded, r) => {
+      if (hh <= 0) return "";
+      if (!topRounded) return `M${x0},${y0}h${w}v${hh}h${-w}Z`;
+      const rr = Math.min(r, w / 2, hh);
+      return `M${x0},${y0 + rr}Q${x0},${y0} ${x0 + rr},${y0}`
+           + `L${x0 + w - rr},${y0}Q${x0 + w},${y0} ${x0 + w},${y0 + rr}`
+           + `V${y0 + hh}H${x0}Z`;
+    };
+
+    // Stacked segments as paths (so the top corner radius works per-segment)
+    const stacked = d3.stack().keys(STATUS_KEYS)(buckets);
+    g.append("g").selectAll("g")
+      .data(stacked)
+      .enter().append("g")
+        .attr("fill", s => STATUS_COLORS[s.key])
+      .selectAll("path")
+      .data(s => s.map(d => ({ ...d, key: s.key })))
+      .enter().append("path")
+        .attr("d", d => {
+          const x0  = x(d.data.label);
+          const y0  = y(d[1]);
+          const w2  = x.bandwidth();
+          const hh  = Math.max(0, y(d[0]) - y(d[1]));
+          const top = topmostKey(d.data) === d.key;
+          return segPath(x0, y0, w2, hh, top, 6);
+        })
+        .attr("stroke", "rgba(0,0,0,0.06)");
+
+    // Total count above each bar
+    g.append("g").selectAll("text")
+      .data(buckets)
+      .enter().append("text")
+        .attr("x", d => x(d.label) + x.bandwidth() / 2)
+        .attr("y", d => y(d.total) - 6)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 10)
+        .attr("font-weight", 700)
+        .attr("fill", "rgba(0,0,0,.7)")
+        .text(d => d.total > 0 ? d.total : "");
+
+    // Axes
+    g.append("g")
+      .call(d3.axisLeft(y).ticks(5).tickFormat(d3.format("d")))
+      .call(gg => gg.selectAll("text").attr("fill", "rgba(0,0,0,.55)"))
+      .call(gg => gg.selectAll("line").attr("stroke", "rgba(0,0,0,.10)"))
+      .call(gg => gg.select(".domain").attr("stroke", "rgba(0,0,0,.12)"));
+
+    g.append("g")
+      .attr("transform", `translate(0,${innerH})`)
+      .call(d3.axisBottom(x))
+      .call(gg => gg.selectAll("text").attr("fill", "rgba(0,0,0,.55)"))
+      .call(gg => gg.selectAll("line").attr("stroke", "rgba(0,0,0,.10)"))
+      .call(gg => gg.select(".domain").attr("stroke", "rgba(0,0,0,.12)"));
+
+    // Per-month hover zones with tooltip (reuses the existing tooltip element)
+    g.append("g").selectAll("rect")
+      .data(buckets)
+      .enter().append("rect")
+        .attr("x", d => x(d.label))
+        .attr("y", 0)
+        .attr("width", x.bandwidth())
+        .attr("height", innerH)
+        .attr("fill", "transparent")
+        .style("cursor", "default")
+        .on("mouseenter", (evt, d) => {
+          const tip = document.getElementById("dashChartTooltip");
+          if (!tip) return;
+          tip.innerHTML = `
+            <div class="font-bold text-ink-800">${d.label} 2026</div>
+            <div class="mt-1 text-black/70">${STATUS_LABELS.not_started}: <span class="font-semibold text-black/80">${d.not_started}</span></div>
+            <div class="text-black/70">${STATUS_LABELS.in_progress}: <span class="font-semibold text-black/80">${d.in_progress}</span></div>
+            <div class="text-black/70">${STATUS_LABELS.completed}: <span class="font-semibold text-black/80">${d.completed}</span></div>
+            <div class="mt-1 text-black/50">${d.total} total</div>
+          `;
+          tip.classList.remove("hidden");
+          tip.style.left = `${evt.clientX}px`;
+          tip.style.top  = `${evt.clientY}px`;
+        })
+        .on("mousemove", (evt) => {
+          const tip = document.getElementById("dashChartTooltip");
+          if (!tip) return;
+          tip.style.left = `${evt.clientX}px`;
+          tip.style.top  = `${evt.clientY}px`;
+        })
+        .on("mouseleave", () => {
+          const tip = document.getElementById("dashChartTooltip");
+          if (tip) tip.classList.add("hidden");
+        });
+  }
 
   function kpiCard(label, valueHtml) {
     return `
@@ -462,8 +669,15 @@ export async function dashboardPage(routeFn) {
   }
 
   renderChart();
+  renderTimeline();
 
-  // Responsive re-render
+  // Responsive re-render for both charts
   const ro = new ResizeObserver(() => renderChart());
   ro.observe(chartHost);
+
+  const timelineHost = document.getElementById("timelineChart");
+  if (timelineHost) {
+    const roT = new ResizeObserver(() => renderTimeline());
+    roT.observe(timelineHost);
+  }
 }

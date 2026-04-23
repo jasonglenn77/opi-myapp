@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 
 import json
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin
 from .service import (
     list_assignable_projects,
     get_assignment_bundle,
@@ -17,6 +17,7 @@ from .service import (
     list_project_events,
     ensure_project_row_for_qbo_customer,
     provision_master_rows_for_all_projects,
+    refresh_project_financial_summary,
 )
 from app.s3 import s3_client, AWS_BUCKET, build_project_file_key, signed_file_url
 
@@ -629,151 +630,64 @@ def projects_basic(user=Depends(get_current_user)):
 @router.get("/projects/financials")
 def projects_financials(user=Depends(get_current_user)):
     """
-    Slow endpoint — returns per-project financial aggregates keyed by
-    qbo_customer_id. Pair with /projects/basic for progressive loading.
+    Fast endpoint — returns per-project financial aggregates keyed by
+    qbo_customer_id. Reads from the pre-computed project_financial_summary
+    table that is refreshed at QBO sync time (and on-demand via
+    /projects/refresh-financials).
+
+    If the summary table is empty (first deploy, fresh DB, or after a wipe)
+    this endpoint lazily triggers a refresh so the page still works.
     """
-    sql = text("""
-    WITH
-
-    latest_sales_txns AS (
-      SELECT *
-      FROM (
-        SELECT qt.*,
-               ROW_NUMBER() OVER (
-                 PARTITION BY qt.customer_qbo_id, qt.entity_type,
-                              COALESCE(qt.doc_number, CONCAT('__nodoc__', qt.qbo_id))
-                 ORDER BY qt.id DESC
-               ) AS _rn
-        FROM myapp.qbo_transactions qt
-        INNER JOIN myapp.qbo_customers qc_proj
-          ON qc_proj.qbo_id = qt.customer_qbo_id
-          AND qc_proj.is_project = 1
-        WHERE qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
-          AND (qt.total_amt IS NULL OR qt.total_amt > 0)
-      ) _ranked
-      WHERE _rn = 1
-    ),
-
-    sales_lines AS (
-      SELECT
-        qc.qbo_id                      AS project_qbo_id,
-        qt.entity_type,
-        qstl.amount                    AS line_amount,
-        qstl.cost_amount               AS line_cost_amount
-      FROM myapp.qbo_customers qc
-      INNER JOIN latest_sales_txns qt
-        ON qt.customer_qbo_id = qc.qbo_id
-      LEFT JOIN myapp.qbo_sales_transaction_lines qstl
-        ON qstl.transaction_id = qt.id
-        AND qstl.line_level = 'child'
-      WHERE qc.is_project = 1
-    ),
-
-    expense_lines AS (
-      SELECT
-        qc.qbo_id                      AS project_qbo_id,
-        CASE
-          WHEN qt.entity_type = 'VendorCredit' THEN -qtl.amount
-          ELSE qtl.amount
-        END                            AS line_amount
-      FROM myapp.qbo_customers qc
-      INNER JOIN myapp.qbo_transaction_lines qtl
-        ON qtl.line_customer_qbo_id = qc.qbo_id
-      INNER JOIN myapp.qbo_transactions qt
-        ON qt.id = qtl.transaction_id
-        AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder', 'VendorCredit')
-      WHERE qc.is_project = 1
-    ),
-
-    ar_lines AS (
-      SELECT
-        qc.qbo_id                AS project_qbo_id,
-        qt.id                    AS transaction_id,
-        qt.balance_amt
-      FROM myapp.qbo_customers qc
-      INNER JOIN latest_sales_txns qt
-        ON qt.customer_qbo_id = qc.qbo_id
-        AND qt.entity_type = 'Invoice'
-      WHERE qc.is_project = 1
-    ),
-
-    sales_rollup AS (
-      SELECT
-        project_qbo_id,
-        SUM(CASE WHEN entity_type = 'Estimate' THEN COALESCE(line_cost_amount, 0) ELSE 0 END) AS estimate_cost_amt,
-        SUM(CASE WHEN entity_type = 'Estimate' THEN COALESCE(line_amount,      0) ELSE 0 END) AS estimate_line_amt,
-        SUM(CASE WHEN entity_type = 'Invoice'  THEN COALESCE(line_amount,      0) ELSE 0 END) AS invoice_line_amt
-      FROM sales_lines
-      GROUP BY project_qbo_id
-    ),
-
-    expense_rollup AS (
-      SELECT
-        project_qbo_id,
-        SUM(COALESCE(line_amount, 0)) AS expense_line_amt
-      FROM expense_lines
-      GROUP BY project_qbo_id
-    ),
-
-    ar_rollup AS (
-      SELECT
-        project_qbo_id,
-        SUM(COALESCE(balance_amt, 0))                    AS invoice_balance_amt,
-        SUM(CASE WHEN balance_amt > 0 THEN 1 ELSE 0 END) AS open_invoice_count
-      FROM ar_lines
-      GROUP BY project_qbo_id
-    )
-
-    SELECT
-      qc.id                                          AS qbo_customer_id,
-      qc.qbo_id                                      AS project_qbo_id,
-
-      COALESCE(sr.estimate_cost_amt, 0)              AS estimate_cost_amt,
-      COALESCE(sr.estimate_line_amt, 0)              AS estimate_line_amt,
-      COALESCE(sr.invoice_line_amt,  0)              AS invoice_line_amt,
-      COALESCE(er.expense_line_amt,  0)              AS expense_line_amt,
-      COALESCE(ar.invoice_balance_amt, 0)            AS invoice_balance_amt,
-      COALESCE(ar.open_invoice_count, 0)             AS open_invoice_count,
-
-      (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0))
-                                                     AS balance_amt,
-      (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0))
-                                                     AS actual_profit,
-      CASE
-        WHEN COALESCE(sr.invoice_line_amt, 0) = 0 THEN NULL
-        ELSE (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0))
-             / COALESCE(sr.invoice_line_amt, 0)
-      END                                            AS actual_profit_pct,
-
-      (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
-                                                     AS projected_profit,
-      CASE
-        WHEN COALESCE(sr.estimate_line_amt, 0) = 0 THEN NULL
-        ELSE (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
-             / COALESCE(sr.estimate_line_amt, 0)
-      END                                            AS projected_profit_pct,
-
-      -- Budget variance: Est. Cost − Expense. Positive = under budget.
-      (COALESCE(sr.estimate_cost_amt, 0) - COALESCE(er.expense_line_amt, 0))
-                                                     AS cost_diff_amt,
-      CASE
-        WHEN COALESCE(sr.estimate_cost_amt, 0) = 0 THEN NULL
-        ELSE (COALESCE(sr.estimate_cost_amt, 0) - COALESCE(er.expense_line_amt, 0))
-             / COALESCE(sr.estimate_cost_amt, 0)
-      END                                            AS cost_diff_pct
-
-    FROM myapp.qbo_customers qc
-    LEFT JOIN sales_rollup   sr ON sr.project_qbo_id = qc.qbo_id
-    LEFT JOIN expense_rollup er ON er.project_qbo_id = qc.qbo_id
-    LEFT JOIN ar_rollup      ar ON ar.project_qbo_id = qc.qbo_id
-    WHERE qc.is_project = 1
-    ORDER BY qc.display_name
+    read_sql = text("""
+        SELECT
+          pfs.qbo_customer_id,
+          pfs.project_qbo_id,
+          pfs.estimate_cost_amt,
+          pfs.estimate_line_amt,
+          pfs.invoice_line_amt,
+          pfs.expense_line_amt,
+          pfs.invoice_balance_amt,
+          pfs.open_invoice_count,
+          pfs.balance_amt,
+          pfs.actual_profit,
+          pfs.actual_profit_pct,
+          pfs.projected_profit,
+          pfs.projected_profit_pct,
+          pfs.cost_diff_amt,
+          pfs.cost_diff_pct
+        FROM myapp.project_financial_summary pfs
+        INNER JOIN myapp.qbo_customers qc
+          ON qc.id = pfs.qbo_customer_id
+         AND qc.is_project = 1
+        ORDER BY qc.display_name
     """)
 
-    with engine.connect() as conn:
-        rows = conn.execute(sql).mappings().all()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(read_sql).mappings().all()
+    except Exception:
+        # Table probably doesn't exist yet; create + populate then retry.
+        refresh_project_financial_summary()
+        with engine.connect() as conn:
+            rows = conn.execute(read_sql).mappings().all()
+
+    # Lazy populate if empty (e.g., fresh DB, never synced)
+    if not rows:
+        refresh_project_financial_summary()
+        with engine.connect() as conn:
+            rows = conn.execute(read_sql).mappings().all()
 
     return {"financials": [dict(r) for r in rows][:1000]}
+
+
+@router.post("/projects/refresh-financials")
+def refresh_financials(_admin=Depends(require_admin)):
+    """
+    Admin-only: manually recompute project_financial_summary. Normally this
+    runs automatically after each QBO sync; use this when you've edited data
+    out-of-band or want to rebuild the summary without waiting for a sync.
+    """
+    return refresh_project_financial_summary()
 
 
 class ArBalanceRequest(BaseModel):

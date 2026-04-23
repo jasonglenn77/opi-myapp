@@ -2136,6 +2136,11 @@ body {
   color: rgb(0 0 0 / 0.2);
 }
 
+.text-red-900 {
+  --tw-text-opacity: 1;
+  color: rgb(127 29 29 / var(--tw-text-opacity, 1));
+}
+
 .opacity-50 {
   opacity: 0.5;
 }
@@ -2391,12 +2396,20 @@ body {
     display: block;
   }
 
+  .lg\:w-44 {
+    width: 11rem;
+  }
+
   .lg\:grid-cols-4 {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .lg\:grid-cols-\[320px_minmax\(0\2c 1fr\)\] {
     grid-template-columns: 320px minmax(0,1fr);
+  }
+
+  .lg\:flex-row {
+    flex-direction: row;
   }
 
   .lg\:gap-6 {

@@ -321,6 +321,35 @@ def qbo_init_tables() -> None:
             ) ENGINE=InnoDB
         """))
 
+        # Pre-computed per-project financial aggregates — populated by the
+        # QBO sync and by /projects/refresh-financials. Enables fast reads
+        # on the Financials page without running the heavy CTE at query time.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS project_financial_summary (
+              qbo_customer_id      INT NOT NULL PRIMARY KEY,
+              project_qbo_id       VARCHAR(32) NULL,
+
+              estimate_cost_amt    DECIMAL(18,2) NOT NULL DEFAULT 0,
+              estimate_line_amt    DECIMAL(18,2) NOT NULL DEFAULT 0,
+              invoice_line_amt     DECIMAL(18,2) NOT NULL DEFAULT 0,
+              expense_line_amt     DECIMAL(18,2) NOT NULL DEFAULT 0,
+              invoice_balance_amt  DECIMAL(18,2) NOT NULL DEFAULT 0,
+              open_invoice_count   INT NOT NULL DEFAULT 0,
+              balance_amt          DECIMAL(18,2) NOT NULL DEFAULT 0,
+
+              actual_profit        DECIMAL(18,2) NOT NULL DEFAULT 0,
+              actual_profit_pct    DECIMAL(12,8) NULL,
+              projected_profit     DECIMAL(18,2) NOT NULL DEFAULT 0,
+              projected_profit_pct DECIMAL(12,8) NULL,
+              cost_diff_amt        DECIMAL(18,2) NOT NULL DEFAULT 0,
+              cost_diff_pct        DECIMAL(12,8) NULL,
+
+              updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+              INDEX idx_pfs_qbo (project_qbo_id)
+            ) ENGINE=InnoDB
+        """))
+
 
 def build_auth_url() -> str:
     if not all([QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_REDIRECT_URI]):
@@ -552,6 +581,14 @@ def run_customers_sync(triggered_by: str = "manual") -> dict:
         customers = fetch_customers(realm_id, access_token)
         upserted = upsert_customers(customers)
         log_sync_finish(run_id, True, fetched=len(customers), upserted=upserted)
+        # Refresh the project financial summary so the Financials page
+        # reflects any newly-flagged is_project=1 customers.
+        try:
+            from app.projects.service import refresh_project_financial_summary
+            refresh_project_financial_summary()
+        except Exception:
+            # Never let the summary refresh fail a successful sync.
+            pass
         return {
             "realm_id": realm_id,
             "customers_fetched": len(customers),
@@ -1184,6 +1221,13 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             upserted_sales_lines_total += up_sales_line
 
         log_sync_finish(run_id, True, fetched=fetched_total, upserted=upserted_txns_total)
+        # Rebuild the pre-computed Financials page aggregates since transactions changed.
+        try:
+            from app.projects.service import refresh_project_financial_summary
+            refresh_project_financial_summary()
+        except Exception:
+            # Never let the summary refresh fail a successful sync.
+            pass
         return {
             "realm_id": realm_id,
             "entities": TRANSACTION_ENTITIES,

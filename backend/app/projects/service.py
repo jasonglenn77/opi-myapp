@@ -398,3 +398,203 @@ def list_project_events(qbo_customer_id: int):
         """), {"pid": int(proj["id"])}).mappings().all()
 
     return [dict(r) for r in rows]
+
+
+def refresh_project_financial_summary() -> dict:
+    """
+    Recomputes per-project financial aggregates and writes them to
+    project_financial_summary. This is the heavy CTE work that used to run
+    on every page load — now run once per QBO sync (or manually) so the
+    /projects/financials endpoint can do a trivial SELECT.
+
+    Safe to call repeatedly; uses INSERT ... ON DUPLICATE KEY UPDATE.
+    Also deletes stale rows for customers that are no longer is_project=1.
+    """
+    with engine.begin() as conn:
+        # Table is created by qbo_init_tables() but we self-heal here in case
+        # a caller reached this function before any QBO operation ran.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS project_financial_summary (
+              qbo_customer_id      INT NOT NULL PRIMARY KEY,
+              project_qbo_id       VARCHAR(32) NULL,
+              estimate_cost_amt    DECIMAL(18,2) NOT NULL DEFAULT 0,
+              estimate_line_amt    DECIMAL(18,2) NOT NULL DEFAULT 0,
+              invoice_line_amt     DECIMAL(18,2) NOT NULL DEFAULT 0,
+              expense_line_amt    DECIMAL(18,2) NOT NULL DEFAULT 0,
+              invoice_balance_amt  DECIMAL(18,2) NOT NULL DEFAULT 0,
+              open_invoice_count   INT NOT NULL DEFAULT 0,
+              balance_amt          DECIMAL(18,2) NOT NULL DEFAULT 0,
+              actual_profit        DECIMAL(18,2) NOT NULL DEFAULT 0,
+              actual_profit_pct    DECIMAL(12,8) NULL,
+              projected_profit     DECIMAL(18,2) NOT NULL DEFAULT 0,
+              projected_profit_pct DECIMAL(12,8) NULL,
+              cost_diff_amt        DECIMAL(18,2) NOT NULL DEFAULT 0,
+              cost_diff_pct        DECIMAL(12,8) NULL,
+              updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_pfs_qbo (project_qbo_id)
+            ) ENGINE=InnoDB
+        """))
+
+        result = conn.execute(text("""
+            INSERT INTO myapp.project_financial_summary (
+              qbo_customer_id, project_qbo_id,
+              estimate_cost_amt, estimate_line_amt, invoice_line_amt, expense_line_amt,
+              invoice_balance_amt, open_invoice_count, balance_amt,
+              actual_profit, actual_profit_pct,
+              projected_profit, projected_profit_pct,
+              cost_diff_amt, cost_diff_pct
+            )
+            WITH
+            latest_sales_txns AS (
+              SELECT *
+              FROM (
+                SELECT qt.*,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY qt.customer_qbo_id, qt.entity_type,
+                                      COALESCE(qt.doc_number, CONCAT('__nodoc__', qt.qbo_id))
+                         ORDER BY qt.id DESC
+                       ) AS _rn
+                FROM myapp.qbo_transactions qt
+                INNER JOIN myapp.qbo_customers qc_proj
+                  ON qc_proj.qbo_id = qt.customer_qbo_id
+                  AND qc_proj.is_project = 1
+                WHERE qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
+                  AND (qt.total_amt IS NULL OR qt.total_amt > 0)
+              ) _ranked
+              WHERE _rn = 1
+            ),
+
+            sales_lines AS (
+              SELECT
+                qc.qbo_id                      AS project_qbo_id,
+                qt.entity_type,
+                qstl.amount                    AS line_amount,
+                qstl.cost_amount               AS line_cost_amount
+              FROM myapp.qbo_customers qc
+              INNER JOIN latest_sales_txns qt
+                ON qt.customer_qbo_id = qc.qbo_id
+              LEFT JOIN myapp.qbo_sales_transaction_lines qstl
+                ON qstl.transaction_id = qt.id
+                AND qstl.line_level = 'child'
+              WHERE qc.is_project = 1
+            ),
+
+            expense_lines AS (
+              SELECT
+                qc.qbo_id                      AS project_qbo_id,
+                CASE
+                  WHEN qt.entity_type = 'VendorCredit' THEN -qtl.amount
+                  ELSE qtl.amount
+                END                            AS line_amount
+              FROM myapp.qbo_customers qc
+              INNER JOIN myapp.qbo_transaction_lines qtl
+                ON qtl.line_customer_qbo_id = qc.qbo_id
+              INNER JOIN myapp.qbo_transactions qt
+                ON qt.id = qtl.transaction_id
+                AND qt.entity_type IN ('Bill', 'Check', 'CreditCardCharge', 'Purchase', 'PurchaseOrder', 'VendorCredit')
+              WHERE qc.is_project = 1
+            ),
+
+            ar_lines AS (
+              SELECT
+                qc.qbo_id                AS project_qbo_id,
+                qt.id                    AS transaction_id,
+                qt.balance_amt
+              FROM myapp.qbo_customers qc
+              INNER JOIN latest_sales_txns qt
+                ON qt.customer_qbo_id = qc.qbo_id
+                AND qt.entity_type = 'Invoice'
+              WHERE qc.is_project = 1
+            ),
+
+            sales_rollup AS (
+              SELECT
+                project_qbo_id,
+                SUM(CASE WHEN entity_type = 'Estimate' THEN COALESCE(line_cost_amount, 0) ELSE 0 END) AS estimate_cost_amt,
+                SUM(CASE WHEN entity_type = 'Estimate' THEN COALESCE(line_amount,      0) ELSE 0 END) AS estimate_line_amt,
+                SUM(CASE WHEN entity_type = 'Invoice'  THEN COALESCE(line_amount,      0) ELSE 0 END) AS invoice_line_amt
+              FROM sales_lines
+              GROUP BY project_qbo_id
+            ),
+
+            expense_rollup AS (
+              SELECT
+                project_qbo_id,
+                SUM(COALESCE(line_amount, 0)) AS expense_line_amt
+              FROM expense_lines
+              GROUP BY project_qbo_id
+            ),
+
+            ar_rollup AS (
+              SELECT
+                project_qbo_id,
+                SUM(COALESCE(balance_amt, 0))                    AS invoice_balance_amt,
+                SUM(CASE WHEN balance_amt > 0 THEN 1 ELSE 0 END) AS open_invoice_count
+              FROM ar_lines
+              GROUP BY project_qbo_id
+            )
+            SELECT
+              qc.id,
+              qc.qbo_id,
+
+              COALESCE(sr.estimate_cost_amt, 0),
+              COALESCE(sr.estimate_line_amt, 0),
+              COALESCE(sr.invoice_line_amt,  0),
+              COALESCE(er.expense_line_amt,  0),
+              COALESCE(ar.invoice_balance_amt, 0),
+              COALESCE(ar.open_invoice_count, 0),
+
+              (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0)),
+              (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0)),
+              CASE
+                WHEN COALESCE(sr.invoice_line_amt, 0) = 0 THEN NULL
+                ELSE (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0))
+                     / COALESCE(sr.invoice_line_amt, 0)
+              END,
+              (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0)),
+              CASE
+                WHEN COALESCE(sr.estimate_line_amt, 0) = 0 THEN NULL
+                ELSE (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
+                     / COALESCE(sr.estimate_line_amt, 0)
+              END,
+              (COALESCE(sr.estimate_cost_amt, 0) - COALESCE(er.expense_line_amt, 0)),
+              CASE
+                WHEN COALESCE(sr.estimate_cost_amt, 0) = 0 THEN NULL
+                ELSE (COALESCE(sr.estimate_cost_amt, 0) - COALESCE(er.expense_line_amt, 0))
+                     / COALESCE(sr.estimate_cost_amt, 0)
+              END
+
+            FROM myapp.qbo_customers qc
+            LEFT JOIN sales_rollup   sr ON sr.project_qbo_id = qc.qbo_id
+            LEFT JOIN expense_rollup er ON er.project_qbo_id = qc.qbo_id
+            LEFT JOIN ar_rollup      ar ON ar.project_qbo_id = qc.qbo_id
+            WHERE qc.is_project = 1
+
+            ON DUPLICATE KEY UPDATE
+              project_qbo_id       = VALUES(project_qbo_id),
+              estimate_cost_amt    = VALUES(estimate_cost_amt),
+              estimate_line_amt    = VALUES(estimate_line_amt),
+              invoice_line_amt     = VALUES(invoice_line_amt),
+              expense_line_amt     = VALUES(expense_line_amt),
+              invoice_balance_amt  = VALUES(invoice_balance_amt),
+              open_invoice_count   = VALUES(open_invoice_count),
+              balance_amt          = VALUES(balance_amt),
+              actual_profit        = VALUES(actual_profit),
+              actual_profit_pct    = VALUES(actual_profit_pct),
+              projected_profit     = VALUES(projected_profit),
+              projected_profit_pct = VALUES(projected_profit_pct),
+              cost_diff_amt        = VALUES(cost_diff_amt),
+              cost_diff_pct        = VALUES(cost_diff_pct)
+        """))
+        upserted = result.rowcount  # note: MySQL counts updated rows as 2
+
+        # Clean up rows for customers that are no longer is_project=1 (or were deleted)
+        deleted = conn.execute(text("""
+            DELETE pfs FROM myapp.project_financial_summary pfs
+            LEFT JOIN myapp.qbo_customers qc
+              ON qc.id = pfs.qbo_customer_id
+              AND qc.is_project = 1
+            WHERE qc.id IS NULL
+        """)).rowcount
+
+    return {"ok": True, "upserted_rows": int(upserted or 0), "deleted_rows": int(deleted or 0)}
