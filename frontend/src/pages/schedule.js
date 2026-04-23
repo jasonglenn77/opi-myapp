@@ -239,13 +239,13 @@ export async function schedulePage(routeFn) {
       <tr>
         <th class="text-[11px] font-extrabold text-black px-2 py-1.5 bg-white sticky top-0 z-30 border-b border-r border-black/10 whitespace-nowrap shadow-sm" style="min-width:36px;">Crew</th>
         ${DAY_LABELS.map(d => `
-          <th class="text-[11px] font-extrabold text-black px-2 py-1.5 bg-white sticky top-0 z-30 border-b border-black/10 whitespace-nowrap text-center shadow-sm" style="min-width:90px;">${d}</th>
+          <th class="text-[11px] font-extrabold text-black px-2 py-1.5 bg-white sticky top-0 z-30 border-b border-r border-black/10 whitespace-nowrap text-center shadow-sm" style="min-width:90px;">${d}</th>
         `).join("")}
       </tr>
     `;
 
     function renderAssignmentCell(items, crewCode, currentDate) {
-      if (items.length === 0) return `<td class="px-1 py-0.5 border-b border-black/5 align-top"></td>`;
+      if (items.length === 0) return `<td class="px-1 py-0.5 border-b border-r border-black/5 align-top"></td>`;
 
       const html = items.map(it => {
         const isTravel  = it.cellType === "travel";
@@ -264,14 +264,13 @@ export async function schedulePage(routeFn) {
           wrapClass = "bg-gray-300 rounded px-1 py-0.5 text-gray-800 italic text-center font-semibold border border-gray-400";
         } else if (isOverage) {
           wrapClass = "bg-orange-50 border border-orange-200 rounded px-0.5 py-px text-orange-700";
-        } else if (isEndDate) {
-          wrapClass = "bg-green-500 text-white rounded px-0.5 py-px font-extrabold";
-        
         } else if (isStartDate) {
-          // 👉 NEW: highlight ONLY on start date
+          // Start-date wins over end-date so single-day projects render as start
           wrapClass = hasWire
             ? "bg-teal-400 text-white rounded px-0.5 py-px font-extrabold"
             : "bg-yellow-300 text-black rounded px-0.5 py-px font-extrabold";
+        } else if (isEndDate) {
+          wrapClass = "bg-green-500 text-white rounded px-0.5 py-px font-extrabold";
         } else {
           wrapClass = "rounded px-0.5 py-px";
         }
@@ -315,7 +314,7 @@ export async function schedulePage(routeFn) {
         `;
       }).join("");
 
-      return `<td class="px-1 py-0.5 border-b border-black/5 align-top">${html}</td>`;
+      return `<td class="px-1 py-0.5 border-b border-r border-black/5 align-top">${html}</td>`;
     }
 
     // Build week blocks
@@ -325,12 +324,13 @@ export async function schedulePage(routeFn) {
         const isCurrentMonth = d.getMonth() === state.month;
         const isToday = ymd(d) === ymd(new Date());
         return `
-          <td class="sticky top-[30px] z-20 text-[11px] px-1 py-1 text-center border-b border-black/20 bg-gray-100
-            ${isToday 
-              ? "bg-gray-100 text-blue-600 font-extrabold" 
-              : isCurrentMonth 
-                ? "text-black font-semibold" 
+          <td class="sticky top-[30px] z-20 text-[11px] px-1 py-1 text-center bg-gray-100
+            ${isToday
+              ? "bg-gray-100 text-blue-600 font-extrabold"
+              : isCurrentMonth
+                ? "text-black font-semibold"
                 : "text-black/40"}"
+            style="box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 -1px 0 rgba(0,0,0,0.2);"
           >${d.getDate()}</td>
         `;
       }).join("");

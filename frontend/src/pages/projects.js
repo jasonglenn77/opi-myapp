@@ -3,16 +3,20 @@ import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 
 export async function projectsPage(routeFn) {
-  const data = await api("/projects");
-  const rows = data.projects || [];
+  // Data loads progressively AFTER the shell is rendered:
+  //   /projects/basic      — fast: names, statuses, PMs, crews, dates, files
+  //   /projects/financials — slower: per-project money aggregates, merged in
+  let rows = [];
 
   // Date filters are { from:"", to:"" }; text/dropdown filters are strings;
   // numeric range filters are { min:"", max:"" }.
   const state = {
-    q:          "",
-    sortKey:    "project_name",
-    sortDir:    "asc",
-    openFilter: null,
+    q:                "",
+    sortKey:          "project_name",
+    sortDir:          "asc",
+    openFilter:       null,
+    loadingBasic:     true,
+    financialsLoaded: false,
     filters: {
       project_name:         "",
       all_statuses:         [],
@@ -25,6 +29,8 @@ export async function projectsPage(routeFn) {
       invoice_line_amt:     { min: "", max: "" },
       invoice_balance_amt:  { min: "", max: "" },
       expense_line_amt:     { min: "", max: "" },
+      cost_diff_amt:        { min: "", max: "" },
+      cost_diff_pct:        { min: "", max: "" },
       actual_profit:        { min: "", max: "" },
       actual_profit_pct:    { min: "", max: "" },
       projected_profit:     { min: "", max: "" },
@@ -34,10 +40,11 @@ export async function projectsPage(routeFn) {
 
   const NUMERIC_COLS = [
     "estimate_cost_amt","estimate_line_amt","invoice_line_amt","invoice_balance_amt",
-    "expense_line_amt","actual_profit","actual_profit_pct","projected_profit","projected_profit_pct",
+    "expense_line_amt","cost_diff_amt","cost_diff_pct",
+    "actual_profit","actual_profit_pct","projected_profit","projected_profit_pct",
   ];
   const DATE_COLS        = ["all_start_dates","all_end_dates"];
-  const PCT_COLS         = ["actual_profit_pct","projected_profit_pct"];
+  const PCT_COLS         = ["actual_profit_pct","projected_profit_pct","cost_diff_pct"];
   const MULTISELECT_COLS = ["all_statuses","all_project_managers","all_work_crews"];
 
   // ── formatting ─────────────────────────────────────────────────────────────
@@ -97,10 +104,42 @@ export async function projectsPage(routeFn) {
     }).join(" ");
   }
 
+  // ── stacked dates: split "2025-02-10, 2025-03-15" into vertical lines ─────
+  function stackDates(commaSeparated) {
+    if (!commaSeparated) return "—";
+    const parts = commaSeparated.split(",").map(d => d.trim()).filter(Boolean);
+    if (!parts.length) return "—";
+    return parts.map(d => `<div>${escapeHtml(d)}</div>`).join("");
+  }
+
+  // ── loading placeholders — shown until financial data arrives ─────────────
+  const skelInline = `<span class="text-black/20">…</span>`;
+  const finAmt       = v => state.financialsLoaded ? fmtAmt(v)       : skelInline;
+  const finSigned    = v => state.financialsLoaded ? fmtSigned(v)    : skelInline;
+  const finPctSigned = v => state.financialsLoaded ? fmtPctSigned(v) : skelInline;
+
+  function skeletonKpiStrip() {
+    const card = "rounded-2xl border border-black/10 bg-white px-4 py-3 flex flex-col gap-1 text-ink-900";
+    const lbl  = "text-[10px] font-bold text-black/40 uppercase tracking-wide";
+    const bar  = `<span class="inline-block h-6 w-24 rounded bg-black/10 animate-pulse"></span>`;
+    const sub  = `<span class="text-[10px] text-black/30">Loading…</span>`;
+    return ["Estimate","Invoice","Expense","Profit"].map(label => `
+      <div class="${card}">
+        <div class="${lbl}">${label}</div>
+        <div>${bar}</div>
+        <div>${sub}</div>
+      </div>
+    `).join("");
+  }
+
   // ── KPI strip ─────────────────────────────────────────────────────────────
   // All colours are explicit — never rely on inheritance from body (text-white).
 
   function renderKpiStrip(list) {
+    if (!state.financialsLoaded) {
+      document.getElementById("kpiStrip").innerHTML = skeletonKpiStrip();
+      return;
+    }
     const ec  = list.reduce((s, r) => s + Number(r.estimate_cost_amt    || 0), 0);
     const el  = list.reduce((s, r) => s + Number(r.estimate_line_amt    || 0), 0);
     const inv = list.reduce((s, r) => s + Number(r.invoice_line_amt     || 0), 0);
@@ -406,7 +445,7 @@ export async function projectsPage(routeFn) {
         <div class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1.5">
             <div>
-              <div class="text-base font-extrabold">Projects</div>
+              <div class="text-base font-extrabold">Financials</div>
               <div class="text-xs text-black/50">Sort columns · filter with the funnel · search by name.</div>
             </div>
             <div class="flex items-center gap-2">
@@ -588,6 +627,8 @@ export async function projectsPage(routeFn) {
         ${th("invoice_balance_amt",  "AR Bal.",      true)}
         ${th("estimate_cost_amt",    "Est.Cost",    true)}
         ${th("expense_line_amt",     "Expense",     true)}
+        ${th("cost_diff_amt",        "Diff",        true)}
+        ${th("cost_diff_pct",        "Diff%",       true)}
         ${th("projected_profit",     "Proj.Profit", true)}
         ${th("projected_profit_pct", "Proj.%",      true)}
         ${th("actual_profit",        "Act.Profit",  true)}
@@ -597,8 +638,9 @@ export async function projectsPage(routeFn) {
   }
 
   function renderBody(list) {
-    document.getElementById("rowCount").textContent =
-      `Showing ${list.length} project${list.length === 1 ? "" : "s"}`;
+    document.getElementById("rowCount").textContent = state.loadingBasic
+      ? "Loading projects…"
+      : `Showing ${list.length} project${list.length === 1 ? "" : "s"}`;
 
     document.getElementById("projectsBody").innerHTML =
       list.map(r => `
@@ -629,19 +671,22 @@ export async function projectsPage(routeFn) {
             ${escapeHtml(r.all_work_crews || "—")}
           </td>
 
-          <td class="py-1.5 px-2 text-xs whitespace-nowrap">${escapeHtml(r.all_start_dates || "—")}</td>
-          <td class="py-1.5 px-2 text-xs whitespace-nowrap">${escapeHtml(r.all_end_dates   || "—")}</td>
+          <td class="py-1.5 px-2 text-xs align-top whitespace-nowrap">${stackDates(r.all_start_dates)}</td>
+          <td class="py-1.5 px-2 text-xs align-top whitespace-nowrap">${stackDates(r.all_end_dates)}</td>
 
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums text-black/60">${fmtAmt(r.estimate_line_amt)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold">${fmtAmt(r.invoice_line_amt)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${Number(r.invoice_balance_amt||0) > 0 ? "text-amber-600 font-semibold" : "text-black/40"}">${fmtAmt(r.invoice_balance_amt)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.estimate_cost_amt)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${fmtAmt(r.expense_line_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums text-black/60">${finAmt(r.estimate_line_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold">${finAmt(r.invoice_line_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${Number(r.invoice_balance_amt||0) > 0 ? "text-amber-600 font-semibold" : "text-black/40"}">${finAmt(r.invoice_balance_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${finAmt(r.estimate_cost_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums">${finAmt(r.expense_line_amt)}</td>
 
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.projected_profit)}">${fmtSigned(r.projected_profit)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.projected_profit_pct)}">${fmtPctSigned(r.projected_profit_pct)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.actual_profit)}">${fmtSigned(r.actual_profit)}</td>
-          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.actual_profit_pct)}">${fmtPctSigned(r.actual_profit_pct)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.cost_diff_amt)}">${finSigned(r.cost_diff_amt)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.cost_diff_pct)}">${finPctSigned(r.cost_diff_pct)}</td>
+
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.projected_profit)}">${finSigned(r.projected_profit)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.projected_profit_pct)}">${finPctSigned(r.projected_profit_pct)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.actual_profit)}">${finSigned(r.actual_profit)}</td>
+          <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.actual_profit_pct)}">${finPctSigned(r.actual_profit_pct)}</td>
 
           <td class="py-1.5 px-2 text-xs whitespace-nowrap">
             <div class="flex items-center gap-1.5">
@@ -661,7 +706,7 @@ export async function projectsPage(routeFn) {
           </td>
         </tr>
       `).join("") ||
-      `<tr><td class="py-8 text-center text-black/40 text-xs" colspan="16">No projects match these filters.</td></tr>`;
+      `<tr><td class="py-8 text-center text-black/40 text-xs" colspan="18">${state.loadingBasic ? "Loading projects…" : "No projects match these filters."}</td></tr>`;
   }
 
   // ── filtering + sorting ────────────────────────────────────────────────────
@@ -952,6 +997,7 @@ export async function projectsPage(routeFn) {
 
     const rowEl = e.target.closest("[data-project-row]");
     if (rowEl) {
+      if (!state.financialsLoaded) return;  // wait until money columns are ready
       const id  = rowEl.getAttribute("data-project-row");
       const row = rows.find(r => String(r.qbo_customer_id) === String(id));
       if (row) openFinancialsModal("estimate", [row], row.project_name || "Project");
@@ -1097,6 +1143,8 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
       invoice_line_amt:     "Invoice",
       invoice_balance_amt:  "AR Balance",
       expense_line_amt:     "Expense",
+      cost_diff_amt:        "Diff",
+      cost_diff_pct:        "Diff %",
       actual_profit:        "Actual Profit",
       actual_profit_pct:    "Actual Profit %",
       projected_profit:     "Proj. Profit",
@@ -1457,6 +1505,7 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
   document.getElementById("kpiStrip").addEventListener("click", e => {
     const card = e.target.closest("[data-kpi-card]");
     if (!card) return;
+    if (!state.financialsLoaded) return;   // ignore clicks on skeleton cards
     const cardKey = card.getAttribute("data-kpi-card");
     // Pass the currently-filtered list so the modal scopes to what's visible
     const currentList = sorted(filtered());
@@ -1680,7 +1729,40 @@ async function openArModal(triggerEl, qboIds = []) {
   });
 
   // ── initial render ─────────────────────────────────────────────────────────
+  // Shell + skeletons render immediately so navigation feels instant.
   renderAll();
   // Double rAF ensures KPI strip + card header are laid out before measuring.
   requestAnimationFrame(() => requestAnimationFrame(fitCardHeight));
+
+  // ── Progressive data load — both endpoints fire in parallel ───────────────
+  const basicPromise      = api("/projects/basic");
+  const financialsPromise = api("/projects/financials");
+
+  // As soon as basic data arrives, show the real rows with skeleton financials
+  basicPromise.then(data => {
+    rows = data.projects || [];
+    state.loadingBasic = false;
+    renderAll();
+    requestAnimationFrame(() => requestAnimationFrame(fitCardHeight));
+  }).catch(err => {
+    console.error("Failed to load /projects/basic:", err);
+    state.loadingBasic = false;
+    renderAll();
+  });
+
+  // Merge financials once BOTH promises have settled (order-independent)
+  Promise.all([basicPromise.catch(() => null), financialsPromise]).then(([_, finData]) => {
+    const map = {};
+    (finData?.financials || []).forEach(f => { map[String(f.qbo_customer_id)] = f; });
+    rows.forEach(r => {
+      const f = map[String(r.qbo_customer_id)];
+      if (f) Object.assign(r, f);
+    });
+    state.financialsLoaded = true;
+    renderAll();
+  }).catch(err => {
+    console.error("Failed to load /projects/financials:", err);
+    state.financialsLoaded = true;   // stop showing skeletons even on error
+    renderAll();
+  });
 }
