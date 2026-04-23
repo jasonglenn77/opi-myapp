@@ -720,6 +720,7 @@ def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
                 INNER JOIN myapp.qbo_customers qc_proj
                   ON qc_proj.qbo_id = t.customer_qbo_id
                   AND qc_proj.is_project = 1
+                  AND (:no_filter = 1 OR qc_proj.qbo_id IN :qbo_ids)
                 WHERE t.entity_type = 'Invoice'
                   AND (t.total_amt IS NULL OR t.total_amt > 0)
             ) _ranked
@@ -772,12 +773,16 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
     if ids:
         # Parameterised safely
         placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
-        id_filter_sales   = f"AND qc.qbo_id IN ({placeholders})"
-        id_filter_expense = f"AND qc.qbo_id IN ({placeholders})"
+        id_filter_sales       = f"AND qc.qbo_id IN ({placeholders})"
+        id_filter_expense     = f"AND qc.qbo_id IN ({placeholders})"
+        # Pushed-down variant: applies the same filter inside the dedup
+        # subquery so the window function doesn't rank rows we won't use.
+        id_filter_sales_inner = f"AND qc_proj.qbo_id IN ({placeholders})"
         id_params = {f"id{i}": v for i, v in enumerate(ids)}
     else:
-        id_filter_sales   = ""
-        id_filter_expense = ""
+        id_filter_sales       = ""
+        id_filter_expense     = ""
+        id_filter_sales_inner = ""
         id_params = {}
 
     sales_sql = text(f"""
@@ -800,6 +805,7 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
                 INNER JOIN myapp.qbo_customers qc_proj
                   ON qc_proj.qbo_id = t.customer_qbo_id
                   AND qc_proj.is_project = 1
+                  {id_filter_sales_inner}
                 WHERE t.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
                   AND (t.total_amt IS NULL OR t.total_amt > 0)
             ) _ranked
