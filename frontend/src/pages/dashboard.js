@@ -59,22 +59,28 @@ export async function dashboardPage(routeFn) {
   }
 
   function statusLabel(s) {
-    return s === "not_started" ? "Not Started"
-         : s === "in_progress" ? "In Progress"
-         : s === "completed"   ? "Completed"
-         : s === "canceled"    ? "Canceled"
+    return s === "not_started"     ? "Not Started"
+         : s === "in_progress"     ? "In Progress"
+         : s === "completed"       ? "Completed"
+         : s === "canceled"        ? "Canceled"
+         : s === "needs_attention" ? "Needs Attn"
          : (s || "");
   }
 
   function statusBadge(s) {
     if (!s) return '<span class="text-black/30">—</span>';
     const cls =
-      s === "in_progress" ? "bg-kpi-inProgress-bg border-kpi-inProgress-bd text-kpi-inProgress-text" :
-      s === "completed"   ? "bg-kpi-completed-bg  border-kpi-completed-bd  text-kpi-completed-text" :
-      s === "canceled"    ? "bg-red-50 border-red-200 text-red-700" :
-                            "bg-kpi-notStarted-bg border-kpi-notStarted-bd text-kpi-notStarted-text";
+      s === "in_progress"     ? "bg-kpi-inProgress-bg border-kpi-inProgress-bd text-kpi-inProgress-text" :
+      s === "completed"       ? "bg-kpi-completed-bg  border-kpi-completed-bd  text-kpi-completed-text" :
+      s === "canceled"        ? "bg-red-50 border-red-200 text-red-700" :
+      s === "needs_attention" ? "bg-kpi-attention-bg  border-kpi-attention-bd  text-kpi-attention-text"  :
+                                "bg-kpi-notStarted-bg border-kpi-notStarted-bd text-kpi-notStarted-text";
     return `<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${cls}">${escapeHtml(statusLabel(s))}</span>`;
   }
+
+  // Projects without any schedule item come back with project_status=null; treat that
+  // as a virtual "needs_attention" status for display, filter, and sort purposes.
+  const effectiveStatus = (r) => r.project_status || "needs_attention";
 
   function fmtNum(v) {
     if (v == null || v === "") return '<span class="text-black/30">—</span>';
@@ -128,7 +134,7 @@ export async function dashboardPage(routeFn) {
         </div>
 
         <div class="mt-4 flex flex-col lg:flex-row gap-3">
-          <div class="flex-1 border border-black/10 bg-black/5 rounded-2xl p-3">
+          <div class="flex-1 min-w-0 border border-black/10 bg-black/5 rounded-2xl p-3">
             <div class="flex flex-wrap items-center justify-between gap-2 px-1 pb-2">
               <div class="text-xs font-bold text-black/60">Legend</div>
               <div class="flex flex-wrap items-center gap-3 text-xs font-semibold text-black/70">
@@ -149,12 +155,12 @@ export async function dashboardPage(routeFn) {
             <div id="timelineChart" class="w-full"></div>
           </div>
 
-          <div class="flex flex-col gap-3 lg:w-44">
-            <div class="rounded-2xl border bg-kpi-attention-bg border-kpi-attention-bd p-4 flex-1 flex flex-col justify-center items-center">
+          <div class="flex flex-col gap-3 lg:w-44 lg:shrink-0">
+            <div id="needsAttnCard" class="rounded-2xl border bg-kpi-attention-bg border-kpi-attention-bd p-4 flex-1 flex flex-col justify-center items-center cursor-pointer transition hover:shadow-md hover:brightness-95">
               <div class="text-xs font-bold text-kpi-attention-text uppercase tracking-wide">Needs Attention</div>
               <div class="mt-1 text-3xl font-extrabold text-kpi-attention-num leading-tight">${needsAttentionCount}</div>
             </div>
-            <div class="rounded-2xl border bg-red-50 border-red-200 p-4 flex-1 flex flex-col justify-center items-center">
+            <div id="canceledCard" class="rounded-2xl border bg-red-50 border-red-200 p-4 flex-1 flex flex-col justify-center items-center cursor-pointer transition hover:shadow-md hover:brightness-95">
               <div class="text-xs font-bold text-red-700 uppercase tracking-wide">Canceled</div>
               <div class="mt-1 text-3xl font-extrabold text-red-900 leading-tight">${canceledCount}</div>
             </div>
@@ -546,7 +552,7 @@ export async function dashboardPage(routeFn) {
           <td class="py-1.5 px-2 font-semibold"
               style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
               title="${ea(r.project_name || "")}">${ea(r.project_name || "—")}</td>
-          <td class="py-1.5 px-2">${statusBadge(r.project_status)}</td>
+          <td class="py-1.5 px-2">${statusBadge(effectiveStatus(r))}</td>
           <td class="py-1.5 px-2 whitespace-nowrap"
               style="max-width:140px; overflow:hidden; text-overflow:ellipsis;"
               title="${ea(r.primary_project_manager || "")}">${ea(r.primary_project_manager || "—")}</td>
@@ -625,10 +631,11 @@ export async function dashboardPage(routeFn) {
       };
       const rawOpts =
         key === "project_status" ? [
-          { value: "not_started", label: "Not Started" },
-          { value: "in_progress", label: "In Progress" },
-          { value: "completed",   label: "Completed" },
-          { value: "canceled",    label: "Canceled" },
+          { value: "needs_attention", label: "Needs Attention" },
+          { value: "not_started",     label: "Not Started" },
+          { value: "in_progress",     label: "In Progress" },
+          { value: "completed",       label: "Completed" },
+          { value: "canceled",        label: "Canceled" },
         ]
         : key === "wire_guidance" ? [
           { value: "yes", label: "Yes" },
@@ -730,7 +737,7 @@ export async function dashboardPage(routeFn) {
           !normalize(r.project_name).includes(normalize(state.filters.project_name))) return false;
 
       if (state.filters.project_status.length > 0 &&
-          !state.filters.project_status.includes(r.project_status || "not_started")) return false;
+          !state.filters.project_status.includes(effectiveStatus(r))) return false;
 
       if (state.filters.primary_project_manager.length > 0 &&
           !state.filters.primary_project_manager.includes(r.primary_project_manager || "")) return false;
@@ -766,9 +773,17 @@ export async function dashboardPage(routeFn) {
     });
   }
 
+  // Semantic sort order for the Status column: urgent first, canceled last.
+  const STATUS_ORDER = { needs_attention: 0, not_started: 1, in_progress: 2, completed: 3, canceled: 4 };
+
   function sorted(list) {
     const dir = state.sortDir === "asc" ? 1 : -1;
     return [...list].sort((a, b) => {
+      if (state.sortKey === "project_status") {
+        const va = STATUS_ORDER[effectiveStatus(a)] ?? 99;
+        const vb = STATUS_ORDER[effectiveStatus(b)] ?? 99;
+        return (va - vb) * dir;
+      }
       const va = a[state.sortKey], vb = b[state.sortKey];
       if (va == null && vb == null) return 0;
       if (va == null) return 1;
@@ -810,6 +825,17 @@ export async function dashboardPage(routeFn) {
     }
     renderAll();
   }
+
+  // Click a side card → toggle the corresponding status filter in the table.
+  // Same toggle behavior as the chart: click again to clear.
+  function handleStatusCardClick(statusValue) {
+    const f = state.filters;
+    const alreadySelected = f.project_status.length === 1 && f.project_status[0] === statusValue;
+    state.filters.project_status = alreadySelected ? [] : [statusValue];
+    renderAll();
+  }
+  document.getElementById("needsAttnCard")?.addEventListener("click", () => handleStatusCardClick("needs_attention"));
+  document.getElementById("canceledCard")?.addEventListener("click", () => handleStatusCardClick("canceled"));
 
   // ── events: search + clear ─────────────────────────────────────────────────
   document.getElementById("projSearchInput").addEventListener("input", e => {

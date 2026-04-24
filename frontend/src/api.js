@@ -29,6 +29,10 @@ export async function api(path, opts = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
   const ct = res.headers.get("content-type") || "";
   const body = ct.includes("application/json") ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(typeof body === "string" ? body : JSON.stringify(body));
+  if (!res.ok) {
+    const err = new Error(typeof body === "string" ? body : JSON.stringify(body));
+    err.status = res.status;     // so callers can distinguish 401/403 from 500/503 etc.
+    throw err;
+  }
   return body;
 }
