@@ -652,12 +652,21 @@ export async function assignmentPage(routeFn) {
   `;
 
   setShell({
-    title: "Assignment",
-    subtitle: "Manage assignments inline.",
+    title: "",
+    subtitle: "",
     bodyHtml,
     showLogout: true,
     routeFn,
   });
+
+  // Hide the empty page-title block; restore when navigating away
+  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
+  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
+    pageTitleBlock.style.display = "none";
+    window.addEventListener("hashchange", () => {
+      if (pageTitleBlock) pageTitleBlock.style.display = "";
+    }, { once: true });
+  }
 
   function inDateRange(isoValue, fromValue, toValue) {
     if (!fromValue && !toValue) return true;

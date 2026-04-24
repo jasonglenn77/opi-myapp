@@ -7,14 +7,24 @@ export async function teamsPage(routeFn) {
     api("/work-crews"),
   ]);
 
-  // Crew helpers
-  const parents = crews.filter(c => !c.parent_id);
-  const childrenByParent = new Map();
-  crews.filter(c => c.parent_id).forEach(c => {
+  // ── split by active status ────────────────────────────────────────────────
+  const activePms     = pms.filter(pm => pm.is_active);
+  const inactivePms   = pms.filter(pm => !pm.is_active);
+  const activeCrews   = crews.filter(c => c.is_active);
+  const inactiveCrews = crews.filter(c => !c.is_active);
+
+  // Active crew hierarchy — parents then their active children, indented
+  const activeParents = activeCrews.filter(c => !c.parent_id);
+  const activeChildrenByParent = new Map();
+  activeCrews.filter(c => c.parent_id).forEach(c => {
     const k = String(c.parent_id);
-    if (!childrenByParent.has(k)) childrenByParent.set(k, []);
-    childrenByParent.get(k).push(c);
+    if (!activeChildrenByParent.has(k)) activeChildrenByParent.set(k, []);
+    activeChildrenByParent.get(k).push(c);
   });
+
+  // Modal "Parent" dropdown — include all parents so an Edit of a disabled
+  // crew still shows its current (possibly-disabled) parent.
+  const parents = crews.filter(c => !c.parent_id);
 
   function colorDot(color) {
     if (!color) return "";
@@ -28,25 +38,37 @@ export async function teamsPage(routeFn) {
     `;
   }
 
-  const pmRows = pms.map(pm => `
-    <tr class="border-b border-black/5">
-      <td class="py-2 pr-3">
-        <div class="flex items-center gap-2">
-          ${colorDot(pm.color)}
-          <div class="font-semibold">${(pm.first_name || "")} ${(pm.last_name || "")}</div>
-        </div>
-      </td>
-      <td class="py-2 pr-3">${pm.email || ""}</td>
-      <td class="py-2 pr-3">${pm.phone || ""}</td>
-      <td class="py-2 pr-3">${pm.is_active ? "Active" : "Disabled"}</td>
-      <td class="py-2 text-right space-x-2">
-        <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" data-pm-edit="${pm.id}">Edit</button>
-        <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5 disabled:opacity-50" data-pm-disable="${pm.id}" ${pm.is_active ? "" : "disabled"}>Disable</button>
-      </td>
-    </tr>
-  `).join("");
+  // ── row renderers ─────────────────────────────────────────────────────────
+  function pmRow(pm) {
+    const isActive    = !!pm.is_active;
+    const toggleLabel = isActive ? "Disable" : "Enable";
+    const toggleAttr  = isActive ? `data-pm-disable="${pm.id}"` : `data-pm-enable="${pm.id}"`;
+    return `
+      <tr class="border-b border-black/5">
+        <td class="py-2 pr-3">
+          <div class="flex items-center gap-2">
+            ${colorDot(pm.color)}
+            <div class="font-semibold">${(pm.first_name || "")} ${(pm.last_name || "")}</div>
+          </div>
+        </td>
+        <td class="py-2 pr-3">${pm.email || ""}</td>
+        <td class="py-2 pr-3">${pm.phone || ""}</td>
+        <td class="py-2 pr-3">${isActive ? "Active" : "Disabled"}</td>
+        <td class="py-2 text-right space-x-2">
+          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" data-pm-edit="${pm.id}">Edit</button>
+          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" ${toggleAttr}>${toggleLabel}</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  const activePmRows   = activePms.map(pmRow).join("");
+  const inactivePmRows = inactivePms.map(pmRow).join("");
 
   function crewRow(c, indent = 0) {
+    const isActive    = !!c.is_active;
+    const toggleLabel = isActive ? "Disable" : "Enable";
+    const toggleAttr  = isActive ? `data-crew-disable="${c.id}"` : `data-crew-enable="${c.id}"`;
     return `
       <tr class="border-b border-black/5">
         <td class="py-2 pr-3">
@@ -56,22 +78,29 @@ export async function teamsPage(routeFn) {
           </div>
         </td>
         <td class="py-2 pr-3">${c.code || ""}</td>
-        <td class="py-2 pr-3">${c.is_active ? "Active" : "Disabled"}</td>
+        <td class="py-2 pr-3">${isActive ? "Active" : "Disabled"}</td>
         <td class="py-2 text-right space-x-2">
           <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" data-crew-edit="${c.id}">Edit</button>
-          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5 disabled:opacity-50" data-crew-disable="${c.id}" ${c.is_active ? "" : "disabled"}>Disable</button>
+          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" ${toggleAttr}>${toggleLabel}</button>
         </td>
       </tr>
     `;
   }
 
-  let crewRows = "";
-  parents.forEach(p => {
-    crewRows += crewRow(p, 0);
-    (childrenByParent.get(String(p.id)) || []).forEach(ch => {
-      crewRows += crewRow(ch, 18);
+  // Active crews: parent rows + indented active children
+  let activeCrewRows = "";
+  activeParents.forEach(p => {
+    activeCrewRows += crewRow(p, 0);
+    (activeChildrenByParent.get(String(p.id)) || []).forEach(ch => {
+      activeCrewRows += crewRow(ch, 18);
     });
   });
+
+  // Inactive crews: flat list sorted by name (avoids orphan-hierarchy weirdness)
+  const inactiveCrewRows = [...inactiveCrews]
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+    .map(c => crewRow(c, 0))
+    .join("");
 
   const bodyHtml = `
     <div class="grid grid-cols-1 gap-4 pb-6">
@@ -96,9 +125,31 @@ export async function teamsPage(routeFn) {
                 <th class="py-2 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody>${pmRows}</tbody>
+            <tbody>${activePmRows || `<tr><td colspan="5" class="py-6 text-center text-black/40 text-sm">No active project managers.</td></tr>`}</tbody>
           </table>
         </div>
+
+        ${inactivePms.length > 0 ? `
+          <details class="mt-4 border-t border-black/10 pt-3">
+            <summary class="cursor-pointer text-sm font-semibold text-black/60 hover:text-black/80 py-1 select-none">
+              Disabled project managers (${inactivePms.length})
+            </summary>
+            <div class="overflow-x-auto mt-3">
+              <table class="w-full text-sm">
+                <thead class="text-left text-black/60">
+                  <tr class="border-b border-black/10">
+                    <th class="py-2 pr-3">Name</th>
+                    <th class="py-2 pr-3">Email</th>
+                    <th class="py-2 pr-3">Phone</th>
+                    <th class="py-2 pr-3">Status</th>
+                    <th class="py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>${inactivePmRows}</tbody>
+              </table>
+            </div>
+          </details>
+        ` : ""}
       </div>
 
       <!-- Crews -->
@@ -121,9 +172,30 @@ export async function teamsPage(routeFn) {
                 <th class="py-2 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody>${crewRows}</tbody>
+            <tbody>${activeCrewRows || `<tr><td colspan="4" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
           </table>
         </div>
+
+        ${inactiveCrews.length > 0 ? `
+          <details class="mt-4 border-t border-black/10 pt-3">
+            <summary class="cursor-pointer text-sm font-semibold text-black/60 hover:text-black/80 py-1 select-none">
+              Disabled crews (${inactiveCrews.length})
+            </summary>
+            <div class="overflow-x-auto mt-3">
+              <table class="w-full text-sm">
+                <thead class="text-left text-black/60">
+                  <tr class="border-b border-black/10">
+                    <th class="py-2 pr-3">Name</th>
+                    <th class="py-2 pr-3">Code</th>
+                    <th class="py-2 pr-3">Status</th>
+                    <th class="py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>${inactiveCrewRows}</tbody>
+              </table>
+            </div>
+          </details>
+        ` : ""}
       </div>
     </div>
 
@@ -223,12 +295,21 @@ export async function teamsPage(routeFn) {
   `;
 
 setShell({
-  title: "Teams",
-  subtitle: "Manage project managers and work crews.",
+  title: "",
+  subtitle: "",
   bodyHtml,
   showLogout: true,
-  routeFn 
+  routeFn
 });
+
+  // Hide the empty page-title block; restore when navigating away
+  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
+  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
+    pageTitleBlock.style.display = "none";
+    window.addEventListener("hashchange", () => {
+      if (pageTitleBlock) pageTitleBlock.style.display = "";
+    }, { once: true });
+  }
 
   // --- Color controls (must be after setShell because DOM now exists) ---
   const pmColorEl = document.getElementById("pmColor");
@@ -348,6 +429,31 @@ setShell({
     });
   });
 
+  // Enable PM — re-activates a disabled project manager without opening the edit modal
+  document.querySelectorAll("[data-pm-enable]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-pm-enable");
+      const pm = pms.find(x => String(x.id) === String(id));
+      if (!pm) return;
+      if (!confirm("Re-enable this project manager?")) return;
+      const payload = {
+        first_name: pm.first_name || null,
+        last_name:  pm.last_name  || null,
+        email:      pm.email      || null,
+        phone:      pm.phone      || null,
+        color:      pm.color      || null,
+        is_active:  true,
+      };
+      try {
+        await api(`/project-managers/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+        location.hash = "#/teams";
+        routeFn();
+      } catch {
+        document.getElementById("pmMsg").textContent = "Failed to re-enable project manager.";
+      }
+    });
+  });
+
   // Save PM (create/update)
   document.getElementById("pmForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -428,6 +534,31 @@ setShell({
         routeFn();
       } catch {
         document.getElementById("crewMsg").textContent = "Failed to disable crew (it may have active sub crews).";
+      }
+    });
+  });
+
+  // Enable Crew — re-activates a disabled crew without opening the edit modal
+  document.querySelectorAll("[data-crew-enable]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-crew-enable");
+      const c  = crews.find(x => String(x.id) === String(id));
+      if (!c) return;
+      if (!confirm("Re-enable this crew?")) return;
+      const payload = {
+        name:       c.name,
+        code:       c.code || null,
+        parent_id:  c.parent_id || null,
+        color:      c.color || null,
+        sort_order: Number(c.sort_order || 0),
+        is_active:  true,
+      };
+      try {
+        await api(`/work-crews/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+        location.hash = "#/teams";
+        routeFn();
+      } catch {
+        document.getElementById("crewMsg").textContent = "Failed to re-enable crew.";
       }
     });
   });

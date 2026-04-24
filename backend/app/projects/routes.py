@@ -155,6 +155,93 @@ def assignment_table(user=Depends(get_current_user)):
 
     return {"projects": [dict(r) for r in rows]}
 
+
+@router.get("/projects/schedule-list")
+def projects_schedule_list(user=Depends(get_current_user)):
+    """
+    Read-only: one row per schedule item across every project, with
+    project-level file_count appended. Mirrors /assignment/table but
+    without the provisioning side effect (doesn't create master rows).
+    Used by the Projects page table.
+    """
+    sql = text("""
+    SELECT
+      psi.id                                    AS schedule_item_id,
+      qc.id                                     AS qbo_customer_id,
+      qc.display_name                           AS project_name,
+
+      psi.status                                AS project_status,
+      psi.start_date                            AS start_date,
+      psi.end_date                              AS end_date,
+      psi.wire_guidance                         AS wire_guidance,
+      psi.travel_days                           AS travel_days,
+      psi.overage_days                          AS overage_days,
+      psi.equipment_type                        AS equipment_type,
+      psi.notes                                 AS notes,
+
+      pm.primary_pm_name                        AS primary_project_manager,
+      wc.primary_crew_name                      AS primary_work_crew,
+
+      COALESCE(pm.all_pm_names,  '')            AS all_project_managers,
+      COALESCE(wc.all_crew_names, '')           AS all_work_crews,
+
+      COALESCE(pf.file_count, 0)                AS file_count
+
+    FROM myapp.qbo_customers qc
+    LEFT JOIN myapp.projects p
+      ON p.qbo_customer_id = qc.id
+    LEFT JOIN myapp.project_schedule_items psi
+      ON psi.project_id = p.id
+
+    LEFT JOIN (
+      SELECT
+        spm.schedule_item_id,
+        MAX(CASE WHEN spm.is_primary = 1
+                 THEN TRIM(CONCAT(COALESCE(pm.first_name,''), ' ', COALESCE(pm.last_name,'')))
+                 ELSE NULL
+            END) AS primary_pm_name,
+        GROUP_CONCAT(
+          DISTINCT TRIM(CONCAT(COALESCE(pm.first_name,''), ' ', COALESCE(pm.last_name,'')))
+          ORDER BY spm.is_primary DESC, pm.last_name, pm.first_name, pm.id
+          SEPARATOR ', '
+        ) AS all_pm_names
+      FROM myapp.project_schedule_item_project_managers spm
+      JOIN myapp.project_managers pm ON pm.id = spm.project_manager_id
+      WHERE spm.unassigned_at IS NULL AND pm.is_active = 1
+      GROUP BY spm.schedule_item_id
+    ) pm ON pm.schedule_item_id = psi.id
+
+    LEFT JOIN (
+      SELECT
+        swc.schedule_item_id,
+        MAX(CASE WHEN swc.is_primary = 1 THEN wc.name ELSE NULL END) AS primary_crew_name,
+        GROUP_CONCAT(
+          DISTINCT wc.name
+          ORDER BY swc.is_primary DESC, wc.sort_order, wc.id
+          SEPARATOR ', '
+        ) AS all_crew_names
+      FROM myapp.project_schedule_item_work_crews swc
+      JOIN myapp.work_crews wc ON wc.id = swc.work_crew_id
+      WHERE swc.unassigned_at IS NULL AND wc.is_active = 1 AND wc.parent_id IS NOT NULL
+      GROUP BY swc.schedule_item_id
+    ) wc ON wc.schedule_item_id = psi.id
+
+    LEFT JOIN (
+      SELECT qbo_customer_id, COUNT(*) AS file_count
+      FROM myapp.project_files
+      GROUP BY qbo_customer_id
+    ) pf ON pf.qbo_customer_id = qc.id
+
+    WHERE qc.is_project = 1
+    ORDER BY qc.display_name, psi.start_date, psi.id
+    """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+
+    return {"rows": [dict(r) for r in rows]}
+
+
 @router.get("/projects/{qbo_customer_id}/events")
 def project_events(qbo_customer_id: int, user=Depends(get_current_user)):
     return list_project_events(qbo_customer_id=qbo_customer_id)

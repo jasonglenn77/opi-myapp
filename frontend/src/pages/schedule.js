@@ -426,12 +426,22 @@ export async function schedulePage(routeFn) {
     `;
 
     setShell({
-      title: "Schedule",
-      subtitle: "Month view by crew.",
+      title: "",
+      subtitle: "",
       bodyHtml,
       showLogout: true,
       routeFn,
     });
+
+    // Hide the empty page-title block; restore when navigating away.
+    // Guard prevents re-adding the listener on every month re-render.
+    const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
+    if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
+      pageTitleBlock.style.display = "none";
+      window.addEventListener("hashchange", () => {
+        if (pageTitleBlock) pageTitleBlock.style.display = "";
+      }, { once: true });
+    }
 
     // --- Tooltip (global, avoids table overflow clipping)
     let tipEl = document.getElementById("projTip");

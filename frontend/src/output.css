@@ -982,10 +982,6 @@ body {
   height: 1rem;
 }
 
-.h-0\.5 {
-  height: 0.125rem;
-}
-
 .h-10 {
   height: 2.5rem;
 }
@@ -1030,6 +1026,10 @@ body {
   height: 100%;
 }
 
+.max-h-\[220px\] {
+  max-height: 220px;
+}
+
 .max-h-\[240px\] {
   max-height: 240px;
 }
@@ -1040,10 +1040,6 @@ body {
 
 .max-h-full {
   max-height: 100%;
-}
-
-.max-h-\[220px\] {
-  max-height: 220px;
 }
 
 .min-h-0 {
@@ -1161,10 +1157,6 @@ body {
 
 .min-w-\[170px\] {
   min-width: 170px;
-}
-
-.min-w-\[180px\] {
-  min-width: 180px;
 }
 
 .min-w-\[60px\] {
@@ -1339,12 +1331,6 @@ body {
   --tw-space-x-reverse: 0;
   margin-right: calc(0.5rem * var(--tw-space-x-reverse));
   margin-left: calc(0.5rem * calc(1 - var(--tw-space-x-reverse)));
-}
-
-.space-y-0\.5 > :not([hidden]) ~ :not([hidden]) {
-  --tw-space-y-reverse: 0;
-  margin-top: calc(0.125rem * calc(1 - var(--tw-space-y-reverse)));
-  margin-bottom: calc(0.125rem * var(--tw-space-y-reverse));
 }
 
 .space-y-2 > :not([hidden]) ~ :not([hidden]) {
@@ -1967,6 +1953,10 @@ body {
   color: rgb(0 0 0 / var(--tw-text-opacity, 1));
 }
 
+.text-black\/20 {
+  color: rgb(0 0 0 / 0.2);
+}
+
 .text-black\/30 {
   color: rgb(0 0 0 / 0.3);
 }
@@ -2119,6 +2109,11 @@ body {
   color: rgb(153 27 27 / var(--tw-text-opacity, 1));
 }
 
+.text-red-900 {
+  --tw-text-opacity: 1;
+  color: rgb(127 29 29 / var(--tw-text-opacity, 1));
+}
+
 .text-white {
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity, 1));
@@ -2130,15 +2125,6 @@ body {
 
 .text-white\/60 {
   color: rgb(255 255 255 / 0.6);
-}
-
-.text-black\/20 {
-  color: rgb(0 0 0 / 0.2);
-}
-
-.text-red-900 {
-  --tw-text-opacity: 1;
-  color: rgb(127 29 29 / var(--tw-text-opacity, 1));
 }
 
 .opacity-50 {
@@ -2257,8 +2243,8 @@ body {
   background-color: rgb(0 0 0 / 0.05);
 }
 
-.hover\:bg-black\/\[0\.015\]:hover {
-  background-color: rgb(0 0 0 / 0.015);
+.hover\:bg-black\/\[0\.02\]:hover {
+  background-color: rgb(0 0 0 / 0.02);
 }
 
 .hover\:bg-black\/\[0\.03\]:hover {
@@ -2297,6 +2283,10 @@ body {
   color: rgb(0 0 0 / 0.6);
 }
 
+.hover\:text-black\/80:hover {
+  color: rgb(0 0 0 / 0.8);
+}
+
 .hover\:underline:hover {
   text-decoration-line: underline;
 }
@@ -2330,10 +2320,6 @@ body {
 
   .sm\:w-72 {
     width: 18rem;
-  }
-
-  .sm\:grid-cols-3 {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .sm\:flex-row {
