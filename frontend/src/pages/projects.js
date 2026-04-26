@@ -525,6 +525,30 @@ export async function projectsPage(routeFn) {
         </div>      </div>
     </div>
 
+    <!-- Estimates-by-Status drill-down modal -->
+    <div id="estModal" class="fixed inset-0 z-[60] hidden">
+      <div class="absolute inset-0" id="estModalBackdrop"></div>
+      <div id="estModalPanel"
+        class="absolute bg-white rounded-2xl shadow-2xl border border-black/10 flex flex-col text-ink-900"
+        style="width:880px; max-width:calc(100vw - 32px);">
+
+        <div class="shrink-0 flex items-center justify-between px-5 py-3 border-b border-black/10">
+          <div>
+            <div class="text-sm font-extrabold">Estimates by Status</div>
+            <div id="estModalSubtitle" class="text-xs text-black/40 mt-0.5"></div>
+          </div>
+          <button type="button" id="estModalClose"
+            class="inline-flex items-center rounded-xl border border-black/10 px-3 py-1.5 text-xs text-black/60 font-semibold hover:bg-black/5">
+            Close
+          </button>
+        </div>
+
+        <div id="estModalBody" class="flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24">
+          Loading…
+        </div>
+      </div>
+    </div>
+
     <!-- File modal -->
     <div id="fileModal" class="fixed inset-0 z-50 hidden">
       <div class="absolute inset-0 bg-black/50 backdrop-blur-[2px]" data-close-file-modal="1"></div>
@@ -1208,7 +1232,10 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
 
     // Clear any previous injected elements
     document.getElementById("finModalFilterChips")?.remove();
+    document.getElementById("finModalPills")?.remove();
+    // Old element IDs in case a previous deploy left them in the DOM:
     document.getElementById("finModalArSummary")?.remove();
+    document.getElementById("finModalEstSummary")?.remove();
 
     const subtitleEl = document.getElementById("finModalSubtitle");
 
@@ -1220,25 +1247,44 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
       subtitleEl.insertAdjacentElement("afterend", chipsDiv);
     }
 
-    // AR summary pill — clickable button that opens the AR drill-down modal
-    if (arBalance > 0) {
-      const arDiv = document.createElement("div");
-      arDiv.id = "finModalArSummary";
-      arDiv.innerHTML = `
-        <button id="finModalArBtn" type="button"
-          style="display:inline-flex;align-items:center;gap:10px;margin-top:5px;padding:3px 10px;background:#fffbeb;border:1px solid #fcd34d;border-radius:999px;cursor:pointer;transition:opacity 0.15s;"
-          onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'">
-          <span style="font-size:11px;font-weight:600;color:#92400e;">AR Balance</span>
-          <span style="font-size:12px;font-weight:700;color:#b45309;">${$$(arBalance)}</span>
-          ${arOpenCount > 0
-            ? `<span style="font-size:11px;color:#a16207;border-left:1px solid #fcd34d;padding-left:10px;">${arOpenCount} open invoice${arOpenCount === 1 ? "" : "s"}</span>`
-            : ""}
-          <span style="font-size:10px;color:#a16207;opacity:0.6;">↗</span>
-        </button>`;
-      const anchorEl = document.getElementById("finModalFilterChips") || subtitleEl;
-      anchorEl.insertAdjacentElement("afterend", arDiv);
+    // Pills row — Estimates by Status first, AR Balance second. Both ALWAYS shown.
+    // AR pill uses an amber/warning palette when balance > 0, neutral grey when 0.
+    {
+      const arHasBalance = arBalance > 0;
+      const arBg     = arHasBalance ? "#fffbeb" : "#f8fafc";
+      const arBorder = arHasBalance ? "#fcd34d" : "#e2e8f0";
+      const arLabel  = arHasBalance ? "#92400e" : "#64748b";
+      const arValue  = arHasBalance ? "#b45309" : "#475569";
+      const arMuted  = arHasBalance ? "#a16207" : "#64748b";
+      const arInvText = `${arOpenCount} open invoice${arOpenCount === 1 ? "" : "s"}`;
 
-      // Attach click handler after the element is in the DOM
+      const pillsDiv = document.createElement("div");
+      pillsDiv.id = "finModalPills";
+      pillsDiv.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:5px;align-items:center;";
+      pillsDiv.innerHTML = `
+        <button id="finModalEstBtn" type="button"
+          style="display:inline-flex;align-items:center;gap:10px;padding:3px 10px;background:#eff6ff;border:1px solid #93c5fd;border-radius:999px;cursor:pointer;transition:opacity 0.15s;"
+          onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'">
+          <span style="font-size:11px;font-weight:600;color:#1e3a8a;">Estimates by Status</span>
+          <span style="font-size:11px;color:#1e40af;border-left:1px solid #93c5fd;padding-left:10px;">All TxnStatus values</span>
+          <span style="font-size:10px;color:#1e40af;opacity:0.6;">↗</span>
+        </button>
+        <button id="finModalArBtn" type="button"
+          style="display:inline-flex;align-items:center;gap:10px;padding:3px 10px;background:${arBg};border:1px solid ${arBorder};border-radius:999px;cursor:pointer;transition:opacity 0.15s;"
+          onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'">
+          <span style="font-size:11px;font-weight:600;color:${arLabel};">AR Balance</span>
+          <span style="font-size:12px;font-weight:700;color:${arValue};">${$$(arBalance)}</span>
+          <span style="font-size:11px;color:${arMuted};border-left:1px solid ${arBorder};padding-left:10px;">${arInvText}</span>
+          <span style="font-size:10px;color:${arMuted};opacity:0.6;">↗</span>
+        </button>
+      `;
+      const anchorEl = document.getElementById("finModalFilterChips") || subtitleEl;
+      anchorEl.insertAdjacentElement("afterend", pillsDiv);
+
+      document.getElementById("finModalEstBtn").addEventListener("click", e => {
+        const qboIds = filteredList.map(r => r.project_qbo_id).filter(Boolean);
+        openEstimatesModal(e.currentTarget, qboIds);
+      });
       document.getElementById("finModalArBtn").addEventListener("click", e => {
         const qboIds = filteredList.map(r => r.project_qbo_id).filter(Boolean);
         openArModal(e.currentTarget, qboIds);
@@ -1725,6 +1771,184 @@ async function openArModal(triggerEl, qboIds = []) {
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && !document.getElementById("arModal").classList.contains("hidden")) {
       closeArModal();
+    }
+  });
+
+  // ── Estimates by Status modal ──────────────────────────────────────────────
+
+  let _estResizeObserver = null;
+
+  function closeEstModal() {
+    document.getElementById("estModal").classList.add("hidden");
+    if (_estResizeObserver) { _estResizeObserver.disconnect(); _estResizeObserver = null; }
+  }
+
+  async function openEstimatesModal(triggerEl, qboIds = []) {
+    const modal = document.getElementById("estModal");
+    const panel = document.getElementById("estModalPanel");
+    const body  = document.getElementById("estModalBody");
+    const sub   = document.getElementById("estModalSubtitle");
+
+    // Sort state
+    let estSortKey = "project_name";
+    let estSortDir = "asc";
+
+    if (_estResizeObserver) { _estResizeObserver.disconnect(); _estResizeObserver = null; }
+
+    function positionPanel() {
+      if (!triggerEl) return;
+      const rect      = triggerEl.getBoundingClientRect();
+      const panelTop  = rect.bottom + 8;
+      const finInner  = document.querySelector("#finModal .rounded-3xl");
+      const finBottom = finInner ? finInner.getBoundingClientRect().bottom - 40 : window.innerHeight - 56;
+      const maxH      = Math.max(160, finBottom - panelTop);
+
+      panel.style.top       = `${panelTop}px`;
+      panel.style.left      = `${rect.left}px`;
+      panel.style.width     = "880px";
+      panel.style.height    = "";
+      panel.style.maxHeight = `${maxH}px`;
+      panel.style.transform = "";
+    }
+    positionPanel();
+
+    const finInner = document.querySelector("#finModal .rounded-3xl");
+    if (finInner) {
+      _estResizeObserver = new ResizeObserver(() => positionPanel());
+      _estResizeObserver.observe(finInner);
+    }
+
+    body.className = "flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24";
+    body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">Loading…</div>`;
+    modal.classList.remove("hidden");
+
+    let data;
+    try {
+      data = await api("/projects/estimates-by-status", {
+        method: "POST",
+        body:   JSON.stringify({ project_qbo_ids: qboIds }),
+      });
+    } catch (err) {
+      body.innerHTML = `<div class="p-4 text-red-500 text-xs">${escapeHtml(String(err.message))}</div>`;
+      return;
+    }
+
+    const rows = data.estimates || [];
+    if (!rows.length) {
+      sub.textContent = `0 projects with estimates`;
+      body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">No estimates found.</div>`;
+      return;
+    }
+
+    // Subtitle: project count + total
+    const grandTotal = rows.reduce((s, r) => s + Number(r.total_amt || 0), 0);
+    sub.textContent = `${rows.length} project${rows.length === 1 ? "" : "s"} · ${$$(grandTotal)} total · Pending and Rejected are excluded from Financials`;
+
+    // Status columns in lifecycle order. Pending and Rejected get an
+    // excluded-from-financials visual hint (light grey background).
+    const STATUS_COLS = [
+      { key: "pending_amt",   label: "Pending",   excluded: true  },
+      { key: "accepted_amt",  label: "Accepted",  excluded: false },
+      { key: "converted_amt", label: "Converted", excluded: false },
+      { key: "closed_amt",    label: "Closed",    excluded: false },
+      { key: "rejected_amt",  label: "Rejected",  excluded: true  },
+    ];
+
+    function renderEstTable() {
+      body.className = "flex-1 min-h-0 overflow-y-auto";
+
+      const sortedRows = [...rows].sort((a, b) => {
+        let av, bv;
+        if (estSortKey === "project_name") {
+          av = (a.project_name || "").toLowerCase();
+          bv = (b.project_name || "").toLowerCase();
+        } else {
+          av = Number(a[estSortKey] || 0);
+          bv = Number(b[estSortKey] || 0);
+        }
+        if (av < bv) return estSortDir === "asc" ? -1 : 1;
+        if (av > bv) return estSortDir === "asc" ? 1 : -1;
+        return 0;
+      });
+
+      // Column footers: sum each status across visible rows
+      const totals = STATUS_COLS.reduce((acc, c) => {
+        acc[c.key] = sortedRows.reduce((s, r) => s + Number(r[c.key] || 0), 0);
+        return acc;
+      }, {});
+      const totalsTotal = sortedRows.reduce((s, r) => s + Number(r.total_amt || 0), 0);
+
+      function fmtCell(n, excluded) {
+        const v = Number(n || 0);
+        if (v === 0) return `<td class="py-2 px-3 text-right text-black/25 whitespace-nowrap tabular-nums" style="${excluded ? "background:rgba(0,0,0,0.02);" : ""}">—</td>`;
+        return `<td class="py-2 px-3 text-right tabular-nums whitespace-nowrap ${excluded ? "text-black/50" : "text-ink-900 font-semibold"}" style="${excluded ? "background:rgba(0,0,0,0.02);" : ""}">${$$(v)}</td>`;
+      }
+
+      const bodyRows = sortedRows.map((r, i) => {
+        const rowBg = i % 2 ? "background:#fafafa;" : "";
+        return `
+          <tr style="border-bottom:1px solid rgba(0,0,0,0.05); ${rowBg}">
+            <td class="py-2 px-3 font-semibold text-ink-900 whitespace-nowrap"
+                style="max-width:240px;overflow:hidden;text-overflow:ellipsis;"
+                title="${escapeHtml(r.project_name || "")}">${escapeHtml(r.project_name || "—")}</td>
+            ${STATUS_COLS.map(c => fmtCell(r[c.key], c.excluded)).join("")}
+            <td class="py-2 px-3 text-right tabular-nums font-extrabold text-ink-900 whitespace-nowrap">${$$(Number(r.total_amt || 0))}</td>
+          </tr>`;
+      }).join("");
+
+      const totalsRow = `
+        <tr style="border-top:2px solid rgba(0,0,0,0.13); background:#f1f5f9;">
+          <td class="py-2 px-3 font-extrabold text-ink-900 whitespace-nowrap">Totals</td>
+          ${STATUS_COLS.map(c => `<td class="py-2 px-3 text-right tabular-nums font-extrabold whitespace-nowrap ${c.excluded ? "text-black/50" : "text-ink-900"}" style="${c.excluded ? "background:rgba(0,0,0,0.04);" : ""}">${$$(totals[c.key])}</td>`).join("")}
+          <td class="py-2 px-3 text-right tabular-nums font-extrabold text-ink-900 whitespace-nowrap">${$$(totalsTotal)}</td>
+        </tr>`;
+
+      function thStyle(key, label, align = "right", excluded = false) {
+        const active = estSortKey === key;
+        const arrow  = active ? (estSortDir === "asc" ? " ▲" : " ▼") : "";
+        return `<th class="py-2 px-3 text-${align} text-[10px] font-bold uppercase tracking-wide whitespace-nowrap cursor-pointer select-none ${active ? "text-black/70" : "text-black/40"} hover:text-black/60"
+                    data-est-sort="${key}"
+                    style="${excluded ? "background:rgba(0,0,0,0.03);" : ""}">${escapeHtml(label)}${arrow}</th>`;
+      }
+
+      body.innerHTML = `
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+          <thead style="position:sticky; top:0; z-index:1; background:#f8fafc;">
+            <tr style="border-bottom:2px solid rgba(0,0,0,0.08);">
+              ${thStyle("project_name", "Project", "left")}
+              ${STATUS_COLS.map(c => thStyle(c.key, c.label, "right", c.excluded)).join("")}
+              ${thStyle("total_amt", "Total", "right")}
+            </tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+          <tfoot>${totalsRow}</tfoot>
+        </table>
+        <div class="px-3 py-2 text-[11px] text-black/45 italic">
+          Shaded columns (Pending, Rejected) are <strong>not</strong> included in the Financials totals on the page.
+        </div>`;
+
+      body.querySelectorAll("[data-est-sort]").forEach(th => {
+        th.addEventListener("click", () => {
+          const key = th.getAttribute("data-est-sort");
+          if (estSortKey === key) {
+            estSortDir = estSortDir === "asc" ? "desc" : "asc";
+          } else {
+            estSortKey = key;
+            estSortDir = key === "project_name" ? "asc" : "desc";
+          }
+          renderEstTable();
+        });
+      });
+    }
+
+    renderEstTable();
+  }
+
+  document.getElementById("estModalClose").addEventListener("click", closeEstModal);
+  document.getElementById("estModalBackdrop").addEventListener("click", closeEstModal);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !document.getElementById("estModal").classList.contains("hidden")) {
+      closeEstModal();
     }
   });
 

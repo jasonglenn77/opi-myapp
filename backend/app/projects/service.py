@@ -460,6 +460,12 @@ def refresh_project_financial_summary() -> dict:
                   AND qc_proj.is_project = 1
                 WHERE qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
                   AND (qt.total_amt IS NULL OR qt.total_amt > 0)
+                  -- Estimates: only count Accepted/Converted/Closed in financials.
+                  -- Pending and Rejected are surfaced separately in the Estimates-by-Status modal.
+                  AND (
+                    qt.entity_type <> 'Estimate'
+                    OR JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')
+                  )
               ) _ranked
               WHERE _rn = 1
             ),

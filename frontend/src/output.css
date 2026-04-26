@@ -2127,6 +2127,14 @@ body {
   color: rgb(255 255 255 / 0.6);
 }
 
+.text-black\/25 {
+  color: rgb(0 0 0 / 0.25);
+}
+
+.text-black\/45 {
+  color: rgb(0 0 0 / 0.45);
+}
+
 .opacity-50 {
   opacity: 0.5;
 }

@@ -284,6 +284,11 @@ def projects(user=Depends(get_current_user)):
           AND qc_proj.is_project = 1
         WHERE qt.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
           AND (qt.total_amt IS NULL OR qt.total_amt > 0)
+          -- Estimates: only count Accepted/Converted/Closed in financials.
+          AND (
+            qt.entity_type <> 'Estimate'
+            OR JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')
+          )
       ) _ranked
       WHERE _rn = 1
     ),
@@ -833,6 +838,81 @@ def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
 
     return {"invoices": [dict(r) for r in rows]}
 
+
+class EstimatesByStatusRequest(BaseModel):
+    project_qbo_ids: List[str] = []
+
+@router.post("/projects/estimates-by-status")
+def projects_estimates_by_status(req: EstimatesByStatusRequest, user=Depends(get_current_user)):
+    """
+    Returns one row per project with conditional sums of Estimate.total_amt
+    bucketed by QBO TxnStatus (Pending, Accepted, Converted, Closed, Rejected).
+    Includes ALL statuses — Pending and Rejected are surfaced here precisely
+    because they're excluded from the main financial aggregations.
+
+    Uses the same dedup-by-doc-number logic as the rest of the page so that
+    revised/replaced estimates aren't double-counted.
+    """
+    # Sums child-line amounts (same source the KPI card / main page / item-pivot
+    # modal uses) so the totals across status columns reconcile exactly with
+    # what's shown elsewhere on the Financials page. Using qt.total_amt instead
+    # would diverge slightly for estimates with discount/tax/markup lines where
+    # QBO's header TotalAmt and the sum of line items don't match.
+    sql = text("""
+        WITH latest_sales_txns AS (
+          SELECT *
+          FROM (
+            SELECT t.*,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY t.customer_qbo_id, t.entity_type,
+                                  COALESCE(t.doc_number, CONCAT('__nodoc__', t.qbo_id))
+                     ORDER BY t.id DESC
+                   ) AS _rn
+            FROM myapp.qbo_transactions t
+            INNER JOIN myapp.qbo_customers qc_proj
+              ON qc_proj.qbo_id = t.customer_qbo_id
+              AND qc_proj.is_project = 1
+              AND (:no_filter = 1 OR qc_proj.qbo_id IN :qbo_ids)
+            WHERE t.entity_type = 'Estimate'
+              AND (t.total_amt IS NULL OR t.total_amt > 0)
+          ) _ranked
+          WHERE _rn = 1
+        )
+        SELECT
+          qc.qbo_id        AS project_qbo_id,
+          qc.display_name  AS project_name,
+          SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) = 'Pending'   THEN COALESCE(qstl.amount, 0) ELSE 0 END) AS pending_amt,
+          SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) = 'Accepted'  THEN COALESCE(qstl.amount, 0) ELSE 0 END) AS accepted_amt,
+          SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) = 'Converted' THEN COALESCE(qstl.amount, 0) ELSE 0 END) AS converted_amt,
+          SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) = 'Closed'    THEN COALESCE(qstl.amount, 0) ELSE 0 END) AS closed_amt,
+          SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.TxnStatus')) = 'Rejected'  THEN COALESCE(qstl.amount, 0) ELSE 0 END) AS rejected_amt,
+          SUM(COALESCE(qstl.amount, 0)) AS total_amt
+        FROM latest_sales_txns qt
+        JOIN myapp.qbo_customers qc
+          ON qt.customer_qbo_id = qc.qbo_id
+        LEFT JOIN myapp.qbo_sales_transaction_lines qstl
+          ON qstl.transaction_id = qt.id
+          AND qstl.line_level = 'child'
+        WHERE qc.is_project = 1
+          AND (
+            :no_filter = 1
+            OR qc.qbo_id IN :qbo_ids
+          )
+        GROUP BY qc.qbo_id, qc.display_name
+        HAVING SUM(COALESCE(qstl.amount, 0)) > 0
+        ORDER BY qc.display_name
+    """)
+
+    qbo_ids = req.project_qbo_ids
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {
+            "no_filter": 1 if not qbo_ids else 0,
+            "qbo_ids":   tuple(qbo_ids) if qbo_ids else ("",),
+        }).mappings().all()
+
+    return {"estimates": [dict(r) for r in rows]}
+
+
 class FinancialsByItemRequest(BaseModel):
     project_qbo_ids: List[str] = []   # empty = all projects
 
@@ -895,6 +975,11 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
                   {id_filter_sales_inner}
                 WHERE t.entity_type IN ('Invoice', 'Estimate', 'SalesReceipt', 'CreditMemo')
                   AND (t.total_amt IS NULL OR t.total_amt > 0)
+                  -- Estimates: only count Accepted/Converted/Closed in the by-item pivot.
+                  AND (
+                    t.entity_type <> 'Estimate'
+                    OR JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')
+                  )
             ) _ranked
             WHERE _rn = 1
         ) qt ON qt.customer_qbo_id = qc.qbo_id
