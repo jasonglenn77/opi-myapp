@@ -30,6 +30,16 @@ export async function schedulePage(routeFn) {
     return copy;
   }
 
+  // Pay day: every 14 days centered on 2026-03-13 (Friday). Same biweekly
+  // cadence rolls forward and backward from the anchor — past or future.
+  // Compared at noon to sidestep DST edge cases on the boundary days.
+  const PAY_DAY_ANCHOR_NOON = new Date(2026, 2, 13, 12).getTime();   // Mar = month 2
+  function isPayDay(d) {
+    const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12).getTime();
+    const days = Math.round((target - PAY_DAY_ANCHOR_NOON) / 86400000);
+    return days % 14 === 0;
+  }
+
   // Returns all Mon–Sun week arrays that cover the given month.
   // Each week is an array of 7 Date objects.
   function weeksForMonth(year, month) {
@@ -322,15 +332,19 @@ export async function schedulePage(routeFn) {
       // Week label row: show date numbers for each day
       const dateNumbers = week.map(d => {
         const isCurrentMonth = d.getMonth() === state.month;
-        const isToday = ymd(d) === ymd(new Date());
+        const isToday        = ymd(d) === ymd(new Date());
+        const isPay          = isPayDay(d);
+        const textCls = isToday
+          ? "text-blue-600 font-extrabold"
+          : isCurrentMonth
+            ? "text-black font-semibold"
+            : "text-black/40";
+        // Inline background overrides bg-gray-100 when this is a pay day.
+        const payBg = isPay ? "background:#86efac;" : "";
         return `
-          <td class="sticky top-[30px] z-20 text-[11px] px-1 py-1 text-center bg-gray-100
-            ${isToday
-              ? "bg-gray-100 text-blue-600 font-extrabold"
-              : isCurrentMonth
-                ? "text-black font-semibold"
-                : "text-black/40"}"
-            style="box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 -1px 0 rgba(0,0,0,0.2);"
+          <td class="sticky top-[30px] z-20 text-[11px] px-1 py-1 text-center bg-gray-100 ${textCls}"
+            style="${payBg}box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 -1px 0 rgba(0,0,0,0.2);"
+            ${isPay ? 'title="Pay day"' : ""}
           >${d.getDate()}</td>
         `;
       }).join("");
