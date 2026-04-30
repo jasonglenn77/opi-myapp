@@ -1151,8 +1151,9 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
         ? `${filteredList.length} of ${rows.length} projects (filtered)`
         : `All ${rows.length} projects`;
     // AR summary — computed from the already-loaded filteredList rows
-    const arBalance    = filteredList.reduce((s, r) => s + Number(r.invoice_balance_amt || 0), 0);
-    const arOpenCount  = filteredList.reduce((s, r) => s + Number(r.open_invoice_count  || 0), 0);
+    const arBalance    = filteredList.reduce((s, r) => s + Number(r.invoice_balance_amt    || 0), 0);
+    const arInvoiced   = filteredList.reduce((s, r) => s + Number(r.open_invoice_total_amt || 0), 0);
+    const arOpenCount  = filteredList.reduce((s, r) => s + Number(r.open_invoice_count     || 0), 0);
 
     // ── Build active-filter chip summary ───────────────────────────────────────
     const FILTER_LABELS = {
@@ -1273,6 +1274,9 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
           style="display:inline-flex;align-items:center;gap:10px;padding:3px 10px;background:${arBg};border:1px solid ${arBorder};border-radius:999px;cursor:pointer;transition:opacity 0.15s;"
           onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'">
           <span style="font-size:11px;font-weight:600;color:${arLabel};">AR Balance</span>
+          <span style="font-size:11px;color:${arMuted};">Invoiced</span>
+          <span style="font-size:12px;font-weight:700;color:${arValue};">${$$(arInvoiced)}</span>
+          <span style="font-size:11px;color:${arMuted};border-left:1px solid ${arBorder};padding-left:10px;">Outstanding</span>
           <span style="font-size:12px;font-weight:700;color:${arValue};">${$$(arBalance)}</span>
           <span style="font-size:11px;color:${arMuted};border-left:1px solid ${arBorder};padding-left:10px;">${arInvText}</span>
           <span style="font-size:10px;color:${arMuted};opacity:0.6;">↗</span>
@@ -1639,7 +1643,8 @@ async function openArModal(triggerEl, qboIds = []) {
     today.setHours(0, 0, 0, 0);
 
     const totalBal = invoices.reduce((s, r) => s + Number(r.balance_amt || 0), 0);
-    sub.textContent = `${invoices.length} open invoice${invoices.length === 1 ? "" : "s"} · ${$$(totalBal)} outstanding`;
+    const totalInv = invoices.reduce((s, r) => s + Number(r.total_amt   || 0), 0);
+    sub.textContent = `${invoices.length} open invoice${invoices.length === 1 ? "" : "s"} · ${$$(totalInv)} invoiced · ${$$(totalBal)} outstanding`;
 
     if (!invoices.length) {
       body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">No open invoices.</div>`;
@@ -1681,6 +1686,9 @@ async function openArModal(triggerEl, qboIds = []) {
         } else if (arSortKey === "due_date") {
           av = a.due_date || "";
           bv = b.due_date || "";
+        } else if (arSortKey === "total_amt") {
+          av = Number(a.total_amt || 0);
+          bv = Number(b.total_amt || 0);
         } else if (arSortKey === "balance_amt") {
           av = Number(a.balance_amt || 0);
           bv = Number(b.balance_amt || 0);
@@ -1720,17 +1728,27 @@ async function openArModal(triggerEl, qboIds = []) {
                 title="${escapeHtml(r.project_name || "")}">${escapeHtml(r.project_name || "—")}</td>
             <td class="py-2 px-3 text-right text-black/50 whitespace-nowrap">${fmtDate(r.txn_date)}</td>
             <td class="py-2 px-3 text-right text-black/50 whitespace-nowrap">${fmtDate(r.due_date)}</td>
+            <td class="py-2 px-3 text-right tabular-nums whitespace-nowrap text-ink-900">${$$(Number(r.total_amt || 0))}</td>
             <td class="py-2 px-3 text-right tabular-nums font-semibold whitespace-nowrap" style="color:#b45309;">${$$(Number(r.balance_amt || 0))}</td>
             <td class="py-2 px-3 text-right text-black/40 whitespace-nowrap">${escapeHtml(r.sales_term_name || "—")}</td>
             ${overdueCell}
           </tr>`;
       }).join("");
 
+      const HEADER_LABELS = {
+        project_name:     "Project",
+        txn_date:         "Invoice Sent",
+        due_date:         "Due Date",
+        total_amt:        "Invoice Amt",
+        balance_amt:      "Balance Due",
+        sales_term_name:  "Sales Term",
+        _days:            "Days Overdue",
+      };
       function thStyle(key, align = "right") {
         const active = arSortKey === key;
         const arrow  = active ? (arSortDir === "asc" ? " ▲" : " ▼") : "";
         return `<th class="py-2 px-3 text-${align} text-[10px] font-bold uppercase tracking-wide whitespace-nowrap cursor-pointer select-none ${active ? "text-black/70" : "text-black/40"} hover:text-black/60"
-                    data-ar-sort="${key}">${key === "project_name" ? "Project" : key === "txn_date" ? "Invoice Sent" : key === "due_date" ? "Due Date" : key === "balance_amt" ? "Balance" : key === "sales_term_name" ? "Sales Term" : "Days Overdue"}${arrow}</th>`;
+                    data-ar-sort="${key}">${HEADER_LABELS[key] || key}${arrow}</th>`;
       }
 
       body.innerHTML = `
@@ -1740,6 +1758,7 @@ async function openArModal(triggerEl, qboIds = []) {
               ${thStyle("project_name",    "left")}
               ${thStyle("txn_date",        "right")}
               ${thStyle("due_date",        "right")}
+              ${thStyle("total_amt",       "right")}
               ${thStyle("balance_amt",     "right")}
               ${thStyle("sales_term_name", "right")}
               ${thStyle("_days",           "right")}

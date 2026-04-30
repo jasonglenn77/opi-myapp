@@ -740,6 +740,7 @@ def projects_financials(user=Depends(get_current_user)):
           pfs.expense_line_amt,
           pfs.invoice_balance_amt,
           pfs.open_invoice_count,
+          pfs.open_invoice_total_amt,
           pfs.balance_amt,
           pfs.actual_profit,
           pfs.actual_profit_pct,
@@ -795,6 +796,7 @@ def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
         SELECT
             qc.qbo_id          AS project_qbo_id,
             qc.display_name    AS project_name,
+            qt.total_amt,
             qt.balance_amt,
             qt.txn_date,
             qt.due_date,

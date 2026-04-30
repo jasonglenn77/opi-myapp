@@ -335,6 +335,7 @@ def qbo_init_tables() -> None:
               expense_line_amt     DECIMAL(18,2) NOT NULL DEFAULT 0,
               invoice_balance_amt  DECIMAL(18,2) NOT NULL DEFAULT 0,
               open_invoice_count   INT NOT NULL DEFAULT 0,
+              open_invoice_total_amt DECIMAL(18,2) NOT NULL DEFAULT 0,
               balance_amt          DECIMAL(18,2) NOT NULL DEFAULT 0,
 
               actual_profit        DECIMAL(18,2) NOT NULL DEFAULT 0,

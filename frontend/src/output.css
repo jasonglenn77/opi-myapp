@@ -766,6 +766,10 @@ body {
   visibility: visible;
 }
 
+.static {
+  position: static;
+}
+
 .fixed {
   position: fixed;
 }
@@ -1139,6 +1143,10 @@ body {
   width: max-content;
 }
 
+.w-20 {
+  width: 5rem;
+}
+
 .min-w-0 {
   min-width: 0px;
 }
@@ -1325,6 +1333,15 @@ body {
 
 .gap-px {
   gap: 1px;
+}
+
+.gap-x-8 {
+  -moz-column-gap: 2rem;
+       column-gap: 2rem;
+}
+
+.gap-y-3 {
+  row-gap: 0.75rem;
 }
 
 .space-x-2 > :not([hidden]) ~ :not([hidden]) {
@@ -2415,6 +2432,10 @@ body {
 
   .lg\:grid-cols-\[320px_minmax\(0\2c 1fr\)\] {
     grid-template-columns: 320px minmax(0,1fr);
+  }
+
+  .lg\:grid-cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .lg\:flex-row {

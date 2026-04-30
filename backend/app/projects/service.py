@@ -423,6 +423,7 @@ def refresh_project_financial_summary() -> dict:
               expense_line_amt    DECIMAL(18,2) NOT NULL DEFAULT 0,
               invoice_balance_amt  DECIMAL(18,2) NOT NULL DEFAULT 0,
               open_invoice_count   INT NOT NULL DEFAULT 0,
+              open_invoice_total_amt DECIMAL(18,2) NOT NULL DEFAULT 0,
               balance_amt          DECIMAL(18,2) NOT NULL DEFAULT 0,
               actual_profit        DECIMAL(18,2) NOT NULL DEFAULT 0,
               actual_profit_pct    DECIMAL(12,8) NULL,
@@ -435,11 +436,22 @@ def refresh_project_financial_summary() -> dict:
             ) ENGINE=InnoDB
         """))
 
+        # Migration: add open_invoice_total_amt to existing tables that pre-date it.
+        # Wrapped in try/except because the column may already exist on fresh installs.
+        try:
+            conn.execute(text("""
+                ALTER TABLE myapp.project_financial_summary
+                ADD COLUMN open_invoice_total_amt DECIMAL(18,2) NOT NULL DEFAULT 0
+                  AFTER open_invoice_count
+            """))
+        except Exception:
+            pass  # column already exists, no-op
+
         result = conn.execute(text("""
             INSERT INTO myapp.project_financial_summary (
               qbo_customer_id, project_qbo_id,
               estimate_cost_amt, estimate_line_amt, invoice_line_amt, expense_line_amt,
-              invoice_balance_amt, open_invoice_count, balance_amt,
+              invoice_balance_amt, open_invoice_count, open_invoice_total_amt, balance_amt,
               actual_profit, actual_profit_pct,
               projected_profit, projected_profit_pct,
               cost_diff_amt, cost_diff_pct
@@ -505,7 +517,8 @@ def refresh_project_financial_summary() -> dict:
               SELECT
                 qc.qbo_id                AS project_qbo_id,
                 qt.id                    AS transaction_id,
-                qt.balance_amt
+                qt.balance_amt,
+                qt.total_amt
               FROM myapp.qbo_customers qc
               INNER JOIN latest_sales_txns qt
                 ON qt.customer_qbo_id = qc.qbo_id
@@ -535,7 +548,8 @@ def refresh_project_financial_summary() -> dict:
               SELECT
                 project_qbo_id,
                 SUM(COALESCE(balance_amt, 0))                    AS invoice_balance_amt,
-                SUM(CASE WHEN balance_amt > 0 THEN 1 ELSE 0 END) AS open_invoice_count
+                SUM(CASE WHEN balance_amt > 0 THEN 1 ELSE 0 END) AS open_invoice_count,
+                SUM(CASE WHEN balance_amt > 0 THEN COALESCE(total_amt, 0) ELSE 0 END) AS open_invoice_total_amt
               FROM ar_lines
               GROUP BY project_qbo_id
             )
@@ -549,6 +563,7 @@ def refresh_project_financial_summary() -> dict:
               COALESCE(er.expense_line_amt,  0),
               COALESCE(ar.invoice_balance_amt, 0),
               COALESCE(ar.open_invoice_count, 0),
+              COALESCE(ar.open_invoice_total_amt, 0),
 
               (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0)),
               (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0)),
@@ -582,9 +597,10 @@ def refresh_project_financial_summary() -> dict:
               estimate_line_amt    = VALUES(estimate_line_amt),
               invoice_line_amt     = VALUES(invoice_line_amt),
               expense_line_amt     = VALUES(expense_line_amt),
-              invoice_balance_amt  = VALUES(invoice_balance_amt),
-              open_invoice_count   = VALUES(open_invoice_count),
-              balance_amt          = VALUES(balance_amt),
+              invoice_balance_amt    = VALUES(invoice_balance_amt),
+              open_invoice_count     = VALUES(open_invoice_count),
+              open_invoice_total_amt = VALUES(open_invoice_total_amt),
+              balance_amt            = VALUES(balance_amt),
               actual_profit        = VALUES(actual_profit),
               actual_profit_pct    = VALUES(actual_profit_pct),
               projected_profit     = VALUES(projected_profit),

@@ -3,7 +3,16 @@
     "allow": [
       "Bash(python -m py_compile backend/app/projects/routes.py)",
       "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/dashboard.js /tmp/dashcheck.mjs)",
-      "Bash(node --check /tmp/dashcheck.mjs)"
+      "Bash(node --check /tmp/dashcheck.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/estimate.js /tmp/est.mjs)",
+      "Bash(node --check /tmp/est.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/app.js /tmp/app.mjs)",
+      "Bash(node --check /tmp/app.mjs)",
+      "Bash(python -m py_compile /c/Users/jason/OPI/myapp/backend/app/qbo/service.py)",
+      "Bash(python -m py_compile /c/Users/jason/OPI/myapp/backend/app/projects/service.py)",
+      "Bash(python -m py_compile /c/Users/jason/OPI/myapp/backend/app/projects/routes.py)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/projects.js /tmp/projcheck.mjs)",
+      "Bash(node --check /tmp/projcheck.mjs)"
     ]
   }
 }

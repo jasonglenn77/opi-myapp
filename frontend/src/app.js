@@ -7,6 +7,7 @@ import { assignmentPage } from "./pages/assignment.js";
 import { usersPage } from "./pages/users.js";
 import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
+import { estimatePage } from "./pages/estimate.js";
 
 async function route() {
   const hash = location.hash || "#/dashboard";
@@ -42,6 +43,7 @@ async function route() {
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);
+  if (hash === "#/estimate") return estimatePage(route);
 
   // placeholder pages
   return dashboardPage(route);
