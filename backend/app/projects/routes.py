@@ -18,6 +18,8 @@ from .service import (
     ensure_project_row_for_qbo_customer,
     provision_master_rows_for_all_projects,
     refresh_project_financial_summary,
+    reset_untouched_master_statuses,
+    consolidate_orphaned_master_rows,
 )
 from app.s3 import s3_client, AWS_BUCKET, build_project_file_key, signed_file_url
 
@@ -479,7 +481,7 @@ def projects(user=Depends(get_current_user)):
 
       -- Assignment fields (concatenated across all schedule items)
       COALESCE(am.all_statuses,   '')                AS all_statuses,
-      COALESCE(am.primary_status, 'not_started')     AS project_status,
+      COALESCE(am.primary_status, 'needs_attention') AS project_status,
       am.all_start_dates,
       am.earliest_start_date                         AS start_date,
       am.all_end_dates,
@@ -493,8 +495,13 @@ def projects(user=Depends(get_current_user)):
       COALESCE(cr.all_crew_names, '')                AS all_work_crews,
       COALESCE(cr.primary_crew_name, '')             AS primary_work_crew,
 
-      -- Needs attention flag
-      CASE WHEN am.qbo_customer_id IS NULL THEN 1 ELSE 0 END AS needs_assignment,
+      -- Needs attention flag — set when no schedule items exist OR the project's
+      -- primary status is the auto-provisioned 'needs_attention' (untouched master row).
+      CASE
+        WHEN am.qbo_customer_id IS NULL THEN 1
+        WHEN am.primary_status = 'needs_attention' THEN 1
+        ELSE 0
+      END                                            AS needs_assignment,
 
       -- File count
       COALESCE(pf.file_count, 0)                     AS file_count,
@@ -683,7 +690,7 @@ def projects_basic(user=Depends(get_current_user)):
       qc.meta_last_updated_time                      AS project_lastupdate_dttm,
 
       COALESCE(am.all_statuses,   '')                AS all_statuses,
-      COALESCE(am.primary_status, 'not_started')     AS project_status,
+      COALESCE(am.primary_status, 'needs_attention') AS project_status,
       am.all_start_dates,
       am.earliest_start_date                         AS start_date,
       am.all_end_dates,
@@ -695,7 +702,11 @@ def projects_basic(user=Depends(get_current_user)):
       COALESCE(cr.all_crew_names, '')                AS all_work_crews,
       COALESCE(cr.primary_crew_name, '')             AS primary_work_crew,
 
-      CASE WHEN am.qbo_customer_id IS NULL THEN 1 ELSE 0 END AS needs_assignment,
+      CASE
+        WHEN am.qbo_customer_id IS NULL THEN 1
+        WHEN am.primary_status = 'needs_attention' THEN 1
+        ELSE 0
+      END                                            AS needs_assignment,
 
       COALESCE(pf.file_count, 0)                     AS file_count
 
@@ -781,6 +792,28 @@ def refresh_financials(_admin=Depends(require_admin)):
     out-of-band or want to rebuild the summary without waiting for a sync.
     """
     return refresh_project_financial_summary()
+
+
+@router.post("/projects/reset-untouched-statuses")
+def reset_untouched_statuses_endpoint(_admin=Depends(require_admin)):
+    """
+    Admin-only: bulk-reset master schedule-item rows that look auto-provisioned
+    and untouched (status='not_started', no dates, is_extra_row=0) to status=NULL,
+    so they render as "Needs Attention" on the Assignments page. Idempotent.
+    """
+    return reset_untouched_master_statuses()
+
+
+@router.post("/projects/consolidate-orphaned-masters")
+def consolidate_orphaned_masters_endpoint(_admin=Depends(require_admin)):
+    """
+    Admin-only: one-time data repair. For projects whose master row is the
+    untouched 'needs_attention' default but a child row holds the real schedule,
+    promote the earliest-dated child into the master row (moving PM/Crew
+    assignments along with it) and delete that child. Renumbers remaining
+    children's sort_order. Idempotent.
+    """
+    return consolidate_orphaned_master_rows()
 
 
 class ArBalanceRequest(BaseModel):

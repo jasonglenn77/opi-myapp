@@ -12,7 +12,18 @@
       "Bash(python -m py_compile /c/Users/jason/OPI/myapp/backend/app/projects/service.py)",
       "Bash(python -m py_compile /c/Users/jason/OPI/myapp/backend/app/projects/routes.py)",
       "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/projects.js /tmp/projcheck.mjs)",
-      "Bash(node --check /tmp/projcheck.mjs)"
+      "Bash(node --check /tmp/projcheck.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/assignment.js /tmp/asncheck.mjs)",
+      "Bash(node --check /tmp/asncheck.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/assignment.js /tmp/asn.mjs)",
+      "Bash(node --check /tmp/asn.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/dashboard.js /tmp/d.mjs)",
+      "Bash(node --check /tmp/d.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/app.js /tmp/a.mjs)",
+      "Bash(node --check /tmp/a.mjs)",
+      "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/login.js /tmp/l.mjs)",
+      "Bash(node --check /tmp/sched.mjs)",
+      "Bash(node --check /tmp/p.mjs)"
     ]
   }
 }

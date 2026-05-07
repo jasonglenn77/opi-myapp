@@ -40,7 +40,7 @@ export async function dashboardPage(routeFn) {
       }
     }
     for (const agg of m.values()) {
-      if (agg.project_status == null) agg.project_status = "not_started";
+      if (agg.project_status == null) agg.project_status = "needs_attention";
     }
     return [...m.values()];
   })();
@@ -90,8 +90,14 @@ export async function dashboardPage(routeFn) {
   }
 
   // ── side-card counts (from basic rows) ─────────────────────────────────────
-  const needsAttentionCount = basicRows.filter(r => Number(r.needs_assignment) === 1).length;
-  const canceledCount       = basicRows.filter(r => normalize(r.project_status) === "canceled").length;
+  // A project needs attention when it has no schedule items at all (legacy edge case)
+  // OR when its primary status is the explicit 'needs_attention' (master row was
+  // auto-provisioned and the user hasn't picked a real status yet).
+  const needsAttentionCount = basicRows.filter(r =>
+    Number(r.needs_assignment) === 1 ||
+    normalize(r.project_status) === "needs_attention"
+  ).length;
+  const canceledCount = basicRows.filter(r => normalize(r.project_status) === "canceled").length;
 
   // ── projects-table state ───────────────────────────────────────────────────
   const state = {
@@ -99,6 +105,12 @@ export async function dashboardPage(routeFn) {
     sortKey:    "project_name",
     sortDir:    "asc",
     openFilter: null,
+    // chartProjectFilter: when the user clicks a stacked-bar segment, we drop the
+    // qbo_customer_ids of the matching projects in here. The table then narrows to
+    // those exact projects (potentially showing multiple schedule items each), so
+    // the chart's count and the table's project count stay in sync. Empty = no
+    // chart-driven filter active.
+    chartProjectFilter: [],
     filters: {
       project_name:             "",
       project_status:           [],
@@ -128,7 +140,7 @@ export async function dashboardPage(routeFn) {
         <div class="flex items-start justify-between gap-3">
           <div>
             <div class="text-lg font-extrabold">Project Timeline</div>
-            <div class="text-sm text-black/60">Project counts by end-date month (2026), stacked by status</div>
+            <div class="text-sm text-black/60">Row counts by end-date month (2026), stacked by status</div>
           </div>
           <div class="text-xs text-black/50 whitespace-nowrap" id="timelineRange">—</div>
         </div>
@@ -169,7 +181,7 @@ export async function dashboardPage(routeFn) {
       </div>
 
       <!-- Projects table (read-only, multi-row per project) -->
-      <div id="projTableCard" class="card flex flex-col overflow-hidden" style="min-height:280px;">
+      <div id="projTableCard" class="card flex flex-col overflow-hidden">
         <div class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1.5">
             <div>
@@ -259,32 +271,29 @@ export async function dashboardPage(routeFn) {
     document.body.appendChild(tip);
   }
 
-  // ── Viewport layout: no page scrollbar, table fills remaining height ──────
-  // 1. Lock body scroll so the browser never shows a page-level scrollbar
-  document.body.style.overflowY = "hidden";
-
-  // 2. Hide the shell's page-title block (empty title/subtitle still renders the mb-5 spacer div)
+  // ── Viewport layout: page scrolls naturally so the chart scrolls up out of
+  // view as the user scrolls down, revealing more of the table. The table card
+  // is `position: sticky; top: 0` and sized to fill the viewport, so once the
+  // chart has scrolled past it the table card stays pinned and the user can
+  // browse rows via the table's own internal scroll. Hide the empty page-title
+  // block on enter; restore on navigate-away.
   const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
   if (pageTitleBlock) pageTitleBlock.style.display = "none";
 
-  // 3. Size the table card to fill whatever viewport remains below the timeline card
-  function fitTableCardHeight() {
+  function applyTableCardLayout() {
     const card = document.getElementById("projTableCard");
     if (!card) return;
-    const rect      = card.getBoundingClientRect();
-    const available = window.innerHeight - rect.top - 12;
-    card.style.height = Math.max(280, available) + "px";
+    card.style.position    = "sticky";
+    card.style.top         = "0";
+    card.style.height      = "calc(100vh - 12px)";
   }
+  applyTableCardLayout();
 
-  // 4. Restore on navigation (any hash change = leaving this page)
   function onNavigateAway() {
-    document.body.style.overflowY = "";
     if (pageTitleBlock) pageTitleBlock.style.display = "";
-    window.removeEventListener("resize", fitTableCardHeight);
     window.removeEventListener("hashchange", onNavigateAway);
   }
   window.addEventListener("hashchange", onNavigateAway);
-  window.addEventListener("resize", fitTableCardHeight);
 
   // ── Project Timeline chart ─────────────────────────────────────────────────
   function renderTimeline() {
@@ -303,35 +312,23 @@ export async function dashboardPage(routeFn) {
       not_started: 0, in_progress: 0, completed: 0, total: 0,
     }));
 
-    // Collapse the CURRENTLY-FILTERED table rows into one-per-project, then
-    // bucket by 2026 end-date month × status. This is what makes the chart
-    // react to table filters (step 1 of bidirectional linking).
-    const projectAgg = new Map();
+    // Bucket every CURRENTLY-FILTERED schedule-item row by its own end_date
+    // month and own status. Each row counts as 1, so chart bar heights match
+    // the row count returned by the table after filtering.
     for (const r of filtered()) {
-      const id = r.qbo_customer_id;
-      if (id == null) continue;
-      let p = projectAgg.get(id);
-      if (!p) { p = { project_status: null, end_date: null }; projectAgg.set(id, p); }
-      if (r.project_status && (p.project_status == null || r.project_status < p.project_status)) {
-        p.project_status = r.project_status;
-      }
-      const ed = r.end_date ? String(r.end_date).slice(0, 10) : null;
-      if (ed && (!p.end_date || ed > p.end_date)) p.end_date = ed;
-    }
-    for (const p of projectAgg.values()) {
-      const d = parseYmd(p.end_date);
+      const d = parseYmd(r.end_date);
       if (!d) continue;
       if (d.getUTCFullYear() !== 2026) continue;
-      const s = (p.project_status || "").toLowerCase();
+      const s = (r.project_status || "").toLowerCase();
       if (!STATUS_KEYS.includes(s)) continue;
       const b = buckets[d.getUTCMonth()];
       b[s] += 1;
       b.total += 1;
     }
 
-    const totalProjects = buckets.reduce((s, b) => s + b.total, 0);
+    const totalRows = buckets.reduce((s, b) => s + b.total, 0);
     const rangeEl = document.getElementById("timelineRange");
-    if (rangeEl) rangeEl.textContent = `${totalProjects} project${totalProjects === 1 ? "" : "s"} ending in 2026`;
+    if (rangeEl) rangeEl.textContent = `${totalRows} row${totalRows === 1 ? "" : "s"} ending in 2026`;
 
     const w = host.clientWidth || 800;
     const h = 200;
@@ -468,10 +465,26 @@ export async function dashboardPage(routeFn) {
   // ── Projects table: rendering + filtering + sorting ────────────────────────
 
   function getOptions(field) {
+    // PM and Crew filter dropdowns are populated from the comma-separated
+    // all_* lists so users can filter by any individual person/crew, not just
+    // the primary one. The state filter key (primary_project_manager / etc.)
+    // stays the same — only the source of options + the matcher logic differ.
+    const sourceMap = {
+      primary_project_manager: "all_project_managers",
+      primary_work_crew:       "all_work_crews",
+    };
+    const source = sourceMap[field] || field;
+    const splits = !!sourceMap[field];
+
     const set = new Set();
     rows.forEach(r => {
-      const v = r[field];
-      if (v != null && v !== "") set.add(String(v));
+      const v = r[source];
+      if (v == null || v === "") return;
+      if (splits) {
+        String(v).split(",").map(s => s.trim()).filter(Boolean).forEach(x => set.add(x));
+      } else {
+        set.add(String(v));
+      }
     });
     return [...set].sort((a, b) => a.localeCompare(b));
   }
@@ -554,11 +567,11 @@ export async function dashboardPage(routeFn) {
               title="${ea(r.project_name || "")}">${ea(r.project_name || "—")}</td>
           <td class="py-1.5 px-2">${statusBadge(effectiveStatus(r))}</td>
           <td class="py-1.5 px-2 whitespace-nowrap"
-              style="max-width:140px; overflow:hidden; text-overflow:ellipsis;"
-              title="${ea(r.primary_project_manager || "")}">${ea(r.primary_project_manager || "—")}</td>
+              style="max-width:180px; overflow:hidden; text-overflow:ellipsis;"
+              title="${ea(r.all_project_managers || "")}">${ea(r.all_project_managers || "—")}</td>
           <td class="py-1.5 px-2 whitespace-nowrap"
-              style="max-width:120px; overflow:hidden; text-overflow:ellipsis;"
-              title="${ea(r.primary_work_crew || "")}">${ea(r.primary_work_crew || "—")}</td>
+              style="max-width:160px; overflow:hidden; text-overflow:ellipsis;"
+              title="${ea(r.all_work_crews || "")}">${ea(r.all_work_crews || "—")}</td>
           <td class="py-1.5 px-2 whitespace-nowrap">${r.start_date ? ea(String(r.start_date).slice(0,10)) : "—"}</td>
           <td class="py-1.5 px-2 whitespace-nowrap">${r.end_date   ? ea(String(r.end_date).slice(0,10))   : "—"}</td>
           <td class="py-1.5 px-2 text-right tabular-nums ${Number(r.wire_guidance) ? "font-semibold" : "text-black/50"}">${Number(r.wire_guidance) ? "Yes" : "No"}</td>
@@ -732,18 +745,27 @@ export async function dashboardPage(routeFn) {
 
   function filtered() {
     const q = normalize(state.q);
+    const chartIds = state.chartProjectFilter.length > 0 ? new Set(state.chartProjectFilter) : null;
     return rows.filter(r => {
+      // Chart-driven project filter (set when user clicks a stacked-bar segment).
+      // Restricts table rows to schedule items belonging to the projects the chart counted.
+      if (chartIds && !chartIds.has(String(r.qbo_customer_id))) return false;
+
       if (state.filters.project_name &&
           !normalize(r.project_name).includes(normalize(state.filters.project_name))) return false;
 
       if (state.filters.project_status.length > 0 &&
           !state.filters.project_status.includes(effectiveStatus(r))) return false;
 
-      if (state.filters.primary_project_manager.length > 0 &&
-          !state.filters.primary_project_manager.includes(r.primary_project_manager || "")) return false;
+      if (state.filters.primary_project_manager.length > 0) {
+        const rowPms = (r.all_project_managers || "").split(",").map(s => s.trim()).filter(Boolean);
+        if (!state.filters.primary_project_manager.some(v => rowPms.includes(v))) return false;
+      }
 
-      if (state.filters.primary_work_crew.length > 0 &&
-          !state.filters.primary_work_crew.includes(r.primary_work_crew || "")) return false;
+      if (state.filters.primary_work_crew.length > 0) {
+        const rowCrews = (r.all_work_crews || "").split(",").map(s => s.trim()).filter(Boolean);
+        if (!state.filters.primary_work_crew.some(v => rowCrews.includes(v))) return false;
+      }
 
       if (!dateInRange(r.start_date, state.filters.start_date.from, state.filters.start_date.to)) return false;
       if (!dateInRange(r.end_date,   state.filters.end_date.from,   state.filters.end_date.to))   return false;
@@ -801,8 +823,9 @@ export async function dashboardPage(routeFn) {
     renderTimeline();  // keep chart in sync with current filter state
   }
 
-  // Click a stacked-bar segment → drive the table filters.
-  // Clicking the same segment again clears those filters (toggle).
+  // Click a stacked-bar segment → set table filters at the SCHEDULE-ITEM (row)
+  // level. Since the chart now counts rows, the chart's bar height equals the
+  // exact row count the table will show after filtering.
   function handleTimelineClick(month, status) {
     const mm      = String(month).padStart(2, "0");
     const lastDay = new Date(Date.UTC(2026, month, 0)).getUTCDate();
@@ -822,17 +845,31 @@ export async function dashboardPage(routeFn) {
     } else {
       state.filters.end_date       = { from, to };
       state.filters.project_status = [status];
+      state.chartProjectFilter     = []; // clear any side-card project-id filter
     }
     renderAll();
   }
 
-  // Click a side card → toggle the corresponding status filter in the table.
-  // Same toggle behavior as the chart: click again to clear.
-  function handleStatusCardClick(statusValue) {
-    const f = state.filters;
-    const alreadySelected = f.project_status.length === 1 && f.project_status[0] === statusValue;
-    state.filters.project_status = alreadySelected ? [] : [statusValue];
+  // Side cards (Needs Attention / Canceled) use the same project-ID-based filter
+  // as the chart, so the card's count and the table's project count stay in sync.
+  function applyChartProjectFilter(matchingIds) {
+    const sameSelection =
+      state.chartProjectFilter.length === matchingIds.length &&
+      state.chartProjectFilter.every(id => matchingIds.includes(id));
+    state.chartProjectFilter = sameSelection ? [] : matchingIds;
     renderAll();
+  }
+
+  function handleStatusCardClick(statusValue) {
+    const matchingIds = basicRows
+      .filter(r => {
+        if (statusValue === "needs_attention") {
+          return Number(r.needs_assignment) === 1 || normalize(r.project_status) === "needs_attention";
+        }
+        return normalize(r.project_status) === normalize(statusValue);
+      })
+      .map(r => String(r.qbo_customer_id));
+    applyChartProjectFilter(matchingIds);
   }
   document.getElementById("needsAttnCard")?.addEventListener("click", () => handleStatusCardClick("needs_attention"));
   document.getElementById("canceledCard")?.addEventListener("click", () => handleStatusCardClick("canceled"));
@@ -846,6 +883,7 @@ export async function dashboardPage(routeFn) {
   document.getElementById("projClearFiltersBtn").addEventListener("click", () => {
     state.q = "";
     state.openFilter = null;
+    state.chartProjectFilter = [];   // also clear chart-driven filter
     document.getElementById("projFilterMenuPortal")?.remove();
     Object.keys(state.filters).forEach(k => {
       if      (DATE_COLS.includes(k))        state.filters[k] = { from: "", to: "" };
@@ -1109,17 +1147,10 @@ export async function dashboardPage(routeFn) {
   // ── initial render ─────────────────────────────────────────────────────────
   renderAll();   // also renders the timeline (they're linked)
 
-  // Double-rAF so the timeline + card header are fully laid out before we
-  // measure the table card's top position and compute its available height.
-  requestAnimationFrame(() => requestAnimationFrame(fitTableCardHeight));
-
+  // Re-render the timeline on resize so the chart adapts to viewport width.
   const timelineHost = document.getElementById("timelineChart");
   if (timelineHost) {
-    const roT = new ResizeObserver(() => {
-      renderTimeline();
-      // Timeline re-render may shift layout (e.g., y-axis label width change)
-      fitTableCardHeight();
-    });
+    const roT = new ResizeObserver(() => renderTimeline());
     roT.observe(timelineHost);
   }
 }

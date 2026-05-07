@@ -50,9 +50,15 @@ def provision_master_rows_for_all_projects():
             """), {"pid": project_id}).mappings().first()
 
             if not master:
+                # 'needs_attention' is a system-set status (NOT in ALLOWED_STATUS,
+                # so users can't pick it from the edit dropdown). It signals "the
+                # master row exists but the user hasn't picked a real status yet."
+                # As soon as the user chooses one of the four user-pickable statuses
+                # via save_schedule_item(), the value is overwritten and the row
+                # leaves the Needs-Attention state.
                 conn.execute(text("""
                     INSERT INTO project_schedule_items (project_id, status, is_extra_row)
-                    VALUES (:pid, 'not_started', 0)
+                    VALUES (:pid, 'needs_attention', 0)
                 """), {"pid": project_id})
 
 def get_assignment_bundle(qbo_customer_id: int):
@@ -398,6 +404,174 @@ def list_project_events(qbo_customer_id: int):
         """), {"pid": int(proj["id"])}).mappings().all()
 
     return [dict(r) for r in rows]
+
+
+def consolidate_orphaned_master_rows() -> dict:
+    """
+    Repairs a data-integrity issue from a past QBO sync timing bug: projects
+    where the master/parent row (is_extra_row=0) was auto-provisioned but
+    never received the actual scheduling data, while one or more child rows
+    (is_extra_row=1) hold the real schedule.
+
+    For each affected project, this:
+      1. Picks the child row with the earliest start_date (tiebreak by id).
+      2. Moves any active PM and Crew assignments from the child's schedule
+         item ID to the master's schedule item ID.
+      3. Copies the child's data fields (status, dates, wire_guidance,
+         travel_days, overage_days, equipment_type, notes) into the master row.
+      4. Deletes that child row.
+      5. Renumbers sort_order on the remaining children: 1, 2, 3, ...
+         ordered by start_date ASC (NULLs last), then id ASC.
+
+    A project is only touched if its master row is genuinely "untouched"
+    (status='needs_attention' AND start_date IS NULL AND end_date IS NULL).
+    Idempotent — safe to run more than once. Returns counts of what happened.
+    """
+    promoted = 0
+    deleted_children = 0
+    skipped = 0
+
+    with engine.begin() as conn:
+        # Find projects with incomplete master + at least one child with a start_date
+        candidates = conn.execute(text("""
+            SELECT DISTINCT m.project_id
+            FROM myapp.project_schedule_items m
+            INNER JOIN myapp.project_schedule_items c
+              ON c.project_id = m.project_id
+              AND c.is_extra_row = 1
+              AND c.start_date IS NOT NULL
+            WHERE m.is_extra_row = 0
+              AND m.status     = 'needs_attention'
+              AND m.start_date IS NULL
+              AND m.end_date   IS NULL
+        """)).mappings().all()
+
+        project_ids = [row["project_id"] for row in candidates]
+
+        for project_id in project_ids:
+            master = conn.execute(text("""
+                SELECT id FROM myapp.project_schedule_items
+                WHERE project_id = :pid AND is_extra_row = 0
+                LIMIT 1
+            """), {"pid": project_id}).mappings().first()
+            if not master:
+                skipped += 1
+                continue
+            master_id = int(master["id"])
+
+            earliest_child = conn.execute(text("""
+                SELECT id, status, start_date, end_date, wire_guidance,
+                       travel_days, overage_days, equipment_type, notes
+                FROM myapp.project_schedule_items
+                WHERE project_id  = :pid
+                  AND is_extra_row = 1
+                  AND start_date  IS NOT NULL
+                ORDER BY start_date ASC, id ASC
+                LIMIT 1
+            """), {"pid": project_id}).mappings().first()
+            if not earliest_child:
+                skipped += 1
+                continue
+            child_id = int(earliest_child["id"])
+
+            # Move PM assignments from the child schedule item to the master.
+            # Master had no schedule items prior (it was the untouched default),
+            # so there shouldn't be any duplicate-key conflicts.
+            conn.execute(text("""
+                UPDATE myapp.project_schedule_item_project_managers
+                SET schedule_item_id = :master_id
+                WHERE schedule_item_id = :child_id
+            """), {"master_id": master_id, "child_id": child_id})
+
+            # Move Crew assignments similarly
+            conn.execute(text("""
+                UPDATE myapp.project_schedule_item_work_crews
+                SET schedule_item_id = :master_id
+                WHERE schedule_item_id = :child_id
+            """), {"master_id": master_id, "child_id": child_id})
+
+            # Copy the child's data fields into the master row
+            conn.execute(text("""
+                UPDATE myapp.project_schedule_items
+                SET status         = :st,
+                    start_date     = :sd,
+                    end_date       = :ed,
+                    wire_guidance  = :wg,
+                    travel_days    = :td,
+                    overage_days   = :od,
+                    equipment_type = :eq,
+                    notes          = :notes
+                WHERE id = :master_id
+            """), {
+                "master_id": master_id,
+                "st":    earliest_child["status"],
+                "sd":    earliest_child["start_date"],
+                "ed":    earliest_child["end_date"],
+                "wg":    earliest_child["wire_guidance"],
+                "td":    earliest_child["travel_days"],
+                "od":    earliest_child["overage_days"],
+                "eq":    earliest_child["equipment_type"],
+                "notes": earliest_child["notes"],
+            })
+            promoted += 1
+
+            # Delete the now-promoted child row (its assignments were already moved)
+            conn.execute(text("""
+                DELETE FROM myapp.project_schedule_items WHERE id = :cid
+            """), {"cid": child_id})
+            deleted_children += 1
+
+            # Renumber sort_order on the remaining children of this project
+            remaining = conn.execute(text("""
+                SELECT id FROM myapp.project_schedule_items
+                WHERE project_id  = :pid
+                  AND is_extra_row = 1
+                ORDER BY (start_date IS NULL) ASC, start_date ASC, id ASC
+            """), {"pid": project_id}).mappings().all()
+
+            for i, child in enumerate(remaining, start=1):
+                conn.execute(text("""
+                    UPDATE myapp.project_schedule_items
+                    SET sort_order = :so
+                    WHERE id = :cid
+                """), {"so": i, "cid": int(child["id"])})
+
+    return {
+        "ok": True,
+        "projects_examined": len(project_ids),
+        "masters_promoted": promoted,
+        "children_deleted": deleted_children,
+        "skipped": skipped,
+    }
+
+
+def reset_untouched_master_statuses() -> dict:
+    """
+    Bulk-resets the status of master schedule-item rows that look auto-provisioned
+    and untouched. Sets them to 'needs_attention' so the Assignments page renders
+    them with the rose-colored Needs-Attention pill. A row matches if ALL of these
+    are true:
+
+      - is_extra_row = 0           (master row, not a user-added extra row)
+      - status       = 'not_started'  (the old auto-provisioning default)
+      - start_date   IS NULL       (no schedule date set)
+      - end_date     IS NULL       (no schedule date set)
+
+    This is intended as a one-time backfill after the auto-provisioning logic was
+    changed from 'not_started' to 'needs_attention'. Safe to run more than once —
+    idempotent: rows already at 'needs_attention' won't match, and rows the user
+    has touched (set dates or moved status off 'not_started') won't match either.
+    """
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            UPDATE myapp.project_schedule_items
+            SET status = 'needs_attention'
+            WHERE is_extra_row = 0
+              AND status       = 'not_started'
+              AND start_date   IS NULL
+              AND end_date     IS NULL
+        """))
+        return {"ok": True, "updated_rows": int(result.rowcount or 0)}
 
 
 def refresh_project_financial_summary() -> dict:

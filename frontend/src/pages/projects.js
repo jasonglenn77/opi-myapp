@@ -86,20 +86,22 @@ export async function projectsPage(routeFn) {
   }
 
   function statusLabel(s) {
-    return s === "not_started" ? "Not Started" :
-           s === "in_progress" ? "In Progress" :
-           s === "completed"   ? "Completed"   :
-           s === "canceled"    ? "Canceled"    : s;
+    return s === "not_started"     ? "Not Started"    :
+           s === "in_progress"     ? "In Progress"    :
+           s === "completed"       ? "Completed"      :
+           s === "canceled"        ? "Canceled"       :
+           s === "needs_attention" ? "Needs Attn"     : s;
   }
 
   function statusBadges(statusStr) {
     if (!statusStr) return '<span class="text-black/30">—</span>';
     return statusStr.split(",").map(s => s.trim()).filter(Boolean).map(s => {
       const cls =
-        s === "in_progress" ? "bg-kpi-inProgress-bg border-kpi-inProgress-bd text-kpi-inProgress-text" :
-        s === "completed"   ? "bg-kpi-completed-bg  border-kpi-completed-bd  text-kpi-completed-text"   :
-        s === "canceled"    ? "bg-red-50 border-red-200 text-red-700"                                   :
-                              "bg-kpi-notStarted-bg border-kpi-notStarted-bd text-kpi-notStarted-text";
+        s === "in_progress"     ? "bg-kpi-inProgress-bg border-kpi-inProgress-bd text-kpi-inProgress-text" :
+        s === "completed"       ? "bg-kpi-completed-bg  border-kpi-completed-bd  text-kpi-completed-text"  :
+        s === "canceled"        ? "bg-red-50 border-red-200 text-red-700"                                  :
+        s === "needs_attention" ? "bg-kpi-attention-bg  border-kpi-attention-bd  text-kpi-attention-text"  :
+                                  "bg-kpi-notStarted-bg border-kpi-notStarted-bd text-kpi-notStarted-text";
       return `<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${cls}">${escapeHtml(statusLabel(s))}</span>`;
     }).join(" ");
   }
@@ -294,8 +296,11 @@ export async function projectsPage(routeFn) {
     } else if (MULTISELECT_COLS.includes(key)) {
       const titleMap = { all_statuses: "Filter Status", all_project_managers: "Filter PM", all_work_crews: "Filter Crew" };
       const rawOpts = key === "all_statuses"
-        ? [{ value: "not_started", label: "Not Started" }, { value: "in_progress", label: "In Progress" },
-           { value: "completed", label: "Completed" }, { value: "canceled", label: "Canceled" }]
+        ? [{ value: "needs_attention", label: "Needs Attention" },
+           { value: "not_started",     label: "Not Started" },
+           { value: "in_progress",     label: "In Progress" },
+           { value: "completed",       label: "Completed" },
+           { value: "canceled",        label: "Canceled" }]
         : getOptions(key).map(x => ({ value: x, label: x }));
       const selected = state.filters[key] || [];
       const optRows = rawOpts.map(({ value, label }) => {
@@ -505,7 +510,7 @@ export async function projectsPage(routeFn) {
       <div class="absolute inset-0" id="arModalBackdrop"></div>
       <div id="arModalPanel"
         class="absolute bg-white rounded-2xl shadow-2xl border border-black/10 flex flex-col text-ink-900"
-        style="width:680px; max-width:calc(100vw - 32px);">
+        style="width:900px; max-width:calc(100vw - 32px);">
 
         <!-- AR modal header -->
         <div class="shrink-0 flex items-center justify-between px-5 py-3 border-b border-black/10">
@@ -1602,12 +1607,26 @@ async function openArModal(triggerEl, qboIds = []) {
       const rect      = triggerEl.getBoundingClientRect();
       const panelTop  = rect.bottom + 8;
       const finInner  = document.querySelector("#finModal .rounded-3xl");
-      const finBottom = finInner ? finInner.getBoundingClientRect().bottom - 40 : window.innerHeight - 56;
+      const finRect   = finInner ? finInner.getBoundingClientRect() : null;
+      const finBottom = finRect ? finRect.bottom - 40 : window.innerHeight - 56;
       const maxH      = Math.max(120, finBottom - panelTop);
 
+      // Constrain the AR panel to sit INSIDE the Financials modal — both width
+      // and horizontal position. The 12px insets keep a small visual gap from
+      // the parent modal's edges. If the trigger is far to the right, the panel
+      // shifts left so its right edge stays within the modal.
+      const insetX     = 12;
+      const leftBound  = finRect ? finRect.left  + insetX : 8;
+      const rightBound = finRect ? finRect.right - insetX : window.innerWidth - 16;
+      const available  = rightBound - leftBound;
+      const desiredWidth = Math.min(900, available);
+      const maxLeft      = rightBound - desiredWidth;
+      const clampedLeft  = Math.max(leftBound, Math.min(rect.left, maxLeft));
+
       panel.style.top       = `${panelTop}px`;
-      panel.style.left      = `${rect.left}px`;
-      panel.style.width     = "780px";
+      panel.style.left      = `${clampedLeft}px`;
+      panel.style.width     = `${desiredWidth}px`;
+      panel.style.maxWidth  = `${available}px`;
       panel.style.height    = "";           // no fixed height — sizes to content
       panel.style.maxHeight = `${maxH}px`;
       panel.style.transform = "";

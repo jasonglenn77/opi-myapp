@@ -77,7 +77,7 @@ export function loginPage(routeFn, message = "") {
       });
 
       setToken(data.access_token, remember);
-      location.hash = "#/dashboard";
+      location.hash = "#/projects";
       routeFn();
     } catch (err) {
       console.error("Login error:", err);

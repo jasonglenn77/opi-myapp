@@ -10,9 +10,9 @@ import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
 
 async function route() {
-  const hash = location.hash || "#/dashboard";
+  const hash = location.hash || "#/projects";
 
-  // Auto-login UX: if token exists, validate quickly via /me before rendering dashboard.
+  // Auto-login UX: if token exists, validate quickly via /me before rendering the landing page.
   // Only clear the token on genuine auth failures (401/403). Transient server errors
   // (500, 503, network blips) must NOT log the user out — those tokens are still valid.
   if (hash !== "#/login") {
@@ -36,8 +36,10 @@ async function route() {
   }
 
   if (hash === "#/login") return loginPage(route);
-  if (hash === "#/dashboard") return dashboardPage(route);
-  if (hash === "#/projects") return projectsPage(route);
+  if (hash === "#/projects") return dashboardPage(route);
+  if (hash === "#/financials") return projectsPage(route);
+  // Backward-compat redirects for any old bookmarks; remove after a grace period.
+  if (hash === "#/dashboard") { location.hash = "#/projects"; return; }
   if (hash === "#/schedule") return schedulePage(route);
   if (hash === "#/assignment") return assignmentPage(route);
   if (hash === "#/users") return usersPage(route);

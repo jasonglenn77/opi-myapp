@@ -123,6 +123,7 @@ export async function assignmentPage(routeFn) {
 
   function statusLabel(v) {
     if (v == null || String(v).trim() === "") return "Needs Attention";
+    if (v === "needs_attention") return "Needs Attention";
     if (v === "not_started") return "Not Started";
     if (v === "in_progress") return "In Progress";
     if (v === "completed") return "Completed";
@@ -132,6 +133,7 @@ export async function assignmentPage(routeFn) {
 
   function statusBucket(v) {
     if (v == null || String(v).trim() === "") return "needs_assignment";
+    if (v === "needs_attention") return "needs_assignment";
     if (v === "not_started") return "not_started";
     if (v === "in_progress") return "in_progress";
     if (v === "completed") return "completed";
@@ -449,7 +451,7 @@ export async function assignmentPage(routeFn) {
             data-multiselect-value="${escapeHtml(value)}"
             ${checked ? "checked" : ""}
           />
-          <span class="text-sm">${escapeHtml(label)}</span>
+          <span class="text-xs">${escapeHtml(label)}</span>
         </label>
       `;
     }).join("");
@@ -460,7 +462,7 @@ export async function assignmentPage(routeFn) {
           ${optRows}
         </div>
         <div class="mt-3 flex justify-end gap-2">
-          <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="${key}">Clear</button>
+          <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-black/5" data-clear-filter="${key}">Clear</button>
           <button type="button" class="btn-primary" data-close-filter="1">Done</button>
         </div>
       </div>
@@ -481,7 +483,7 @@ export async function assignmentPage(routeFn) {
             value="${escapeHtml(state.filters.project_name || "")}"
           />
           <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="project_name">Clear</button>
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-black/5" data-clear-filter="project_name">Clear</button>
             <button type="button" class="btn-primary" data-close-filter="1">Done</button>
           </div>
         </div>
@@ -550,16 +552,16 @@ export async function assignmentPage(routeFn) {
           <div class="text-xs font-bold text-black/50 mb-2">Filter ${escapeHtml(key.replaceAll("_", " "))}</div>
           <div class="space-y-2">
             <div>
-              <div class="text-[11px] text-black/50 mb-1">From</div>
+              <div class="text-[10px] text-black/50 mb-1">From</div>
               <input type="date" class="input" data-filter-input="${fromKey}" value="${escapeHtml(state.filters[fromKey] || "")}" />
             </div>
             <div>
-              <div class="text-[11px] text-black/50 mb-1">To</div>
+              <div class="text-[10px] text-black/50 mb-1">To</div>
               <input type="date" class="input" data-filter-input="${toKey}" value="${escapeHtml(state.filters[toKey] || "")}" />
             </div>
           </div>
           <div class="mt-3 flex justify-end gap-2">
-            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5" data-clear-filter="${key}">Clear</button>
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-black/5" data-clear-filter="${key}">Clear</button>
             <button type="button" class="btn-primary" data-close-filter="1">Done</button>
           </div>
         </div>
@@ -600,34 +602,34 @@ export async function assignmentPage(routeFn) {
     <div class="card flex flex-col overflow-hidden" style="height:calc(100vh - 180px); min-height:400px;">
 
       <!-- Fixed card header: title, subtitle, search. Never scrolls. -->
-      <div id="assignCardHeader" class="shrink-0 px-5 pt-5 pb-3 border-b border-black/10">
-        <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-2">
+      <div id="assignCardHeader" class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10">
+        <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-1.5">
           <div>
-            <div class="text-lg font-extrabold">Assignments</div>
-            <div class="text-sm text-black/60">Sort columns, filter from the funnel button, and edit directly in the row.</div>
+            <div class="text-base font-extrabold">Assignments</div>
+            <div class="text-xs text-black/50">Sort columns, filter from the funnel button, and edit directly in the row.</div>
           </div>
           <div class="flex items-center gap-2">
-            <div class="text-sm font-semibold text-black/60 whitespace-nowrap">Search</div>
-            <input id="searchInput" class="input w-full sm:w-72" placeholder="Project Name" />
+            <div class="text-xs font-semibold text-black/50 whitespace-nowrap">Search</div>
+            <input id="searchInput" class="input text-xs py-1 w-full sm:w-56" placeholder="Project Name" />
             <button
               id="clearFiltersBtn"
               type="button"
-              class="inline-flex items-center rounded-xl border border-black/10 bg-gray-200 px-3 py-2 text-sm font-semibold hover:bg-black/5 whitespace-nowrap"
+              class="inline-flex items-center rounded-xl border border-black/10 bg-gray-200 px-3 py-1.5 text-xs font-semibold hover:bg-black/5 whitespace-nowrap"
             >
               Clear Filters
             </button>
           </div>
         </div>
         <div class="flex items-center justify-between gap-3">
-          <div id="rowCount" class="text-sm font-semibold text-black/60">Showing 0 records</div>
-          <div id="assignPageMsg" class="text-sm min-h-[1rem]"></div>
+          <div id="rowCount" class="text-xs font-semibold text-black/50">Showing 0 records</div>
+          <div id="assignPageMsg" class="text-xs min-h-[1rem]"></div>
         </div>
       </div>
 
       <!-- Single scroll container: both axes scroll here, nothing else does.
            thead sticky top-0 works because this div is the scroll ancestor. -->
       <div id="assignTableScroll" class="flex-1 overflow-auto">
-        <table id="assignmentTable" class="text-sm border-collapse w-full" style="min-width:900px;">
+        <table id="assignmentTable" class="text-xs border-collapse w-full" style="min-width:900px;">
           <thead id="assignThead" class="text-left text-black/60 border-b border-black/10 sticky top-0 z-20 bg-white">
             <tr>
               ${th("project_name", "Project Name")}

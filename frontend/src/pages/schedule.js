@@ -255,7 +255,7 @@ export async function schedulePage(routeFn) {
     `;
 
     function renderAssignmentCell(items, crewCode, currentDate) {
-      if (items.length === 0) return `<td class="px-1 py-0.5 border-b border-r border-black/5 align-top"></td>`;
+      if (items.length === 0) return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top"></td>`;
 
       const html = items.map(it => {
         const isTravel  = it.cellType === "travel";
@@ -324,7 +324,7 @@ export async function schedulePage(routeFn) {
         `;
       }).join("");
 
-      return `<td class="px-1 py-0.5 border-b border-r border-black/5 align-top">${html}</td>`;
+      return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top">${html}</td>`;
     }
 
     // Build week blocks
@@ -361,7 +361,7 @@ export async function schedulePage(routeFn) {
       if (visibleCrews.length === 0) {
         return dateRow + `
           <tr>
-            <td class="text-[10px] text-black/40 px-1 py-2 border-b border-black/5" colspan="8">No assignments this week.</td>
+            <td class="text-[10px] text-black/40 px-1 py-2 border-b border-black/10" colspan="8">No assignments this week.</td>
           </tr>
         `;
       }
@@ -377,7 +377,7 @@ export async function schedulePage(routeFn) {
 
         return `
           <tr>
-            <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/5 bg-white/60 whitespace-nowrap align-top">${escapeHtml(crewCode)}</td>
+            <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top">${escapeHtml(crewCode)}</td>
             ${tds}
           </tr>
         `;
@@ -498,9 +498,16 @@ export async function schedulePage(routeFn) {
         const equip = data.equipment_type || "None";
         const notes = data.notes || "None";
 
+        const statusLabel = (s) =>
+          s === "not_started"     ? "Not Started"     :
+          s === "in_progress"     ? "In Progress"     :
+          s === "completed"       ? "Completed"       :
+          s === "canceled"        ? "Canceled"        :
+          s === "needs_attention" ? "Needs Attention" : (s || "—");
+
         const html = `
           ${data.project ? `<div class="font-extrabold mb-1">${escapeHtml(data.project)}</div>` : ""}
-          <div class="text-black/70"><span class="font-semibold">Status:</span> ${escapeHtml(data.status || "—")}</div>
+          <div class="text-black/70"><span class="font-semibold">Status:</span> ${escapeHtml(statusLabel(data.status))}</div>
           <div class="text-black/70"><span class="font-semibold">PMs:</span> ${escapeHtml(pms)}</div>
           <div class="text-black/70"><span class="font-semibold">Crews:</span> ${escapeHtml(crews)}</div>
           <div class="text-black/70"><span class="font-semibold">Dates:</span> ${escapeHtml(dates)}</div>
