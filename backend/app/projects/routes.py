@@ -316,7 +316,8 @@ def projects(user=Depends(get_current_user)):
 
     -- ----------------------------------------------------------------
     -- SIDE B: Expense / cost lines (Bills, Checks, CC charges, etc.)
-    -- VendorCredits are included as negative amounts (they reduce costs).
+    -- VendorCredits and Purchases flagged Credit=true (Credit Card Credits,
+    -- cash/check refunds) are included as negative amounts (they reduce costs).
     -- Joined to customer via line_customer_qbo_id
     -- ----------------------------------------------------------------
     expense_lines AS (
@@ -324,6 +325,9 @@ def projects(user=Depends(get_current_user)):
         qc.qbo_id                      AS project_qbo_id,
         CASE
           WHEN qt.entity_type = 'VendorCredit' THEN -qtl.amount
+          WHEN qt.entity_type = 'Purchase'
+               AND JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.Credit')) = 'true'
+            THEN -qtl.amount
           ELSE qtl.amount
         END                            AS line_amount
       FROM myapp.qbo_customers qc
@@ -1031,6 +1035,9 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
             COALESCE(item_names.item_name, 'Other') AS item_name,
             SUM(CASE
                 WHEN qt.entity_type = 'VendorCredit' THEN -COALESCE(qtl.amount, 0)
+                WHEN qt.entity_type = 'Purchase'
+                     AND JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.Credit')) = 'true'
+                  THEN -COALESCE(qtl.amount, 0)
                 ELSE COALESCE(qtl.amount, 0)
             END)                                    AS line_amount
         FROM myapp.qbo_customers qc

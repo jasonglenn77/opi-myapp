@@ -158,11 +158,19 @@ export async function quickBooksPage(routeFn) {
     routeFn,
   });
 
-  // Lock body scroll so the 3 compact cards sit naturally in the viewport
-  // instead of producing a page-level scrollbar. Restore on navigation.
-  document.body.style.overflowY = "hidden";
+  // Desktop (lg+): lock body scroll so the 3 compact cards sit naturally in the
+  // viewport instead of producing a page-level scrollbar.
+  // Below lg: the cards stack to ~1000px+ tall on a phone, so we let the page
+  // scroll naturally. Re-evaluate on resize/rotation. Restore on navigation.
+  const applyScrollLock = () => {
+    const desktop = window.matchMedia("(min-width: 1024px)").matches;
+    document.body.style.overflowY = desktop ? "hidden" : "";
+  };
+  applyScrollLock();
+  window.addEventListener("resize", applyScrollLock);
   window.addEventListener("hashchange", () => {
     document.body.style.overflowY = "";
+    window.removeEventListener("resize", applyScrollLock);
   }, { once: true });
 
   // Connect / Reconnect: get auth_url from backend and open it

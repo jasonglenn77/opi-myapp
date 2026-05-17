@@ -181,7 +181,7 @@ export async function dashboardPage(routeFn) {
       </div>
 
       <!-- Projects table (read-only, multi-row per project) -->
-      <div id="projTableCard" class="card flex flex-col overflow-hidden">
+      <div id="projTableCard" class="card flex flex-col lg:overflow-hidden">
         <div class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1.5">
             <div>
@@ -200,12 +200,15 @@ export async function dashboardPage(routeFn) {
           <div id="projRowCount" class="text-xs font-semibold text-black/50">Showing 0 projects · 0 rows</div>
         </div>
 
-        <div class="flex-1 overflow-auto">
+        <div class="hidden lg:block flex-1 overflow-auto">
           <table class="text-xs border-collapse w-full" style="min-width:1100px;">
             <thead id="projTableThead" class="text-left text-black/60 border-b border-black/10 sticky top-0 z-20 bg-white"></thead>
             <tbody id="projTableBody"></tbody>
           </table>
         </div>
+
+        <!-- Mobile/tablet card list (hidden on lg+) -->
+        <div id="projCardList" class="lg:hidden flex flex-col divide-y divide-black/5"></div>
       </div>
 
     </div>
@@ -280,18 +283,31 @@ export async function dashboardPage(routeFn) {
   const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
   if (pageTitleBlock) pageTitleBlock.style.display = "none";
 
+  // The viewport-filling sticky table layout only makes sense on lg+ where the
+  // table has its own internal scroll. On mobile/tablet the page renders a
+  // vertical card list that needs to flow naturally with the page scroll, so
+  // we leave the card un-styled at narrow widths.
   function applyTableCardLayout() {
     const card = document.getElementById("projTableCard");
     if (!card) return;
-    card.style.position    = "sticky";
-    card.style.top         = "0";
-    card.style.height      = "calc(100vh - 12px)";
+    const isDesktop = window.matchMedia("(min-width: 1024px)").matches;
+    if (isDesktop) {
+      card.style.position = "sticky";
+      card.style.top      = "0";
+      card.style.height   = "calc(100vh - 12px)";
+    } else {
+      card.style.position = "";
+      card.style.top      = "";
+      card.style.height   = "";
+    }
   }
   applyTableCardLayout();
+  window.addEventListener("resize", applyTableCardLayout);
 
   function onNavigateAway() {
     if (pageTitleBlock) pageTitleBlock.style.display = "";
     window.removeEventListener("hashchange", onNavigateAway);
+    window.removeEventListener("resize", applyTableCardLayout);
   }
   window.addEventListener("hashchange", onNavigateAway);
 
@@ -602,6 +618,83 @@ export async function dashboardPage(routeFn) {
         </tr>
       `).join("") ||
       `<tr><td class="py-8 text-center text-black/40 text-xs" colspan="12">No projects match these filters.</td></tr>`;
+
+    // Mobile/tablet card list — same data, restructured for narrow screens.
+    document.getElementById("projCardList").innerHTML =
+      list.map(r => {
+        const startStr = r.start_date ? ea(String(r.start_date).slice(0, 10)) : "—";
+        const endStr   = r.end_date   ? ea(String(r.end_date).slice(0, 10))   : "—";
+        const wire     = Number(r.wire_guidance) ? "Yes" : "No";
+        return `
+        <div class="p-4 hover:bg-black/[0.02] transition-colors">
+          <div class="flex items-start justify-between gap-3 mb-2">
+            <div class="font-extrabold text-sm leading-snug min-w-0 break-words" title="${ea(r.project_name || "")}">
+              ${ea(r.project_name || "—")}
+            </div>
+            <div class="shrink-0">${statusBadge(effectiveStatus(r))}</div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+            <div class="min-w-0">
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">PM</div>
+              <div class="font-semibold text-black/80 truncate" title="${ea(r.all_project_managers || "")}">${ea(r.all_project_managers || "—")}</div>
+            </div>
+            <div class="min-w-0">
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Crew</div>
+              <div class="font-semibold text-black/80 truncate" title="${ea(r.all_work_crews || "")}">${ea(r.all_work_crews || "—")}</div>
+            </div>
+            <div>
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Start</div>
+              <div class="font-semibold text-black/80 whitespace-nowrap">${startStr}</div>
+            </div>
+            <div>
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">End</div>
+              <div class="font-semibold text-black/80 whitespace-nowrap">${endStr}</div>
+            </div>
+          </div>
+
+          <div class="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div class="rounded-lg bg-black/[0.04] py-1.5">
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Travel</div>
+              <div class="text-sm font-extrabold tabular-nums">${fmtNum(r.travel_days)}</div>
+            </div>
+            <div class="rounded-lg bg-black/[0.04] py-1.5">
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Overage</div>
+              <div class="text-sm font-extrabold tabular-nums">${fmtNum(r.overage_days)}</div>
+            </div>
+            <div class="rounded-lg bg-black/[0.04] py-1.5">
+              <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Wire</div>
+              <div class="text-sm font-extrabold ${Number(r.wire_guidance) ? "" : "text-black/40"}">${wire}</div>
+            </div>
+          </div>
+
+          <div class="mt-3 text-xs">
+            <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Equipment</div>
+            <div class="font-semibold text-black/80 break-words">${ea(r.equipment_type || "—")}</div>
+          </div>
+
+          <div class="mt-2 text-xs">
+            <div class="text-[10px] uppercase tracking-wide text-black/40 font-bold">Notes</div>
+            <div class="text-black/70 line-clamp-2 break-words" title="${ea(r.notes || "")}">${ea(r.notes || "—")}</div>
+          </div>
+
+          <div class="mt-3 flex items-center gap-2">
+            <button type="button"
+              class="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 active:bg-emerald-200 transition"
+              data-upload-project="${ea(String(r.qbo_customer_id || ""))}"
+              data-project-name="${ea(r.project_name || "")}">
+              Upload
+            </button>
+            <button type="button"
+              class="inline-flex items-center rounded-full border border-black/10 bg-white px-3 py-1 text-xs font-semibold text-black/70 hover:bg-black/5 active:bg-black/10 transition ${Number(r.file_count || 0) > 0 ? "" : "opacity-50"}"
+              data-view-files="${ea(String(r.qbo_customer_id || ""))}"
+              data-project-name="${ea(r.project_name || "")}">
+              View (${Number(r.file_count || 0)})
+            </button>
+          </div>
+        </div>`;
+      }).join("") ||
+      `<div class="py-10 text-center text-black/40 text-xs">No projects match these filters.</div>`;
   }
 
   // ── filter portal — fixed position, escapes the table's overflow ───────────
@@ -1018,7 +1111,9 @@ export async function dashboardPage(routeFn) {
   });
 
   // ── events: row actions (Upload + View) ────────────────────────────────────
-  document.getElementById("projTableBody").addEventListener("click", async e => {
+  // Bound at the card level so it catches clicks from both the desktop table
+  // body and the mobile card list.
+  document.getElementById("projTableCard").addEventListener("click", async e => {
     const uploadBtn = e.target.closest("[data-upload-project]");
     if (uploadBtn) {
       const id = uploadBtn.getAttribute("data-upload-project");

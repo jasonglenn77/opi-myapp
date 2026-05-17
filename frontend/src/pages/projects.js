@@ -165,62 +165,76 @@ export async function projectsPage(routeFn) {
       return `<span class="${col} text-sm font-bold">${n >= 0 ? "+" : "-"}${$$(Math.abs(n))}</span>`;
     }
 
-    const card = "rounded-2xl border border-black/10 bg-white px-4 py-3 flex flex-col gap-1 text-ink-900";
-    const lbl  = "text-[10px] font-bold text-black/40 uppercase tracking-wide";
-    const main = "text-lg font-extrabold leading-tight text-ink-900";
-    const sub  = "text-[10px] text-black/40";
-    const hr   = "mt-1.5 pt-1.5 border-t border-black/5";
+    // Below sm: cards are a horizontal 2-column split (main on left, secondary on right) for compactness.
+    // At sm+ and lg+: revert to the stacked, padded layout the desktop expects.
+    const card    = "rounded-2xl border border-black/10 bg-white px-3 py-2.5 sm:px-4 sm:py-3 flex flex-row sm:flex-col items-stretch gap-3 sm:gap-1 text-ink-900";
+    const lbl     = "text-[10px] font-bold text-black/40 uppercase tracking-wide";
+    const main    = "text-base sm:text-lg font-extrabold leading-tight text-ink-900";
+    const sub     = "text-[10px] text-black/40";
+    const subHide = "text-[10px] text-black/40 hidden sm:block";
+    // Left column on mobile / full row on desktop
+    const left    = "flex-1 min-w-0";
+    // Right column on mobile / hr-separated section on desktop
+    const right   = "sm:mt-1.5 sm:pt-1.5 sm:border-t sm:border-black/5 text-right sm:text-left shrink-0 sm:shrink min-w-0";
 
     document.getElementById("kpiStrip").innerHTML = `
       <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="estimate">
-        <div class="${lbl}">Estimate</div>
-        <div class="${main}">${$$(el)}</div>
-        <div class="${sub}">Contract amount</div>
-        <div class="${hr}">
+        <div class="${left}">
+          <div class="${lbl}">Estimate</div>
+          <div class="${main}">${$$(el)}</div>
+          <div class="${subHide}">Contract amount</div>
+        </div>
+        <div class="${right}">
           <div class="${sub}">Cost basis</div>
           <div class="text-sm font-bold text-black/70">${$$(ec)}</div>
         </div>
       </div>
 
       <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="invoice">
-        <div class="${lbl}">Invoice</div>
-        <div class="${main}">${$$(inv)}</div>
-        <div class="${sub}">Billed to date</div>
-        <div class="${hr}">
-          <div class="flex items-baseline justify-between gap-3">
-            <div>
-              <div class="${sub}">vs Est. amount</div>
+        <div class="${left}">
+          <div class="${lbl}">Invoice</div>
+          <div class="${main}">${$$(inv)}</div>
+          <div class="${subHide}">Billed to date</div>
+        </div>
+        <div class="${right}">
+          <div class="flex sm:items-baseline sm:justify-between gap-3 flex-col sm:flex-row items-end sm:items-baseline">
+            <div class="text-right sm:text-left">
+              <div class="${sub}">vs Est.</div>
               ${sa(invVsEst)}
             </div>
             <div class="text-right">
               <div class="${sub}">AR Balance</div>
               <div class="text-sm font-bold ${bal > 0 ? "text-amber-600" : "text-black/50"}">${$$(bal)}</div>
-              ${openInv > 0 ? `<div class="${sub} mt-0.5">${openInv} open invoice${openInv === 1 ? "" : "s"}</div>` : ""}
+              ${openInv > 0 ? `<div class="${sub} mt-0.5 hidden sm:block">${openInv} open invoice${openInv === 1 ? "" : "s"}</div>` : ""}
             </div>
           </div>
         </div>
       </div>
 
       <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="expense">
-        <div class="${lbl}">Expense</div>
-        <div class="${main}">${$$(exp)}</div>
-        <div class="${sub}">Costs posted</div>
-        <div class="${hr}">
+        <div class="${left}">
+          <div class="${lbl}">Expense</div>
+          <div class="${main}">${$$(exp)}</div>
+          <div class="${subHide}">Costs posted</div>
+        </div>
+        <div class="${right}">
           <div class="${sub}">Est. Cost − Expense</div>
           ${sa(estVsExp)}
         </div>
       </div>
 
       <div class="${card} cursor-pointer hover:border-black/20 hover:shadow-sm transition-shadow" data-kpi-card="profit">
-        <div class="${lbl}">Profit</div>
-        <div class="flex items-baseline gap-1">
-          <div class="text-lg font-extrabold leading-tight ${ap > 0 ? "text-emerald-700" : ap < 0 ? "text-red-600" : "text-ink-900"}">${$$(ap)}</div>
-          ${pct(apP)}
-        </div>
-        <div class="${sub}">Actual (Invoice − Expense)</div>
-        <div class="${hr}">
-          <div class="${sub}">Projected (Invoice − Est. Cost)</div>
+        <div class="${left}">
+          <div class="${lbl}">Profit</div>
           <div class="flex items-baseline gap-1">
+            <div class="text-base sm:text-lg font-extrabold leading-tight ${ap > 0 ? "text-emerald-700" : ap < 0 ? "text-red-600" : "text-ink-900"}">${$$(ap)}</div>
+            ${pct(apP)}
+          </div>
+          <div class="${subHide}">Actual (Invoice − Expense)</div>
+        </div>
+        <div class="${right}">
+          <div class="${sub}">Projected</div>
+          <div class="flex items-baseline gap-1 justify-end sm:justify-start">
             <div class="text-sm font-bold ${pp > 0 ? "text-emerald-700" : pp < 0 ? "text-red-600" : "text-black/70"}">${$$(pp)}</div>
             ${pct(ppP)}
           </div>
@@ -442,7 +456,7 @@ export async function projectsPage(routeFn) {
     <div id="projectsPageRoot" class="flex flex-col gap-3">
 
       <!-- KPI strip — explicit text-ink-900 so it never inherits text-white -->
-      <div id="kpiStrip" class="grid grid-cols-2 lg:grid-cols-4 gap-3 text-ink-900"></div>
+      <div id="kpiStrip" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-ink-900"></div>
 
       <!-- Table card -->
       <div id="projectsCard" class="card flex flex-col overflow-hidden" style="min-height:380px;">
@@ -494,9 +508,11 @@ export async function projectsPage(routeFn) {
             </button>
           </div>
 
-          <!-- Modal body — no overflow here; finModalBody manages its own scroll -->
+          <!-- Modal body — finModalBody is the horizontal-scroll container so the
+               1065px-wide pivot table can pan on mobile while vertical scrolling
+               for rows still happens inside the inner #fin-body div. -->
           <div class="flex-1 min-h-0 flex flex-col overflow-hidden px-6 pb-6 pt-4">
-            <div id="finModalBody" class="flex-1 min-h-0 flex flex-col text-sm text-black/50">
+            <div id="finModalBody" class="flex-1 min-h-0 overflow-x-auto overflow-y-hidden text-sm text-black/50">
               Loading…
             </div>
           </div>
@@ -524,8 +540,9 @@ export async function projectsPage(routeFn) {
           </button>
         </div>
 
-        <!-- AR modal body — is itself the scroll container so sticky thead works correctly -->
-        <div id="arModalBody" class="flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24">
+        <!-- AR modal body — is itself the scroll container so sticky thead works correctly.
+             overflow-auto (not overflow-y-auto) so wide tables can pan horizontally on mobile. -->
+        <div id="arModalBody" class="flex-1 min-h-0 overflow-auto text-xs text-black/40 flex items-center justify-center h-24">
           Loading…
         </div>      </div>
     </div>
@@ -548,7 +565,7 @@ export async function projectsPage(routeFn) {
           </button>
         </div>
 
-        <div id="estModalBody" class="flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24">
+        <div id="estModalBody" class="flex-1 min-h-0 overflow-auto text-xs text-black/40 flex items-center justify-center h-24">
           Loading…
         </div>
       </div>
@@ -606,31 +623,39 @@ export async function projectsPage(routeFn) {
     routeFn,
   });
 
-  // ── Concrete no-scroll fix ────────────────────────────────────────────────
-  // The shell's body has overflow-y:auto which allows page-level scrolling
-  // whenever content exceeds 100vh. We eliminate that entirely for this page:
-  //   1. Lock body scroll so the browser never shows a page scrollbar.
-  //   2. Also hide the mb-5 page-title block (empty title still takes space).
-  //   3. Size the card to fill the remaining viewport height precisely via JS.
-  //   4. Restore everything when the user navigates away.
+  // ── Viewport layout ───────────────────────────────────────────────────────
+  // Desktop (lg+) gets a locked-viewport layout: the body never scrolls, the
+  // table card fills the remaining height, and the table itself scrolls
+  // internally so the KPI strip stays pinned above it.
+  //
+  // Below lg, the four KPI cards alone consume most of a phone's viewport,
+  // so we let the page scroll naturally — the user scrolls past the cards to
+  // reach the table. We also re-apply the desktop layout on resize / rotation.
+  const isDesktopVP = () => window.matchMedia("(min-width: 1024px)").matches;
 
-  // 1. Lock body scroll
-  document.body.style.overflowY = "hidden";
-
-  // 2. Hide the page title/subtitle block (empty strings still render the mb-5 div)
+  // Hide the empty page-title block on both layouts (saves ~56px of chrome).
   const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
   if (pageTitleBlock) pageTitleBlock.style.display = "none";
 
-  // 3. Size card to fill remaining space
   function fitCardHeight() {
     const card = document.getElementById("projectsCard");
     if (!card) return;
+
+    if (!isDesktopVP()) {
+      // Mobile/tablet: clear any locked-viewport leftovers so the card grows
+      // with the table contents and the page scrolls naturally.
+      document.body.style.overflowY = "";
+      card.style.height = "";
+      return;
+    }
+
+    document.body.style.overflowY = "hidden";
     const rect      = card.getBoundingClientRect();
     const available = window.innerHeight - rect.top - 12;
     card.style.height = Math.max(300, available) + "px";
   }
+  fitCardHeight();
 
-  // 4. Restore on navigation (any hash change = leaving this page)
   function onNavigateAway() {
     document.body.style.overflowY = "";
     if (pageTitleBlock) pageTitleBlock.style.display = "";
@@ -1520,8 +1545,13 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
     // its content when rows are few — totals snap directly under the body table.
     // When rows overflow the modal height, the body div scrolls and totals still
     // sit directly below the last visible row.
+    // Sum of fixed column widths defined in PX above (160+90+90+130+10+110+90+130+10+115+130).
+    // Stamping this as min-width on the layout root forces finModalBody to overflow
+    // horizontally on narrow viewports, enabling the swipe-to-pan behavior.
+    const layoutMinWidth = Object.values(PX).reduce((s, n) => s + n, 0);
+
     document.getElementById("finModalBody").innerHTML = `
-      <div style="display:flex; flex-direction:column; max-height:100%; overflow:hidden;">
+      <div style="display:flex; flex-direction:column; max-height:100%; min-width:${layoutMinWidth}px; overflow:hidden;">
 
         <!-- Fixed header -->
         <div id="fin-hdr" style="flex-shrink:0; overflow:hidden;">
@@ -1641,7 +1671,7 @@ async function openArModal(triggerEl, qboIds = []) {
       _arResizeObserver.observe(finInner);
     }
 
-    body.className = "flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24";
+    body.className = "flex-1 min-h-0 overflow-auto text-xs text-black/40 flex items-center justify-center h-24";
     body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">Loading…</div>`;
     modal.classList.remove("hidden");
 
@@ -1690,8 +1720,9 @@ async function openArModal(triggerEl, qboIds = []) {
     }));
 
     function renderArTable() {
-      // Reset body to plain scroll container before rendering table
-      body.className = "flex-1 min-h-0 overflow-y-auto";
+      // Reset body to plain scroll container before rendering table.
+      // overflow-auto so wide tables can pan horizontally on mobile.
+      body.className = "flex-1 min-h-0 overflow-auto";
 
       // Sort
       const sorted = [...enriched].sort((a, b) => {
@@ -1856,7 +1887,7 @@ async function openArModal(triggerEl, qboIds = []) {
       _estResizeObserver.observe(finInner);
     }
 
-    body.className = "flex-1 min-h-0 overflow-y-auto text-xs text-black/40 flex items-center justify-center h-24";
+    body.className = "flex-1 min-h-0 overflow-auto text-xs text-black/40 flex items-center justify-center h-24";
     body.innerHTML = `<div class="flex items-center justify-center h-24 text-black/40 text-xs">Loading…</div>`;
     modal.classList.remove("hidden");
 
@@ -1893,7 +1924,7 @@ async function openArModal(triggerEl, qboIds = []) {
     ];
 
     function renderEstTable() {
-      body.className = "flex-1 min-h-0 overflow-y-auto";
+      body.className = "flex-1 min-h-0 overflow-auto";
 
       const sortedRows = [...rows].sort((a, b) => {
         let av, bv;

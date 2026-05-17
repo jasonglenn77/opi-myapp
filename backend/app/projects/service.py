@@ -676,6 +676,9 @@ def refresh_project_financial_summary() -> dict:
                 qc.qbo_id                      AS project_qbo_id,
                 CASE
                   WHEN qt.entity_type = 'VendorCredit' THEN -qtl.amount
+                  WHEN qt.entity_type = 'Purchase'
+                       AND JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.Credit')) = 'true'
+                    THEN -qtl.amount
                   ELSE qtl.amount
                 END                            AS line_amount
               FROM myapp.qbo_customers qc

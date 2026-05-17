@@ -4,14 +4,18 @@ import { setShell } from "../shell.js";
 export async function usersPage(routeFn) {
   const users = await api("/users");
 
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+
   const rows = users.map(u => `
     <tr class="border-b border-black/5">
-      <td class="py-2 pr-3 font-semibold">${u.email}</td>
-      <td class="py-2 pr-3">${u.first_name || ""}</td>
-      <td class="py-2 pr-3">${u.last_name || ""}</td>
+      <td class="py-2 pr-3 font-semibold">${esc(u.email)}</td>
+      <td class="py-2 pr-3">${esc(u.first_name || "")}</td>
+      <td class="py-2 pr-3">${esc(u.last_name || "")}</td>
       <td class="py-2 pr-3">
         <span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${u.role === "admin" ? "bg-black/10" : "bg-black/5"}">
-          ${u.role}
+          ${esc(u.role)}
         </span>
       </td>
       <td class="py-2 pr-3">${u.is_active ? "Active" : "Disabled"}</td>
@@ -34,6 +38,42 @@ export async function usersPage(routeFn) {
     </tr>
   `).join("");
 
+  // Mobile/tablet card list — same actions, same data attributes so the
+  // existing click handlers fire from either layout.
+  const cards = users.map(u => {
+    const fullName = `${u.first_name || ""} ${u.last_name || ""}`.trim();
+    const displayName = fullName || u.email;
+    const roleCls = u.role === "admin" ? "bg-black/10 text-ink-800" : "bg-black/5 text-black/70";
+    const statusCls = u.is_active
+      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : "bg-red-50 text-red-700 border-red-200";
+    return `
+      <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="font-extrabold text-sm leading-snug break-words">${esc(displayName)}</div>
+            ${fullName ? `<div class="text-xs text-black/60 break-all">${esc(u.email)}</div>` : ""}
+          </div>
+          <div class="flex flex-col items-end gap-1 shrink-0">
+            <span class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${roleCls}">${esc(u.role)}</span>
+            <span class="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold ${statusCls}">${u.is_active ? "Active" : "Disabled"}</span>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 pt-1">
+          <button
+            class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10"
+            data-edit="${u.id}"
+          >Edit</button>
+          <button
+            class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10 disabled:opacity-50"
+            data-disable="${u.id}"
+            ${u.is_active ? "" : "disabled"}
+          >Disable</button>
+        </div>
+      </div>`;
+  }).join("");
+
   const bodyHtml = `
     <div class="card p-5">
       <div class="flex items-center justify-between mb-4">
@@ -46,7 +86,7 @@ export async function usersPage(routeFn) {
 
       <div id="usersMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
 
-      <div class="overflow-x-auto">
+      <div class="hidden lg:block overflow-x-auto">
         <table class="w-full text-sm">
           <thead class="text-left text-black/60">
             <tr class="border-b border-black/10">
@@ -60,6 +100,11 @@ export async function usersPage(routeFn) {
           </thead>
           <tbody>${rows}</tbody>
         </table>
+      </div>
+
+      <!-- Mobile/tablet card list (hidden on lg+) -->
+      <div class="lg:hidden flex flex-col gap-3">
+        ${cards || `<div class="text-center text-sm text-black/40 py-6">No users.</div>`}
       </div>
     </div>
 

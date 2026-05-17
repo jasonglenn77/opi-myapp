@@ -182,7 +182,13 @@ def dashboard(user=Depends(get_current_user)):
         SUM(CASE WHEN t.entity_type='Bill' THEN COALESCE(lt.line_amt,0) ELSE 0 END) AS bill_amt,
         SUM(CASE WHEN t.entity_type='Bill' THEN 1 ELSE 0 END) AS bill_ct,
 
-        SUM(CASE WHEN t.entity_type='Purchase' THEN COALESCE(lt.line_amt,0) ELSE 0 END) AS expense_amt,
+        SUM(CASE
+              WHEN t.entity_type='Purchase'
+                   AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.Credit')) = 'true'
+                THEN -COALESCE(lt.line_amt,0)
+              WHEN t.entity_type='Purchase' THEN COALESCE(lt.line_amt,0)
+              ELSE 0
+            END) AS expense_amt,
         SUM(CASE WHEN t.entity_type='Purchase' THEN 1 ELSE 0 END) AS expense_ct,
 
         SUM(CASE WHEN t.entity_type='VendorCredit' THEN COALESCE(lt.line_amt,0) ELSE 0 END) AS vendorcredit_amt,

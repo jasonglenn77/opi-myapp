@@ -26,6 +26,10 @@ export async function teamsPage(routeFn) {
   // crew still shows its current (possibly-disabled) parent.
   const parents = crews.filter(c => !c.parent_id);
 
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+
   function colorDot(color) {
     if (!color) return "";
     return `
@@ -36,6 +40,13 @@ export async function teamsPage(routeFn) {
         aria-label="Color ${color}"
       ></span>
     `;
+  }
+
+  function statusPill(isActive) {
+    const cls = isActive
+      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : "bg-red-50 text-red-700 border-red-200";
+    return `<span class="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold whitespace-nowrap ${cls}">${isActive ? "Active" : "Disabled"}</span>`;
   }
 
   // ── row renderers ─────────────────────────────────────────────────────────
@@ -64,6 +75,32 @@ export async function teamsPage(routeFn) {
 
   const activePmRows   = activePms.map(pmRow).join("");
   const inactivePmRows = inactivePms.map(pmRow).join("");
+
+  function pmCard(pm) {
+    const isActive    = !!pm.is_active;
+    const toggleLabel = isActive ? "Disable" : "Enable";
+    const toggleAttr  = isActive ? `data-pm-disable="${pm.id}"` : `data-pm-enable="${pm.id}"`;
+    const fullName    = `${pm.first_name || ""} ${pm.last_name || ""}`.trim();
+    return `
+      <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1 flex items-center gap-2">
+            ${colorDot(pm.color)}
+            <div class="font-extrabold text-sm break-words">${esc(fullName || "—")}</div>
+          </div>
+          ${statusPill(isActive)}
+        </div>
+        ${pm.email ? `<div class="text-xs text-black/60 break-all"><span class="text-black/40">Email:</span> ${esc(pm.email)}</div>` : ""}
+        ${pm.phone ? `<div class="text-xs text-black/60"><span class="text-black/40">Phone:</span> ${esc(pm.phone)}</div>` : ""}
+        <div class="flex items-center gap-2 pt-1">
+          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" data-pm-edit="${pm.id}">Edit</button>
+          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" ${toggleAttr}>${toggleLabel}</button>
+        </div>
+      </div>`;
+  }
+
+  const activePmCards   = activePms.map(pmCard).join("");
+  const inactivePmCards = inactivePms.map(pmCard).join("");
 
   function crewRow(c, indent = 0) {
     const isActive    = !!c.is_active;
@@ -102,6 +139,44 @@ export async function teamsPage(routeFn) {
     .map(c => crewRow(c, 0))
     .join("");
 
+  function crewCard(c, isChild = false) {
+    const isActive    = !!c.is_active;
+    const toggleLabel = isActive ? "Disable" : "Enable";
+    const toggleAttr  = isActive ? `data-crew-disable="${c.id}"` : `data-crew-enable="${c.id}"`;
+    // Child crews get a left accent border to preserve the parent/child hierarchy
+    const childWrap = isChild ? "ml-4 border-l-4 border-l-black/15" : "";
+    return `
+      <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2 ${childWrap}">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1 flex items-center gap-2">
+            ${colorDot(c.color)}
+            <div class="font-extrabold text-sm break-words">${esc(c.name || "—")}</div>
+          </div>
+          ${statusPill(isActive)}
+        </div>
+        ${c.code ? `<div class="text-xs text-black/60"><span class="text-black/40">Code:</span> ${esc(c.code)}</div>` : ""}
+        <div class="flex items-center gap-2 pt-1">
+          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" data-crew-edit="${c.id}">Edit</button>
+          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" ${toggleAttr}>${toggleLabel}</button>
+        </div>
+      </div>`;
+  }
+
+  // Active crews: parent cards followed by their indented active children
+  let activeCrewCards = "";
+  activeParents.forEach(p => {
+    activeCrewCards += crewCard(p, false);
+    (activeChildrenByParent.get(String(p.id)) || []).forEach(ch => {
+      activeCrewCards += crewCard(ch, true);
+    });
+  });
+
+  // Inactive crews: flat list sorted by name (parity with table)
+  const inactiveCrewCards = [...inactiveCrews]
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+    .map(c => crewCard(c, false))
+    .join("");
+
   const bodyHtml = `
     <div class="grid grid-cols-1 gap-4 pb-6">
       <!-- PMs -->
@@ -114,7 +189,7 @@ export async function teamsPage(routeFn) {
           <button id="newPmBtn" class="btn-primary">New PM</button>
         </div>
         <div id="pmMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
-        <div class="overflow-x-auto">
+        <div class="hidden lg:block overflow-x-auto">
           <table class="w-full text-sm">
             <thead class="text-left text-black/60">
               <tr class="border-b border-black/10">
@@ -129,12 +204,17 @@ export async function teamsPage(routeFn) {
           </table>
         </div>
 
+        <!-- Mobile/tablet card list -->
+        <div class="lg:hidden flex flex-col gap-3">
+          ${activePmCards || `<div class="text-center text-sm text-black/40 py-6">No active project managers.</div>`}
+        </div>
+
         ${inactivePms.length > 0 ? `
           <details class="mt-4 border-t border-black/10 pt-3">
             <summary class="cursor-pointer text-sm font-semibold text-black/60 hover:text-black/80 py-1 select-none">
               Disabled project managers (${inactivePms.length})
             </summary>
-            <div class="overflow-x-auto mt-3">
+            <div class="hidden lg:block overflow-x-auto mt-3">
               <table class="w-full text-sm">
                 <thead class="text-left text-black/60">
                   <tr class="border-b border-black/10">
@@ -147,6 +227,9 @@ export async function teamsPage(routeFn) {
                 </thead>
                 <tbody>${inactivePmRows}</tbody>
               </table>
+            </div>
+            <div class="lg:hidden flex flex-col gap-3 mt-3">
+              ${inactivePmCards}
             </div>
           </details>
         ` : ""}
@@ -162,7 +245,7 @@ export async function teamsPage(routeFn) {
           <button id="newCrewBtn" class="btn-primary">New crew</button>
         </div>
         <div id="crewMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
-        <div class="overflow-x-auto">
+        <div class="hidden lg:block overflow-x-auto">
           <table class="w-full text-sm">
             <thead class="text-left text-black/60">
               <tr class="border-b border-black/10">
@@ -176,12 +259,17 @@ export async function teamsPage(routeFn) {
           </table>
         </div>
 
+        <!-- Mobile/tablet card list -->
+        <div class="lg:hidden flex flex-col gap-3">
+          ${activeCrewCards || `<div class="text-center text-sm text-black/40 py-6">No active crews.</div>`}
+        </div>
+
         ${inactiveCrews.length > 0 ? `
           <details class="mt-4 border-t border-black/10 pt-3">
             <summary class="cursor-pointer text-sm font-semibold text-black/60 hover:text-black/80 py-1 select-none">
               Disabled crews (${inactiveCrews.length})
             </summary>
-            <div class="overflow-x-auto mt-3">
+            <div class="hidden lg:block overflow-x-auto mt-3">
               <table class="w-full text-sm">
                 <thead class="text-left text-black/60">
                   <tr class="border-b border-black/10">
@@ -193,6 +281,9 @@ export async function teamsPage(routeFn) {
                 </thead>
                 <tbody>${inactiveCrewRows}</tbody>
               </table>
+            </div>
+            <div class="lg:hidden flex flex-col gap-3 mt-3">
+              ${inactiveCrewCards}
             </div>
           </details>
         ` : ""}

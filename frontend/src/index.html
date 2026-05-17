@@ -26,7 +26,7 @@
       </div>
 
       <!-- Persistent shell -->
-      <div class="w-full px-3 sm:px-4 lg:px-6 2xl:px-10 py-5 sm:py-6">
+      <div class="w-full px-3 sm:px-4 lg:px-6 2xl:px-10 py-5 sm:py-6 pb-24 lg:pb-6">
         <!-- Page header -->
         <div class="mb-5">
           <div id="pageTitle" class="text-xl sm:text-2xl lg:text-3xl font-extrabold"></div>
@@ -76,6 +76,88 @@
           </aside>
 
           <main id="pageBody" class="flex-1 min-w-0"></main>
+        </div>
+      </div>
+
+      <!-- Mobile bottom navigation (hidden on lg+ where the sidebar takes over) -->
+      <nav id="mobileNav" class="lg:hidden fixed bottom-0 inset-x-0 z-50 bg-ink-900/95 backdrop-blur border-t border-white/10" style="padding-bottom: env(safe-area-inset-bottom);">
+        <div class="flex items-stretch">
+          <a href="#/projects" class="nav-item flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-white/70 hover:text-white active:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            <span class="text-[10px] leading-none truncate w-full text-center">Projects</span>
+          </a>
+          <a href="#/financials" class="nav-item flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-white/70 hover:text-white active:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+            <span class="text-[10px] leading-none truncate w-full text-center">Financials</span>
+          </a>
+          <a href="#/estimate" class="nav-item flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-white/70 hover:text-white active:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <span class="text-[10px] leading-none truncate w-full text-center">Estimate</span>
+          </a>
+          <a href="#/schedule" class="nav-item flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-white/70 hover:text-white active:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            <span class="text-[10px] leading-none truncate w-full text-center">Schedule</span>
+          </a>
+          <a href="#/assignment" class="nav-item flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-white/70 hover:text-white active:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+            <span class="text-[10px] leading-none truncate w-full text-center">Assign</span>
+          </a>
+          <button id="mobileNavMoreBtn" type="button" class="flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 px-1 py-2 text-white/70 hover:text-white active:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+            <span class="text-[10px] leading-none truncate w-full text-center">More</span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Mobile nav drawer (slides up from bottom; hidden by default) -->
+      <div id="mobileNavDrawer" class="lg:hidden fixed inset-0 z-[60] hidden">
+        <div id="mobileNavBackdrop" class="absolute inset-0 bg-black/60 opacity-0 transition-opacity duration-200"></div>
+        <div id="mobileNavSheet" class="absolute bottom-0 inset-x-0 bg-ink-900 border-t border-white/10 rounded-t-2xl shadow-soft max-h-[85vh] overflow-y-auto transform translate-y-full transition-transform duration-200" style="padding-bottom: env(safe-area-inset-bottom);">
+          <div class="flex items-center justify-between px-4 pt-3 pb-2">
+            <div class="text-white font-bold text-sm">Navigation</div>
+            <button id="mobileNavCloseBtn" type="button" class="text-white/70 hover:text-white p-1 -mr-1" aria-label="Close menu">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6l-12 12"/></svg>
+            </button>
+          </div>
+
+          <div class="px-2 pb-2">
+            <a href="#/projects" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              <span class="font-semibold">Projects</span>
+            </a>
+            <a href="#/financials" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+              <span class="font-semibold">Financials</span>
+            </a>
+            <a href="#/estimate" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+              <span class="font-semibold">Estimate</span>
+            </a>
+            <a href="#/schedule" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+              <span class="font-semibold">Schedule</span>
+            </a>
+            <a href="#/assignment" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
+              <span class="font-semibold">Assignment</span>
+            </a>
+          </div>
+
+          <div class="px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider text-white/40 font-bold border-t border-white/10">Settings</div>
+          <div class="px-2 pb-3">
+            <a href="#/users" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+              <span class="font-semibold">Users</span>
+            </a>
+            <a href="#/teams" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M3 20c0-3 2.7-5 6-5s6 2 6 5"/><path d="M16 15c2 0 5 1 5 4"/></svg>
+              <span class="font-semibold">Teams</span>
+            </a>
+            <a href="#/quickbooks" class="nav-item flex items-center gap-3 rounded-xl px-3 py-3 text-white/85 hover:bg-white/5 hover:text-white">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
+              <span class="font-semibold">QuickBooks</span>
+            </a>
+          </div>
         </div>
       </div>
     </div>

@@ -70,6 +70,48 @@ function bindSidebarHover() {
   });
 }
 
+function bindMobileNavDrawer() {
+  const drawer = document.getElementById("mobileNavDrawer");
+  if (!drawer || drawer.dataset.bound) return;
+  drawer.dataset.bound = "1";
+
+  const backdrop = document.getElementById("mobileNavBackdrop");
+  const sheet    = document.getElementById("mobileNavSheet");
+  const openBtn  = document.getElementById("mobileNavMoreBtn");
+  const closeBtn = document.getElementById("mobileNavCloseBtn");
+
+  const open = () => {
+    drawer.classList.remove("hidden");
+    // Force a paint before transitioning so the slide-up plays
+    requestAnimationFrame(() => {
+      backdrop.classList.remove("opacity-0");
+      backdrop.classList.add("opacity-100");
+      sheet.classList.remove("translate-y-full");
+    });
+  };
+
+  const close = () => {
+    backdrop.classList.add("opacity-0");
+    backdrop.classList.remove("opacity-100");
+    sheet.classList.add("translate-y-full");
+    setTimeout(() => drawer.classList.add("hidden"), 200);
+  };
+
+  openBtn?.addEventListener("click", open);
+  closeBtn?.addEventListener("click", close);
+  backdrop?.addEventListener("click", close);
+
+  // Tapping any link inside the drawer should dismiss it
+  drawer.querySelectorAll('a[href^="#/"]').forEach(a => {
+    a.addEventListener("click", close);
+  });
+
+  // Close on Escape (helps with desktop testing in a narrow viewport)
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !drawer.classList.contains("hidden")) close();
+  });
+}
+
 function updateStickyOffsets() {
   const topBar = document.getElementById("topBar");
   const topBarH = topBar ? topBar.getBoundingClientRect().height : 65;
@@ -108,10 +150,8 @@ export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout 
   // ✅ Inject page HTML FIRST
   if (pageBody) pageBody.innerHTML = bodyHtml;
 
-  const sidebar = document.getElementById("sidebar");
-  if (sidebar) sidebar.classList.remove("hidden");
-
   bindSidebarHover();
+  bindMobileNavDrawer();
   bindNavHandlers(routeFn);
 
   window.setTimeout(updateStickyOffsets, 0);
