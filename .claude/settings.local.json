@@ -23,7 +23,23 @@
       "Bash(node --check /tmp/a.mjs)",
       "Bash(cp /c/Users/jason/OPI/myapp/frontend/src/pages/login.js /tmp/l.mjs)",
       "Bash(node --check /tmp/sched.mjs)",
-      "Bash(node --check /tmp/p.mjs)"
+      "Bash(node --check /tmp/p.mjs)",
+      "Bash(npm run *)",
+      "Bash(node --check src/pages/estimate.js)",
+      "Bash(cp src/pages/estimate.js /tmp/estimate-check.mjs)",
+      "Bash(node --check /tmp/estimate-check.mjs)",
+      "Bash(rm /tmp/estimate-check.mjs)",
+      "Bash(cp src/pages/estimate.js /tmp/est-check.mjs)",
+      "Bash(node --check /tmp/est-check.mjs)",
+      "Bash(rm /tmp/est-check.mjs)",
+      "Bash(cp frontend/src/pages/estimate.js /tmp/est-check.mjs)",
+      "Bash(ls c:\\\\Users\\\\jason\\\\OPI\\\\myapp\\\\backend 2>nul || ls c:\\\\Users\\\\jason\\\\OPI\\\\myapp)",
+      "Bash(python -c \"import openpyxl; print\\('openpyxl', openpyxl.__version__\\)\")",
+      "Bash(python c:/Users/jason/OPI/myapp/references/extract_workbook.py)",
+      "Bash(python c:/Users/jason/OPI/myapp/references/dump_base_sheet.py)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\jason\\OPI\\myapp"
     ]
   }
 }

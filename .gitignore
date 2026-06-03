@@ -37,3 +37,6 @@ Thumbs.db
 # Production envs
 .env.prod
 .env.production
+
+# Workbook reference files (local-only; may contain client data)
+references/

@@ -8,6 +8,7 @@ import { usersPage } from "./pages/users.js";
 import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
+import { baseQuotingMetricsPage } from "./pages/base-quoting-metrics.js";
 
 async function route() {
   const hash = location.hash || "#/projects";
@@ -46,6 +47,7 @@ async function route() {
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);
   if (hash === "#/estimate") return estimatePage(route);
+  if (hash === "#/base-quoting-metrics") return baseQuotingMetricsPage(route);
 
   // placeholder pages
   return dashboardPage(route);
