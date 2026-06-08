@@ -14,11 +14,13 @@ from .auth import create_access_token, get_current_user, require_admin
 from app.qbo.routes import router as qbo_router
 from app.projects.routes import router as projects_router
 from app.quoting.routes import router as quoting_router
+from app.estimates.routes import router as estimates_router
 
 app = FastAPI()
 app.include_router(qbo_router)
 app.include_router(projects_router)
 app.include_router(quoting_router)
+app.include_router(estimates_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 

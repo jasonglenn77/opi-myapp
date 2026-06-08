@@ -233,11 +233,79 @@ def list_metric_sets(estimate_id: int, _user=Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Create a new metric set for an estimate. Used by the "+ Add Option" tab on
+# the Estimate workspace. Auto-assigns the next option sort_order (1, 2, 3,
+# ...) and seeds labor-block templates on the new set so it feels populated
+# right away.
+# ---------------------------------------------------------------------------
+class MetricSetCreate(BaseModel):
+    estimate_id: int
+    kind:        str   # 'option' | 'project_rentals'  (Base auto-creates elsewhere)
+    label:       Optional[str] = None
+
+
+@router.post("/metric-sets")
+def create_metric_set(req: MetricSetCreate, _user=Depends(get_current_user)):
+    if req.kind not in ("option", "project_rentals"):
+        raise HTTPException(
+            status_code=400,
+            detail="kind must be 'option' or 'project_rentals' (base is auto-created)"
+        )
+
+    with engine.begin() as conn:
+        if req.kind == "project_rentals":
+            # Only one PR slot per estimate.
+            existing = conn.execute(text("""
+                SELECT id FROM quote_metric_sets
+                WHERE estimate_id = :eid AND kind = 'project_rentals'
+                LIMIT 1
+            """), {"eid": req.estimate_id}).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Project Rentals set already exists for this estimate")
+            sort_order = 99
+            label = req.label or "Project Rentals"
+        else:
+            # Next free option sort_order, starting at 1.
+            row = conn.execute(text("""
+                SELECT COALESCE(MAX(sort_order), 0) AS max_so
+                FROM quote_metric_sets
+                WHERE estimate_id = :eid AND kind = 'option'
+            """), {"eid": req.estimate_id}).mappings().first()
+            sort_order = int(row["max_so"]) + 1
+            label = req.label or f"Option {sort_order}"
+
+        result = conn.execute(text("""
+            INSERT INTO quote_metric_sets
+              (estimate_id, kind, label, sort_order, is_enabled, mobilizations)
+            VALUES (:eid, :kind, :label, :so, 1, 1)
+        """), {
+            "eid":   req.estimate_id,
+            "kind":  req.kind,
+            "label": label,
+            "so":    sort_order,
+        })
+        new_id = result.lastrowid
+
+        # Seed labor-block + other-rentals templates so the option starts in
+        # a usable state, same as the Base set does on auto-create.
+        _ensure_labor_templates(conn, new_id)
+
+        # Return the fully-hydrated row (includes all per-set attr columns).
+        row = conn.execute(text(f"""
+            SELECT id, estimate_id, kind, label, sort_order, is_enabled,
+                   CAST(mobilizations AS DECIMAL(6,2)) AS mobilizations
+            FROM quote_metric_sets WHERE id = :id
+        """), {"id": new_id}).mappings().first()
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
 # Per-set attribute update. Accepts a partial body — any field omitted from
 # the request stays unchanged. The frontend Tab Settings card calls this on
 # every input change.
 # ---------------------------------------------------------------------------
 class MetricSetAttrsPatch(BaseModel):
+    is_enabled:                          Optional[int]    = None   # 0 / 1 toggle from the Review tab
     mobilizations:                       Optional[float]  = None
     estimate_type_override:              Optional[str]    = None
     installation_environment:            Optional[str]    = None
@@ -388,10 +456,19 @@ def _fetch_line(conn, line_id: int):
 
 @router.get("/metric-lines")
 def list_metric_lines(
-    metric_set_id: int,
-    section_code: Optional[str] = None,
+    metric_set_id: Optional[int] = None,
+    estimate_id:   Optional[int] = None,
+    section_code:  Optional[str] = None,
     _user=Depends(get_current_user),
 ):
+    """
+    Pass `metric_set_id` to scope to one set (the Base / Option / Project
+    Rentals editor uses this). Pass `estimate_id` to return every line for
+    every set on that estimate at once — used by the Review tab's rollup.
+    """
+    if metric_set_id is None and estimate_id is None:
+        raise HTTPException(status_code=400, detail="metric_set_id or estimate_id is required")
+
     sql = """
         SELECT l.id, l.metric_set_id, l.section_code, l.line_kind, l.sort_order,
                l.productivity_rate_id, l.rental_rate_id, l.label,
@@ -414,13 +491,20 @@ def list_metric_lines(
         FROM quote_metric_lines l
         LEFT JOIN productivity_rates pr ON pr.id = l.productivity_rate_id
         LEFT JOIN rental_rates      rr ON rr.id = l.rental_rate_id
-        WHERE l.metric_set_id = :metric_set_id
     """
-    params = {"metric_set_id": metric_set_id}
+    params: dict = {}
+    where = []
+    if metric_set_id is not None:
+        where.append("l.metric_set_id = :metric_set_id")
+        params["metric_set_id"] = metric_set_id
+    if estimate_id is not None:
+        sql += " JOIN quote_metric_sets s ON s.id = l.metric_set_id"
+        where.append("s.estimate_id = :estimate_id")
+        params["estimate_id"] = estimate_id
     if section_code:
-        sql += " AND l.section_code = :section_code"
+        where.append("l.section_code = :section_code")
         params["section_code"] = section_code
-    sql += " ORDER BY l.sort_order, l.id"
+    sql += " WHERE " + " AND ".join(where) + " ORDER BY l.metric_set_id, l.sort_order, l.id"
 
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
@@ -497,4 +581,44 @@ def delete_metric_line(line_id: int, _user=Depends(get_current_user)):
         ), {"id": line_id})
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Line not found")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Bulk delete — clear every line in a section for a given metric set. Used by
+# the "Clear" button on each section card. Idempotent: returns the row count
+# even when nothing matched.
+# ---------------------------------------------------------------------------
+@router.delete("/metric-lines")
+def delete_metric_lines_bulk(
+    metric_set_id: int,
+    section_code:  str,
+    _user=Depends(get_current_user),
+):
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            DELETE FROM quote_metric_lines
+            WHERE metric_set_id = :mid AND section_code = :sc
+        """), {"mid": metric_set_id, "sc": section_code})
+    return {"ok": True, "deleted": result.rowcount or 0}
+
+
+# ---------------------------------------------------------------------------
+# Delete a metric set entirely. Cascades to quote_metric_lines via the FK
+# (ON DELETE CASCADE). Base sets are protected — there must always be a
+# Base for an estimate.
+# ---------------------------------------------------------------------------
+@router.delete("/metric-sets/{set_id}")
+def delete_metric_set(set_id: int, _user=Depends(get_current_user)):
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT kind FROM quote_metric_sets WHERE id = :id
+        """), {"id": set_id}).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Metric set not found")
+        if row[0] == "base":
+            raise HTTPException(status_code=400, detail="The Base set cannot be deleted")
+        conn.execute(text("""
+            DELETE FROM quote_metric_sets WHERE id = :id
+        """), {"id": set_id})
     return {"ok": True}

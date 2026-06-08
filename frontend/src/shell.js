@@ -32,7 +32,18 @@ export function brandHeader() {
 export function bindNavHandlers(routeFn) {
   document.querySelectorAll('a[href^="#/"]').forEach(a => {
     if (a.dataset.bound) return;
-    a.addEventListener("click", () => setTimeout(routeFn, 0));
+    a.addEventListener("click", () => {
+      // Only force a routeFn() call when the link's target is the SAME hash
+      // as the current location — the browser won't fire `hashchange` in
+      // that case, so we'd otherwise miss the re-render. For different-hash
+      // links, hashchange fires naturally; calling routeFn here too would
+      // mount the destination page twice (race condition that doubles up
+      // document-level listeners and breaks stateful UIs like the picker
+      // chevron).
+      if (a.getAttribute("href") === location.hash) {
+        setTimeout(routeFn, 0);
+      }
+    });
     a.dataset.bound = "1";
   });
 }

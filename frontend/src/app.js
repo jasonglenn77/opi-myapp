@@ -8,7 +8,9 @@ import { usersPage } from "./pages/users.js";
 import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
-import { baseQuotingMetricsPage } from "./pages/base-quoting-metrics.js";
+// Base Quoting Metrics is embedded inside the Estimate page now; the standalone
+// route is intentionally retired. The mountable function is still exported from
+// base-quoting-metrics.js and is consumed by estimate.js.
 
 async function route() {
   const hash = location.hash || "#/projects";
@@ -46,8 +48,7 @@ async function route() {
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);
-  if (hash === "#/estimate") return estimatePage(route);
-  if (hash === "#/base-quoting-metrics") return baseQuotingMetricsPage(route);
+  if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return estimatePage(route);
 
   // placeholder pages
   return dashboardPage(route);

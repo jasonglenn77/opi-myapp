@@ -36,7 +36,15 @@
       "Bash(ls c:\\\\Users\\\\jason\\\\OPI\\\\myapp\\\\backend 2>nul || ls c:\\\\Users\\\\jason\\\\OPI\\\\myapp)",
       "Bash(python -c \"import openpyxl; print\\('openpyxl', openpyxl.__version__\\)\")",
       "Bash(python c:/Users/jason/OPI/myapp/references/extract_workbook.py)",
-      "Bash(python c:/Users/jason/OPI/myapp/references/dump_base_sheet.py)"
+      "Bash(python c:/Users/jason/OPI/myapp/references/dump_base_sheet.py)",
+      "Bash(grep -n \"Estimate #\\\\${ESTIMATE_ID}\" c:/Users/jason/OPI/myapp/frontend/src/pages/base-quoting-metrics.js)",
+      "Bash(grep -n \"function costSummaryCardHtml\\\\|function travelCostsCardHtml\\\\|function bundleOutputCardHtml\" c:/Users/jados/OPI/myapp/frontend/src/pages/base-quoting-metrics.js 2>/dev/null || grep -n \"function costSummaryCardHtml\\\\|function travelCostsCardHtml\\\\|function bundleOutputCardHtml\" c:/Users/jason/OPI/myapp/frontend/src/pages/base-quoting-metrics.js)",
+      "Read(//c/Users/jados/OPI/myapp/frontend/src/pages/**)",
+      "Bash(node --check src/utils/qm-rollup.js)",
+      "Bash(node --input-type=module --check)",
+      "Bash(python -c \"from app.estimates.routes import router; print\\('OK'\\)\")",
+      "Bash(python -m py_compile app/estimates/routes.py)",
+      "Bash(python -m py_compile app/quoting/routes.py)"
     ],
     "additionalDirectories": [
       "c:\\Users\\jason\\OPI\\myapp"

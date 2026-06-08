@@ -5,7 +5,12 @@ from app.db import engine
 from datetime import datetime
 from typing import Any, Dict
 
-ALLOWED_STATUS = {"not_started", "in_progress", "completed", "canceled"}
+ALLOWED_STATUS = {"needs_attention", "not_started", "in_progress", "completed", "canceled"}
+# 'needs_attention' is the initial system-set value for a freshly-created
+# master row (see comment in ensure_project_row_for_qbo_customer), but it's
+# ALSO a valid user-pickable status: a row can stay in Needs Attention as
+# long as the user wants while they fill in partial data. Only the user's
+# explicit status change moves it out of Needs Attention.
 
 def list_assignable_projects():
     with engine.connect() as conn:
@@ -50,12 +55,11 @@ def provision_master_rows_for_all_projects():
             """), {"pid": project_id}).mappings().first()
 
             if not master:
-                # 'needs_attention' is a system-set status (NOT in ALLOWED_STATUS,
-                # so users can't pick it from the edit dropdown). It signals "the
-                # master row exists but the user hasn't picked a real status yet."
-                # As soon as the user chooses one of the four user-pickable statuses
-                # via save_schedule_item(), the value is overwritten and the row
-                # leaves the Needs-Attention state.
+                # 'needs_attention' is the default initial status — the row
+                # has been created but no scheduling data has been entered.
+                # The user can keep it in Needs Attention while filling in
+                # partial data (PM but no crew, dates but no PM, etc.) and
+                # picks a different status from the dropdown when ready.
                 conn.execute(text("""
                     INSERT INTO project_schedule_items (project_id, status, is_extra_row)
                     VALUES (:pid, 'needs_attention', 0)

@@ -3,6 +3,16 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 
+// Statuses the backend accepts on /assignment/save (ALLOWED_STATUS in
+// backend/app/projects/service.py). 'needs_attention' is included — a row
+// stays in Needs Attention through partial-data saves (PM but no crew,
+// dates but no PM, etc.) until the user explicitly picks a different
+// status from the dropdown. Truly unknown / empty statuses still fall
+// back to 'not_started' defensively.
+const USER_STATUSES = new Set([
+  "needs_attention", "not_started", "in_progress", "completed", "canceled",
+]);
+
 export async function assignmentPage(routeFn) {
   const res = await api("/assignment/table");
   const rows = (res.projects || []).map((r) => ({
@@ -37,10 +47,11 @@ export async function assignmentPage(routeFn) {
   };
 
   const STATUS_OPTIONS = [
-    { value: "not_started", label: "Not Started" },
-    { value: "in_progress", label: "In Progress" },
-    { value: "completed", label: "Completed" },
-    { value: "canceled", label: "Canceled" },
+    { value: "needs_attention", label: "Needs Attention" },
+    { value: "not_started",     label: "Not Started" },
+    { value: "in_progress",     label: "In Progress" },
+    { value: "completed",       label: "Completed" },
+    { value: "canceled",        label: "Canceled" },
   ];
 
   const KPI_STYLES = {
@@ -268,7 +279,7 @@ export async function assignmentPage(routeFn) {
     const payload = {
       schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
-      status: row.project_status || "not_started",
+      status: USER_STATUSES.has(row.project_status) ? row.project_status : "not_started",
       start_date: row.start_date || null,
       end_date: row.end_date || null,
       wire_guidance: row.wire_guidance || 0,
@@ -1305,7 +1316,7 @@ export async function assignmentPage(routeFn) {
     const payload = {
       schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
-      status: row.project_status || "not_started",
+      status: USER_STATUSES.has(row.project_status) ? row.project_status : "not_started",
       start_date: field === "start_date" ? (isoValue || null) : (row.start_date || null),
       end_date: field === "end_date" ? (isoValue || null) : (row.end_date || null),
       wire_guidance: row.wire_guidance || 0,
@@ -1349,7 +1360,7 @@ export async function assignmentPage(routeFn) {
     const payload = {
       schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
       qbo_customer_id: Number(row.qbo_customer_id),
-      status: row.project_status || "not_started",
+      status: USER_STATUSES.has(row.project_status) ? row.project_status : "not_started",
       start_date: row.start_date || null,
       end_date: row.end_date || null,
       wire_guidance: row.wire_guidance || 0,
@@ -1376,7 +1387,16 @@ export async function assignmentPage(routeFn) {
       setMsg(`Saved ${row.project_name}.`, true);
     } catch (e) {
       console.error(e);
-      setMsg("Could not update assignments. Make sure any selected primary is also checked.");
+      const detail = e?.message || "";
+      // Try to extract the FastAPI {"detail": "..."} payload for a useful
+      // banner; fall back to a generic message otherwise.
+      let friendly = detail;
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed && parsed.detail) friendly = String(parsed.detail);
+      } catch { /* not JSON */ }
+      if (!friendly) friendly = "Could not update assignments.";
+      setMsg(`Could not update assignments: ${friendly}`);
     }
   }
 
@@ -1549,6 +1569,36 @@ export async function assignmentPage(routeFn) {
   });
 
   document.getElementById("assignmentBody").addEventListener("change", async (e) => {
+      // Primary radio — auto-check the matching checkbox so the row's PM/crew
+      // is included in the save payload. Without this, picking a primary
+      // without first ticking the checkbox sends the backend a primary id
+      // that isn't in project_manager_ids / work_crew_ids and it 400s.
+      const primaryRadio = e.target.closest("[data-assign-primary]");
+      if (primaryRadio && primaryRadio.checked) {
+        const rowId = primaryRadio.getAttribute("data-assign-primary");
+        const field = primaryRadio.getAttribute("data-assign-field");
+        const id    = primaryRadio.getAttribute("data-id");
+        const cb = document.querySelector(
+          `[data-assign-check="${rowId}"][data-assign-field="${field}"][data-id="${id}"]`
+        );
+        if (cb && !cb.checked) cb.checked = true;
+        return;
+      }
+
+      // Unchecking a row's checkbox while it's the primary — clear the primary
+      // so we don't ship an orphan primary id to the backend.
+      const assignCheck = e.target.closest("[data-assign-check]");
+      if (assignCheck && !assignCheck.checked) {
+        const rowId = assignCheck.getAttribute("data-assign-check");
+        const field = assignCheck.getAttribute("data-assign-field");
+        const id    = assignCheck.getAttribute("data-id");
+        const radio = document.querySelector(
+          `[data-assign-primary="${rowId}"][data-assign-field="${field}"][data-id="${id}"]`
+        );
+        if (radio && radio.checked) radio.checked = false;
+        return;
+      }
+
       // Travel days dropdown
       const travelSelect = e.target.closest("[data-travel-select]");
       if (travelSelect) {

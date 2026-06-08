@@ -16,8 +16,13 @@
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { api } from "../api.js";
+import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
 
-const ESTIMATE_ID = 1;   // TODO: derive from estimate persistence
+// Estimate id is passed in by the caller. Used in every /api/quoting call
+// to scope sets + lines to the right estimate. We still allow a default of
+// 1 so the standalone wrapper / older tests don't break — but the consolidated
+// Estimate page always provides one explicitly now.
+const DEFAULT_ESTIMATE_ID = 1;
 
 const SECTIONS = [
   // ── Rack Installation ───────────────────────────────────────────────────
@@ -37,16 +42,19 @@ const SECTIONS = [
   { code: "miscellaneous",                kind: "productivity", title: "Miscellaneous",                     category: "Miscellaneous" },
 
   { code: "rentals_rack_install",         kind: "rental",       title: "Rentals - Rack Install" },
-  { code: "other_rentals_rack_install",   kind: "other_rental", title: "Other Rentals (Rack Install)" },
+  { code: "other_rentals_rack_install",   kind: "other_rental", title: "Other Rentals (Rack Install)",
+    hint: 'For the QuickBooks bundle, rows are split by label keyword: "Dumpster" → Dumpsters/Site Rentals, "Propane" → Propane. Anything else falls into Equipment - Lifts.' },
 
   // ── Wire Guidance Install ───────────────────────────────────────────────
   { code: "materials_wire_guidance",      kind: "free_form",    title: "Material Costs (Wire Guidance Install)" },
   { code: "wire_guidance_contract_labor", kind: "productivity", title: "Wire Guidance Contract Labor",      category: "Wire Guidance" },
   { code: "rentals_wire_guidance",        kind: "rental",       title: "Rentals - Wire Guidance Install" },
-  { code: "other_rentals_wire_guidance",  kind: "other_rental", title: "Other Rentals (Wire Guidance Install)" },
+  { code: "other_rentals_wire_guidance",  kind: "other_rental", title: "Other Rentals (Wire Guidance Install)",
+    hint: 'For the QuickBooks bundle, rows whose label contains "Propane" are split out; everything else feeds Floor Scrubber.' },
 
   // ── Additional Items ────────────────────────────────────────────────────
-  { code: "wire_guidance_additional",     kind: "free_form",    title: "Wire Guidance Additional Items" },
+  { code: "wire_guidance_additional",     kind: "free_form",    title: "Wire Guidance Additional Items",
+    hint: 'For the QuickBooks bundle, rows are bucketed by label keyword: "Slurry", "Line Driver", "Magnet", "RFID". Other labels are ignored by the bundle math.' },
 
   // ── Labor blocks ────────────────────────────────────────────────────────
   // Template row labels are auto-seeded by the backend on the Base metric
@@ -62,8 +70,28 @@ const SECTIONS = [
   { code: "miscellaneous_labor",    kind: "free_form", title: "Miscellaneous (Labor)" },
 ];
 
-export async function baseQuotingMetricsPage(routeFn) {
+/**
+ * Mount the Base Quoting Metrics UI into a given container. Used by:
+ *   - the standalone #/base-quoting-metrics page (via the wrapper below), and
+ *   - the consolidated Estimate page, which embeds these cards below its
+ *     existing Estimate / Key Inputs / Output / Results cards.
+ *
+ * Returns a cleanup function that removes the global ('storage') listener
+ * and clears the container; the container-scoped change/input/click
+ * listeners are auto-cleaned when the container is wiped or removed.
+ */
+export async function mountBaseQuotingMetrics({
+  container,
+  estimateId = DEFAULT_ESTIMATE_ID,
+  metricSetId = null,           // when set, scope to a specific (non-Base) set
+}) {
+  if (!container) return () => {};
+  const ESTIMATE_ID = estimateId;
+
   // ── data load ──────────────────────────────────────────────────────────────
+  // `baseSet` is the *active* set the page edits — it's the Base set by
+  // default, but the caller can pin to a specific set id (e.g. an Option's
+  // metric set) so the same UI hosts every Option tab.
   let baseSet, productivityItems, rentalItems, allLines, lookups;
   try {
     const [sets, prodItems, rentItems, lk] = await Promise.all([
@@ -72,22 +100,22 @@ export async function baseQuotingMetricsPage(routeFn) {
       api(`/quoting/rental-rates`),
       api(`/quoting/lookup-values`),
     ]);
-    baseSet = sets.find(s => s.kind === "base");
-    if (!baseSet) throw new Error("Base metric set missing and auto-create failed.");
+    if (metricSetId != null) {
+      baseSet = sets.find(s => Number(s.id) === Number(metricSetId));
+      if (!baseSet) throw new Error(`Metric set ${metricSetId} not found for estimate ${ESTIMATE_ID}.`);
+    } else {
+      baseSet = sets.find(s => s.kind === "base");
+      if (!baseSet) throw new Error("Base metric set missing and auto-create failed.");
+    }
     productivityItems = prodItems;
     rentalItems       = rentItems;
     lookups           = lk || {};
     allLines = await api(`/quoting/metric-lines?metric_set_id=${baseSet.id}`);
   } catch (err) {
-    setShell({
-      title: "Base Quoting Metrics",
-      bodyHtml: `<div class="card px-5 py-4 text-sm text-red-600">
-        Failed to load: ${escapeHtml(err?.message || String(err))}
-      </div>`,
-      showLogout: true,
-      routeFn,
-    });
-    return;
+    container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">
+      Failed to load Base Quoting Metrics: ${escapeHtml(err?.message || String(err))}
+    </div>`;
+    return () => {};
   }
 
   // ── per-section state ──────────────────────────────────────────────────────
@@ -427,25 +455,34 @@ export async function baseQuotingMetricsPage(routeFn) {
     else if (cfg.kind === "free_form") sub = "Qty × unit cost = ext cost";
     else                               sub = "Qty ÷ daily production = days";
     return `
-      <div class="card px-5 py-4" data-section data-section-host data-section-code="${cfg.code}" data-section-kind="${cfg.kind}">
-        <button type="button" data-section-toggle
+      <div class="card px-5 py-4" data-qm-section data-section-host data-section-code="${cfg.code}" data-section-kind="${cfg.kind}">
+        <button type="button" data-qm-section-toggle
                 class="w-full flex items-center justify-between gap-3 pb-2 border-b border-black/10 text-left cursor-pointer select-none">
           <span class="flex items-baseline gap-3">
             <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">${escapeHtml(cfg.title)}</span>
             <span class="text-[11px] italic text-black/40">${sub}</span>
           </span>
-          <svg class="w-4 h-4 text-black/40 shrink-0 transition-transform ${chevronClass}" data-section-chevron
+          <svg class="w-4 h-4 text-black/40 shrink-0 transition-transform ${chevronClass}" data-qm-section-chevron
                fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
             <path d="M6 9l6 6 6-6"/>
           </svg>
         </button>
 
-        <div class="${bodyClass}" data-section-body>
+        <div class="${bodyClass}" data-qm-section-body>
+          ${cfg.hint ? `
+            <div class="text-[11px] italic text-blue-700/80 bg-blue-50/60 border border-blue-100 rounded px-3 py-2 mb-2">
+              ${escapeHtml(cfg.hint)}
+            </div>` : ""}
           <div data-section-host-table>${tableHtml(code)}</div>
-          <div class="pt-3">
+          <div class="pt-3 flex items-center justify-between gap-2">
             <button type="button" data-add-row
                     class="text-xs font-semibold text-blue-600 hover:text-blue-800 px-2 py-1 rounded hover:bg-blue-50">
               + Add line
+            </button>
+            <button type="button" data-clear-section
+                    class="text-xs font-semibold text-red-600 hover:text-red-800 px-2 py-1 rounded hover:bg-red-50"
+                    title="Delete every row in this section">
+              Clear all rows
             </button>
           </div>
         </div>
@@ -751,22 +788,55 @@ export async function baseQuotingMetricsPage(routeFn) {
       </tr>`;
   }
 
+  // Wraps a card body in the same collapsible toggle pattern used by the
+  // input section cards. Anyone clicking the header (data-qm-section-toggle)
+  // toggles the body's `hidden` class; the existing onClick handler picks
+  // it up via data-qm-section-* attributes. Outer card gets the supplied
+  // attrs so existing renderX() functions can still locate it.
+  function qmCollapsibleCardHtml(title, subtitle, bodyHtml, opts = {}) {
+    const cardAttrs = opts.cardAttrs || "";
+    const collapsed = opts.collapsed === true;
+    return `
+      <div class="card px-5 py-4" data-qm-section ${cardAttrs}>
+        <button type="button" data-qm-section-toggle
+                class="w-full flex items-center justify-between gap-3 pb-2 border-b border-black/10 text-left cursor-pointer select-none">
+          <span class="flex items-baseline gap-3">
+            <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">${escapeHtml(title)}</span>
+            ${subtitle ? `<span class="text-[11px] italic text-black/40">${escapeHtml(subtitle)}</span>` : ""}
+          </span>
+          <svg class="w-4 h-4 text-black/40 shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}" data-qm-section-chevron
+               fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <div class="${collapsed ? 'pt-3 hidden' : 'pt-3'}" data-qm-section-body>
+          ${bodyHtml}
+        </div>
+      </div>`;
+  }
+
   function tabSettingsHtml() {
     const factor = currentEnvFactor();
+    // Surface the General Info "Estimate Type" so the user can see WHAT
+    // they're inheriting when this set's override is blank. Falls back to
+    // "Standard" (the same default the rollup math uses).
+    const inheritedEst = (readEstimateBridge().estimate_type || "Standard");
+    const estPlaceholder = `Inherit from Roll Up (${inheritedEst})`;
     return `
-      <div class="card px-5 py-4" data-tab-settings>
-        <div class="flex items-baseline justify-between gap-3 pb-2 border-b border-black/10">
-          <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">Tab Settings</span>
-          <span class="text-[11px] italic text-black/40">Per-set overrides + day type adjustments</span>
+        <div class="flex justify-end -mt-2 mb-1">
+          <button type="button" data-reset-tab-settings
+                  class="text-[11px] font-semibold text-red-600 hover:text-red-800 px-2 py-0.5 rounded hover:bg-red-50"
+                  title="Clear every override on this tab">
+            Reset Tab Settings
+          </button>
         </div>
-
-        <div class="pt-4 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-3">
+        <div class="pt-1 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-3">
 
           <!-- Left column -->
           <div class="flex flex-col gap-3">
             <div class="grid grid-cols-[1fr_1fr] gap-x-3 gap-y-3 items-center">
               ${attrLabel("Estimate Type Override")}
-              ${selectAttrHtml("estimate_type_override", ESTIMATE_TYPE_OPTS, { placeholder: "Inherit from Roll Up" })}
+              ${selectAttrHtml("estimate_type_override", ESTIMATE_TYPE_OPTS, { placeholder: estPlaceholder })}
 
               ${attrLabel("Installation Environment")}
               <div class="flex items-center gap-2">
@@ -821,8 +891,7 @@ export async function baseQuotingMetricsPage(routeFn) {
               ${dayOverrideRow("travel",        "Travel",        false, false)}
             </tbody>
           </table>
-        </div>
-      </div>`;
+        </div>`;
   }
 
   // The mobilizations field lives on the parent set, not in `attrs`, but we
@@ -841,166 +910,36 @@ export async function baseQuotingMetricsPage(routeFn) {
     } catch { return {}; }
   }
 
-  function lookupValueNum(category, key) {
-    const rows = lookups[category];
-    if (!Array.isArray(rows) || !key) return null;
-    const row = rows.find(r => r.key === key);
-    return (row && row.value_num != null) ? Number(row.value_num) : null;
-  }
 
-  // Mirrors the Estimate page's step-function lookup (Travel Days Per Crew,
-  // Per Mobilization). >38 hrs = error; we return 0 for the computation.
-  function travelDaysFromHrs(hrs) {
-    if (hrs == null || hrs === "") return 0;
-    const h = Number(hrs);
-    if (Number.isNaN(h) || h > 38) return 0;
-    const rows = lookups.project_travel_day_calculator;
-    if (!Array.isArray(rows) || rows.length === 0) return 0;
-    const eligible = rows
-      .map(r => ({ threshold: Number(r.key), value: r.value_num }))
-      .filter(r => !Number.isNaN(r.threshold) && r.value != null && r.threshold <= h)
-      .sort((a, b) => b.threshold - a.threshold);
-    return eligible.length ? Number(eligible[0].value) * 2 : 0;
-  }
-
-  // Section codes that feed the "Rack Contract Labor" rollup (H44).
-  const RACK_LABOR_SECTIONS = [
-    "teardrop_racking", "bolted_racking", "wire_decking", "anchors",
-    "cantilever_racking", "high_density_storage", "mezz_pick_modules",
-    "rack_protection", "safety_netting", "shelving", "miscellaneous",
-  ];
-
-  function sumProductivityDays(sectionCodes, useAgg) {
-    let sum = 0;
-    for (const code of sectionCodes) {
-      const section = sections[code];
-      if (!section) continue;
-      for (const row of section.rows) {
-        const val = useAgg ? row.agg_total : row.std_total;
-        if (val != null) sum += Number(val);
-      }
-    }
-    return sum;
-  }
-
-  function sumSectionExtCosts(sectionCode) {
-    const section = sections[sectionCode];
-    if (!section) return 0;
-    let sum = 0;
-    for (const row of section.rows) {
-      if (row.ext_cost != null) sum += Number(row.ext_cost);
-    }
-    return sum;
-  }
-
-  const ceilingHalf = (x) => Math.ceil(Number(x) * 2) / 2;
-
+  // computeTravelCosts is now a thin wrapper around qm-rollup#computeSetRollup
+  // so the per-tab Cost Summary / Travel Costs cards always agree with the
+  // Review tab's rollup. The wrapper just gathers the page's live rows + the
+  // current attrs + the estimate-state bridge, then adds the UI-only extras
+  // the cards expect (Inputs column values + hrs_out_of_range flag + the
+  // `section_total` alias for what the rollup calls `travel_costs_total`).
   function computeTravelCosts() {
     const est = readEstimateBridge();
-    const travel_hrs = Number(est.one_way_travel_hrs ?? 0) || 0;
-    const crew_count = Number(est.crew_count ?? 0) || 0;
-    const crew_size_key = est.crew_size || "";
-    const lodging_cost_per_day = Number(est.lodging_cost_per_day ?? 0) || 0;
-    const mgmt_pct_pts = Number(est.mgmt_travel_multiplier ?? 0) || 0;  // percentage points
-    const mgmt_pct = mgmt_pct_pts / 100;
-
-    // Labor Cost / Day formula = (OOT or Local) / 5 × crew_size value_num.
-    // Same logic as estimate.js. Returns 0 if any input is missing.
-    const oot   = lookupValueNum("labor_crew_cost", "Out of Town");
-    const local = lookupValueNum("labor_crew_cost", "Local");
-    const crew_size_num = lookupValueNum("crew_size", crew_size_key);
-    let labor_cost_per_day = 0;
-    if (travel_hrs > 0 && crew_size_num != null && oot != null && local != null) {
-      labor_cost_per_day = ((travel_hrs > 1 ? oot : local) / 5) * crew_size_num;
+    const allLines = [];
+    for (const code of Object.keys(sections)) {
+      for (const row of sections[code].rows) {
+        allLines.push({ ...row, section_code: row.section_code || code });
+      }
     }
-    const labor_cost_per_travel_day = labor_cost_per_day;
-    const travel_days_per_crew = travelDaysFromHrs(travel_hrs);
-
-    // Per-set override of estimate type takes priority over the Roll Up's.
-    const estimate_type = attrs.estimate_type_override || est.estimate_type || "Standard";
-    const useAgg = estimate_type === "Aggressive";
-
-    // Section rollups
-    const rack_days  = sumProductivityDays(RACK_LABOR_SECTIONS, useAgg);
-    const wire_days  = sumProductivityDays(["wire_guidance_contract_labor"], useAgg);
-    const mat_rack   = sumSectionExtCosts("materials_rack_install");
-    const mat_wire   = sumSectionExtCosts("materials_wire_guidance");
-
-    // Per-set attributes
-    const mobilizations = Number(attrs.mobilizations ?? 0) || 0;
-    const env_factor    = Number(currentEnvFactor() ?? 1) || 1;
-
-    const overrideOrNull = (v) => (v != null && v !== "" && Number(v) > 0) ? Number(v) : null;
-    const numOr0         = (v) => Number(v ?? 0) || 0;
-
-    const travel_override = overrideOrNull(attrs.travel_labor_day_override);
-    const rack_override   = overrideOrNull(attrs.rack_install_labor_day_override);
-    const rack_adder      = numOr0(attrs.rack_install_project_time_adder);
-    const wire_override   = overrideOrNull(attrs.wire_guidance_labor_day_override);
-    const wire_adder      = numOr0(attrs.wire_guidance_project_time_adder);
-
-    // D22 TAB Travel Days
-    const D22 = travel_override != null
-      ? travel_override
-      : travel_days_per_crew * crew_count * mobilizations;
-
-    // D23/D24 Tab Labor Days (Rack / Wire), each ceilinged to 0.5
-    const D23_input = (rack_override != null ? rack_override + rack_adder : rack_days + rack_adder);
-    const D24_input = (wire_override != null ? wire_override + wire_adder : wire_days + wire_adder);
-    const D23 = ceilingHalf(D23_input * env_factor);
-    const D24 = ceilingHalf(D24_input * env_factor);
-
-    // G33 Lodging
-    const lodging = D22 > 0 ? (D22 + D23 + D24) * lodging_cost_per_day : 0;
-
-    // Section dollar rollups
-    const H44 = rack_days * labor_cost_per_day;            // Rack Contract Labor $
-    const H39 = mat_rack;                                  // Materials, Rack Install $
-    const H214 = mat_wire;                                 // Materials, Wire Guidance $
-    const H220 = wire_days * labor_cost_per_day;           // Wire Guidance Contract Labor $
-
-    // Other top-level section dollar totals (workbook L5 sum components).
-    const H187 = sumSectionExtCosts("rentals_rack_install");   // Rentals - Rack Install $
-    const H226 = sumSectionExtCosts("rentals_wire_guidance");  // Rentals - Wire Guidance $
-    const H248 = sumSectionExtCosts("wire_guidance_additional"); // WG Additional Items $
-
-    // G35 Travel Day Costs
-    const G35 = labor_cost_per_travel_day * D22;
-
-    // G34 Mgmt Travel — the workbook's IF(D13=1400,0,...) collapses to "no
-    // mgmt travel when Labor Cost / Day is exactly $1,400" (Local rate ×
-    // Full crew: 1400/5*5 = 1400). Anything else pays mgmt travel.
-    const no_mgmt_travel = labor_cost_per_day === 1400;
-    const mgmt_travel = no_mgmt_travel
-      ? 0
-      : (H44 + H39 + lodging + H214 + H220 + G35) * mgmt_pct;
-
-    // H32 section total (Travel Costs)
-    const section_total = lodging + mgmt_travel + G35;
-
-    // Top-level bundle totals that feed the workbook's cost-checker.
-    //   H38  = Rack Installation bundle (materials + contract labor)
-    //   H213 = Wire Guidance Labor bundle (materials + contract labor)
-    //   H32 / H187 / H226 / H248 are already standalone totals
-    //   L5   = grand total (sum of the 6 top-level section totals)
-    const H38  = H39 + H44;
-    const H213 = H214 + H220;
-    const grand_total = section_total + H38 + H187 + H213 + H226 + H248;
-
+    const rollup = computeSetRollup({
+      set:           { ...baseSet, ...attrs },
+      lines:         allLines,
+      lookups,
+      estimateState: est,
+    });
     return {
-      estimate_type, useAgg,
-      labor_cost_per_day, labor_cost_per_travel_day, travel_days_per_crew,
-      rack_days, wire_days, mat_rack, mat_wire,
-      mobilizations, env_factor,
-      D22, D23, D24,
-      H44, H39, H214, H220, H187, H226, H248,
-      H38, H213,
-      lodging, mgmt_travel, travel_day_costs: G35,
-      section_total,
-      grand_total,
-      // surface the inputs back to the UI for the "Inputs" column
-      lodging_cost_per_day, mgmt_pct_pts, crew_count,
-      hrs_out_of_range: Number(travel_hrs) > 38,
+      ...rollup,
+      // Alias for legacy callers that read tc.section_total.
+      section_total:       rollup.travel_costs_total,
+      // Inputs surfaced to the Travel Costs card's "Estimate Inputs" column.
+      lodging_cost_per_day: Number(est.lodging_cost_per_day   ?? 0) || 0,
+      mgmt_pct_pts:         Number(est.mgmt_travel_multiplier ?? 0) || 0,
+      crew_count:           Number(est.crew_count             ?? 0) || 0,
+      hrs_out_of_range:     Number(est.one_way_travel_hrs     ?? 0) > 38,
     };
   }
 
@@ -1015,11 +954,8 @@ export async function baseQuotingMetricsPage(routeFn) {
         <span class="text-sm tabular-nums ${opts.bold ? "font-bold" : "font-semibold"}">${fmtMoney(value)}</span>
       </div>`;
     return `
-      <div class="flex items-baseline justify-between gap-3 pb-2 border-b border-black/10">
-        <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">Cost Summary</span>
-        <span class="text-[11px] italic text-black/40">Cost checker · ${escapeHtml(tc.estimate_type)} estimate</span>
-      </div>
-      <div class="pt-3 grid grid-cols-1 lg:grid-cols-2 gap-x-8">
+      <div class="text-[11px] italic text-black/40 pb-2">Cost checker · ${escapeHtml(tc.estimate_type)} estimate</div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-8">
         <div>
           ${row("Travel Costs (H32)", tc.section_total)}
           ${row("Rack Installation (H38)", tc.H38)}
@@ -1044,344 +980,28 @@ export async function baseQuotingMetricsPage(routeFn) {
   }
 
   function renderCostSummary() {
-    const card = document.querySelector("[data-cost-summary]");
-    if (card) card.innerHTML = costSummaryCardHtml();
+    const body = document.querySelector("[data-cost-summary] [data-qm-section-body]");
+    if (body) body.innerHTML = costSummaryCardHtml();
   }
 
   // ── QuickBooks Bundle Output ───────────────────────────────────────────────
-  // Decodes the BASE sheet's S-column bundle formulas. Each sub-line is
-  // ceiling'd to the nearest $10 (matches workbook).
-  //
-  // Key intermediate: M20 / M21 — "buffer days" added by the Project Time
-  // Adder on the day-type override. The workbook computes them as:
-  //   M20 = ceil_half((override>0 ? override : rack_days) + adder) × env)
-  //       − ceil_half((override>0 ? override : rack_days)            × env)
-  // i.e., the extra days the Project Time Adder introduces. Defaults to 0
-  // when no adder is set. Same shape for M21 (Wire Guidance).
-  const ceil10   = (x) => Math.ceil(Number(x) / 10) * 10;
-  const ceilHalf = (x) => Math.ceil(Number(x) * 2) / 2;
-  const isYes    = (s) => String(s ?? "").toLowerCase() === "yes";
-  const isNo     = (s) => String(s ?? "").toLowerCase() === "no";
-
-  function computeBufferDays(override, adder, baseDays, envFactor) {
-    const ovr   = (override != null && Number(override) > 0) ? Number(override) : null;
-    const base  = ovr != null ? ovr : Number(baseDays || 0);
-    const a     = Number(adder || 0);
-    const env   = Number(envFactor || 1);
-    return ceilHalf((base + a) * env) - ceilHalf(base * env);
-  }
-
-  // Markup helper: a/(1-p) - a   (i.e., "what you add on top to hit margin p").
-  const markup = (amount, pct) => {
-    const denom = 1 - pct;
-    if (denom === 0) return 0;
-    return amount / denom - amount;
-  };
-
-  // WG Additional Items: map free-form rows to the 4 known categories by
-  // case-insensitive substring match on the user-entered label.
-  function wgAdditionalLine(needle) {
-    const section = sections["wire_guidance_additional"];
-    if (!section) return 0;
-    const n = needle.toLowerCase();
-    let sum = 0;
-    for (const row of section.rows) {
-      const lbl = String(row.label || "").toLowerCase();
-      if (lbl.includes(n) && row.ext_cost != null) sum += Number(row.ext_cost);
-    }
-    return sum;
-  }
-
-  // Sum Other Rentals rows whose label contains a given keyword. Used to
-  // split the section total into the workbook's S11/S12/S13/S22 buckets.
-  function sumOtherRentalsByLabel(sectionCode, needle) {
-    const section = sections[sectionCode];
-    if (!section) return 0;
-    const n = needle.toLowerCase();
-    let sum = 0;
-    for (const row of section.rows) {
-      const lbl = String(row.label || "").toLowerCase();
-      if (lbl.includes(n) && row.ext_cost != null) sum += Number(row.ext_cost);
-    }
-    return sum;
-  }
-
+  // The bundle math (BASE sheet's S-column formulas) lives in
+  // utils/qm-rollup.js as `computeSetBundles` so the Review tab can call it
+  // for cross-set aggregates. The local wrapper just gathers the page's
+  // live state (rows + per-set attrs + estimate bridge) and delegates.
   function computeAllBundles() {
-    const tc  = computeTravelCosts();
-    const est = readEstimateBridge();
-
-    // Section dollar totals (existing)
-    const H44 = tc.H44;
-    const H39 = tc.H39;
-    const H214 = tc.H214;
-    const H220 = tc.H220;
-    const H187 = tc.H187;
-    const H226 = tc.H226;
-    const H248 = tc.H248;
-
-    // Other intermediates
-    const G34 = tc.mgmt_travel;
-    const G35 = tc.travel_day_costs;
-    const D13 = tc.labor_cost_per_day;
-    const D15 = tc.lodging_cost_per_day;
-    const D21 = Number(est.one_way_travel_hrs ?? 0) || 0;
-    const D22 = tc.D22;
-    const D23 = tc.D23;
-    const D24 = tc.D24;
-    const mobs = tc.mobilizations;
-    const env  = tc.env_factor;
-    const rack_days = tc.rack_days;
-    const wire_days = tc.wire_days;
-
-    // M20 / M21 buffer days (computed from per-set day-type overrides).
-    const rack_override = attrs.rack_install_labor_day_override;
-    const rack_adder    = attrs.rack_install_project_time_adder;
-    const wire_override = attrs.wire_guidance_labor_day_override;
-    const wire_adder    = attrs.wire_guidance_project_time_adder;
-    const M20 = computeBufferDays(rack_override, rack_adder, rack_days, env);
-    const M21 = computeBufferDays(wire_override, wire_adder, wire_days, env);
-
-    // Estimate inputs
-    const breakOutMob = est.breaking_out_mobilization;
-    const rack_profit_pct  = (Number(est.rack_install_profit_target  ?? 0) || 0) / 100;
-    const rent_rack_pct    = (Number(est.rental_rack_profit_target   ?? 0) || 0) / 100;
-    const mob_profit_pct   = (Number(est.mobilization_profit_target  ?? 0) || 0) / 100;
-    const wg_profit_pct    = (Number(est.wire_guidance_profit_target ?? 0) || 0) / 100;
-    const rent_wire_pct    = (Number(est.rental_wire_profit_target   ?? 0) || 0) / 100;
-    const downtime_target  = D21 > 1 ? 3500 : 3000;   // Roll Up G24
-
-    // ── Installation Labor Bundle (S3–S9) ───────────────────────────────────
-    let S4_raw = 0;
-    if (H44 > 0) {
-      S4_raw = isYes(breakOutMob) ? (H44 - M20 * D13) : (H44 - M20 * D13 + G35);
+    const allLines = [];
+    for (const code of Object.keys(sections)) {
+      for (const row of sections[code].rows) {
+        allLines.push({ ...row, section_code: row.section_code || code });
+      }
     }
-    const S4 = ceil10(S4_raw);
-    const S5 = ceil10(H39);
-    const S6 = ceil10(S4 === 0 ? 0 : G34);
-    const S7 = ceil10(M20 * D13 / (1 - rack_profit_pct || 1));
-    const S8 = ceil10(
-      S4 !== 0 && D21 > 1
-        ? (isNo(breakOutMob) ? (D22 + D23) * D15 : D23 * D15)
-        : 0
-    );
-    const U4 = ceil10(D23 * D13 - M20 * D13);
-    const T4 = ceil10(U4 === 0 ? 0 : G35);
-    const U8 = ceil10(D23 * D15);
-    const T8 = ceil10(U8 === 0 ? 0 : ((D22 + D23) * D15 - U8));
-    const ilb_sub = S4 + S5 + S6 + S8;
-    let S9;
-    if (isYes(breakOutMob)) {
-      S9 = ceil10(markup(ilb_sub, rack_profit_pct));
-    } else {
-      S9 = ceil10(
-        ((ilb_sub - T4 - T8) / (1 - rack_profit_pct || 1))
-          + ((T4 + T8) / (1 - mob_profit_pct || 1))
-          - ilb_sub
-      );
-    }
-    const ilb_total = S4 + S5 + S6 + S7 + S8 + S9;
-
-    // ── Rentals Bundle (S10–S14) ────────────────────────────────────────────
-    // S11 = regular rack rentals + "Other Rentals (Rack Install)" rows
-    //       EXCEPT Dumpster (→ S12) and Liquid Propane (→ S13).
-    // S12 = Dumpster row(s) from Other Rentals (Rack)
-    // S13 = Liquid Propane row(s) from Other Rentals (Rack)
-    const otherRackDumpster = sumOtherRentalsByLabel("other_rentals_rack_install", "dumpster");
-    const otherRackPropane  = sumOtherRentalsByLabel("other_rentals_rack_install", "propane");
-    const otherRackRest     = sumSectionExtCosts("other_rentals_rack_install") - otherRackDumpster - otherRackPropane;
-    const S11 = ceil10(H187 + otherRackRest);
-    const S12 = ceil10(otherRackDumpster);
-    const S13 = ceil10(otherRackPropane);
-    const S14 = ceil10((S11 + S12) / (1 - rent_rack_pct || 1) + S13 - (S11 + S12 + S13));
-    const rentals_total = S11 + S12 + S13 + S14;
-
-    // ── Wire Guidance Labor Bundle (S15–S23) ────────────────────────────────
-    // S16 Contract Labor:
-    //   IF(BreakOutMob=NO, G35 + H220 - M21*D13 - IF(S4>0, G35, 0),
-    //                       H220 - M21*D13)
-    let S16_raw;
-    if (isNo(breakOutMob)) {
-      S16_raw = G35 + H220 - M21 * D13 - (S4 > 0 ? G35 : 0);
-    } else {
-      S16_raw = H220 - M21 * D13;
-    }
-    const S16 = ceil10(S16_raw);
-    const S17 = ceil10(H214);
-    // S18 Mgmt Travel: workbook uses IF(S4=0, IF(S16=0,0,G34))
-    // — IF without false branch defaults to 0 when S4 != 0.
-    let S18_raw = 0;
-    if (S4 === 0 && S16 !== 0) S18_raw = G34;
-    const S18 = ceil10(S18_raw);
-    // S19 Lodging = CEIL10(T19 + U19)  where:
-    //   T16 = IF(BreakOutMob=No AND D23=0, G35, 0)
-    //   T19 = IF(T16>0, (D22+D23)*D15 - U8, 0)
-    //   U19 = CEIL10(D24 * D15)
-    const T16 = (isNo(breakOutMob) && D23 === 0) ? G35 : 0;
-    const T19 = T16 > 0 ? ((D22 + D23) * D15 - U8) : 0;
-    const U19 = ceil10(D24 * D15);
-    const S19 = ceil10(T19 + U19);
-    const S20 = ceil10(M21 * D13 / (1 - rack_profit_pct || 1));
-    // S21 = WG rentals + "Other Rentals (WG)" rows EXCEPT Liquid Propane.
-    // S22 = Liquid Propane row(s) from Other Rentals (WG).
-    const otherWgPropane = sumOtherRentalsByLabel("other_rentals_wire_guidance", "propane");
-    const otherWgRest    = sumSectionExtCosts("other_rentals_wire_guidance") - otherWgPropane;
-    const S21 = ceil10(H226 + otherWgRest);
-    const S22 = ceil10(otherWgPropane);
-    // S23 OH&P: WG markup on (S16,S17,S18,S19) at WG profit %, plus S21 at
-    // rental_wire profit %, less the subtotal. The split for non-breaking-out-
-    // mob also moves (T16+T19) to mobilization profit.
-    const wglb_sub = S16 + S17 + S18 + S19;
-    let S23;
-    if (isYes(breakOutMob)) {
-      S23 = ceil10(
-        markup(wglb_sub, wg_profit_pct) + markup(S21, rent_wire_pct)
-      );
-    } else {
-      S23 = ceil10(
-        ((wglb_sub - T16 - T19) / (1 - wg_profit_pct || 1))
-          + ((T16 + T19) / (1 - mob_profit_pct || 1))
-          - wglb_sub
-          + markup(S21, rent_wire_pct)
-      );
-    }
-    const wglb_total = S16 + S17 + S18 + S19 + S20 + S21 + S22 + S23;
-
-    // ── Wire Guidance Additional Items (S24–S29) ────────────────────────────
-    const slurry  = wgAdditionalLine("slurry");
-    const lineDrv = wgAdditionalLine("line driver");
-    const magnet  = wgAdditionalLine("magnet");
-    const rfid    = wgAdditionalLine("rfid");
-    const S25 = ceil10(slurry);
-    const S26 = ceil10(lineDrv);
-    const S27 = ceil10(magnet);
-    const S28 = ceil10(rfid);
-    const wga_sub = S25 + S26 + S27 + S28;
-    // Workbook quirk: if the sub equals exactly 600 the OH&P is forced to 400;
-    // otherwise standard 40% markup.
-    const S29 = ceil10(
-      wga_sub === 600 ? 400 : (wga_sub / (1 - 0.40) - wga_sub)
-    );
-    const wga_total = S25 + S26 + S27 + S28 + S29;
-
-    // ── Mobilization (S30–S35) ──────────────────────────────────────────────
-    // S31 (Materials) — workbook leaves this as a static 0; we mirror that.
-    const avg_mobs = mobs > 0 ? mobs : 0;   // single-set view: rack==wire
-    const has_mobs = avg_mobs > 0;
-    const S31 = 0;
-    const S32 = has_mobs && isYes(breakOutMob) ? ceil10(G35 / avg_mobs) : 0;
-    const S33 = (S18 + S6 === 0) ? ceil10(G34) : 0;
-    const S34 = has_mobs && isYes(breakOutMob) ? ceil10((D22 / avg_mobs) * D15) : 0;
-    const mob_sub = S31 + S32 + S33 + S34;
-    const S35 = ceil10(markup(mob_sub, mob_profit_pct));
-    const mob_total = S31 + S32 + S33 + S34 + S35;
-
-    // ── Remobilization (S36–S41) ────────────────────────────────────────────
-    // Each line = Mobilization line × (mobs − 1). Zero when mobs ≤ 1.
-    const extra = Math.max(0, avg_mobs - 1);
-    const has_extra = extra > 0;
-    const S37 = has_extra ? ceil10(S31 * extra) : 0;
-    const S38 = has_extra ? ceil10(S32 * extra) : 0;
-    const S39 = has_extra ? ceil10(S33 * extra) : 0;
-    const S40 = has_extra ? ceil10(S34 * extra) : 0;
-    const S41 = has_extra ? ceil10(S35 * extra) : 0;
-    const remob_total = S37 + S38 + S39 + S40 + S41;
-
-    // ── Downtime (S42–S47) ──────────────────────────────────────────────────
-    // Per-set Downtime Day Override K22 drives the bundle. Materials (S43)
-    // and Mgmt Travel (S45) are static 0 in the workbook.
-    const K22 = Number(attrs.downtime_labor_day_override ?? 0) || 0;
-    const S43 = 0;   // Materials (static in workbook)
-    const S44 = ceil10(ceilHalf(K22) * D13);
-    const S45 = 0;   // Mgmt Travel (static in workbook)
-    const S46 = S44 > 0 ? ceil10(Math.ceil(K22) * D15) : 0;
-    const S47 = S44 > 0
-      ? ceil10(ceilHalf(K22) * downtime_target - (S43 + S44 + S45 + S46))
-      : 0;
-    const downtime_total = S43 + S44 + S45 + S46 + S47;
-
-    return {
-      installation: {
-        title: "Installation (Labor Bundle)",
-        total: ilb_total,
-        lines: [
-          ["Contract Labor", S4],
-          ["Materials",      S5],
-          ["Mgmt Travel",    S6],
-          ["Buffer",         S7],
-          ["Lodging",        S8],
-          ["OH&P",           S9],
-        ],
-      },
-      rentals: {
-        title: "Rentals (Bundle)",
-        total: rentals_total,
-        lines: [
-          ["Equipment - Lifts",        S11],
-          ["Dumpsters / Site Rentals", S12],
-          ["Propane",                  S13],
-          ["OH&P",                     S14],
-        ],
-      },
-      wg_labor: {
-        title: "Wire Guidance (Labor Bundle)",
-        total: wglb_total,
-        lines: [
-          ["Contract Labor", S16],
-          ["Materials",      S17],
-          ["Mgmt Travel",    S18],
-          ["Lodging",        S19],
-          ["Buffer",         S20],
-          ["Floor Scrubber", S21],
-          ["Propane",        S22],
-          ["OH&P",           S23],
-        ],
-      },
-      wg_additional: {
-        title: "Wire Guidance (Additional Items)",
-        total: wga_total,
-        lines: [
-          ["Slurry Tank",  S25],
-          ["Line Drivers", S26],
-          ["Magnets",      S27],
-          ["RFID Tags",    S28],
-          ["OH&P",         S29],
-        ],
-      },
-      mobilization: {
-        title: "Mobilization",
-        total: mob_total,
-        lines: [
-          ["Materials",              S31, { stub: true }],
-          ["Contract Labor - Travel", S32],
-          ["Mgmt Travel",            S33],
-          ["Lodging",                S34],
-          ["OH&P",                   S35],
-        ],
-      },
-      remobilization: {
-        title: "Remobilization",
-        total: remob_total,
-        note: `× ${extra} extra mobilization${extra === 1 ? "" : "s"}`,
-        lines: [
-          ["Materials",              S37, { stub: true }],
-          ["Contract Labor - Travel", S38],
-          ["Mgmt Travel",            S39],
-          ["Lodging",                S40],
-          ["OH&P",                   S41],
-        ],
-      },
-      downtime: {
-        title: "Downtime",
-        total: downtime_total,
-        lines: [
-          ["Materials",      S43, { stub: true }],
-          ["Contract Labor", S44],
-          ["Mgmt Travel",    S45, { stub: true }],
-          ["Lodging",        S46],
-          ["OH&P",           S47],
-        ],
-      },
-    };
+    return computeSetBundles({
+      set:           { ...baseSet, ...attrs },
+      lines:         allLines,
+      lookups,
+      estimateState: readEstimateBridge(),
+    });
   }
 
   function bundleOutputCardHtml() {
@@ -1407,11 +1027,7 @@ export async function baseQuotingMetricsPage(routeFn) {
         </div>`;
     };
     return `
-      <div class="flex items-baseline justify-between gap-3 pb-2 border-b border-black/10">
-        <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">QuickBooks Bundle Output</span>
-        <span class="text-[11px] italic text-black/40">Per-bundle line items · ceilings to $10 · * = not yet modeled (0)</span>
-      </div>
-      <div class="pt-3 grid grid-cols-1 lg:grid-cols-2 gap-x-8">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-8">
         <div>
           ${renderBundle(b.installation)}
           ${renderBundle(b.rentals)}
@@ -1428,8 +1044,8 @@ export async function baseQuotingMetricsPage(routeFn) {
   }
 
   function renderBundleOutput() {
-    const card = document.querySelector("[data-bundle-output]");
-    if (card) card.innerHTML = bundleOutputCardHtml();
+    const body = document.querySelector("[data-bundle-output] [data-qm-section-body]");
+    if (body) body.innerHTML = bundleOutputCardHtml();
   }
 
   function travelCostsCardHtml() {
@@ -1445,12 +1061,9 @@ export async function baseQuotingMetricsPage(routeFn) {
          </div>`
       : "";
     return `
-      <div class="flex items-baseline justify-between gap-3 pb-2 border-b border-black/10">
-        <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">Travel Costs</span>
-        <span class="text-[11px] italic text-black/40">Computed · ${escapeHtml(tc.estimate_type)} estimate</span>
-      </div>
+      <div class="text-[11px] italic text-black/40 pb-2">Computed · ${escapeHtml(tc.estimate_type)} estimate</div>
 
-      <div class="pt-4 grid grid-cols-1 lg:grid-cols-3 gap-x-6 gap-y-4 text-sm">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-x-6 gap-y-4 text-sm">
 
         <div>
           <div class="text-[11px] font-semibold uppercase tracking-wide text-black/40 pb-2">Tab Days (this set)</div>
@@ -1491,8 +1104,8 @@ export async function baseQuotingMetricsPage(routeFn) {
   }
 
   function renderTravelCosts() {
-    const card = document.querySelector("[data-travel-costs]");
-    if (card) card.innerHTML = travelCostsCardHtml();
+    const body = document.querySelector("[data-travel-costs] [data-qm-section-body]");
+    if (body) body.innerHTML = travelCostsCardHtml();
   }
 
   async function persistAttr(field, value) {
@@ -1513,54 +1126,75 @@ export async function baseQuotingMetricsPage(routeFn) {
   }
 
   // ── page HTML ──────────────────────────────────────────────────────────────
+  // Group dividers visually band the long list of input cards into the same
+  // logical chunks the workbook uses (Rack Install / Wire Guidance / Additional
+  // Items / Labor Blocks). Behavior is unchanged — each card is still
+  // independently collapsible.
+  // Page body is bg-ink-900 (dark), so dividers need light text + a light
+  // rule to be visible in the gap between cards.
+  const groupDivider = (title) => `
+    <div class="flex items-center gap-3 pt-4 first:pt-1 px-1">
+      <span class="text-[11px] font-extrabold uppercase tracking-widest text-white">${escapeHtml(title)}</span>
+      <span class="flex-1 h-px bg-white/25"></span>
+    </div>`;
+
+  const SECTION_GROUPS = [
+    { title: "Rack Installation", codes: [
+      "materials_rack_install",
+      "teardrop_racking", "bolted_racking", "wire_decking", "anchors",
+      "cantilever_racking", "high_density_storage", "mezz_pick_modules",
+      "rack_protection", "safety_netting", "shelving", "miscellaneous",
+      "rentals_rack_install", "other_rentals_rack_install",
+    ]},
+    { title: "Wire Guidance Install", codes: [
+      "materials_wire_guidance", "wire_guidance_contract_labor",
+      "rentals_wire_guidance", "other_rentals_wire_guidance",
+    ]},
+    { title: "Additional Items", codes: [
+      "wire_guidance_additional",
+    ]},
+    { title: "Labor Blocks", codes: [
+      "downtime_labor", "remobilization_labor", "dismantle_labor",
+      "mobilization_labor", "upright_assembly_labor", "anchor_holes_labor",
+      "wedge_anchors", "miscellaneous_labor",
+    ]},
+  ];
+
+  const groupedSectionsHtml = SECTION_GROUPS.map(g => `
+    ${groupDivider(g.title)}
+    ${g.codes.map(c => sectionCardHtml(c)).join("")}
+  `).join("");
+
   const bodyHtml = `
     <div class="grid grid-cols-1 gap-3 pb-3">
 
-      <div class="card px-5 py-3">
-        <div class="flex items-baseline justify-between gap-3">
-          <div>
-            <div class="text-base font-extrabold">Base Quoting Metrics</div>
-            <div class="text-xs text-black/50">
-              Estimate #${ESTIMATE_ID} · Base set ID ${baseSet.id} · Tab Settings · Materials · Contract Labor · Rentals · Add-ons
-            </div>
-          </div>
-          <div class="text-[11px] text-black/40 whitespace-nowrap">B155.1 · Step 7a</div>
-        </div>
-      </div>
+      ${groupDivider("Configuration")}
+      ${qmCollapsibleCardHtml("Tab Settings",
+          "Per-set overrides + day type adjustments",
+          tabSettingsHtml(),
+          { cardAttrs: "data-tab-settings" })}
 
-      ${tabSettingsHtml()}
+      ${groupDivider("Live Calculations")}
+      ${qmCollapsibleCardHtml("Cost Summary",
+          "Cost checker",
+          costSummaryCardHtml(),
+          { cardAttrs: "data-cost-summary" })}
 
-      <div class="card px-5 py-4" data-cost-summary>
-        ${costSummaryCardHtml()}
-      </div>
+      ${qmCollapsibleCardHtml("Travel Costs",
+          "Computed",
+          travelCostsCardHtml(),
+          { cardAttrs: "data-travel-costs" })}
 
-      <div class="card px-5 py-4" data-travel-costs>
-        ${travelCostsCardHtml()}
-      </div>
+      ${qmCollapsibleCardHtml("QuickBooks Bundle Output",
+          "Per-bundle line items · ceilings to $10 · * = not yet modeled (0)",
+          bundleOutputCardHtml(),
+          { cardAttrs: "data-bundle-output" })}
 
-      <div class="card px-5 py-4" data-bundle-output>
-        ${bundleOutputCardHtml()}
-      </div>
-
-      ${SECTIONS.map(s => sectionCardHtml(s.code)).join("")}
+      ${groupedSectionsHtml}
 
     </div>`;
 
-  setShell({
-    title:    "",
-    subtitle: "",
-    bodyHtml,
-    showLogout: true,
-    routeFn,
-  });
-
-  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
-  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
-    pageTitleBlock.style.display = "none";
-    window.addEventListener("hashchange", () => {
-      if (pageTitleBlock) pageTitleBlock.style.display = "";
-    }, { once: true });
-  }
+  container.innerHTML = bodyHtml;
 
   // ── input wiring ───────────────────────────────────────────────────────────
   function ctxFromEvent(e) {
@@ -1640,13 +1274,13 @@ export async function baseQuotingMetricsPage(routeFn) {
   }
 
   function onClick(e) {
-    const toggle = e.target.closest("[data-section-toggle]");
+    const toggle = e.target.closest("[data-qm-section-toggle]");
     if (toggle) {
-      const card = toggle.closest("[data-section]");
-      const body = card?.querySelector("[data-section-body]");
+      const card = toggle.closest("[data-qm-section]");
+      const body = card?.querySelector("[data-qm-section-body]");
       if (body) {
         const collapsed = body.classList.toggle("hidden");
-        const chevron = toggle.querySelector("[data-section-chevron]");
+        const chevron = toggle.querySelector("[data-qm-section-chevron]");
         if (chevron) chevron.classList.toggle("-rotate-90", collapsed);
       }
       return;
@@ -1660,12 +1294,61 @@ export async function baseQuotingMetricsPage(routeFn) {
     if (e.target.closest("[data-row-delete]")) {
       const ctx = ctxFromEvent(e);
       if (ctx && ctx.idx != null) deleteRow(ctx.code, ctx.idx);
+      return;
+    }
+    if (e.target.closest("[data-clear-section]")) {
+      const ctx = ctxFromEvent(e);
+      if (ctx) clearSection(ctx.code);
+      return;
+    }
+    if (e.target.closest("[data-reset-tab-settings]")) {
+      resetTabSettings();
     }
   }
 
-  document.addEventListener("change", onFieldChange);
-  document.addEventListener("input",  onFieldInput);
-  document.addEventListener("click",  onClick);
+  // Clear every per-set attribute on this set. Iterates the live DOM so we
+  // pick up whatever Tab Settings exposes, dispatches input + change events
+  // so the existing onFieldChange / onFieldInput paths run normally (state
+  // update + PATCH + re-render of the calc cards).
+  async function resetTabSettings() {
+    const card = container.querySelector("[data-tab-settings]");
+    if (!card) return;
+    const fields = card.querySelectorAll("[data-attr-field]");
+    if (fields.length === 0) return;
+    if (!confirm("Clear every Tab Settings value on this tab? This cannot be undone.")) return;
+    for (const el of fields) {
+      el.value = "";
+      el.dispatchEvent(new Event("input",  { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
+  // Wipe every line in a section for the current metric set. Backend cascades
+  // the delete; the frontend just refreshes the table + the calc cards.
+  async function clearSection(code) {
+    const section = sections[code];
+    if (!section || section.rows.length === 0) return;
+    const title = section.config.title || code;
+    if (!confirm(`Delete all ${section.rows.length} row(s) in "${title}"? This cannot be undone.`)) return;
+    try {
+      await api(`/quoting/metric-lines?metric_set_id=${baseSet.id}&section_code=${encodeURIComponent(code)}`, {
+        method: "DELETE",
+      });
+      section.rows = [];
+      renderTable(code);
+      renderTravelCosts();
+      renderCostSummary();
+      renderBundleOutput();
+    } catch (err) {
+      alert("Failed to clear section: " + (err?.message || err));
+    }
+  }
+
+  // Container-scoped so we don't collide with the host page's listeners
+  // (e.g. the Estimate page also listens for click/input on `document`).
+  container.addEventListener("change", onFieldChange);
+  container.addEventListener("input",  onFieldInput);
+  container.addEventListener("click",  onClick);
 
   // Live-update Travel Costs when the Estimate page (potentially open in
   // another tab) writes to localStorage. The 'storage' event only fires in
@@ -1679,10 +1362,39 @@ export async function baseQuotingMetricsPage(routeFn) {
   }
   window.addEventListener("storage", onStorage);
 
-  window.addEventListener("hashchange", () => {
-    document.removeEventListener("change", onFieldChange);
-    document.removeEventListener("input",  onFieldInput);
-    document.removeEventListener("click",  onClick);
+  return function cleanup() {
+    container.removeEventListener("change", onFieldChange);
+    container.removeEventListener("input",  onFieldInput);
+    container.removeEventListener("click",  onClick);
     window.removeEventListener("storage", onStorage);
-  }, { once: true });
+  };
+}
+
+/**
+ * Standalone page route — wraps the mount function in setShell. Kept so
+ * #/base-quoting-metrics still works as a direct URL even after the page
+ * is also embedded in #/estimate.
+ */
+export async function baseQuotingMetricsPage(routeFn) {
+  setShell({
+    title:    "",
+    subtitle: "",
+    bodyHtml: `<div data-qm-standalone-host></div>`,
+    showLogout: true,
+    routeFn,
+  });
+
+  // Hide the empty page-title block; restore on navigate-away.
+  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
+  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
+    pageTitleBlock.style.display = "none";
+    window.addEventListener("hashchange", () => {
+      if (pageTitleBlock) pageTitleBlock.style.display = "";
+    }, { once: true });
+  }
+
+  const host = document.querySelector("[data-qm-standalone-host]");
+  if (!host) return;
+  const cleanup = await mountBaseQuotingMetrics({ container: host });
+  window.addEventListener("hashchange", cleanup, { once: true });
 }
