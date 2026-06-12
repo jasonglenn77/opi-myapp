@@ -1,4 +1,5 @@
-import { api, getToken, clearToken } from "./api.js";
+import { getToken, clearToken, fetchMe, getMe, hasCapability } from "./api.js";
+import { setShell, applyNavPermissions } from "./shell.js";
 import { loginPage } from "./pages/login.js";
 import { dashboardPage } from "./pages/dashboard.js";
 import { projectsPage } from "./pages/projects.js";
@@ -12,10 +13,46 @@ import { estimatePage } from "./pages/estimate.js";
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
 
+// Which capability each route requires (mirrors backend page.* capabilities).
+const ROUTE_CAPS = {
+  "#/projects":   "page.dashboard",
+  "#/financials": "page.financials",
+  "#/estimate":   "page.estimate",
+  "#/schedule":   "page.schedule",
+  "#/assignment": "page.assignment",
+  "#/teams":      "page.teams",
+  "#/users":      "page.users",
+  "#/quickbooks": "page.quickbooks",
+};
+
+// Preference order for choosing a landing page the user is actually allowed to see.
+const ROUTE_ORDER = [
+  "#/projects", "#/financials", "#/estimate", "#/schedule",
+  "#/assignment", "#/teams", "#/users", "#/quickbooks",
+];
+
+function requiredCapForHash(hash) {
+  if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return "page.estimate";
+  return ROUTE_CAPS[hash] || null;
+}
+
+function firstAllowedRoute() {
+  return ROUTE_ORDER.find((r) => hasCapability(ROUTE_CAPS[r])) || null;
+}
+
+function renderNoAccess() {
+  setShell({
+    title: "No access",
+    subtitle: "",
+    bodyHtml: `<div class="card p-6">Your account doesn't have access to any pages yet. Please contact an administrator.</div>`,
+    routeFn: route,
+  });
+}
+
 async function route() {
   const hash = location.hash || "#/projects";
 
-  // Auto-login UX: if token exists, validate quickly via /me before rendering the landing page.
+  // Auto-login UX: if token exists, validate via /me before rendering the landing page.
   // Only clear the token on genuine auth failures (401/403). Transient server errors
   // (500, 503, network blips) must NOT log the user out — those tokens are still valid.
   if (hash !== "#/login") {
@@ -25,7 +62,9 @@ async function route() {
       return loginPage(route);
     }
     try {
-      await api("/me");
+      // Force-refresh each navigation: re-validates the token and picks up any
+      // permission changes an admin made since the page loaded.
+      await fetchMe(true);
     } catch (err) {
       if (err && (err.status === 401 || err.status === 403)) {
         clearToken();
@@ -35,6 +74,23 @@ async function route() {
       // Any other failure: keep the user signed in and let the target page render.
       // The page's own API calls will surface their own errors if the backend is down.
       console.warn("Token validation skipped (transient error):", err?.message || err);
+    }
+
+    // Reflect capabilities in the nav (no-op if /me was unavailable).
+    applyNavPermissions();
+
+    // Route guard (UI only; the backend enforces too). If we have a known user
+    // and they lack the target page's capability, send them somewhere allowed.
+    if (getMe()) {
+      const needed = requiredCapForHash(hash);
+      if (needed && !hasCapability(needed)) {
+        const dest = firstAllowedRoute();
+        if (dest && dest !== hash) {
+          location.hash = dest;
+          return;
+        }
+        return renderNoAccess();
+      }
     }
   }
 

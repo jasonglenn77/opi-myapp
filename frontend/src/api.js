@@ -16,6 +16,27 @@ export function getToken() {
 export function clearToken() {
   localStorage.removeItem("token");
   sessionStorage.removeItem("token");
+  _me = null;
+}
+
+/** Cached current user (role + capabilities + resource links) from /api/me. */
+let _me = null;
+
+export async function fetchMe(force = false) {
+  if (_me && !force) return _me;
+  const data = await api("/me");
+  _me = data.user || null;
+  return _me;
+}
+
+export function getMe() {
+  return _me;
+}
+
+/** True if the current user has the given capability (e.g. "page.financials"). */
+export function hasCapability(cap) {
+  const caps = (_me && _me.capabilities) || [];
+  return caps.includes(cap);
 }
 
 export async function api(path, opts = {}) {

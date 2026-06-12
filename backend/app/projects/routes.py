@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 import json
 
 from app.auth import get_current_user, require_admin
+from app.permissions import filter_visible, can_edit_assignment, visible_project_qbo_ids
 from .service import (
     list_assignable_projects,
     get_assignment_bundle,
@@ -52,6 +53,9 @@ def assignment_bundle(qbo_customer_id: int, user=Depends(get_current_user)):
 
 @router.post("/assignment/save")
 def assignment_save(req: ScheduleItemSaveRequest, user=Depends(get_current_user)):
+    # Permission: edit_any, or edit_own when the project is in the user's scope.
+    if not can_edit_assignment(user, req.qbo_customer_id):
+        raise HTTPException(status_code=403, detail="You can't edit this project's schedule")
     try:
         return save_schedule_item(req=req, actor_user_id=int(user["id"]))
     except ValueError as e:
@@ -60,6 +64,19 @@ def assignment_save(req: ScheduleItemSaveRequest, user=Depends(get_current_user)
 @router.delete("/assignment/schedule-item/{schedule_item_id}")
 def delete_schedule_item(schedule_item_id: int, user=Depends(get_current_user)):
     from .service import delete_schedule_item as delete_schedule_item_service
+    # Resolve the owning project so we can apply the same edit permission check.
+    with engine.connect() as conn:
+        owner = conn.execute(text("""
+            SELECT p.qbo_customer_id
+            FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id = psi.project_id
+            WHERE psi.id = :id
+            LIMIT 1
+        """), {"id": schedule_item_id}).mappings().first()
+    if not owner:
+        raise HTTPException(status_code=404, detail="Schedule item not found")
+    if not can_edit_assignment(user, owner["qbo_customer_id"]):
+        raise HTTPException(status_code=403, detail="You can't edit this project's schedule")
     try:
         return delete_schedule_item_service(schedule_item_id, int(user["id"]))
     except ValueError as e:
@@ -155,7 +172,8 @@ def assignment_table(user=Depends(get_current_user)):
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
 
-    return {"projects": [dict(r) for r in rows]}
+    projects = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    return {"projects": projects}
 
 
 @router.get("/projects/schedule-list")
@@ -241,7 +259,8 @@ def projects_schedule_list(user=Depends(get_current_user)):
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
 
-    return {"rows": [dict(r) for r in rows]}
+    visible = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    return {"rows": visible}
 
 
 @router.get("/projects/{qbo_customer_id}/events")
@@ -581,6 +600,9 @@ def projects(user=Depends(get_current_user)):
 
     projects = [dict(r) for r in rows]
 
+    # Scope to visible projects before aggregating, so KPI cards reconcile.
+    projects = filter_visible(projects, user, key="qbo_customer_id")
+
     # Compute header-level aggregates for the KPI cards
     total_estimate_cost  = sum(float(p.get("estimate_cost_amt") or 0) for p in projects)
     total_estimate_line  = sum(float(p.get("estimate_line_amt") or 0) for p in projects)
@@ -731,7 +753,8 @@ def projects_basic(user=Depends(get_current_user)):
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
 
-    return {"projects": [dict(r) for r in rows][:1000]}
+    visible = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    return {"projects": visible[:1000]}
 
 
 @router.get("/projects/financials")
@@ -785,7 +808,8 @@ def projects_financials(user=Depends(get_current_user)):
         with engine.connect() as conn:
             rows = conn.execute(read_sql).mappings().all()
 
-    return {"financials": [dict(r) for r in rows][:1000]}
+    visible = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    return {"financials": visible[:1000]}
 
 
 @router.post("/projects/refresh-financials")
@@ -875,7 +899,12 @@ def projects_ar_balance(req: ArBalanceRequest, user=Depends(get_current_user)):
             "qbo_ids":   tuple(qbo_ids) if qbo_ids else ("",),
         }).mappings().all()
 
-    return {"invoices": [dict(r) for r in rows]}
+    # Scope to the user's visible projects (admin/office unaffected).
+    allowed = visible_project_qbo_ids(user)
+    rows = [dict(r) for r in rows]
+    if allowed is not None:
+        rows = [r for r in rows if str(r.get("project_qbo_id")) in allowed]
+    return {"invoices": rows}
 
 
 class EstimatesByStatusRequest(BaseModel):
@@ -949,7 +978,12 @@ def projects_estimates_by_status(req: EstimatesByStatusRequest, user=Depends(get
             "qbo_ids":   tuple(qbo_ids) if qbo_ids else ("",),
         }).mappings().all()
 
-    return {"estimates": [dict(r) for r in rows]}
+    # Scope to the user's visible projects (admin/office unaffected).
+    allowed = visible_project_qbo_ids(user)
+    rows = [dict(r) for r in rows]
+    if allowed is not None:
+        rows = [r for r in rows if str(r.get("project_qbo_id")) in allowed]
+    return {"estimates": rows}
 
 
 class FinancialsByItemRequest(BaseModel):
@@ -976,6 +1010,17 @@ def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_c
 
     # Build an optional IN-filter clause
     ids = [str(x).strip() for x in req.project_qbo_ids if x]
+
+    # Scope to the user's visible projects. For scoped users we must always
+    # constrain by id (an empty request would otherwise mean "all projects").
+    allowed = visible_project_qbo_ids(user)
+    if allowed is not None:
+        ids = [i for i in ids if i in allowed] if ids else list(allowed)
+        if not ids:
+            # Scoped user with nothing visible -> empty pivot.
+            return {"items": [], "estimate_line": {}, "estimate_cost": {},
+                    "invoice_line": {}, "expense_line": {}}
+
     if ids:
         # Parameterised safely
         placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
@@ -1149,6 +1194,7 @@ def schedule(
       SELECT
         psi.id AS schedule_item_id,
         p.id AS project_id,
+        qc.id AS qbo_customer_id,
         psi.start_date,
         psi.end_date,
         psi.wire_guidance,
@@ -1235,6 +1281,9 @@ def schedule(
             else:
                 row[k] = []
         assignments.append(row)
+
+    # Scope assignments to the user's visible projects (crews list is not sensitive).
+    assignments = filter_visible(assignments, user, key="qbo_customer_id")
 
     return {
         "week_start": visible_start.isoformat(),

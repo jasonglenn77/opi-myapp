@@ -11,6 +11,7 @@ import uuid
 from typing import Optional
 
 from .auth import create_access_token, get_current_user, require_admin
+from .permissions import VALID_ROLES, filter_visible, permission_snapshot, ALL_CAPABILITIES
 from app.qbo.routes import router as qbo_router
 from app.projects.routes import router as projects_router
 from app.quoting.routes import router as quoting_router
@@ -47,6 +48,8 @@ class UserCreateRequest(BaseModel):
     last_name: Optional[str] = None
     role: str = "user"
     is_active: bool = True
+    project_manager_id: Optional[int] = None
+    work_crew_id: Optional[int] = None
 
 class UserUpdateRequest(BaseModel):
     email: Optional[str] = None
@@ -55,6 +58,15 @@ class UserUpdateRequest(BaseModel):
     last_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    project_manager_id: Optional[int] = None
+    work_crew_id: Optional[int] = None
+
+class PermissionOverrideItem(BaseModel):
+    capability: str
+    effect: str  # "allow" | "deny"
+
+class PermissionsUpdateRequest(BaseModel):
+    overrides: list[PermissionOverrideItem] = []
 
 class ProjectManagerCreateRequest(BaseModel):
     first_name: Optional[str] = None
@@ -138,7 +150,18 @@ def login(req: LoginRequest):
 
 @app.get("/api/me")
 def me(user=Depends(get_current_user)):
-    return {"user": user}
+    # Expose role, links and capabilities so the frontend can hide nav/buttons.
+    # (Security is still enforced server-side; this is UX only.)
+    return {
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "role": user["role"],
+            "project_manager_id": user.get("project_manager_id"),
+            "work_crew_id": user.get("work_crew_id"),
+            "capabilities": sorted(user.get("capabilities") or []),
+        }
+    }
 
 
 @app.get("/api/dashboard")
@@ -304,6 +327,9 @@ def dashboard(user=Depends(get_current_user)):
 
     projects = [dict(r) for r in rows]
 
+    # Scope to the projects this user may see (admin/office see all).
+    projects = filter_visible(projects, user, key="qbo_customer_id")
+
     # avg age (kept for future use; harmless if frontend ignores it)
     age_sum = 0
     age_ct = 0
@@ -327,11 +353,61 @@ def list_users(_admin=Depends(require_admin)):
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT id, uuid, email, first_name, last_name, role, is_active,
+                   project_manager_id, work_crew_id,
                    created_at, updated_at, last_login_at
             FROM users
             ORDER BY id DESC
         """)).mappings().all()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/users/{user_id}/permissions")
+def get_user_permissions(user_id: int, _admin=Depends(require_admin)):
+    """Role defaults, this user's overrides, and the resulting effective set."""
+    from .db import engine
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT id, role FROM users WHERE id = :id LIMIT 1"),
+            {"id": user_id},
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    return permission_snapshot(row["id"], row["role"])
+
+
+@app.put("/api/users/{user_id}/permissions")
+def set_user_permissions(user_id: int, req: PermissionsUpdateRequest, _admin=Depends(require_admin)):
+    """Replace this user's permission overrides with the supplied list."""
+    valid_caps = set(ALL_CAPABILITIES)
+    cleaned = []
+    for item in req.overrides:
+        cap = (item.capability or "").strip()
+        effect = (item.effect or "").strip().lower()
+        if cap not in valid_caps:
+            raise HTTPException(status_code=400, detail=f"Unknown capability: {cap}")
+        if effect not in ("allow", "deny"):
+            raise HTTPException(status_code=400, detail="effect must be 'allow' or 'deny'")
+        cleaned.append({"cap": cap, "effect": effect})
+
+    from .db import engine
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT id FROM users WHERE id = :id LIMIT 1"), {"id": user_id}
+        ).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        conn.execute(
+            text("DELETE FROM user_permission_overrides WHERE user_id = :uid"),
+            {"uid": user_id},
+        )
+        for c in cleaned:
+            conn.execute(text("""
+                INSERT INTO user_permission_overrides (user_id, capability, effect)
+                VALUES (:uid, :cap, :effect)
+            """), {"uid": user_id, "cap": c["cap"], "effect": c["effect"]})
+
+    return {"ok": True}
 
 
 @app.post("/api/users")
@@ -343,7 +419,7 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Email required")
 
     role = (req.role or "user").strip().lower()
-    if role not in ("admin", "user"):
+    if role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
 
     if not req.password or not req.password.strip():
@@ -358,8 +434,10 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO users (uuid, email, first_name, last_name, password_hash, role, is_active)
-                VALUES (:uuid, :email, :first_name, :last_name, :password_hash, :role, :is_active)
+                INSERT INTO users (uuid, email, first_name, last_name, password_hash, role, is_active,
+                                   project_manager_id, work_crew_id)
+                VALUES (:uuid, :email, :first_name, :last_name, :password_hash, :role, :is_active,
+                        :project_manager_id, :work_crew_id)
             """), {
                 "uuid": user_uuid,
                 "email": email,
@@ -368,6 +446,8 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
                 "password_hash": password_hash,
                 "role": role,
                 "is_active": 1 if req.is_active else 0,
+                "project_manager_id": req.project_manager_id,
+                "work_crew_id": req.work_crew_id,
             })
     except Exception:
         raise HTTPException(status_code=400, detail="Could not create user (email may already exist)")
@@ -400,7 +480,7 @@ def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_adm
 
     if req.role is not None:
         role = req.role.strip().lower()
-        if role not in ("admin", "user"):
+        if role not in VALID_ROLES:
             raise HTTPException(status_code=400, detail="Invalid role")
         updates.append("role = :role")
         params["role"] = role
@@ -408,6 +488,15 @@ def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_adm
     if req.is_active is not None:
         updates.append("is_active = :is_active")
         params["is_active"] = 1 if req.is_active else 0
+
+    # Resource links (nullable): allow setting or clearing via explicit null.
+    if "project_manager_id" in req.__fields_set__:
+        updates.append("project_manager_id = :project_manager_id")
+        params["project_manager_id"] = req.project_manager_id
+
+    if "work_crew_id" in req.__fields_set__:
+        updates.append("work_crew_id = :work_crew_id")
+        params["work_crew_id"] = req.work_crew_id
 
     # Password: if included and non-empty, update it. If included as empty/null, ignore.
     if "password" in req.__fields_set__:

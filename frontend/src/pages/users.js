@@ -2,11 +2,58 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 
 export async function usersPage(routeFn) {
-  const users = await api("/users");
+  // Users plus the resource records a login can be linked to (PMs / work crews).
+  const [users, pms, crews] = await Promise.all([
+    api("/users"),
+    api("/project-managers").catch(() => []),
+    api("/work-crews").catch(() => []),
+  ]);
 
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[c]));
+
+  const pmLabel = (p) => {
+    const name = `${p.first_name || ""} ${p.last_name || ""}`.trim();
+    return name || p.email || `PM #${p.id}`;
+  };
+  const crewLabel = (c) => {
+    const base = c.name || `Crew #${c.id}`;
+    return c.parent_id ? `— ${base}` : base;  // indent sub-crews
+  };
+
+  // Friendlier capability labels for the permissions matrix.
+  const CAP_LABELS = {
+    "page.dashboard": "Page: Projects (dashboard)",
+    "page.financials": "Page: Financials",
+    "page.estimate": "Page: Estimate",
+    "page.schedule": "Page: Schedule",
+    "page.assignment": "Page: Assignment",
+    "page.teams": "Page: Teams",
+    "page.users": "Page: Users",
+    "page.quickbooks": "Page: QuickBooks",
+    "project.view_all": "See all projects (not just assigned)",
+    "assignment.edit_any": "Edit any project's schedule",
+    "assignment.edit_own": "Edit own assigned schedule items",
+    "users.manage": "Manage users & permissions",
+    "teams.manage": "Manage PMs & work crews",
+    "qbo.sync": "Run QuickBooks syncs",
+    "projects.admin_tools": "Project admin tools (refresh/reset)",
+  };
+  const capLabel = (c) => CAP_LABELS[c] || c;
+
+  // Small badge showing which PM/crew record a login is linked to.
+  const linkBadge = (u) => {
+    if (u.project_manager_id != null) {
+      const p = pms.find(x => String(x.id) === String(u.project_manager_id));
+      return `<div class="text-[11px] text-black/50 mt-0.5">PM: ${esc(p ? pmLabel(p) : "#" + u.project_manager_id)}</div>`;
+    }
+    if (u.work_crew_id != null) {
+      const c = crews.find(x => String(x.id) === String(u.work_crew_id));
+      return `<div class="text-[11px] text-black/50 mt-0.5">Crew: ${esc(c ? (c.name || "#" + u.work_crew_id) : "#" + u.work_crew_id)}</div>`;
+    }
+    return "";
+  };
 
   const rows = users.map(u => `
     <tr class="border-b border-black/5">
@@ -17,6 +64,7 @@ export async function usersPage(routeFn) {
         <span class="inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${u.role === "admin" ? "bg-black/10" : "bg-black/5"}">
           ${esc(u.role)}
         </span>
+        ${linkBadge(u)}
       </td>
       <td class="py-2 pr-3">${u.is_active ? "Active" : "Disabled"}</td>
       <td class="py-2 text-right space-x-2">
@@ -25,6 +73,13 @@ export async function usersPage(routeFn) {
           data-edit="${u.id}"
         >
           Edit
+        </button>
+
+        <button
+          class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5"
+          data-perms="${u.id}"
+        >
+          Permissions
         </button>
 
         <button
@@ -66,11 +121,16 @@ export async function usersPage(routeFn) {
             data-edit="${u.id}"
           >Edit</button>
           <button
+            class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10"
+            data-perms="${u.id}"
+          >Perms</button>
+          <button
             class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10 disabled:opacity-50"
             data-disable="${u.id}"
             ${u.is_active ? "" : "disabled"}
           >Disable</button>
         </div>
+        ${linkBadge(u)}
       </div>`;
   }).join("");
 
@@ -138,14 +198,24 @@ export async function usersPage(routeFn) {
             <div>
               <div class="label mb-1">Role</div>
               <select id="userRole" class="input">
-                <option value="user">user</option>
+                <option value="user">user (office staff)</option>
                 <option value="admin">admin</option>
+                <option value="pm">pm (project manager)</option>
+                <option value="crew_lead">crew_lead</option>
               </select>
+              <div class="text-[11px] text-black/50 mt-1">Choose <b>pm</b> or <b>crew_lead</b> to link this login to a Teams record below.</div>
             </div>
             <label class="flex items-center gap-2 text-sm text-black/70 mt-6">
               <input id="userActive" type="checkbox" class="h-4 w-4 rounded border-black/20" checked />
               Active
             </label>
+          </div>
+
+          <!-- Resource link: shown only for pm / crew_lead roles -->
+          <div id="linkPicker" class="hidden">
+            <div class="label mb-1" id="linkLabel">Linked record</div>
+            <select id="linkSelect" class="input"></select>
+            <div class="text-xs text-black/50 mt-1" id="linkHint"></div>
           </div>
 
           <div>
@@ -160,6 +230,29 @@ export async function usersPage(routeFn) {
 
           <div class="text-sm text-red-700 min-h-[1.25rem]" id="modalMsg"></div>
         </form>
+      </div>
+    </div>
+
+    <div id="permsModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-6 flex flex-col" style="width:100%; max-width:42rem; max-height:85vh; overflow:hidden;">
+        <div class="flex items-center justify-between mb-1">
+          <div class="text-lg font-extrabold">Permissions</div>
+          <button id="closePermsBtn" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
+        </div>
+        <div class="text-sm text-black/60 mb-3" id="permsSubtitle"></div>
+
+        <div class="text-xs text-black/50 mb-2">
+          Each capability follows the role's default unless you override it.
+          <span class="font-semibold">Allow</span> grants it, <span class="font-semibold">Deny</span> removes it.
+        </div>
+
+        <div id="permsList" class="divide-y divide-black/5 border-y border-black/10" style="flex:1 1 auto; min-height:0; overflow-y:auto;"></div>
+
+        <div class="flex justify-end gap-2 pt-3">
+          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" type="button" id="permsCancelBtn">Cancel</button>
+          <button class="btn-primary" type="button" id="permsSaveBtn">Save permissions</button>
+        </div>
+        <div class="text-sm text-red-700 min-h-[1.25rem]" id="permsMsg"></div>
       </div>
     </div>
   `;
@@ -204,7 +297,12 @@ export async function usersPage(routeFn) {
   // Close on Escape
   if (!document.body.dataset.usersEscBound) {
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeModal();
+      if (e.key === "Escape") {
+        document.getElementById("userModal")?.classList.add("hidden");
+        document.getElementById("userModal")?.classList.remove("flex");
+        document.getElementById("permsModal")?.classList.add("hidden");
+        document.getElementById("permsModal")?.classList.remove("flex");
+      }
     });
     document.body.dataset.usersEscBound = "1";
   }
@@ -212,6 +310,36 @@ export async function usersPage(routeFn) {
   // Close buttons
   document.getElementById("closeModalBtn").addEventListener("click", closeModal);
   document.getElementById("cancelBtn").addEventListener("click", closeModal);
+
+  // Show/populate the PM or crew picker based on the chosen role.
+  const linkPicker = document.getElementById("linkPicker");
+  const linkSelect = document.getElementById("linkSelect");
+  const linkLabel  = document.getElementById("linkLabel");
+  const linkHint   = document.getElementById("linkHint");
+
+  function syncLinkPicker(role, selectedId) {
+    const opt = (val, text, sel) => `<option value="${val}" ${sel ? "selected" : ""}>${esc(text)}</option>`;
+    if (role === "pm") {
+      linkLabel.textContent = "Linked project manager";
+      linkHint.textContent = "Which Teams-page PM record this login represents (scopes them to that PM's projects).";
+      linkSelect.innerHTML = opt("", "— none —", selectedId == null)
+        + pms.map(p => opt(p.id, pmLabel(p), String(p.id) === String(selectedId))).join("");
+      linkPicker.classList.remove("hidden");
+    } else if (role === "crew_lead") {
+      linkLabel.textContent = "Linked work crew";
+      linkHint.textContent = "Which crew this login leads (scopes them to that crew's projects).";
+      linkSelect.innerHTML = opt("", "— none —", selectedId == null)
+        + crews.map(c => opt(c.id, crewLabel(c), String(c.id) === String(selectedId))).join("");
+      linkPicker.classList.remove("hidden");
+    } else {
+      linkPicker.classList.add("hidden");
+      linkSelect.innerHTML = "";
+    }
+  }
+
+  document.getElementById("userRole").addEventListener("change", (e) => {
+    syncLinkPicker(e.target.value, null);
+  });
 
   document.getElementById("newUserBtn").addEventListener("click", () => {
     document.getElementById("userId").value = "";
@@ -221,6 +349,7 @@ export async function usersPage(routeFn) {
     document.getElementById("userRole").value = "user";
     document.getElementById("userActive").checked = true;
     document.getElementById("userPassword").value = "";
+    syncLinkPicker("user", null);
     openModal("New user");
   });
 
@@ -231,13 +360,18 @@ export async function usersPage(routeFn) {
       const u = users.find(x => String(x.id) === String(id));
       if (!u) return;
 
+      const role = (u.role || "user").toLowerCase();
       document.getElementById("userId").value = u.id;
       document.getElementById("firstName").value = u.first_name || "";
       document.getElementById("lastName").value = u.last_name || "";
       document.getElementById("userEmail").value = u.email || "";
-      document.getElementById("userRole").value = (u.role || "user").toLowerCase();
+      document.getElementById("userRole").value = role;
       document.getElementById("userActive").checked = !!u.is_active;
       document.getElementById("userPassword").value = "";
+      const linkedId = role === "pm" ? u.project_manager_id
+                     : role === "crew_lead" ? u.work_crew_id
+                     : null;
+      syncLinkPicker(role, linkedId);
       openModal("Edit user");
     });
   });
@@ -262,13 +396,22 @@ export async function usersPage(routeFn) {
     modalMsg.textContent = "";
 
     const id = document.getElementById("userId").value;
+    const role = document.getElementById("userRole").value;
+
+    // Only one link applies per role; clear the other so stale links don't linger.
+    const linkVal = linkSelect.value ? parseInt(linkSelect.value, 10) : null;
+    const project_manager_id = role === "pm" ? linkVal : null;
+    const work_crew_id = role === "crew_lead" ? linkVal : null;
+
     const payload = {
       email: document.getElementById("userEmail").value.trim(),
       first_name: document.getElementById("firstName").value.trim() || null,
       last_name: document.getElementById("lastName").value.trim() || null,
-      role: document.getElementById("userRole").value,
+      role,
       is_active: document.getElementById("userActive").checked,
-      password: document.getElementById("userPassword").value || null
+      password: document.getElementById("userPassword").value || null,
+      project_manager_id,
+      work_crew_id,
     };
 
     try {
@@ -288,6 +431,81 @@ export async function usersPage(routeFn) {
       routeFn();
     } catch (err) {
       modalMsg.textContent = "Save failed (check for duplicate email / permissions).";
+    }
+  });
+
+  // ----- Permissions matrix modal -----
+  const permsModal = document.getElementById("permsModal");
+  const permsList = document.getElementById("permsList");
+  const permsMsg = document.getElementById("permsMsg");
+  const permsSubtitle = document.getElementById("permsSubtitle");
+  let permsUserId = null;
+
+  const openPerms = () => { permsModal.classList.remove("hidden"); permsModal.classList.add("flex"); };
+  const closePerms = () => { permsModal.classList.add("hidden"); permsModal.classList.remove("flex"); };
+
+  permsModal.addEventListener("click", (e) => { if (e.target === permsModal) closePerms(); });
+  document.getElementById("closePermsBtn").addEventListener("click", closePerms);
+  document.getElementById("permsCancelBtn").addEventListener("click", closePerms);
+
+  function renderPermsRows(snapshot) {
+    const overrideMap = {};
+    for (const o of (snapshot.overrides || [])) overrideMap[o.capability] = o.effect;
+    const defaults = new Set(snapshot.defaults || []);
+    permsList.innerHTML = (snapshot.all_capabilities || []).map(cap => {
+      const cur = overrideMap[cap] || "default";
+      const defOn = defaults.has(cap);
+      const sel = (v, t) => `<option value="${v}" ${cur === v ? "selected" : ""}>${t}</option>`;
+      return `
+        <div class="flex items-center justify-between gap-3 py-2">
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-ink-900 truncate">${esc(capLabel(cap))}</div>
+            <div class="text-[11px] text-black/40">${esc(cap)} · role default: <span class="font-semibold ${defOn ? "text-emerald-600" : "text-black/40"}">${defOn ? "ON" : "off"}</span></div>
+          </div>
+          <select class="input shrink-0" style="width:9rem;" data-cap-select="${esc(cap)}">
+            ${sel("default", `Default (${defOn ? "on" : "off"})`)}
+            ${sel("allow", "Allow")}
+            ${sel("deny", "Deny")}
+          </select>
+        </div>`;
+    }).join("");
+  }
+
+  async function openPermsForUser(id) {
+    const u = users.find(x => String(x.id) === String(id));
+    permsUserId = id;
+    permsMsg.textContent = "";
+    permsSubtitle.textContent = u ? `${u.email} — role: ${u.role}` : "";
+    permsList.innerHTML = `<div class="text-sm text-black/40 py-4">Loading…</div>`;
+    openPerms();
+    try {
+      const snap = await api(`/users/${id}/permissions`);
+      renderPermsRows(snap);
+    } catch (e) {
+      permsList.innerHTML = `<div class="text-sm text-red-700 py-4">Failed to load permissions.</div>`;
+    }
+  }
+
+  document.querySelectorAll("[data-perms]").forEach(btn => {
+    btn.addEventListener("click", () => openPermsForUser(btn.getAttribute("data-perms")));
+  });
+
+  document.getElementById("permsSaveBtn").addEventListener("click", async () => {
+    permsMsg.textContent = "";
+    const overrides = [];
+    permsList.querySelectorAll("[data-cap-select]").forEach(sel => {
+      if (sel.value === "allow" || sel.value === "deny") {
+        overrides.push({ capability: sel.getAttribute("data-cap-select"), effect: sel.value });
+      }
+    });
+    try {
+      await api(`/users/${permsUserId}/permissions`, {
+        method: "PUT",
+        body: JSON.stringify({ overrides }),
+      });
+      closePerms();
+    } catch (e) {
+      permsMsg.textContent = "Failed to save permissions.";
     }
   });
 }

@@ -25,6 +25,9 @@ Thumbs.db
 # database dumps / local files
 *.sql
 *.sqlite
+# ...but DO track schema migrations (needed for prod deploys)
+!backend/migrations/
+!backend/migrations/*.sql
 
 # deploy artifacts
 *.zip

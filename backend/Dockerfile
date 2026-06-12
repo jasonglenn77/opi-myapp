@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app ./app
 
+# Copy SQL migrations so `python -m app.migrate` can run inside the container
+COPY migrations ./migrations
+
 # Expose port for the container
 EXPOSE 8000
 

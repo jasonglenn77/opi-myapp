@@ -1,5 +1,26 @@
 // Shell management: showing/hiding auth vs main UI, setting page title/subtitle/body, binding global handlers, etc.
-import { clearToken } from "./api.js";
+import { clearToken, getMe } from "./api.js";
+
+/**
+ * Show/hide nav (and any other tagged element) based on the current user's
+ * capabilities. UX only — the backend still enforces access.
+ *   data-cap="page.x"            -> hidden unless the user has that capability
+ *   data-cap-any="page.a,page.b" -> hidden unless the user has at least one
+ */
+export function applyNavPermissions() {
+  const me = getMe();
+  const allowed = new Set((me && me.capabilities) || []);
+
+  document.querySelectorAll("[data-cap]").forEach((el) => {
+    el.classList.toggle("hidden", !allowed.has(el.getAttribute("data-cap")));
+  });
+
+  document.querySelectorAll("[data-cap-any]").forEach((el) => {
+    const any = (el.getAttribute("data-cap-any") || "")
+      .split(",").map((s) => s.trim()).filter(Boolean);
+    el.classList.toggle("hidden", !any.some((c) => allowed.has(c)));
+  });
+}
 
 export function showAuth() {
   document.getElementById("authRoot")?.classList.remove("hidden");
