@@ -45,6 +45,14 @@ def sync_transactions(_admin=Depends(require_admin)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/sync/accounts")
+def sync_accounts(_admin=Depends(require_admin)):
+    try:
+        return service.run_accounts_sync(triggered_by="manual")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/status")
 def qbo_status(_admin=Depends(require_admin)):
     service.qbo_init_tables()

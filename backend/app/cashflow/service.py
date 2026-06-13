@@ -49,6 +49,120 @@ WEEKS = 13
 WEEK_END_WEEKDAY = 4  # Friday (matches the spreadsheet's week-ending dates)
 
 
+# ---------------------------------------------------------------------------
+# Category settings (user-managed: which expense categories are "operating"
+# cash vs. transfers/financing to exclude). Persisted, shared across users.
+# Default = included; only exclusions are stored.
+# ---------------------------------------------------------------------------
+def ensure_cashflow_tables():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cashflow_category_settings (
+              category VARCHAR(255) NOT NULL PRIMARY KEY,
+              excluded TINYINT(1) NOT NULL DEFAULT 0,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB
+        """))
+
+
+def _excluded_categories() -> set:
+    try:
+        with engine.connect() as conn:
+            return set(conn.execute(
+                text("SELECT category FROM cashflow_category_settings WHERE excluded = 1")
+            ).scalars().all())
+    except Exception:
+        return set()  # table not created yet
+
+
+def list_expense_categories() -> list:
+    """All Purchase expense categories (account parents) with a trailing-12-month
+    total, the current include/exclude flag, and — when the chart of accounts has
+    been synced — the QBO classification + a suggested-exclude flag (anything that
+    isn't a P&L 'Expense' account: bank transfers, liabilities, assets/capex)."""
+    ensure_cashflow_tables()
+    start = date.today() - timedelta(days=365)
+    base = """
+        SELECT g.category, g.line_ct, g.total_12mo {extra}
+        FROM (
+          SELECT SUBSTRING_INDEX(
+                   JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')),
+                   ':', 1) AS category,
+                 COUNT(*) AS line_ct,
+                 ROUND(SUM(l.amount)) AS total_12mo
+          FROM qbo_transactions qt
+          JOIN qbo_transaction_lines l ON l.transaction_id = qt.id
+          WHERE qt.entity_type = 'Purchase'
+            AND qt.txn_date >= :start
+            AND JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name') IS NOT NULL
+          GROUP BY category
+        ) g
+        {join}
+        ORDER BY g.total_12mo DESC
+    """
+    excluded = _excluded_categories()
+    with engine.connect() as conn:
+        try:
+            sql = text(base.format(
+                extra=", acc.classification AS classification, acc.account_type AS account_type",
+                join="LEFT JOIN qbo_accounts acc ON acc.name = g.category",
+            ))
+            rows = conn.execute(sql, {"start": start}).mappings().all()
+        except Exception:
+            # Chart of accounts not synced yet -> no classification available.
+            sql = text(base.format(extra="", join=""))
+            rows = conn.execute(sql, {"start": start}).mappings().all()
+
+    out = []
+    for r in rows:
+        cls = r.get("classification") if hasattr(r, "get") else None
+        # Suggest excluding anything that isn't a P&L Expense account.
+        suggested = bool(cls) and cls != "Expense"
+        out.append({
+            "category": r["category"],
+            "line_ct": int(r["line_ct"]),
+            "total_12mo": float(r["total_12mo"] or 0),
+            "excluded": r["category"] in excluded,
+            "classification": cls,
+            "account_type": r.get("account_type") if hasattr(r, "get") else None,
+            "suggested_exclude": suggested,
+        })
+    return out
+
+
+def get_bank_balance() -> dict:
+    """Total current cash across QBO Bank accounts (for the opening balance)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT name, current_balance
+                FROM qbo_accounts
+                WHERE account_type = 'Bank' AND (active = 1 OR active IS NULL)
+                ORDER BY current_balance DESC
+            """)).mappings().all()
+    except Exception:
+        return {"available": False, "balance": 0.0, "accounts": []}
+    total = sum(float(r["current_balance"] or 0) for r in rows)
+    return {
+        "available": len(rows) > 0,
+        "balance": round(total, 2),
+        "accounts": [{"name": r["name"], "balance": float(r["current_balance"] or 0)} for r in rows],
+    }
+
+
+def set_excluded_categories(categories: list) -> dict:
+    """Replace the exclusion set with the supplied categories."""
+    ensure_cashflow_tables()
+    cats = sorted({c.strip() for c in categories if c and c.strip()})
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM cashflow_category_settings"))
+        for c in cats:
+            conn.execute(text(
+                "INSERT INTO cashflow_category_settings (category, excluded) VALUES (:c, 1)"
+            ), {"c": c})
+    return {"ok": True, "excluded": cats}
+
+
 def _next_weekday(d: date, weekday: int) -> date:
     """Date of the given weekday (0=Mon..6=Sun) on or after d."""
     return d + timedelta(days=(weekday - d.weekday()) % 7)
@@ -100,19 +214,27 @@ def generate_forecast(start_date: date | None = None,
         ending[i] = round(bal, 2)
 
     return {
+        "mode": "forecast",
         "as_of": today.isoformat(),
         "start_date": week_ends[0].isoformat(),
         "weeks": weeks,
         "week_ends": [d.isoformat() for d in week_ends],
         "opening_balance": round(float(opening_balance), 2),
         "inflow": {
+            "label": "Cash Inflow",
+            "sublabel": "open invoices by due date",
             "rows": inflow_rows,
             "weekly_totals": [round(x, 2) for x in inflow_totals],
             "grand_total": round(sum(inflow_totals), 2),
         },
         "outflow": {
-            "ap": {"rows": ap_rows, "weekly_totals": [round(x, 2) for x in ap_totals]},
-            "recurring": {"rows": recurring_rows, "weekly_totals": [round(x, 2) for x in rec_totals]},
+            "label": "Cash Outflow",
+            "sections": [
+                {"key": "ap", "label": "A/P — open bills", "rows": ap_rows,
+                 "weekly_totals": [round(x, 2) for x in ap_totals]},
+                {"key": "recurring", "label": "Recurring (run-rate)", "rows": recurring_rows,
+                 "weekly_totals": [round(x, 2) for x in rec_totals]},
+            ],
             "weekly_totals": outflow_totals,
             "grand_total": round(sum(outflow_totals), 2),
         },
@@ -121,6 +243,79 @@ def generate_forecast(start_date: date | None = None,
             "surplus": surplus,
             "ending": ending,
         },
+    }
+
+
+def generate_actuals(start_date: date | None = None,
+                     opening_balance: float = 0.0,
+                     weeks: int = WEEKS) -> dict:
+    """
+    Historical realized cash flow from actual payment movement:
+      IN  = Payment      (cash received against invoices), by txn_date
+      OUT = BillPayment  (cash paid against bills) + Purchase (direct expenses), by txn_date
+
+    Default window = the trailing `weeks` ending on the most recent Friday.
+    """
+    today = date.today()
+    last_friday = today - timedelta(days=(today.weekday() - WEEK_END_WEEKDAY) % 7)
+    if start_date is None:
+        start_date = last_friday - timedelta(days=7 * (weeks - 1))
+
+    week_ends = [start_date + timedelta(days=7 * i) for i in range(weeks)]
+    win_start = week_ends[0] - timedelta(days=6)
+    win_end = week_ends[-1]
+
+    def week_index(d):
+        if d is None:
+            return None
+        for i, we in enumerate(week_ends):
+            if (we - timedelta(days=6)) <= d <= we:
+                return i
+        return None
+
+    payments = _actual_payments(win_start, win_end, week_index, weeks)
+    billpays = _actual_billpayments(win_start, win_end, week_index, weeks)
+    purchases = _actual_purchases(win_start, win_end, week_index, weeks)
+
+    inflow_totals = _column_sums(payments, weeks)
+    bp_totals = _column_sums(billpays, weeks)
+    pur_totals = _column_sums(purchases, weeks)
+    outflow_totals = [round(bp_totals[i] + pur_totals[i], 2) for i in range(weeks)]
+
+    opening, surplus, ending = _zeros(), _zeros(), _zeros()
+    bal = float(opening_balance)
+    for i in range(weeks):
+        opening[i] = round(bal, 2)
+        surplus[i] = round(inflow_totals[i] - outflow_totals[i], 2)
+        bal = bal + inflow_totals[i] - outflow_totals[i]
+        ending[i] = round(bal, 2)
+
+    return {
+        "mode": "actuals",
+        "as_of": today.isoformat(),
+        "start_date": week_ends[0].isoformat(),
+        "weeks": weeks,
+        "week_ends": [d.isoformat() for d in week_ends],
+        "opening_balance": round(float(opening_balance), 2),
+        "inflow": {
+            "label": "Cash Collected",
+            "sublabel": "customer payments received",
+            "rows": payments,
+            "weekly_totals": [round(x, 2) for x in inflow_totals],
+            "grand_total": round(sum(inflow_totals), 2),
+        },
+        "outflow": {
+            "label": "Cash Paid Out",
+            "sections": [
+                {"key": "billpay", "label": "Bill payments (vendors/contractors)", "rows": billpays,
+                 "weekly_totals": [round(x, 2) for x in bp_totals]},
+                {"key": "purchases", "label": "Direct expenses (cards/checks)", "rows": purchases,
+                 "weekly_totals": [round(x, 2) for x in pur_totals]},
+            ],
+            "weekly_totals": outflow_totals,
+            "grand_total": round(sum(outflow_totals), 2),
+        },
+        "summary": {"opening": opening, "surplus": surplus, "ending": ending},
     }
 
 
@@ -222,6 +417,64 @@ def _outflow_recurring(today, weeks):
             "total": round(wk * weeks, 2),
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Actuals queries (realized cash by txn_date)
+# ---------------------------------------------------------------------------
+def _actual_payments(win_start, win_end, week_index, weeks):
+    sql = text("""
+        SELECT COALESCE(qc.display_name,
+                        JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.CustomerRef.name')),
+                        'Unknown') AS name,
+               qt.txn_date AS due_date, qt.total_amt AS amount
+        FROM qbo_transactions qt
+        LEFT JOIN qbo_customers qc ON qc.qbo_id = qt.customer_qbo_id
+        WHERE qt.entity_type = 'Payment'
+          AND qt.txn_date BETWEEN :ws AND :we
+          AND qt.total_amt IS NOT NULL
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
+    return _bucket_by_name(rows, week_index, weeks)
+
+
+def _actual_billpayments(win_start, win_end, week_index, weeks):
+    sql = text("""
+        SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.VendorRef.name')),
+                        'Unknown vendor') AS name,
+               qt.txn_date AS due_date, qt.total_amt AS amount
+        FROM qbo_transactions qt
+        WHERE qt.entity_type = 'BillPayment'
+          AND qt.txn_date BETWEEN :ws AND :we
+          AND qt.total_amt IS NOT NULL
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
+    return _bucket_by_name(rows, week_index, weeks)
+
+
+def _actual_purchases(win_start, win_end, week_index, weeks):
+    """Direct expenses (cards/checks), grouped by account category, by header date."""
+    sql = text("""
+        SELECT COALESCE(
+                 SUBSTRING_INDEX(
+                   JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')),
+                   ':', 1),
+                 'Other') AS name,
+               qt.txn_date AS due_date, l.amount AS amount
+        FROM qbo_transactions qt
+        JOIN qbo_transaction_lines l ON l.transaction_id = qt.id
+        WHERE qt.entity_type = 'Purchase'
+          AND qt.txn_date BETWEEN :ws AND :we
+          AND l.amount IS NOT NULL
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
+    grouped = _bucket_by_name(rows, week_index, weeks)
+    # Drop categories the user has classified as transfers/financing (non-operating).
+    excluded = _excluded_categories()
+    return [r for r in grouped if r["label"] not in excluded]
 
 
 # ---------------------------------------------------------------------------

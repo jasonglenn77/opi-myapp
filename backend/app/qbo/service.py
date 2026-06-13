@@ -187,6 +187,26 @@ def qbo_init_tables() -> None:
         """))
 
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS qbo_accounts (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              qbo_id VARCHAR(32) NOT NULL UNIQUE,
+              name VARCHAR(255) NULL,
+              fully_qualified_name VARCHAR(512) NULL,
+              account_type VARCHAR(100) NULL,
+              account_sub_type VARCHAR(100) NULL,
+              classification VARCHAR(40) NULL,   -- Asset / Liability / Equity / Revenue / Expense
+              current_balance DECIMAL(18,2) NULL,
+              active TINYINT(1) NULL,
+              meta_last_updated_time DATETIME NULL,
+              raw_json JSON NOT NULL,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_acct_name (name),
+              INDEX idx_acct_class (classification),
+              INDEX idx_acct_type (account_type)
+            ) ENGINE=InnoDB
+        """))
+
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS qbo_sync_runs (
               id INT AUTO_INCREMENT PRIMARY KEY,
               sync_type VARCHAR(50) NOT NULL,
@@ -599,6 +619,77 @@ def run_customers_sync(triggered_by: str = "manual") -> dict:
             "realm_id": realm_id,
             "customers_fetched": len(customers),
             "customers_upserted": upserted,
+            "run_id": run_id,
+        }
+    except Exception as e:
+        log_sync_finish(run_id, False, error_message=str(e))
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Chart of Accounts sync (Account entity): powers cash-flow opening balance
+# (bank-account CurrentBalance) and auto-classification of expense categories
+# (Classification: Asset/Liability/Equity/Revenue/Expense).
+# ---------------------------------------------------------------------------
+def upsert_accounts(accounts: list) -> int:
+    qbo_init_tables()
+    if not accounts:
+        return 0
+    upserted = 0
+    with engine.begin() as conn:
+        for a in accounts:
+            if not isinstance(a, dict):
+                continue
+            qbo_id = str(a.get("Id") or "").strip()
+            if not qbo_id:
+                continue
+            md = a.get("MetaData") or {}
+            conn.execute(text("""
+                INSERT INTO qbo_accounts (
+                  qbo_id, name, fully_qualified_name, account_type, account_sub_type,
+                  classification, current_balance, active, meta_last_updated_time, raw_json
+                ) VALUES (
+                  :qbo_id, :name, :fqn, :atype, :asub,
+                  :cls, :bal, :active, :mlut, CAST(:raw AS JSON)
+                )
+                ON DUPLICATE KEY UPDATE
+                  name = VALUES(name),
+                  fully_qualified_name = VALUES(fully_qualified_name),
+                  account_type = VALUES(account_type),
+                  account_sub_type = VALUES(account_sub_type),
+                  classification = VALUES(classification),
+                  current_balance = VALUES(current_balance),
+                  active = VALUES(active),
+                  meta_last_updated_time = VALUES(meta_last_updated_time),
+                  raw_json = VALUES(raw_json)
+            """), {
+                "qbo_id": qbo_id,
+                "name": a.get("Name"),
+                "fqn": a.get("FullyQualifiedName"),
+                "atype": a.get("AccountType"),
+                "asub": a.get("AccountSubType"),
+                "cls": a.get("Classification"),
+                "bal": _parse_decimal(a.get("CurrentBalance")),
+                "active": 1 if a.get("Active") else 0,
+                "mlut": _parse_qbo_dt(md.get("LastUpdatedTime")) if isinstance(md, dict) else None,
+                "raw": json.dumps(a),
+            })
+            upserted += 1
+    return upserted
+
+
+def run_accounts_sync(triggered_by: str = "manual") -> dict:
+    """Full pull of the chart of accounts (small list, so we fetch all each time)."""
+    run_id = log_sync_start("accounts", triggered_by)
+    try:
+        realm_id, access_token = get_valid_access_token()
+        accounts = fetch_entities_incremental(realm_id, access_token, entity="Account", since=None)
+        upserted = upsert_accounts(accounts)
+        log_sync_finish(run_id, True, fetched=len(accounts), upserted=upserted)
+        return {
+            "realm_id": realm_id,
+            "accounts_fetched": len(accounts),
+            "accounts_upserted": upserted,
             "run_id": run_id,
         }
     except Exception as e:
@@ -1233,6 +1324,12 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             refresh_project_financial_summary()
         except Exception:
             # Never let the summary refresh fail a successful sync.
+            pass
+        # Refresh the chart of accounts too, so cash-flow opening balances stay
+        # current. Best-effort: never let it fail an otherwise-successful sync.
+        try:
+            run_accounts_sync(triggered_by="auto-with-transactions")
+        except Exception:
             pass
         return {
             "realm_id": realm_id,
