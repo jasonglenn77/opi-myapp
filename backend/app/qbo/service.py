@@ -35,6 +35,11 @@ TRANSACTION_ENTITIES = [
     "VendorCredit",
     "JournalEntry",
     "TimeActivity",
+    # Actual cash movement (for the cash-flow "actuals" view):
+    #   Payment     = cash RECEIVED against invoices (TotalAmt, TxnDate, CustomerRef)
+    #   BillPayment = cash PAID against bills        (TotalAmt, TxnDate, VendorRef)
+    "Payment",
+    "BillPayment",
 ]
 
 SALES_TRANSACTION_ENTITIES = {
@@ -1242,6 +1247,42 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
     except Exception as e:
         log_sync_finish(run_id, False, error_message=str(e))
         raise
+
+def run_entities_backfill(entities: list[str], triggered_by: str = "backfill") -> dict:
+    """
+    One-time FULL backfill of specific transaction entities (since=None).
+
+    Needed when adding a new entity type (e.g. Payment / BillPayment): the normal
+    incremental sync shares a single 'transactions' watermark, so it would only
+    fetch recently-updated rows and skip the historical backlog. This pulls the
+    full history for the named entities. Safe to re-run (ON DUPLICATE KEY UPDATE).
+    """
+    qbo_init_tables()
+    allowed = set(TRANSACTION_ENTITIES)
+    ents = [e for e in entities if e in allowed]
+    if not ents:
+        raise ValueError(f"No valid entities. Allowed: {', '.join(sorted(allowed))}")
+
+    run_id = log_sync_start("transactions", triggered_by)
+    try:
+        realm_id, access_token = get_valid_access_token()
+        per_entity = {}
+        fetched_total = 0
+        upserted_total = 0
+        for entity in ents:
+            rows = fetch_entities_incremental(realm_id, access_token, entity=entity, since=None)
+            up_txn, up_line, up_sales = upsert_transactions_and_lines(realm_id, entity, rows)
+            per_entity[entity] = {"fetched": len(rows), "upserted": up_txn}
+            fetched_total += len(rows)
+            upserted_total += up_txn
+        log_sync_finish(run_id, True, fetched=fetched_total, upserted=upserted_total)
+        return {"ok": True, "entities": per_entity,
+                "fetched_total": fetched_total, "upserted_total": upserted_total,
+                "run_id": run_id}
+    except Exception as e:
+        log_sync_finish(run_id, False, error_message=str(e))
+        raise
+
 
 def backfill_sales_lines_from_existing():
     qbo_init_tables()

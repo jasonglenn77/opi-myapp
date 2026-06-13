@@ -34,6 +34,7 @@ PAGE_ASSIGNMENT = "page.assignment"
 PAGE_TEAMS      = "page.teams"
 PAGE_USERS      = "page.users"
 PAGE_QUICKBOOKS = "page.quickbooks"
+PAGE_CASHFLOW   = "page.cashflow"
 
 # Action capabilities
 PROJECT_VIEW_ALL    = "project.view_all"      # see every project (vs. only assigned)
@@ -46,7 +47,7 @@ PROJECTS_ADMIN      = "projects.admin_tools"  # refresh financials, reset status
 
 ALL_CAPABILITIES: List[str] = [
     PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
-    PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS,
+    PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS, PAGE_CASHFLOW,
     PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, ASSIGNMENT_EDIT_OWN,
     USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN,
 ]
@@ -61,7 +62,7 @@ ROLE_DEFAULTS: Dict[str, Set[str]] = {
 
     "user": {  # office staff
         PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
-        PAGE_ASSIGNMENT, PAGE_TEAMS,
+        PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_CASHFLOW,
         PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, TEAMS_MANAGE, PROJECTS_ADMIN,
     },
 

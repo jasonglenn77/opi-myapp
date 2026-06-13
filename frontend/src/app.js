@@ -9,6 +9,7 @@ import { usersPage } from "./pages/users.js";
 import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
+import { cashflowPage } from "./pages/cashflow.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -17,6 +18,7 @@ import { estimatePage } from "./pages/estimate.js";
 const ROUTE_CAPS = {
   "#/projects":   "page.dashboard",
   "#/financials": "page.financials",
+  "#/cashflow":   "page.cashflow",
   "#/estimate":   "page.estimate",
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
@@ -27,7 +29,7 @@ const ROUTE_CAPS = {
 
 // Preference order for choosing a landing page the user is actually allowed to see.
 const ROUTE_ORDER = [
-  "#/projects", "#/financials", "#/estimate", "#/schedule",
+  "#/projects", "#/financials", "#/cashflow", "#/estimate", "#/schedule",
   "#/assignment", "#/teams", "#/users", "#/quickbooks",
 ];
 
@@ -97,6 +99,7 @@ async function route() {
   if (hash === "#/login") return loginPage(route);
   if (hash === "#/projects") return dashboardPage(route);
   if (hash === "#/financials") return projectsPage(route);
+  if (hash === "#/cashflow") return cashflowPage(route);
   // Backward-compat redirects for any old bookmarks; remove after a grace period.
   if (hash === "#/dashboard") { location.hash = "#/projects"; return; }
   if (hash === "#/schedule") return schedulePage(route);

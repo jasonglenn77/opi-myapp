@@ -991,6 +991,10 @@ body {
   margin-left: 1rem;
 }
 
+.mr-1 {
+  margin-right: 0.25rem;
+}
+
 .mt-0\.5 {
   margin-top: 0.125rem;
 }
@@ -1052,6 +1056,10 @@ body {
 
 .table {
   display: table;
+}
+
+.table-row {
+  display: table-row;
 }
 
 .grid {
@@ -2018,6 +2026,10 @@ body {
      object-fit: cover;
 }
 
+.p-0 {
+  padding: 0px;
+}
+
 .p-1 {
   padding: 0.25rem;
 }
@@ -2446,6 +2458,11 @@ body {
   color: rgb(30 64 175 / var(--tw-text-opacity, 1));
 }
 
+.text-brand-700 {
+  --tw-text-opacity: 1;
+  color: rgb(50 82 65 / var(--tw-text-opacity, 1));
+}
+
 .text-emerald-600 {
   --tw-text-opacity: 1;
   color: rgb(5 150 105 / var(--tw-text-opacity, 1));
@@ -2867,6 +2884,11 @@ body {
 
 .hover\:bg-white\/5:hover {
   background-color: rgb(255 255 255 / 0.05);
+}
+
+.hover\:text-black:hover {
+  --tw-text-opacity: 1;
+  color: rgb(0 0 0 / var(--tw-text-opacity, 1));
 }
 
 .hover\:text-black\/60:hover {
