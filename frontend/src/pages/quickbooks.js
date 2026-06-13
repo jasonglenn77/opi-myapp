@@ -115,7 +115,7 @@ export async function quickBooksPage(routeFn) {
         <div class="flex items-center justify-between gap-3">
           <div>
             <div class="text-base font-extrabold">Transactions Sync</div>
-            <div class="text-xs text-black/60">Sync invoices, bills, purchases, etc. into qbo_transactions + qbo_transaction_lines.</div>
+            <div class="text-xs text-black/60">Syncs invoices, bills, purchases, payments &amp; bill payments — and refreshes the chart of accounts / bank balances. Powers Financials and the Cash Flow page.</div>
           </div>
           <button id="qboTxSyncBtn" class="btn-primary" ${connected ? "" : "disabled"}>Sync transactions now</button>
         </div>

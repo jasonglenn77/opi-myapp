@@ -10,8 +10,23 @@ import re
 import uuid
 from typing import Optional
 
+import os
+
 from .auth import create_access_token, get_current_user, require_admin
 from .permissions import VALID_ROLES, filter_visible, permission_snapshot, ALL_CAPABILITIES
+
+# Protected system accounts: hidden from the Users page and immune to edit/disable,
+# so an always-on admin login can't be accidentally changed or locked out.
+# Override via env (comma-separated) if needed.
+PROTECTED_ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("PROTECTED_ADMIN_EMAILS", "admin@onpointinstallers.com").split(",")
+    if e.strip()
+}
+
+
+def _is_protected_email(email) -> bool:
+    return (email or "").strip().lower() in PROTECTED_ADMIN_EMAILS
 from app.qbo.routes import router as qbo_router
 from app.projects.routes import router as projects_router
 from app.quoting.routes import router as quoting_router
@@ -360,7 +375,8 @@ def list_users(_admin=Depends(require_admin)):
             FROM users
             ORDER BY id DESC
         """)).mappings().all()
-    return [dict(r) for r in rows]
+    # Hide protected system accounts so they can't be accidentally edited/disabled.
+    return [dict(r) for r in rows if not _is_protected_email(r["email"])]
 
 
 @app.get("/api/users/{user_id}/permissions")
@@ -394,10 +410,12 @@ def set_user_permissions(user_id: int, req: PermissionsUpdateRequest, _admin=Dep
     from .db import engine
     with engine.begin() as conn:
         exists = conn.execute(
-            text("SELECT id FROM users WHERE id = :id LIMIT 1"), {"id": user_id}
-        ).first()
+            text("SELECT id, email FROM users WHERE id = :id LIMIT 1"), {"id": user_id}
+        ).mappings().first()
         if not exists:
             raise HTTPException(status_code=404, detail="User not found")
+        if _is_protected_email(exists["email"]):
+            raise HTTPException(status_code=403, detail="This account is protected and cannot be modified.")
 
         conn.execute(
             text("DELETE FROM user_permission_overrides WHERE user_id = :uid"),
@@ -460,6 +478,11 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
 @app.put("/api/users/{user_id}")
 def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_admin)):
     from .db import engine
+
+    with engine.connect() as conn:
+        target = conn.execute(text("SELECT email FROM users WHERE id = :id"), {"id": user_id}).first()
+    if target and _is_protected_email(target[0]):
+        raise HTTPException(status_code=403, detail="This account is protected and cannot be modified.")
 
     updates = []
     params = {"id": user_id}
@@ -532,6 +555,12 @@ def disable_user(user_id: int, _admin=Depends(require_admin)):
     Safer than hard delete: disable the user
     """
     from .db import engine
+
+    with engine.connect() as conn:
+        target = conn.execute(text("SELECT email FROM users WHERE id = :id"), {"id": user_id}).first()
+    if target and _is_protected_email(target[0]):
+        raise HTTPException(status_code=403, detail="This account is protected and cannot be disabled.")
+
     with engine.begin() as conn:
         result = conn.execute(text("""
             UPDATE users
