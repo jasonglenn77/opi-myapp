@@ -201,9 +201,10 @@ export async function usersPage(routeFn) {
                 <option value="user">user (office staff)</option>
                 <option value="admin">admin</option>
                 <option value="pm">pm (project manager)</option>
-                <option value="crew_lead">crew_lead</option>
+                <option value="crew_lead">crew_lead (parent crew / boss)</option>
+                <option value="crew_foreman">crew_foreman (child crew)</option>
               </select>
-              <div class="text-[11px] text-black/50 mt-1">Choose <b>pm</b> or <b>crew_lead</b> to link this login to a Teams record below.</div>
+              <div class="text-[11px] text-black/50 mt-1">Choose <b>pm</b>, <b>crew_lead</b>, or <b>crew_foreman</b> to link this login to a Teams record below.</div>
             </div>
             <label class="flex items-center gap-2 text-sm text-black/70 mt-6">
               <input id="userActive" type="checkbox" class="h-4 w-4 rounded border-black/20" checked />
@@ -325,9 +326,11 @@ export async function usersPage(routeFn) {
       linkSelect.innerHTML = opt("", "— none —", selectedId == null)
         + pms.map(p => opt(p.id, pmLabel(p), String(p.id) === String(selectedId))).join("");
       linkPicker.classList.remove("hidden");
-    } else if (role === "crew_lead") {
+    } else if (role === "crew_lead" || role === "crew_foreman") {
       linkLabel.textContent = "Linked work crew";
-      linkHint.textContent = "Which crew this login leads (scopes them to that crew's projects).";
+      linkHint.textContent = role === "crew_lead"
+        ? "Link to a PARENT crew — they'll see all child crews + their projects."
+        : "Link to a CHILD crew — the foreman sees only this crew's assigned project(s).";
       linkSelect.innerHTML = opt("", "— none —", selectedId == null)
         + crews.map(c => opt(c.id, crewLabel(c), String(c.id) === String(selectedId))).join("");
       linkPicker.classList.remove("hidden");
@@ -369,7 +372,7 @@ export async function usersPage(routeFn) {
       document.getElementById("userActive").checked = !!u.is_active;
       document.getElementById("userPassword").value = "";
       const linkedId = role === "pm" ? u.project_manager_id
-                     : role === "crew_lead" ? u.work_crew_id
+                     : (role === "crew_lead" || role === "crew_foreman") ? u.work_crew_id
                      : null;
       syncLinkPicker(role, linkedId);
       openModal("Edit user");
@@ -401,7 +404,7 @@ export async function usersPage(routeFn) {
     // Only one link applies per role; clear the other so stale links don't linger.
     const linkVal = linkSelect.value ? parseInt(linkSelect.value, 10) : null;
     const project_manager_id = role === "pm" ? linkVal : null;
-    const work_crew_id = role === "crew_lead" ? linkVal : null;
+    const work_crew_id = (role === "crew_lead" || role === "crew_foreman") ? linkVal : null;
 
     const payload = {
       email: document.getElementById("userEmail").value.trim(),

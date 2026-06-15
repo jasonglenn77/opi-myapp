@@ -1266,6 +1266,8 @@ async function renderCustomerPicker(routeFn) {
             </svg>
           </button>
         </td>
+        <td class="py-2 px-2 text-sm font-semibold text-ink-900 whitespace-nowrap">${escapeHtml(c.display_name || "")}</td>
+        <td class="py-2 px-2 whitespace-nowrap">${actionBtnHtml(c)}</td>
         <td class="py-2 px-2 relative align-middle" style="width:200px; min-width:200px; max-width:200px;">
           ${statusPillHtml(c)}
           ${statusDropdownHtml(c)}
@@ -1276,9 +1278,7 @@ async function renderCustomerPicker(routeFn) {
             data-follow-up="${c.qbo_customer_id}">${c.follow_up_qty ?? 0}</td>
         <td class="py-2 px-2 w-20 text-black/60 text-xs"
             data-last-comm="${c.qbo_customer_id}">${escapeHtml(c.last_communication_type || "—")}</td>
-        <td class="py-2 px-2 whitespace-nowrap">${actionBtnHtml(c)}</td>
         <td class="py-2 px-2 w-20 text-right text-black/60 tabular-nums text-xs">${c.estimate_id != null ? (c.estimate_revision_count ?? 0) : "—"}</td>
-        <td class="py-2 px-2 text-xs">${escapeHtml(c.display_name || "")}</td>
         <td class="py-2 px-2 text-xs text-black/60">${escapeHtml(c.email || "—")}</td>
         <td class="py-2 px-2 text-black/60 tabular-nums text-xs whitespace-nowrap">${fmtLocal(c.meta_create_time)}</td>
       </tr>
@@ -1295,13 +1295,13 @@ async function renderCustomerPicker(routeFn) {
     return `
       <tr class="border-b border-black/10">
         <th class="py-2 pr-2 w-6"></th>
+        ${th("display_name",             "Customer",       { sortable: true, filterable: true })}
+        ${th("estimate_action",          "Estimate",       { sortable: true, filterable: true })}
         ${th("pipeline_status",          "Status",         { sortable: true, filterable: true })}
         ${th("last_contact_date",        "Last Contact",   { sortable: true, filterable: true })}
         ${th("follow_up_qty",            "Follow Up Qty",  { sortable: true, align: "right" })}
         ${th("last_communication_type",  "Last Comm",      { sortable: true, filterable: true })}
-        ${th("estimate_action",          "Estimate",       { sortable: true, filterable: true })}
         ${th("estimate_revision_count",  "Revisions",      { sortable: true, align: "right" })}
-        ${th("display_name",             "Customer",       { sortable: true, filterable: true })}
         ${th("email",                    "Email",          { sortable: true, filterable: true })}
         ${th("meta_create_time",         "Created",        { sortable: true, filterable: true })}
       </tr>`;

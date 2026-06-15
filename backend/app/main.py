@@ -32,6 +32,7 @@ from app.projects.routes import router as projects_router
 from app.quoting.routes import router as quoting_router
 from app.estimates.routes import router as estimates_router
 from app.cashflow.routes import router as cashflow_router
+from app.crew.routes import router as crew_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -39,6 +40,7 @@ app.include_router(projects_router)
 app.include_router(quoting_router)
 app.include_router(estimates_router)
 app.include_router(cashflow_router)
+app.include_router(crew_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -116,6 +118,7 @@ class WorkCrewUpdateRequest(BaseModel):
     color: Optional[str] = None
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
+    vendor_qbo_id: Optional[str] = None   # QBO vendor for crew-earnings (parent crews)
 
 
 @app.get("/api/health")
@@ -694,7 +697,8 @@ def list_work_crews(_admin=Depends(require_admin)):
     from .db import engine
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, name, code, parent_id, color, is_active, sort_order, created_at, updated_at
+            SELECT id, name, code, parent_id, color, is_active, sort_order,
+                   vendor_qbo_id, created_at, updated_at
             FROM work_crews
             ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, sort_order, id
         """)).mappings().all()
@@ -769,6 +773,11 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(re
     if req.is_active is not None:
         updates.append("is_active = :is_active")
         params["is_active"] = 1 if req.is_active else 0
+
+    # vendor_qbo_id: link/clear the QBO vendor used for crew earnings
+    if "vendor_qbo_id" in req.__fields_set__:
+        updates.append("vendor_qbo_id = :vendor_qbo_id")
+        params["vendor_qbo_id"] = (req.vendor_qbo_id or "").strip() or None
 
     # parent_id: allow clearing when client sends null
     if "parent_id" in req.__fields_set__:

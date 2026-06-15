@@ -35,6 +35,7 @@ PAGE_TEAMS      = "page.teams"
 PAGE_USERS      = "page.users"
 PAGE_QUICKBOOKS = "page.quickbooks"
 PAGE_CASHFLOW   = "page.cashflow"
+PAGE_CREW_PORTAL = "page.crew_portal"   # crew hierarchy drill-down (parents → children → projects → foreman)
 
 # Action capabilities
 PROJECT_VIEW_ALL    = "project.view_all"      # see every project (vs. only assigned)
@@ -48,6 +49,7 @@ PROJECTS_ADMIN      = "projects.admin_tools"  # refresh financials, reset status
 ALL_CAPABILITIES: List[str] = [
     PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
     PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS, PAGE_CASHFLOW,
+    PAGE_CREW_PORTAL,
     PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, ASSIGNMENT_EDIT_OWN,
     USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN,
 ]
@@ -70,8 +72,12 @@ ROLE_DEFAULTS: Dict[str, Set[str]] = {
         PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE,
     },
 
-    "crew_lead": {  # crew lead: scoped to own projects; Projects only
-        PAGE_DASHBOARD,
+    "crew_lead": {  # parent crew (boss): enters the portal at their subtree (children → projects → foreman)
+        PAGE_CREW_PORTAL,
+    },
+
+    "crew_foreman": {  # child crew foreman: enters straight at their project's foreman view
+        PAGE_CREW_PORTAL,
     },
 }
 

@@ -10,6 +10,7 @@ import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
 import { cashflowPage } from "./pages/cashflow.js";
+import { crewPortalPage } from "./pages/crew.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -25,16 +26,18 @@ const ROUTE_CAPS = {
   "#/teams":      "page.teams",
   "#/users":      "page.users",
   "#/quickbooks": "page.quickbooks",
+  "#/crew": "page.crew_portal",
 };
 
 // Preference order for choosing a landing page the user is actually allowed to see.
 const ROUTE_ORDER = [
   "#/projects", "#/financials", "#/cashflow", "#/estimate", "#/schedule",
-  "#/assignment", "#/teams", "#/users", "#/quickbooks",
+  "#/assignment", "#/crew", "#/teams", "#/users", "#/quickbooks",
 ];
 
 function requiredCapForHash(hash) {
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return "page.estimate";
+  if (hash.startsWith("#/crew")) return "page.crew_portal";
   return ROUTE_CAPS[hash] || null;
 }
 
@@ -100,6 +103,11 @@ async function route() {
   if (hash === "#/projects") return dashboardPage(route);
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);
+  if (hash.startsWith("#/crew")) {
+    const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);
+    if (cm) return crewPortalPage(route, { childId: decodeURIComponent(cm[1]), projectId: cm[2] ? decodeURIComponent(cm[2]) : null });
+    return crewPortalPage(route, null);
+  }
   // Backward-compat redirects for any old bookmarks; remove after a grace period.
   if (hash === "#/dashboard") { location.hash = "#/projects"; return; }
   if (hash === "#/schedule") return schedulePage(route);

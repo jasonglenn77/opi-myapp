@@ -2,10 +2,13 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 
 export async function teamsPage(routeFn) {
-  const [pms, crews] = await Promise.all([
+  const [pms, crews, vendorData] = await Promise.all([
     api("/project-managers"),
     api("/work-crews"),
+    api("/crew/vendors").catch(() => ({ vendors: [] })),
   ]);
+  const vendors = vendorData.vendors || [];
+  const escOpt = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   // ── split by active status ────────────────────────────────────────────────
   const activePms     = pms.filter(pm => pm.is_active);
@@ -358,6 +361,14 @@ export async function teamsPage(routeFn) {
             </div>
           </div>
 
+          <div id="crewVendorWrap">
+            <div class="label mb-1">QuickBooks Vendor <span class="text-black/40">(parent crews — for crew earnings)</span></div>
+            <select id="crewVendor" class="input">
+              <option value="">(not linked)</option>
+              ${vendors.map(v => `<option value="${escOpt(v.vendor_qbo_id)}">${escOpt(v.name)} — $${Math.round(v.total_paid).toLocaleString("en-US")}</option>`).join("")}
+            </select>
+          </div>
+
           <div>
             <div class="label mb-1">Color</div>
             <div class="flex items-center gap-2">
@@ -573,6 +584,13 @@ setShell({
     }
   });
 
+  // Vendor field only applies to PARENT crews (no parent selected).
+  function toggleVendorWrap() {
+    const isParent = !document.getElementById("crewParent").value;
+    document.getElementById("crewVendorWrap").style.display = isParent ? "" : "none";
+  }
+  document.getElementById("crewParent").addEventListener("change", toggleVendorWrap);
+
   // New Crew
   document.getElementById("newCrewBtn").addEventListener("click", () => {
     document.getElementById("crewModalMsg").textContent = "";
@@ -583,6 +601,8 @@ setShell({
     document.getElementById("crewParent").value = "";
     document.getElementById("crewSort").value = "0";
     document.getElementById("crewActive").checked = true;
+    document.getElementById("crewVendor").value = "";
+    toggleVendorWrap();
     crewColorEl.value = "#000000"; // optional default
     crewColorEl.dataset.cleared = "1";
     openModal(crewModal);
@@ -601,6 +621,8 @@ setShell({
       document.getElementById("crewName").value = c.name || "";
       document.getElementById("crewCode").value = c.code || "";
       document.getElementById("crewParent").value = c.parent_id ? String(c.parent_id) : "";
+      document.getElementById("crewVendor").value = c.vendor_qbo_id || "";
+      toggleVendorWrap();
       document.getElementById("crewSort").value = String(c.sort_order || 0);
       document.getElementById("crewActive").checked = !!c.is_active;
       if (c.color) {
@@ -670,6 +692,8 @@ setShell({
       color: getCrewColorForPayload(),
       sort_order: Number(document.getElementById("crewSort").value || 0),
       is_active: document.getElementById("crewActive").checked,
+      // Vendor link only meaningful for parent crews; null for children.
+      vendor_qbo_id: parentVal ? null : (document.getElementById("crewVendor").value || null),
     };
 
     try {
