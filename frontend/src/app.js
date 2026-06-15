@@ -11,6 +11,7 @@ import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
 import { cashflowPage } from "./pages/cashflow.js";
 import { crewPortalPage } from "./pages/crew.js";
+import { customersPage } from "./pages/customers.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -20,6 +21,7 @@ const ROUTE_CAPS = {
   "#/projects":   "page.dashboard",
   "#/financials": "page.financials",
   "#/cashflow":   "page.cashflow",
+  "#/customers":  "page.customers",
   "#/estimate":   "page.estimate",
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
@@ -31,7 +33,7 @@ const ROUTE_CAPS = {
 
 // Preference order for choosing a landing page the user is actually allowed to see.
 const ROUTE_ORDER = [
-  "#/projects", "#/financials", "#/cashflow", "#/estimate", "#/schedule",
+  "#/projects", "#/financials", "#/cashflow", "#/customers", "#/estimate", "#/schedule",
   "#/assignment", "#/crew", "#/teams", "#/users", "#/quickbooks",
 ];
 
@@ -103,6 +105,7 @@ async function route() {
   if (hash === "#/projects") return dashboardPage(route);
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);
+  if (hash === "#/customers") return customersPage(route);
   if (hash.startsWith("#/crew")) {
     const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);
     if (cm) return crewPortalPage(route, { childId: decodeURIComponent(cm[1]), projectId: cm[2] ? decodeURIComponent(cm[2]) : null });

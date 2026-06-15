@@ -95,7 +95,7 @@ export async function crewPortalPage(routeFn, params = null) {
     const crewName = found ? found.child.name : "crew";
     const label = pr ? pr.project_name : `Project ${params.projectId}`;
     mount(`
-      <div class="mx-auto w-full max-w-2xl grid grid-cols-1 gap-3 pb-3">
+      <div class="mx-auto w-full max-w-5xl grid grid-cols-1 gap-3 pb-3">
         <div><a href="#/crew/child/${params.childId}" class="text-xs font-semibold text-blue-600 hover:text-blue-800">← ${escapeHtml(crewName)} · other projects</a></div>
         ${foremanDetailHtml(label)}
         <div class="text-center text-[11px] text-black/30 pt-1">Skeleton — capture forms &amp; S3 uploads wired after feedback.</div>
@@ -109,7 +109,7 @@ export async function crewPortalPage(routeFn, params = null) {
     const projs = child.projects || [];
     const up = showUp ? `<div><a href="#/crew" class="text-xs font-semibold text-blue-600 hover:text-blue-800">← All crews</a></div>` : "";
     mount(`
-      <div class="mx-auto w-full max-w-2xl grid grid-cols-1 gap-3 pb-3">
+      <div class="mx-auto w-full max-w-5xl grid grid-cols-1 gap-3 pb-3">
         ${up}
         <div class="card p-4">
           <div class="text-[11px] text-black/40">${escapeHtml(parent.name)}</div>
@@ -184,7 +184,7 @@ export async function crewPortalPage(routeFn, params = null) {
               <span class="text-black/30 text-xs shrink-0 lg:hidden">▸ expand</span>
             </div>
           </div>
-          <div class="mt-2 lg:mt-0 lg:shrink-0 lg:w-96 flex items-center gap-3">
+          <div class="mt-2 lg:mt-0 lg:shrink-0 lg:w-[28rem] flex items-center gap-3">
             <div class="flex-1 min-w-0">${parentEarnings(p.earnings)}</div>
             <span class="text-black/30 text-xs shrink-0 hidden lg:inline">▸</span>
           </div>
@@ -200,7 +200,7 @@ export async function crewPortalPage(routeFn, params = null) {
 
   const scopeNote = data.scope === "all" ? "All crew parents." : "Your crews.";
   mount(`
-    <div class="mx-auto w-full max-w-2xl grid grid-cols-1 gap-3 pb-3">
+    <div class="mx-auto w-full max-w-5xl grid grid-cols-1 gap-3 pb-3">
       <div class="card p-4">
         <div class="flex items-center justify-between gap-3">
           <div>

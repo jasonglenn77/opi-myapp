@@ -36,6 +36,7 @@ PAGE_USERS      = "page.users"
 PAGE_QUICKBOOKS = "page.quickbooks"
 PAGE_CASHFLOW   = "page.cashflow"
 PAGE_CREW_PORTAL = "page.crew_portal"   # crew hierarchy drill-down (parents → children → projects → foreman)
+PAGE_CUSTOMERS  = "page.customers"      # customers → legacy jobs drill-down (revenue not tied to QBO Projects)
 
 # Action capabilities
 PROJECT_VIEW_ALL    = "project.view_all"      # see every project (vs. only assigned)
@@ -49,7 +50,7 @@ PROJECTS_ADMIN      = "projects.admin_tools"  # refresh financials, reset status
 ALL_CAPABILITIES: List[str] = [
     PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
     PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS, PAGE_CASHFLOW,
-    PAGE_CREW_PORTAL,
+    PAGE_CREW_PORTAL, PAGE_CUSTOMERS,
     PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, ASSIGNMENT_EDIT_OWN,
     USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN,
 ]
@@ -64,7 +65,7 @@ ROLE_DEFAULTS: Dict[str, Set[str]] = {
 
     "user": {  # office staff
         PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
-        PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_CASHFLOW,
+        PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_CASHFLOW, PAGE_CUSTOMERS,
         PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, TEAMS_MANAGE, PROJECTS_ADMIN,
     },
 
