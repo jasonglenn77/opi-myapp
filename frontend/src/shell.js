@@ -1,5 +1,5 @@
 // Shell management: showing/hiding auth vs main UI, setting page title/subtitle/body, binding global handlers, etc.
-import { clearToken, getMe } from "./api.js";
+import { clearToken, getMe, api } from "./api.js";
 
 /**
  * Show/hide nav (and any other tagged element) based on the current user's
@@ -79,6 +79,95 @@ export function bindGlobalHandlers(routeFn) {
     };
     logoutBtn.dataset.bound = "1";
   }
+  bindAccountMenu();
+}
+
+function bindAccountMenu() {
+  const btn = document.getElementById("accountBtn");
+  const dropdown = document.getElementById("accountDropdown");
+  if (!btn || !dropdown) return;
+
+  // Label the account button/email with the current user.
+  const me = getMe();
+  const label = document.getElementById("accountLabel");
+  const emailEl = document.getElementById("accountEmail");
+  if (me && label) label.textContent = me.email || "Account";
+  if (me && emailEl) emailEl.textContent = me.email || "";
+
+  if (!btn.dataset.bound) {
+    const close = () => dropdown.classList.add("hidden");
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dropdown.classList.toggle("hidden");
+    });
+    document.addEventListener("click", (e) => {
+      if (!dropdown.contains(e.target) && e.target !== btn) close();
+    });
+    document.getElementById("changePwBtn")?.addEventListener("click", () => {
+      close();
+      openPasswordModal();
+    });
+    btn.dataset.bound = "1";
+  }
+  bindPasswordModal();
+}
+
+function openPasswordModal() {
+  const modal = document.getElementById("pwModal");
+  if (!modal) return;
+  ["pwCurrent", "pwNew", "pwConfirm"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+  const msg = document.getElementById("pwMsg");
+  if (msg) { msg.textContent = ""; msg.className = "text-sm min-h-[1.25rem]"; }
+  modal.classList.remove("hidden");
+  modal.classList.add("flex");
+  document.getElementById("pwCurrent")?.focus();
+}
+
+function bindPasswordModal() {
+  const modal = document.getElementById("pwModal");
+  const form = document.getElementById("pwForm");
+  if (!modal || !form || form.dataset.bound) return;
+
+  const close = () => { modal.classList.add("hidden"); modal.classList.remove("flex"); };
+  const msg = document.getElementById("pwMsg");
+  const setMsg = (text, ok) => {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = "text-sm min-h-[1.25rem] " + (ok ? "text-emerald-700" : "text-red-700");
+  };
+
+  document.getElementById("pwCancel")?.addEventListener("click", close);
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const current = document.getElementById("pwCurrent")?.value || "";
+    const next = document.getElementById("pwNew")?.value || "";
+    const confirm = document.getElementById("pwConfirm")?.value || "";
+    if (next.length < 8) return setMsg("New password must be at least 8 characters.", false);
+    if (next !== confirm) return setMsg("New passwords do not match.", false);
+
+    const submitBtn = document.getElementById("pwSubmit");
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await api("/me/password", {
+        method: "POST",
+        body: JSON.stringify({ current_password: current, new_password: next }),
+      });
+      setMsg("Password updated.", true);
+      setTimeout(close, 900);
+    } catch (err) {
+      let detail = err?.message || "Could not update password.";
+      try { const o = JSON.parse(detail); if (o && o.detail) detail = o.detail; } catch (_) {}
+      setMsg(detail, false);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+  form.dataset.bound = "1";
 }
 
 function bindSidebarHover() {

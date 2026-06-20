@@ -13,7 +13,10 @@ from typing import Optional
 import os
 
 from .auth import create_access_token, get_current_user, require_admin
-from .permissions import VALID_ROLES, filter_visible, permission_snapshot, ALL_CAPABILITIES
+from .permissions import (
+    valid_roles, filter_visible, permission_snapshot, ALL_CAPABILITIES,
+    get_role_defaults, bump_roles_cache, BUILTIN_ROLE_META, ADMIN_ROLE,
+)
 
 # Protected system accounts: hidden from the Users page and immune to edit/disable,
 # so an always-on admin login can't be accidentally changed or locked out.
@@ -62,6 +65,10 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
 class UserCreateRequest(BaseModel):
     email: str
     password: str
@@ -88,6 +95,17 @@ class PermissionOverrideItem(BaseModel):
 
 class PermissionsUpdateRequest(BaseModel):
     overrides: list[PermissionOverrideItem] = []
+
+class RoleCreateRequest(BaseModel):
+    name: str
+    label: Optional[str] = None
+    description: Optional[str] = None
+    capabilities: list[str] = []
+
+class RoleUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    description: Optional[str] = None
+    capabilities: Optional[list[str]] = None
 
 class ProjectManagerCreateRequest(BaseModel):
     first_name: Optional[str] = None
@@ -169,6 +187,32 @@ def login(req: LoginRequest):
 
     token = create_access_token(sub=user["email"])
     return {"access_token": token, "token_type": "bearer", "role": user["role"]}
+
+
+@app.post("/api/me/password")
+def change_my_password(req: ChangePasswordRequest, user=Depends(get_current_user)):
+    """Self-service password change: verify the caller's current password, set a new one."""
+    new_pw = (req.new_password or "")
+    if len(new_pw) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters.")
+    if req.current_password == new_pw:
+        raise HTTPException(status_code=400, detail="New password must be different from the current one.")
+
+    from .db import engine
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT password_hash FROM users WHERE id = :id LIMIT 1"),
+            {"id": user["id"]},
+        ).mappings().first()
+    if not row or not pwd_context.verify(req.current_password, row["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE users SET password_hash = :h WHERE id = :id"),
+            {"h": pwd_context.hash(new_pw), "id": user["id"]},
+        )
+    return {"ok": True}
 
 @app.get("/api/me")
 def me(user=Depends(get_current_user)):
@@ -435,6 +479,114 @@ def set_user_permissions(user_id: int, req: PermissionsUpdateRequest, _admin=Dep
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Roles management (Settings page) — roles + their default capabilities live in
+# the DB so an admin can create/edit them. Capabilities themselves stay code-
+# defined (each maps to real enforcement). The admin role is locked.
+# ---------------------------------------------------------------------------
+def _validate_caps(caps):
+    valid = set(ALL_CAPABILITIES)
+    cleaned = []
+    for c in caps or []:
+        c = (c or "").strip()
+        if c not in valid:
+            raise HTTPException(status_code=400, detail=f"Unknown capability: {c}")
+        if c not in cleaned:
+            cleaned.append(c)
+    return cleaned
+
+
+@app.get("/api/roles")
+def list_roles(_admin=Depends(require_admin)):
+    from .db import engine
+    defaults = get_role_defaults()  # ensures tables are seeded
+    with engine.connect() as conn:
+        roles = conn.execute(text(
+            "SELECT id, name, label, description, is_system FROM roles ORDER BY is_system DESC, name"
+        )).mappings().all()
+        counts = conn.execute(text("SELECT role, COUNT(*) n FROM users GROUP BY role")).mappings().all()
+    count_map = {c["role"]: int(c["n"]) for c in counts}
+    out = [{
+        "id": r["id"], "name": r["name"], "label": r["label"], "description": r["description"],
+        "is_system": bool(r["is_system"]),
+        "is_admin": r["name"] == ADMIN_ROLE,
+        "user_count": count_map.get(r["name"], 0),
+        "capabilities": sorted(defaults.get(r["name"], set())),
+    } for r in roles]
+    return {"roles": out, "all_capabilities": ALL_CAPABILITIES}
+
+
+@app.post("/api/roles")
+def create_role(req: RoleCreateRequest, _admin=Depends(require_admin)):
+    from .db import engine
+    import re as _re
+    name = (req.name or "").strip().lower()
+    if not _re.fullmatch(r"[a-z][a-z0-9_]{1,39}", name):
+        raise HTTPException(status_code=400, detail="Name must be lowercase letters/digits/underscores and start with a letter.")
+    if name == ADMIN_ROLE:
+        raise HTTPException(status_code=400, detail="Reserved role name.")
+    caps = _validate_caps(req.capabilities)
+    try:
+        with engine.begin() as conn:
+            if conn.execute(text("SELECT 1 FROM roles WHERE name=:n"), {"n": name}).first():
+                raise HTTPException(status_code=400, detail="A role with that name already exists.")
+            conn.execute(text("INSERT INTO roles (name, label, description, is_system) VALUES (:n,:l,:d,0)"),
+                         {"n": name, "l": req.label or None, "d": req.description or None})
+            rid = conn.execute(text("SELECT id FROM roles WHERE name=:n"), {"n": name}).scalar()
+            for c in caps:
+                conn.execute(text("INSERT IGNORE INTO role_capabilities (role_id, capability) VALUES (:r,:c)"), {"r": rid, "c": c})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not create role.")
+    bump_roles_cache()
+    return {"ok": True}
+
+
+@app.put("/api/roles/{role_id}")
+def update_role(role_id: int, req: RoleUpdateRequest, _admin=Depends(require_admin)):
+    from .db import engine
+    with engine.connect() as conn:
+        role = conn.execute(text("SELECT id, name FROM roles WHERE id=:id"), {"id": role_id}).mappings().first()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    if role["name"] == ADMIN_ROLE:
+        raise HTTPException(status_code=400, detail="The admin role is locked and cannot be changed.")
+    with engine.begin() as conn:
+        sets, params = [], {"id": role_id}
+        if "label" in req.__fields_set__:
+            sets.append("label=:label"); params["label"] = req.label or None
+        if "description" in req.__fields_set__:
+            sets.append("description=:description"); params["description"] = req.description or None
+        if sets:
+            conn.execute(text(f"UPDATE roles SET {', '.join(sets)} WHERE id=:id"), params)
+        if req.capabilities is not None:
+            caps = _validate_caps(req.capabilities)
+            conn.execute(text("DELETE FROM role_capabilities WHERE role_id=:id"), {"id": role_id})
+            for c in caps:
+                conn.execute(text("INSERT IGNORE INTO role_capabilities (role_id, capability) VALUES (:r,:c)"), {"r": role_id, "c": c})
+    bump_roles_cache()
+    return {"ok": True}
+
+
+@app.delete("/api/roles/{role_id}")
+def delete_role(role_id: int, _admin=Depends(require_admin)):
+    from .db import engine
+    with engine.connect() as conn:
+        role = conn.execute(text("SELECT id, name, is_system FROM roles WHERE id=:id"), {"id": role_id}).mappings().first()
+        if not role:
+            raise HTTPException(status_code=404, detail="Role not found")
+        if role["is_system"] or role["name"] == ADMIN_ROLE:
+            raise HTTPException(status_code=400, detail="Built-in roles cannot be deleted.")
+        n = conn.execute(text("SELECT COUNT(*) FROM users WHERE role=:n"), {"n": role["name"]}).scalar()
+        if n and int(n) > 0:
+            raise HTTPException(status_code=400, detail=f"{int(n)} user(s) still have this role. Reassign them first.")
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM roles WHERE id=:id"), {"id": role_id})
+    bump_roles_cache()
+    return {"ok": True}
+
+
 @app.post("/api/users")
 def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
     from .db import engine
@@ -444,7 +596,7 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Email required")
 
     role = (req.role or "user").strip().lower()
-    if role not in VALID_ROLES:
+    if role not in valid_roles():
         raise HTTPException(status_code=400, detail="Invalid role")
 
     if not req.password or not req.password.strip():
@@ -510,7 +662,7 @@ def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_adm
 
     if req.role is not None:
         role = req.role.strip().lower()
-        if role not in VALID_ROLES:
+        if role not in valid_roles():
             raise HTTPException(status_code=400, detail="Invalid role")
         updates.append("role = :role")
         params["role"] = role

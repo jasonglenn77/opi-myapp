@@ -37,6 +37,7 @@ PAGE_QUICKBOOKS = "page.quickbooks"
 PAGE_CASHFLOW   = "page.cashflow"
 PAGE_CREW_PORTAL = "page.crew_portal"   # crew hierarchy drill-down (parents → children → projects → foreman)
 PAGE_CUSTOMERS  = "page.customers"      # customers → legacy jobs drill-down (revenue not tied to QBO Projects)
+PAGE_SETTINGS   = "page.settings"       # manage roles & their default permissions (admin)
 
 # Action capabilities
 PROJECT_VIEW_ALL    = "project.view_all"      # see every project (vs. only assigned)
@@ -50,17 +51,24 @@ PROJECTS_ADMIN      = "projects.admin_tools"  # refresh financials, reset status
 ALL_CAPABILITIES: List[str] = [
     PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
     PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS, PAGE_CASHFLOW,
-    PAGE_CREW_PORTAL, PAGE_CUSTOMERS,
+    PAGE_CREW_PORTAL, PAGE_CUSTOMERS, PAGE_SETTINGS,
     PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, ASSIGNMENT_EDIT_OWN,
     USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN,
 ]
 
 # ---------------------------------------------------------------------------
-# Role defaults  (tweak freely — this dict is the policy)
-# Note: 'user' is the office-staff tier (kept as 'user' to avoid migrating
-# existing rows). admin/office see everything; pm/crew_lead are scoped.
+# Role defaults.
+#
+# Roles + their default capabilities live in the DB (`roles`, `role_capabilities`)
+# so an admin can create roles and manage defaults from the Settings page. This
+# dict is the SEED (used to populate the tables on first run) and the FALLBACK
+# (used if the tables don't exist yet, e.g. before migration 0003). After seeding,
+# the DB is the source of truth. The admin role is always forced to ALL caps and
+# can't be edited or deleted — you can't lock yourself out.
+#
+# Note: 'user' is the office-staff tier (kept as 'user' to avoid migrating rows).
 # ---------------------------------------------------------------------------
-ROLE_DEFAULTS: Dict[str, Set[str]] = {
+FALLBACK_ROLE_DEFAULTS: Dict[str, Set[str]] = {
     "admin": set(ALL_CAPABILITIES),
 
     "user": {  # office staff
@@ -82,19 +90,87 @@ ROLE_DEFAULTS: Dict[str, Set[str]] = {
     },
 }
 
-VALID_ROLES = set(ROLE_DEFAULTS.keys())
+# Friendly metadata for the built-in roles (label, description, is_system).
+# is_system roles can't be deleted; only the admin role's caps are locked.
+BUILTIN_ROLE_META = {
+    "admin":        ("Administrator", "Full access to everything (locked).", True),
+    "user":         ("Office staff", "Office team: projects, financials, estimates, scheduling, cash flow.", True),
+    "pm":           ("Project manager", "Scoped to their own assigned projects.", True),
+    "crew_lead":    ("Crew lead", "Parent-crew boss: their crew subtree in the Crew Portal.", True),
+    "crew_foreman": ("Crew foreman", "Child-crew foreman: their assigned project's foreman view.", True),
+}
+
+ADMIN_ROLE = "admin"
+
+# Short-lived cache so we don't hit the DB for role defaults on every request.
+_roles_cache: Dict[str, object] = {"exp": 0.0, "defaults": None, "valid": None}
+_ROLES_TTL = 10.0  # seconds
+
+
+def _seed_roles_if_empty(conn) -> None:
+    """Populate roles/role_capabilities from the code defaults on first run."""
+    n = conn.execute(text("SELECT COUNT(*) FROM roles")).scalar()
+    if n and int(n) > 0:
+        return
+    for name, caps in FALLBACK_ROLE_DEFAULTS.items():
+        label, desc, is_sys = BUILTIN_ROLE_META.get(name, (name, None, False))
+        conn.execute(
+            text("INSERT INTO roles (name, label, description, is_system) VALUES (:n, :l, :d, :s)"),
+            {"n": name, "l": label, "d": desc, "s": 1 if is_sys else 0},
+        )
+        rid = conn.execute(text("SELECT id FROM roles WHERE name = :n"), {"n": name}).scalar()
+        for cap in caps:
+            conn.execute(
+                text("INSERT IGNORE INTO role_capabilities (role_id, capability) VALUES (:r, :c)"),
+                {"r": rid, "c": cap},
+            )
+
+
+def get_role_defaults() -> Dict[str, Set[str]]:
+    """{role_name: set(capabilities)} from the DB (seeded + cached). admin = ALL."""
+    import time
+    now = time.time()
+    if _roles_cache["defaults"] is not None and now < float(_roles_cache["exp"]):
+        return _roles_cache["defaults"]  # type: ignore[return-value]
+    try:
+        with engine.begin() as conn:
+            _seed_roles_if_empty(conn)
+            roles = conn.execute(text("SELECT id, name FROM roles")).mappings().all()
+            caps = conn.execute(text("SELECT role_id, capability FROM role_capabilities")).mappings().all()
+    except Exception:
+        # Tables not present yet (pre-migration) — use the code fallback.
+        return {k: set(v) for k, v in FALLBACK_ROLE_DEFAULTS.items()}
+    by_id = {r["id"]: r["name"] for r in roles}
+    out: Dict[str, Set[str]] = {r["name"]: set() for r in roles}
+    for c in caps:
+        nm = by_id.get(c["role_id"])
+        if nm:
+            out[nm].add(c["capability"])
+    out[ADMIN_ROLE] = set(ALL_CAPABILITIES)  # admin always has everything
+    _roles_cache.update(exp=now + _ROLES_TTL, defaults=out, valid=set(out.keys()))
+    return out
+
+
+def valid_roles() -> Set[str]:
+    get_role_defaults()
+    return set(_roles_cache["valid"]) if _roles_cache["valid"] else set(FALLBACK_ROLE_DEFAULTS.keys())  # type: ignore[arg-type]
+
+
+def bump_roles_cache() -> None:
+    """Invalidate the role-defaults cache (call after any role mutation)."""
+    _roles_cache.update(exp=0.0, defaults=None, valid=None)
 
 
 # ---------------------------------------------------------------------------
 # Effective capabilities
 # ---------------------------------------------------------------------------
 def load_capabilities(user_id: int, role: str) -> Set[str]:
-    """Role defaults, adjusted by this user's allow/deny overrides.
+    """Role defaults (from DB), adjusted by this user's allow/deny overrides.
 
     Resilient to the overrides table not existing yet (pre-migration): falls
     back to role defaults.
     """
-    caps = set(ROLE_DEFAULTS.get((role or "").lower(), set()))
+    caps = set(get_role_defaults().get((role or "").lower(), set()))
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
@@ -119,7 +195,7 @@ def has_capability(user: dict, cap: str) -> bool:
 def permission_snapshot(user_id: int, role: str) -> dict:
     """For the admin UI: role defaults, raw overrides, and resulting effective set."""
     role = (role or "").lower()
-    defaults = sorted(ROLE_DEFAULTS.get(role, set()))
+    defaults = sorted(get_role_defaults().get(role, set()))
     overrides = []
     try:
         with engine.connect() as conn:
