@@ -150,6 +150,32 @@ def delete_customer_contact(contact_id: int, _user=Depends(get_current_user)):
     return {"ok": True}
 
 
+class ContactPatch(BaseModel):
+    contact_date: Optional[str] = None
+    communication_type: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/contacts/{contact_id}")
+def update_customer_contact(contact_id: int, req: ContactPatch, _user=Depends(get_current_user)):
+    sets, params = [], {"id": contact_id}
+    if "contact_date" in req.__fields_set__:
+        if not (req.contact_date or "").strip():
+            raise HTTPException(status_code=400, detail="contact_date cannot be empty")
+        sets.append("contact_date=:d"); params["d"] = req.contact_date
+    if "communication_type" in req.__fields_set__:
+        sets.append("communication_type=:ct"); params["ct"] = req.communication_type or None
+    if "notes" in req.__fields_set__:
+        sets.append("notes=:n"); params["n"] = req.notes or None
+    if not sets:
+        return {"ok": True}
+    with engine.begin() as conn:
+        result = conn.execute(text(f"UPDATE customer_contact_log SET {', '.join(sets)} WHERE id=:id"), params)
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Contact not found")
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Shared loader — returns the full estimate row + the linked customer's
 # display name and email for header rendering.
@@ -207,6 +233,178 @@ def create_or_get_estimate(req: EstimateCreate, _user=Depends(get_current_user))
             VALUES (:cid, :qid)
         """), {"cid": customer["id"], "qid": customer["qbo_id"]})
         return _load_estimate(conn, result.lastrowid)
+
+
+# ===========================================================================
+# Estimate TRACKING — OPI status + contact log over all QBO estimates.
+# The QBO estimate is the spine; estimate_tracking is the OPI overlay.
+# ===========================================================================
+@router.get("/estimators")
+def list_estimators(_user=Depends(get_current_user)):
+    """Active users assignable as an estimate owner (estimator)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, TRIM(CONCAT(COALESCE(first_name,''),' ',COALESCE(last_name,''))) AS name, email
+            FROM users WHERE is_active = 1 ORDER BY name, email
+        """)).mappings().all()
+    return [{"id": r["id"], "name": (r["name"] or "").strip() or r["email"], "email": r["email"]} for r in rows]
+
+
+@router.get("/tracking")
+def list_estimate_tracking(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    owner_id: Optional[int] = None,
+    show_all: int = 0,
+    _user=Depends(get_current_user),
+):
+    """All QBO estimates + OPI overlay. OPI status uses the pipeline-status
+    vocabulary (lookup_values.estimate_pipeline_status, e.g. "60% Project
+    Confirmed…"); the "0% …" statuses mean lost/inactive. Default view = active
+    + recent: tracked-and-not-0% OR untracked Pending/Accepted within ~18 months.
+    show_all=1 removes the filter."""
+    where = ["t.entity_type = 'Estimate'"]
+    params: dict = {}
+
+    if not show_all:
+        where.append("""(
+            (et.qbo_estimate_id IS NOT NULL AND et.status NOT LIKE '0%')
+            OR (et.qbo_estimate_id IS NULL
+                AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Pending','Accepted')
+                AND t.txn_date >= DATE_SUB(CURDATE(), INTERVAL 18 MONTH))
+        )""")
+    if status:
+        where.append("et.status = :status")
+        params["status"] = status
+    if owner_id:
+        where.append("et.owner_user_id = :owner_id")
+        params["owner_id"] = owner_id
+    if search:
+        where.append("(c.display_name LIKE :q OR t.doc_number LIKE :q "
+                     "OR JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.CustomerMemo.value')) LIKE :q)")
+        params["q"] = f"%{search}%"
+
+    sql = text(f"""
+        SELECT
+            t.qbo_id                                              AS qbo_estimate_id,
+            t.doc_number                                          AS est_no,
+            t.txn_date                                            AS txn_date,
+            ROUND(t.total_amt)                                    AS amount,
+            JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus'))  AS qbo_status,
+            JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.CustomerMemo.value')) AS description,
+            c.id                                                  AS qbo_customer_id,
+            c.display_name                                        AS customer_name,
+            et.status                                             AS opi_status,
+            et.owner_user_id                                      AS owner_user_id,
+            TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS owner_name,
+            (SELECT MAX(contact_date) FROM customer_contact_log cl
+               WHERE cl.qbo_estimate_id = t.qbo_id)               AS last_contact_date,
+            (SELECT COUNT(*) FROM customer_contact_log cl
+               WHERE cl.qbo_estimate_id = t.qbo_id)               AS contact_count
+        FROM qbo_transactions t
+        LEFT JOIN qbo_customers c       ON c.qbo_id = t.customer_qbo_id
+        LEFT JOIN estimate_tracking et  ON et.qbo_estimate_id = t.qbo_id
+        LEFT JOIN users u               ON u.id = et.owner_user_id
+        WHERE {" AND ".join(where)}
+        ORDER BY t.txn_date DESC, t.qbo_id DESC
+        LIMIT 1000
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, params).mappings().all()
+
+    out = []
+    for r in rows:
+        out.append({
+            "qbo_estimate_id": r["qbo_estimate_id"],
+            "est_no": r["est_no"],
+            "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
+            "amount": float(r["amount"] or 0),
+            "qbo_status": r["qbo_status"],
+            "description": r["description"],
+            "qbo_customer_id": r["qbo_customer_id"],
+            "customer_name": r["customer_name"],
+            "opi_status": r["opi_status"] or "",          # pipeline status; '' = not set
+            "is_tracked": r["opi_status"] is not None,
+            "owner_user_id": r["owner_user_id"],
+            "owner_name": (r["owner_name"] or "").strip() or None,
+            "last_contact_date": str(r["last_contact_date"]) if r["last_contact_date"] else None,
+            "contact_count": int(r["contact_count"] or 0),
+        })
+    return {"estimates": out}
+
+
+class EstimateTrackingPatch(BaseModel):
+    status: Optional[str] = None
+    owner_user_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/tracking/{qbo_estimate_id}")
+def upsert_estimate_tracking(qbo_estimate_id: str, req: EstimateTrackingPatch,
+                             _user=Depends(get_current_user)):
+    # Status is a free-form pipeline value from the lookup; the UI constrains it.
+    if req.status is not None and len(req.status) > 64:
+        raise HTTPException(status_code=400, detail="Status too long")
+    with engine.begin() as conn:
+        exists = conn.execute(text(
+            "SELECT 1 FROM qbo_transactions WHERE qbo_id = :id AND entity_type='Estimate'"),
+            {"id": qbo_estimate_id}).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        cur = conn.execute(text("SELECT status FROM estimate_tracking WHERE qbo_estimate_id=:id"),
+                           {"id": qbo_estimate_id}).mappings().first()
+        status = req.status if req.status is not None else (cur["status"] if cur else "")
+        sets, params = ["status=:status"], {"id": qbo_estimate_id, "status": status}
+        if "owner_user_id" in req.__fields_set__:
+            sets.append("owner_user_id=:owner"); params["owner"] = req.owner_user_id
+        if "notes" in req.__fields_set__:
+            sets.append("notes=:notes"); params["notes"] = req.notes
+        if cur:
+            conn.execute(text(f"UPDATE estimate_tracking SET {', '.join(sets)} WHERE qbo_estimate_id=:id"), params)
+        else:
+            conn.execute(text("""
+                INSERT INTO estimate_tracking (qbo_estimate_id, status, owner_user_id, notes)
+                VALUES (:id, :status, :owner, :notes)
+            """), {"id": qbo_estimate_id, "status": status,
+                   "owner": req.owner_user_id if "owner_user_id" in req.__fields_set__ else None,
+                   "notes": req.notes if "notes" in req.__fields_set__ else None})
+    return {"ok": True, "status": status}
+
+
+@router.get("/tracking/{qbo_estimate_id}/contacts")
+def list_estimate_contacts(qbo_estimate_id: str, _user=Depends(get_current_user)):
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, contact_date, communication_type, notes, created_at
+            FROM customer_contact_log
+            WHERE qbo_estimate_id = :id
+            ORDER BY contact_date DESC, id DESC
+        """), {"id": qbo_estimate_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+class EstimateContactCreate(BaseModel):
+    contact_date: str
+    communication_type: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/tracking/{qbo_estimate_id}/contacts")
+def create_estimate_contact(qbo_estimate_id: str, req: EstimateContactCreate,
+                            _user=Depends(get_current_user)):
+    if not (req.contact_date or "").strip():
+        raise HTTPException(status_code=400, detail="contact_date is required")
+    with engine.begin() as conn:
+        cust = conn.execute(text("""
+            SELECT c.id FROM qbo_transactions t JOIN qbo_customers c ON c.qbo_id = t.customer_qbo_id
+            WHERE t.qbo_id = :id AND t.entity_type='Estimate'
+        """), {"id": qbo_estimate_id}).scalar()
+        conn.execute(text("""
+            INSERT INTO customer_contact_log (qbo_customer_id, qbo_estimate_id, contact_date, communication_type, notes)
+            VALUES (:cid, :eid, :d, :ct, :n)
+        """), {"cid": cust, "eid": qbo_estimate_id, "d": req.contact_date,
+               "ct": req.communication_type, "n": req.notes})
+    return {"ok": True}
 
 
 @router.get("/{estimate_id}")

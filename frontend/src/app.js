@@ -13,6 +13,7 @@ import { cashflowPage } from "./pages/cashflow.js";
 import { crewPortalPage } from "./pages/crew.js";
 import { customersPage } from "./pages/customers.js";
 import { settingsPage } from "./pages/settings.js";
+import { estimateTrackingPage } from "./pages/estimate-tracking.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -121,6 +122,7 @@ async function route() {
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);
+  if (hash === "#/estimates" || hash.startsWith("#/estimates")) return estimateTrackingPage(route);
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return estimatePage(route);
 
   // placeholder pages
