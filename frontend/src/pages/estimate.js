@@ -8,7 +8,7 @@
 
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
-import { api } from "../api.js";
+import { api, hasCapability } from "../api.js";
 import { mountBaseQuotingMetrics } from "./base-quoting-metrics.js";
 import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
 
@@ -23,12 +23,273 @@ import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
 //   #/base-quoting-metrics              -> legacy URL; redirected to the picker
 export async function estimatePage(routeFn) {
   const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|project-rentals|option\/(\d+)))?\/?$/);
-  if (!m) return renderCustomerPicker(routeFn);
+  if (!m) return renderEstimateList(routeFn);
   const estimateId = Number(m[1]);
   const tabPath    = m[2] || "general";
   const tab        = tabPath.split("/")[0];   // "general" | "base" | "review" | "project-rentals" | "option"
   const optionN    = m[3] ? Number(m[3]) : null;
   return renderEstimateWorkspace(routeFn, estimateId, tab, optionN);
+}
+
+// ── Estimate-list landing (Phase 0b) ────────────────────────────────────────
+// Lists all quoting-metrics estimates (one per opportunity) with their
+// create -> ready-for-QBO -> linked lifecycle. The workbook (#/estimate/{id})
+// is the calculator; this is the control center around it.
+const Q_STATUS = {
+  draft:         { label: "Draft", cls: "bg-black/10 text-black/60" },
+  ready_for_qbo: { label: "Ready", cls: "bg-amber-100 text-amber-700" },
+};
+
+async function renderEstimateList(routeFn) {
+  let estimates = [], customers = [];
+  try {
+    [estimates, customers] = await Promise.all([
+      api("/estimates/quoting-list"),
+      api("/estimates/customers").catch(() => []),
+    ]);
+  } catch (e) {
+    setShell({ title: "", bodyHtml: `<div class="mx-auto w-full max-w-4xl"><div class="card p-5 text-sm text-red-700">Failed to load estimates: ${escapeHtml(e?.message || String(e))}</div></div>`, showLogout: true, routeFn });
+    return;
+  }
+  customers = customers.slice().sort((a, b) => (a.display_name || "").localeCompare(b.display_name || ""));  // alphabetical
+  const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
+  const badge = (st) => { const m = Q_STATUS[st] || Q_STATUS.draft; return `<span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${m.cls}">${m.label}</span>`; };
+
+  // ---- table state (3-state sort: asc -> desc -> off) ----
+  let search = "", sort = { key: null, dir: null };
+  const statusFilter = new Set();
+  const STATUS_ORDER = { draft: 0, ready_for_qbo: 1, in_qbo: 2 };
+  const SORT_COLS = [
+    { key: "customer_name", label: "Customer" },
+    { key: "quote_description", label: "Description" },
+    { key: "status", label: "Status" },
+    { key: "updated_at", label: "Last edited" },
+  ];
+  const visible = () => {
+    let out = estimates.slice();
+    const q = search.trim().toLowerCase();
+    if (q) out = out.filter(e => (`${e.customer_name || ""} ${e.quote_description || ""}`).toLowerCase().includes(q));
+    if (statusFilter.size) out = out.filter(e => {
+      for (const f of statusFilter) { if (f === "linked" ? e.qbo_estimate_id : e.status === f) return true; }
+      return false;
+    });
+    if (sort.key) {
+      const d = sort.dir === "asc" ? 1 : -1;
+      out.sort((a, b) => {
+        let av, bv;
+        if (sort.key === "status") { av = STATUS_ORDER[a.status] ?? 9; bv = STATUS_ORDER[b.status] ?? 9; }
+        else { av = (a[sort.key] || "").toString().toLowerCase(); bv = (b[sort.key] || "").toString().toLowerCase(); }
+        return av < bv ? -d : av > bv ? d : 0;
+      });
+    }
+    return out;
+  };
+  const cycleSort = (key) => {
+    if (sort.key !== key) sort = { key, dir: "asc" };
+    else if (sort.dir === "asc") sort.dir = "desc";
+    else sort = { key: null, dir: null };   // third click resets
+    renderHead(); renderRows();
+  };
+  const sortMark = (key) => sort.key === key ? (sort.dir === "asc" ? " ▲" : " ▼") : "";
+
+  // Link and ready are independent; the status cell shows both states.
+  const statusCell = (e) => `${badge(e.status)}${e.qbo_estimate_id
+    ? `<a href="#/estimates" class="ml-1.5 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold bg-emerald-50 text-emerald-700 hover:bg-emerald-100" title="Linked — track on Estimates">#${escapeHtml(e.quote_number || "")} ↗</a>` : ""}`;
+  // Visible action buttons (ghost/outline) — always show what's available.
+  const ACTBTN = "inline-flex items-center rounded-lg border border-black/10 bg-white px-2.5 py-1 text-xs font-semibold hover:bg-black/5 whitespace-nowrap";
+  const actionCell = (e) => {
+    const ready = e.status === "ready_for_qbo"
+      ? `<button class="${ACTBTN} text-black/50" data-revert="${e.id}">Unmark ready</button>`
+      : `<button class="${ACTBTN} text-amber-700" data-ready="${e.id}">Mark ready</button>`;
+    const link = e.qbo_estimate_id
+      ? `<button class="${ACTBTN} text-emerald-700" data-link="${e.id}">Change link</button>`
+      : `<button class="${ACTBTN} text-blue-600" data-link="${e.id}">Link to QBO</button>`;
+    return `<div class="inline-flex items-center gap-1.5">
+      <a href="#/estimate/${e.id}" class="${ACTBTN} text-ink-800">Open</a>${ready}${link}</div>`;
+  };
+
+  const renderHead = () => {
+    const head = document.getElementById("qmHead");
+    if (head) head.innerHTML = `<tr class="bg-black/[0.02] border-b border-black/10 text-black/50">
+      ${SORT_COLS.map(c => `<th class="px-3 py-2.5"><button type="button" data-sort="${c.key}" class="font-semibold text-xs uppercase tracking-wide hover:text-black/80">${c.label}${sortMark(c.key)}</button></th>`).join("")}
+      <th class="px-3 py-2.5"></th></tr>`;
+    head?.querySelectorAll("[data-sort]").forEach(b => b.addEventListener("click", () => cycleSort(b.dataset.sort)));
+  };
+  const renderRows = () => {
+    const list = visible();
+    const tb = document.getElementById("qmRows");
+    if (tb) tb.innerHTML = list.map(e => `<tr class="border-b border-black/5 hover:bg-black/[0.02]">
+      <td class="px-3 py-2.5 font-semibold text-ink-900"><a class="hover:underline" href="#/estimate/${e.id}">${escapeHtml(e.customer_name || "—")}</a></td>
+      <td class="px-3 py-2.5 text-black/60 max-w-[22rem] truncate" title="${escapeHtml(e.quote_description || "")}">${escapeHtml(e.quote_description || "(no description)")}</td>
+      <td class="px-3 py-2.5">${statusCell(e)}</td>
+      <td class="px-3 py-2.5 text-xs text-black/50 tabular-nums">${e.revision_count || 0} rev · ${ymd(e.updated_at)}</td>
+      <td class="px-3 py-2.5 text-right">${actionCell(e)}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="py-8 text-center text-black/40">No estimates match.</td></tr>`;
+    const cnt = document.getElementById("qmCount"); if (cnt) cnt.textContent = `${list.length} estimate${list.length === 1 ? "" : "s"}`;
+    tb?.querySelectorAll("[data-ready]").forEach(b => b.addEventListener("click", async () => { try { await api(`/estimates/${b.dataset.ready}/status`, { method: "PATCH", body: JSON.stringify({ status: "ready_for_qbo" }) }); routeFn(); } catch (_) {} }));
+    tb?.querySelectorAll("[data-revert]").forEach(b => b.addEventListener("click", async () => { try { await api(`/estimates/${b.dataset.revert}/status`, { method: "PATCH", body: JSON.stringify({ status: "draft" }) }); routeFn(); } catch (_) {} }));
+    tb?.querySelectorAll("[data-link]").forEach(b => b.addEventListener("click", () => openLink(b.dataset.link)));
+  };
+
+  const chip = (key, label) => `<button type="button" data-statuschip="${key}" class="rounded-full px-3 py-1 text-xs font-semibold border ${statusFilter.has(key) ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`;
+
+  setShell({
+    title: "", showLogout: true, routeFn,
+    bodyHtml: `
+    <div class="mx-auto w-full max-w-5xl grid grid-cols-1 gap-3 pb-3">
+      <div class="card p-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="text-lg font-extrabold text-ink-900">Quoting Metrics</div>
+            <div class="text-xs text-black/50">Build an estimate, mark it ready, then link it to its QuickBooks Est # — it then tracks on the <a href="#/estimates" class="text-blue-600 font-semibold hover:underline">Estimates</a> page.</div>
+          </div>
+          <button id="newEstBtn" class="btn-primary shrink-0">New estimate</button>
+        </div>
+        <div class="mt-3 flex items-center gap-2 flex-wrap">
+          <input id="qmSearch" class="input text-sm py-2 w-full sm:w-64" placeholder="Search customer or description…">
+          <div class="flex items-center gap-1.5" id="qmChips">${chip("draft", "Draft")}${chip("ready_for_qbo", "Ready")}${chip("linked", "Linked")}</div>
+          <span id="qmCount" class="text-xs text-black/40 ml-auto"></span>
+        </div>
+      </div>
+      <div class="card p-0 overflow-hidden">
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead id="qmHead" class="text-left text-black/50"></thead>
+          <tbody id="qmRows"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <div id="newEstModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-5 w-full max-w-md">
+        <div class="text-lg font-extrabold mb-3">New estimate</div>
+        <form id="newEstForm" class="space-y-3">
+          <div>
+            <div class="label mb-1">Customer</div>
+            <div class="relative">
+              <input id="neCustInput" class="input" placeholder="Type to search customer…" autocomplete="off">
+              <div id="neCustList" class="hidden absolute z-10 mt-1 w-full max-h-56 overflow-auto rounded-xl border border-black/10 bg-white shadow-lg text-ink-900"></div>
+            </div>
+          </div>
+          <div><div class="label mb-1">Description <span class="text-black/40">(optional)</span></div><input id="neDesc" class="input" placeholder="e.g. Rack install — Katy, TX"></div>
+          <div><div class="label mb-1">QBO Estimate No. <span class="text-black/40">(optional — link now if you have it)</span></div><input id="neEstNo" class="input" placeholder="e.g. 7147"></div>
+          <div class="text-sm text-red-700 min-h-[1.25rem]" id="neMsg"></div>
+          <div class="flex justify-end gap-2"><button type="button" id="neCancel" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold hover:bg-black/5">Cancel</button><button type="submit" class="btn-primary">Create &amp; open</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div id="linkModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-5 w-full max-w-md">
+        <div class="text-lg font-extrabold">Link to QuickBooks</div>
+        <div class="text-xs text-black/50 mb-3 mt-0.5">Once it's created in QuickBooks, enter its Estimate No. (or pick a recent one) to link &amp; start tracking.</div>
+        <form id="linkForm" class="space-y-3">
+          <div><div class="label mb-1">Recent QBO estimates for this customer</div><select id="lkCandidate" class="input"><option value="">— choose, or type below —</option></select></div>
+          <div class="flex items-center justify-between gap-2 -mt-1">
+            <span class="text-[11px] text-black/40">Not listed? It may not be synced from QBO yet.</span>
+            ${hasCapability("qbo.sync") ? `<button type="button" id="lkSync" class="text-xs font-semibold text-blue-600 hover:underline whitespace-nowrap">↻ Sync from QBO</button>` : ""}
+          </div>
+          <div><div class="label mb-1">Estimate No.</div><input id="lkEstNo" class="input" placeholder="e.g. 7147"></div>
+          <div class="text-sm text-red-700 min-h-[1.25rem]" id="lkMsg"></div>
+          <div class="flex justify-between gap-2">
+            <button type="button" id="lkUnlink" class="hidden rounded-xl border border-red-200 text-red-600 px-3 py-1.5 text-sm font-semibold hover:bg-red-50">Unlink</button>
+            <div class="flex gap-2 ml-auto"><button type="button" id="lkCancel" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold hover:bg-black/5">Cancel</button><button type="submit" class="btn-primary">Link estimate</button></div>
+          </div>
+        </form>
+      </div>
+    </div>`,
+  });
+
+  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
+  if (pageTitleBlock && pageTitleBlock.style.display !== "none") { pageTitleBlock.style.display = "none"; window.addEventListener("hashchange", () => { if (pageTitleBlock) pageTitleBlock.style.display = ""; }, { once: true }); }
+
+  renderHead(); renderRows();
+  document.getElementById("qmSearch").addEventListener("input", (e) => { search = e.target.value; renderRows(); });
+  function wireChips() {
+    document.querySelectorAll("[data-statuschip]").forEach(b => b.addEventListener("click", () => {
+      const k = b.dataset.statuschip; statusFilter.has(k) ? statusFilter.delete(k) : statusFilter.add(k);
+      document.getElementById("qmChips").innerHTML = chip("draft", "Draft") + chip("ready_for_qbo", "Ready") + chip("linked", "Linked");
+      wireChips(); renderRows();
+    }));
+  }
+  wireChips();
+
+  // ---- New estimate (searchable customer combobox) ----
+  const neModal = document.getElementById("newEstModal");
+  let selectedCustomerId = null;
+  const custInput = document.getElementById("neCustInput");
+  const custList = document.getElementById("neCustList");
+  const renderCustList = () => {
+    const q = custInput.value.trim().toLowerCase();
+    const matches = customers.filter(c => (c.display_name || "").toLowerCase().includes(q)).slice(0, 50);
+    custList.innerHTML = matches.map(c => `<button type="button" data-cid="${c.qbo_customer_id}" class="block w-full text-left px-3 py-1.5 text-sm hover:bg-black/5">${escapeHtml(c.display_name || ("#" + c.qbo_customer_id))}</button>`).join("") || `<div class="px-3 py-2 text-sm text-black/40">No matches</div>`;
+    custList.classList.remove("hidden");
+    custList.querySelectorAll("[data-cid]").forEach(b => b.addEventListener("mousedown", (e) => {
+      e.preventDefault(); selectedCustomerId = parseInt(b.dataset.cid, 10); custInput.value = b.textContent; custList.classList.add("hidden");
+    }));
+  };
+  custInput.addEventListener("focus", renderCustList);
+  custInput.addEventListener("input", () => { selectedCustomerId = null; renderCustList(); });
+  custInput.addEventListener("blur", () => setTimeout(() => custList.classList.add("hidden"), 150));
+
+  const openNe = () => { document.getElementById("neMsg").textContent = ""; selectedCustomerId = null; custInput.value = ""; document.getElementById("neDesc").value = ""; document.getElementById("neEstNo").value = ""; neModal.classList.remove("hidden"); neModal.classList.add("flex"); custInput.focus(); };
+  const closeNe = () => { neModal.classList.add("hidden"); neModal.classList.remove("flex"); };
+  document.getElementById("newEstBtn").addEventListener("click", openNe);
+  document.getElementById("neCancel").addEventListener("click", closeNe);
+  neModal.addEventListener("click", (e) => { if (e.target === neModal) closeNe(); });
+  document.getElementById("newEstForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!selectedCustomerId) { document.getElementById("neMsg").textContent = "Pick a customer from the list."; return; }
+    try {
+      const created = await api("/estimates", { method: "POST", body: JSON.stringify({ qbo_customer_id: selectedCustomerId, quote_description: document.getElementById("neDesc").value.trim() || null }) });
+      const estNo = document.getElementById("neEstNo").value.trim();
+      if (estNo) { try { await api(`/estimates/${created.id}/link-qbo`, { method: "POST", body: JSON.stringify({ est_no: estNo }) }); } catch (err) { let d = err?.message || ""; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} document.getElementById("neMsg").textContent = "Created, but link failed: " + d; return; } }
+      location.hash = `#/estimate/${created.id}`;
+    } catch (err) { document.getElementById("neMsg").textContent = "Could not create estimate."; }
+  });
+
+  // ---- Link to QBO ----
+  const linkModal = document.getElementById("linkModal");
+  let linkId = null;
+  const closeLink = () => { linkModal.classList.add("hidden"); linkModal.classList.remove("flex"); };
+  document.getElementById("lkCancel").addEventListener("click", closeLink);
+  linkModal.addEventListener("click", (e) => { if (e.target === linkModal) closeLink(); });
+  document.getElementById("lkCandidate").addEventListener("change", (e) => { if (e.target.value) document.getElementById("lkEstNo").value = e.target.value; });
+  async function openLink(id) {
+    linkId = id;
+    const est = estimates.find(x => String(x.id) === String(id));
+    document.getElementById("lkMsg").textContent = "";
+    document.getElementById("lkEstNo").value = est?.quote_number || "";
+    document.getElementById("lkUnlink").classList.toggle("hidden", !est?.qbo_estimate_id);
+    const sel = document.getElementById("lkCandidate"); sel.innerHTML = `<option value="">— choose, or type below —</option>`;
+    linkModal.classList.remove("hidden"); linkModal.classList.add("flex");
+    try { (await api(`/estimates/${linkId}/qbo-candidates`)).forEach(c => { const o = document.createElement("option"); o.value = c.est_no; o.textContent = `#${c.est_no} · ${c.txn_date || ""} · $${Math.round(c.amount).toLocaleString()}`; sel.appendChild(o); }); } catch (_) {}
+  }
+  document.getElementById("lkUnlink").addEventListener("click", async () => {
+    try { await api(`/estimates/${linkId}/unlink-qbo`, { method: "POST" }); closeLink(); routeFn(); } catch (_) {}
+  });
+  document.getElementById("lkSync")?.addEventListener("click", async () => {
+    const btn = document.getElementById("lkSync"), orig = btn.textContent, msg = document.getElementById("lkMsg");
+    btn.textContent = "Syncing…"; btn.disabled = true; msg.textContent = "";
+    try {
+      await api("/qbo/sync/transactions", { method: "POST" });
+      if (linkId) {
+        const sel = document.getElementById("lkCandidate"); sel.innerHTML = `<option value="">— choose, or type below —</option>`;
+        (await api(`/estimates/${linkId}/qbo-candidates`)).forEach(c => { const o = document.createElement("option"); o.value = c.est_no; o.textContent = `#${c.est_no} · ${c.txn_date || ""} · $${Math.round(c.amount).toLocaleString()}`; sel.appendChild(o); });
+      }
+      msg.className = "text-sm text-emerald-700 min-h-[1.25rem]"; msg.textContent = "Synced — candidates refreshed.";
+    } catch (err) {
+      msg.className = "text-sm text-red-700 min-h-[1.25rem]";
+      let d = err?.message || "Sync failed."; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {}
+      msg.textContent = d;
+    } finally { btn.textContent = orig; btn.disabled = false; }
+  });
+  document.getElementById("linkForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const estNo = document.getElementById("lkEstNo").value.trim();
+    if (!estNo) { document.getElementById("lkMsg").textContent = "Enter an Estimate No."; return; }
+    try { await api(`/estimates/${linkId}/link-qbo`, { method: "POST", body: JSON.stringify({ est_no: estNo }) }); closeLink(); routeFn(); }
+    catch (err) { let d = err?.message || "Could not link."; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} document.getElementById("lkMsg").textContent = d; }
+  });
 }
 
 // ── Estimate workspace shell (tab strip + body container) ───────────────────

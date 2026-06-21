@@ -197,26 +197,19 @@ def _load_estimate(conn, estimate_id: int):
 
 class EstimateCreate(BaseModel):
     qbo_customer_id: int
+    quote_description: Optional[str] = None
 
 
 @router.post("")
-def create_or_get_estimate(req: EstimateCreate, _user=Depends(get_current_user)):
+def create_estimate(req: EstimateCreate, _user=Depends(get_current_user)):
     """
-    Upsert by qbo_customer_id (1:1). Returns the existing estimate when
-    one already exists — idempotent on retry. Otherwise creates a new
-    one with all input fields NULL.
+    Create a NEW quoting-metrics estimate for a customer. A customer may have
+    many estimates (one per opportunity); this always inserts a new row in
+    'draft' status. The QBO estimate is linked later, at transfer.
     """
     with engine.begin() as conn:
-        existing = conn.execute(text("""
-            SELECT id FROM estimates WHERE qbo_customer_id = :cid
-        """), {"cid": req.qbo_customer_id}).first()
-        if existing:
-            return _load_estimate(conn, existing[0])
-
-        # Verify the customer actually exists and is eligible — keeps junk
-        # estimates from being created against non-customer ids. Also capture
-        # the external qbo_id so the estimate row stands on its own even if
-        # qbo_customers is later re-synced.
+        # Verify the customer exists and is eligible (top-level estimating
+        # customer). Capture qbo_id so the row stands alone across re-syncs.
         customer = conn.execute(text("""
             SELECT id, qbo_id FROM qbo_customers
             WHERE id = :cid AND job = 0 AND active = 1 AND is_project = 0
@@ -229,9 +222,9 @@ def create_or_get_estimate(req: EstimateCreate, _user=Depends(get_current_user))
             )
 
         result = conn.execute(text("""
-            INSERT INTO estimates (qbo_customer_id, qbo_customer_qbo_id)
-            VALUES (:cid, :qid)
-        """), {"cid": customer["id"], "qid": customer["qbo_id"]})
+            INSERT INTO estimates (qbo_customer_id, qbo_customer_qbo_id, quote_description, status)
+            VALUES (:cid, :qid, :desc, 'draft')
+        """), {"cid": customer["id"], "qid": customer["qbo_id"], "desc": (req.quote_description or None)})
         return _load_estimate(conn, result.lastrowid)
 
 
@@ -300,7 +293,9 @@ def list_estimate_tracking(
             (SELECT MAX(contact_date) FROM customer_contact_log cl
                WHERE cl.qbo_estimate_id = t.qbo_id)               AS last_contact_date,
             (SELECT COUNT(*) FROM customer_contact_log cl
-               WHERE cl.qbo_estimate_id = t.qbo_id)               AS contact_count
+               WHERE cl.qbo_estimate_id = t.qbo_id)               AS contact_count,
+            (SELECT e.id FROM estimates e
+               WHERE e.qbo_estimate_id = t.qbo_id LIMIT 1)        AS app_estimate_id
         FROM qbo_transactions t
         LEFT JOIN qbo_customers c       ON c.qbo_id = t.customer_qbo_id
         LEFT JOIN estimate_tracking et  ON et.qbo_estimate_id = t.qbo_id
@@ -313,9 +308,30 @@ def list_estimate_tracking(
         rows = conn.execute(sql, params).mappings().all()
 
     out = []
+    # Pre-QBO drafts: quoting-metrics estimates not yet linked to a QBO estimate.
+    # Shown with a badge so the full pipeline is visible in one place.
+    with engine.connect() as conn:
+        drafts = conn.execute(text("""
+            SELECT e.id, e.quote_description, e.status, e.updated_at,
+                   c.id AS qbo_customer_id, c.display_name AS customer_name
+            FROM estimates e LEFT JOIN qbo_customers c ON c.id = e.qbo_customer_id
+            WHERE e.qbo_estimate_id IS NULL AND e.status IN ('draft','ready_for_qbo')
+            ORDER BY e.updated_at DESC
+        """)).mappings().all()
+    for d in drafts:
+        out.append({
+            "qbo_estimate_id": None, "app_estimate_id": d["id"], "is_draft": True,
+            "draft_status": d["status"],
+            "est_no": "—", "txn_date": str(d["updated_at"])[:10] if d["updated_at"] else None,
+            "amount": 0, "qbo_status": None,
+            "description": d["quote_description"], "qbo_customer_id": d["qbo_customer_id"],
+            "customer_name": d["customer_name"], "opi_status": "", "is_tracked": False,
+            "owner_user_id": None, "owner_name": None, "last_contact_date": None, "contact_count": 0,
+        })
+
     for r in rows:
         out.append({
-            "qbo_estimate_id": r["qbo_estimate_id"],
+            "qbo_estimate_id": r["qbo_estimate_id"], "is_draft": False,
             "est_no": r["est_no"],
             "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
             "amount": float(r["amount"] or 0),
@@ -329,6 +345,7 @@ def list_estimate_tracking(
             "owner_name": (r["owner_name"] or "").strip() or None,
             "last_contact_date": str(r["last_contact_date"]) if r["last_contact_date"] else None,
             "contact_count": int(r["contact_count"] or 0),
+            "app_estimate_id": r["app_estimate_id"],   # linked quoting-metrics estimate, if any
         })
     return {"estimates": out}
 
@@ -404,6 +421,118 @@ def create_estimate_contact(qbo_estimate_id: str, req: EstimateContactCreate,
             VALUES (:cid, :eid, :d, :ct, :n)
         """), {"cid": cust, "eid": qbo_estimate_id, "d": req.contact_date,
                "ct": req.communication_type, "n": req.notes})
+    return {"ok": True}
+
+
+# ===========================================================================
+# Quoting-metrics estimate lifecycle (Phase 0b): list, ready-for-QBO, link.
+# Declared before /{estimate_id} so /quoting-list isn't parsed as an int.
+# ===========================================================================
+# Link (qbo_estimate_id) and ready-status are INDEPENDENT — an estimate can be
+# linked while still draft, or ready without a link. Both are settable anytime.
+QUOTING_STATUSES = ["draft", "ready_for_qbo"]
+
+
+class EstimateStatusPatch(BaseModel):
+    status: str
+
+
+class EstimateLinkRequest(BaseModel):
+    est_no: str
+
+
+@router.get("/quoting-list")
+def list_quoting_estimates(_user=Depends(get_current_user)):
+    """All quoting-metrics estimates (one per opportunity) for the QM landing."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT e.id, e.qbo_customer_id, c.display_name AS customer_name,
+                   e.quote_description, e.quote_number, e.status, e.qbo_estimate_id,
+                   e.revision_count, e.updated_at, e.created_at
+            FROM estimates e
+            LEFT JOIN qbo_customers c ON c.id = e.qbo_customer_id
+            ORDER BY e.updated_at DESC, e.id DESC
+        """)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.patch("/{estimate_id}/status")
+def set_estimate_status(estimate_id: int, req: EstimateStatusPatch, _user=Depends(get_current_user)):
+    if req.status not in ("draft", "ready_for_qbo"):
+        raise HTTPException(status_code=400, detail="status must be draft or ready_for_qbo")
+    with engine.begin() as conn:
+        est = conn.execute(text("SELECT id, status FROM estimates WHERE id=:id"), {"id": estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        if req.status == "ready_for_qbo":
+            conn.execute(text("UPDATE estimates SET status='ready_for_qbo', ready_at=NOW(), ready_by_user_id=:u WHERE id=:id"),
+                         {"id": estimate_id, "u": _user.get("id")})
+        else:
+            conn.execute(text("UPDATE estimates SET status='draft', ready_at=NULL, ready_by_user_id=NULL WHERE id=:id"),
+                         {"id": estimate_id})
+    return {"ok": True, "status": req.status}
+
+
+@router.get("/{estimate_id}/qbo-candidates")
+def qbo_estimate_candidates(estimate_id: int, _user=Depends(get_current_user)):
+    """Recent QBO estimates for this estimate's customer — to help pick the No. to link."""
+    with engine.connect() as conn:
+        est = conn.execute(text("SELECT qbo_customer_qbo_id FROM estimates WHERE id=:id"), {"id": estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        rows = conn.execute(text("""
+            SELECT t.qbo_id, t.doc_number AS est_no, t.txn_date, ROUND(t.total_amt) AS amount
+            FROM qbo_transactions t
+            WHERE t.entity_type='Estimate' AND t.customer_qbo_id = :cid
+              AND t.qbo_id NOT IN (SELECT qbo_estimate_id FROM estimates WHERE qbo_estimate_id IS NOT NULL)
+            ORDER BY t.txn_date DESC LIMIT 25
+        """), {"cid": est["qbo_customer_qbo_id"]}).mappings().all()
+    return [{"qbo_id": r["qbo_id"], "est_no": r["est_no"], "txn_date": str(r["txn_date"]) if r["txn_date"] else None, "amount": float(r["amount"] or 0)} for r in rows]
+
+
+@router.post("/{estimate_id}/link-qbo")
+def link_estimate_to_qbo(estimate_id: int, req: EstimateLinkRequest, _user=Depends(get_current_user)):
+    """Link this quoting estimate to a QBO estimate (by Estimate No.) and seed a
+    tracking row so it flows into the Estimates page. Independent of ready-status
+    (can link a draft); the QBO estimate must already exist + be synced."""
+    est_no = (req.est_no or "").strip()
+    if not est_no:
+        raise HTTPException(status_code=400, detail="Estimate No. is required")
+    with engine.begin() as conn:
+        est = conn.execute(text("SELECT id, qbo_customer_qbo_id FROM estimates WHERE id=:id"), {"id": estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        qbo = conn.execute(text("""
+            SELECT qbo_id FROM qbo_transactions
+            WHERE entity_type='Estimate' AND doc_number=:n
+            ORDER BY (customer_qbo_id = :cid) DESC, txn_date DESC LIMIT 1
+        """), {"n": est_no, "cid": est["qbo_customer_qbo_id"]}).mappings().first()
+        if not qbo:
+            raise HTTPException(status_code=404, detail=f"No QuickBooks estimate found with No. {est_no}. Create it in QBO first, then link.")
+        already = conn.execute(text("SELECT id FROM estimates WHERE qbo_estimate_id=:q AND id<>:id"),
+                               {"q": qbo["qbo_id"], "id": estimate_id}).first()
+        if already:
+            raise HTTPException(status_code=400, detail=f"Estimate No. {est_no} is already linked to another quoting estimate.")
+        conn.execute(text("""
+            UPDATE estimates SET qbo_estimate_id=:q, linked_at=NOW(), linked_by_user_id=:u,
+                quote_number=:n WHERE id=:id
+        """), {"q": qbo["qbo_id"], "u": _user.get("id"), "n": est_no, "id": estimate_id})
+        conn.execute(text("""
+            INSERT IGNORE INTO estimate_tracking (qbo_estimate_id, status) VALUES (:q, '')
+        """), {"q": qbo["qbo_id"]})
+    return {"ok": True, "qbo_estimate_id": qbo["qbo_id"], "est_no": est_no}
+
+
+@router.post("/{estimate_id}/unlink-qbo")
+def unlink_estimate_from_qbo(estimate_id: int, _user=Depends(get_current_user)):
+    """Remove the link to a QBO estimate (ready-status is unchanged)."""
+    with engine.begin() as conn:
+        if not conn.execute(text("SELECT id FROM estimates WHERE id=:id"), {"id": estimate_id}).first():
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        conn.execute(text("""
+            UPDATE estimates SET qbo_estimate_id=NULL, linked_at=NULL, linked_by_user_id=NULL, quote_number=NULL
+            WHERE id=:id
+        """), {"id": estimate_id})
     return {"ok": True}
 
 

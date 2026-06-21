@@ -892,6 +892,7 @@ export async function dashboardPage(routeFn) {
   const STATUS_ORDER = { needs_attention: 0, not_started: 1, in_progress: 2, completed: 3, canceled: 4 };
 
   function sorted(list) {
+    if (!state.sortKey) return [...list];
     const dir = state.sortDir === "asc" ? 1 : -1;
     return [...list].sort((a, b) => {
       if (state.sortKey === "project_status") {
@@ -1006,8 +1007,10 @@ export async function dashboardPage(routeFn) {
     const sortBtn = e.target.closest("[data-sort]");
     if (sortBtn) {
       const key = sortBtn.getAttribute("data-sort");
-      if (state.sortKey === key) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
-      else { state.sortKey = key; state.sortDir = "asc"; }
+      if (state.sortKey === key) {
+        if (state.sortDir === "asc") state.sortDir = "desc";
+        else { state.sortKey = null; state.sortDir = "asc"; }   // 3rd click resets
+      } else { state.sortKey = key; state.sortDir = "asc"; }
       document.getElementById("projFilterMenuPortal")?.remove();
       state.openFilter = null;
       renderAll();

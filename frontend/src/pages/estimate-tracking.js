@@ -45,7 +45,7 @@ export async function estimateTrackingPage(routeFn) {
   const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
 
   const COLS = [
-    { key: "est_no", label: "Est #", type: "text", w: 74, td: (r) => `<span class="font-mono text-black/60 tabular-nums">${escapeHtml(r.est_no || "—")}</span>` },
+    { key: "est_no", label: "Est #", type: "text", w: 92, td: (r) => `<span class="font-mono text-black/60 tabular-nums">${escapeHtml(r.est_no || "—")}</span>${r.app_estimate_id && !r.is_draft ? ` <a href="#/estimate/${r.app_estimate_id}" class="text-blue-600 hover:text-blue-800 align-middle" title="Open quote in Quoting Metrics">✎</a>` : ""}` },
     { key: "customer_name", label: "Customer", type: "text", w: 150, trunc: true, td: (r) => `<span class="font-semibold text-ink-900">${escapeHtml(r.customer_name || "—")}</span>` },
     { key: "description", label: "Description", type: "text", w: 230, trunc: true, td: (r) => `<span class="text-black/60">${escapeHtml(r.description || "")}</span>` },
     { key: "amount", label: "Amount", type: "num", w: 100, align: "right", td: (r) => `<span class="font-semibold text-ink-900 tabular-nums">${money(r.amount)}</span>` },
@@ -56,17 +56,20 @@ export async function estimateTrackingPage(routeFn) {
     { key: "txn_date", label: "Date", type: "date", w: 96, td: (r) => `<span class="text-black/50 tabular-nums">${ymd(r.txn_date)}</span>` },
   ];
   const EXPAND_W = 52;
-  const dispVal = (r, key) => key === "opi_status" ? (r.opi_status || "— none —") : key === "owner_name" ? (r.owner_name || "— Unassigned —") : (r[key] || "");
+  const draftLabel = (r) => r.draft_status === "ready_for_qbo" ? "Ready for QBO" : "Draft";
+  const dispVal = (r, key) => key === "opi_status" ? (r.is_draft ? draftLabel(r) : (r.opi_status || "— none —"))
+    : key === "owner_name" ? (r.owner_name || "— Unassigned —") : (r[key] || "");
   const multiOptions = (key) => {
-    if (key === "opi_status") return ["— none —", ...STATUS_OPTS];
+    if (key === "opi_status") return ["Draft", "Ready for QBO", "— none —", ...STATUS_OPTS];
     const set = new Set(); rows.forEach(r => { const v = dispVal(r, key); if (v) set.add(v); });
     return [...set].sort();
   };
 
-  const statusPill = (r) => `<button type="button" data-status-pill="${escapeHtml(r.qbo_estimate_id)}"
+  const draftBadge = (r) => `<span class="inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${r.draft_status === "ready_for_qbo" ? "bg-amber-100 text-amber-700" : "bg-black/10 text-black/60"}">${r.draft_status === "ready_for_qbo" ? "Ready for QBO" : "Draft"}</span>`;
+  const statusPill = (r) => r.is_draft ? draftBadge(r) : `<button type="button" data-status-pill="${escapeHtml(r.qbo_estimate_id)}"
       class="${statusColors(r.opi_status)} inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold leading-snug text-left hover:opacity-85 max-w-full truncate ${r.opi_status ? "" : "opacity-70"}"
       title="${escapeHtml(r.opi_status || "Set status")}">${escapeHtml(r.opi_status || "Set status")}</button>`;
-  const ownerBtn = (r) => `<button type="button" data-owner="${escapeHtml(r.qbo_estimate_id)}"
+  const ownerBtn = (r) => r.is_draft ? `<span class="text-black/30">—</span>` : `<button type="button" data-owner="${escapeHtml(r.qbo_estimate_id)}"
       class="text-left text-black/70 hover:text-ink-900 hover:underline decoration-dotted underline-offset-2 truncate max-w-full"
       title="${escapeHtml(r.owner_name || "Unassigned")}">${escapeHtml(r.owner_name || "— assign —")}</button>`;
 
@@ -141,7 +144,7 @@ export async function estimateTrackingPage(routeFn) {
     const q = search.trim().toLowerCase();
     if (q) out = out.filter(r => (`${r.customer_name || ""} ${r.est_no || ""} ${r.description || ""}`).toLowerCase().includes(q));
     out = out.filter(passFilters);
-    out.sort((a, b) => { let av = a[sortKey], bv = b[sortKey]; if (sortKey === "amount") return ((+av || 0) - (+bv || 0)) * sortDir; av = (av ?? "").toString().toLowerCase(); bv = (bv ?? "").toString().toLowerCase(); return av < bv ? -sortDir : av > bv ? sortDir : 0; });
+    if (sortKey) out.sort((a, b) => { let av = a[sortKey], bv = b[sortKey]; if (sortKey === "amount") return ((+av || 0) - (+bv || 0)) * sortDir; av = (av ?? "").toString().toLowerCase(); bv = (bv ?? "").toString().toLowerCase(); return av < bv ? -sortDir : av > bv ? sortDir : 0; });
     return out;
   };
 
@@ -214,7 +217,13 @@ export async function estimateTrackingPage(routeFn) {
       ${COLS.map(c => `<th class="px-3 py-2.5 align-middle ${c.align === "right" ? "text-right" : "text-left"}"><div class="inline-flex items-center gap-1 max-w-full">
         <button type="button" data-sort="${c.key}" class="font-bold text-xs uppercase tracking-wide truncate hover:text-black/80">${escapeHtml(c.label)}${sortMark(c.key)}</button>
         <button type="button" data-filter="${c.key}" class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-lg hover:bg-black/5 ${filterActive(c.key) ? "bg-black/5" : ""}">${FUNNEL(filterActive(c.key))}</button></div></th>`).join("")}</tr>`;
-    head.querySelectorAll("[data-sort]").forEach(b => b.addEventListener("click", () => { const k = b.dataset.sort; if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; } renderAll(); }));
+    head.querySelectorAll("[data-sort]").forEach(b => b.addEventListener("click", () => {
+      const k = b.dataset.sort;
+      if (sortKey !== k) { sortKey = k; sortDir = 1; }      // 1st click: ascending
+      else if (sortDir === 1) { sortDir = -1; }             // 2nd click: descending
+      else { sortKey = null; sortDir = 1; }                 // 3rd click: reset
+      renderAll();
+    }));
     head.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", (e) => { e.stopPropagation(); openFilterPortal(b.dataset.filter, b); }));
   };
 
@@ -223,28 +232,32 @@ export async function estimateTrackingPage(routeFn) {
     // desktop table body
     const tbody = document.getElementById("estRows");
     if (tbody) tbody.innerHTML = list.map(r => {
-      const open = expandedRow === r.qbo_estimate_id;
-      return `<tr class="border-b border-black/5 hover:bg-black/[0.02]">
-        <td class="px-2 py-2.5 text-center"><button type="button" data-expand="${escapeHtml(r.qbo_estimate_id)}" class="text-black/40 hover:text-black/80 ${open ? "rotate-90" : ""}" style="display:inline-flex" title="Show contacts">${CHEV}</button></td>
+      const open = !!expandedRow && !r.is_draft && expandedRow === r.qbo_estimate_id;
+      const lead = r.is_draft
+        ? `<a href="#/estimate/${r.app_estimate_id}" class="text-blue-600 hover:text-blue-800" title="Open in Quoting Metrics" style="display:inline-flex"><svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3h7v7M21 3l-9 9M10 5H5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-5"/></svg></a>`
+        : `<button type="button" data-expand="${escapeHtml(r.qbo_estimate_id)}" class="text-black/40 hover:text-black/80 ${open ? "rotate-90" : ""}" style="display:inline-flex" title="Show contacts">${CHEV}</button>`;
+      return `<tr class="border-b border-black/5 hover:bg-black/[0.02] ${r.is_draft ? "bg-amber-50/40" : ""}">
+        <td class="px-2 py-2.5 text-center">${lead}</td>
         ${COLS.map(c => `<td class="px-3 py-2.5 ${c.trunc ? "truncate" : "whitespace-nowrap"} ${c.align === "right" ? "text-right" : ""}" ${c.trunc ? `title="${escapeHtml(r[c.key] || "")}"` : ""}>${c.td(r)}</td>`).join("")}
       </tr>${open ? `<tr class="bg-black/[0.015]"><td colspan="${COLS.length + 1}" class="px-3 pb-3">${contactPanelHtml(r.qbo_estimate_id)}</td></tr>` : ""}`;
     }).join("") || `<tr><td colspan="${COLS.length + 1}" class="py-8 text-center text-black/40">No estimates match.</td></tr>`;
     // mobile cards
     const cards = document.getElementById("estCards");
     if (cards) cards.innerHTML = list.map(r => {
-      const open = expandedRow === r.qbo_estimate_id;
+      const open = !!expandedRow && !r.is_draft && expandedRow === r.qbo_estimate_id;
       return `<div class="rounded-xl border border-black/10 bg-white p-3">
         <div class="flex items-start justify-between gap-2">
-          <div class="min-w-0"><div class="text-[11px] font-mono text-black/40">#${escapeHtml(r.est_no || "—")}</div><div class="font-bold text-ink-900 truncate">${escapeHtml(r.customer_name || "—")}</div></div>
+          <div class="min-w-0"><div class="text-[11px] font-mono text-black/40">#${escapeHtml(r.est_no || "—")}${r.app_estimate_id && !r.is_draft ? ` · <a href="#/estimate/${r.app_estimate_id}" class="text-blue-600">✎ edit quote</a>` : ""}</div><div class="font-bold text-ink-900 truncate">${escapeHtml(r.customer_name || "—")}</div></div>
           <div class="text-right shrink-0"><div class="font-bold tabular-nums text-ink-900">${money(r.amount)}</div><div class="text-[11px] text-black/40">${ymd(r.txn_date)} · ${escapeHtml(r.qbo_status || "—")}</div></div>
         </div>
         ${r.description ? `<div class="text-xs text-black/55 mt-1 line-clamp-2">${escapeHtml(r.description)}</div>` : ""}
         <div class="flex items-center justify-between gap-2 mt-2">${statusPill(r)}<div class="text-xs text-black/60 truncate">${ownerBtn(r)}</div></div>
         <div class="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-black/5 text-xs">
-          <span class="text-black/50">${r.contact_count ? `Last contact ${ymd(r.last_contact_date)} (${r.contact_count})` : "No contacts"}</span>
-          <button type="button" data-expand="${escapeHtml(r.qbo_estimate_id)}" class="font-semibold text-blue-600">${open ? "Hide" : "Contacts ▸"}</button>
+          ${r.is_draft
+            ? `<span class="text-black/50">Not in QuickBooks yet</span><a href="#/estimate/${r.app_estimate_id}" class="font-semibold text-blue-600">Open in QM ↗</a>`
+            : `<span class="text-black/50">${r.contact_count ? `Last contact ${ymd(r.last_contact_date)} (${r.contact_count})` : "No contacts"}</span><button type="button" data-expand="${escapeHtml(r.qbo_estimate_id)}" class="font-semibold text-blue-600">${open ? "Hide" : "Contacts ▸"}</button>`}
         </div>
-        ${open ? `<div class="mt-2">${contactPanelHtml(r.qbo_estimate_id)}</div>` : ""}
+        ${open && !r.is_draft ? `<div class="mt-2">${contactPanelHtml(r.qbo_estimate_id)}</div>` : ""}
       </div>`;
     }).join("") || `<div class="text-center text-sm text-black/40 py-6">No estimates match.</div>`;
 

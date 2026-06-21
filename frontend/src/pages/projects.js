@@ -822,6 +822,7 @@ export async function projectsPage(routeFn) {
   }
 
   function sorted(list) {
+    if (!state.sortKey) return [...list];
     const dir = state.sortDir === "asc" ? 1 : -1;
     return [...list].sort((a, b) => {
       const va = a[state.sortKey], vb = b[state.sortKey];
@@ -861,8 +862,10 @@ export async function projectsPage(routeFn) {
     const sortBtn = e.target.closest("[data-sort]");
     if (sortBtn) {
       const key = sortBtn.getAttribute("data-sort");
-      if (state.sortKey === key) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
-      else { state.sortKey = key; state.sortDir = "asc"; }
+      if (state.sortKey === key) {
+        if (state.sortDir === "asc") state.sortDir = "desc";
+        else { state.sortKey = null; state.sortDir = "asc"; }   // 3rd click resets
+      } else { state.sortKey = key; state.sortDir = "asc"; }
       document.getElementById("filterMenuPortal")?.remove();
       state.openFilter = null;
       renderAll();
