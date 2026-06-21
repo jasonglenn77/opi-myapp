@@ -989,6 +989,78 @@ def projects_estimates_by_status(req: EstimatesByStatusRequest, user=Depends(get
 class FinancialsByItemRequest(BaseModel):
     project_qbo_ids: List[str] = []   # empty = all projects
 
+
+class FinancialsItemLinesRequest(BaseModel):
+    project_qbo_ids: List[str] = []
+    item_name: str
+    kind: str = "expense"   # expense | invoice | estimate
+
+
+@router.post("/projects/financials/by-item/lines")
+def projects_financials_item_lines(req: FinancialsItemLinesRequest, user=Depends(get_current_user)):
+    """Drill-down: the raw transaction lines behind one item-type cell (e.g. the
+    expense lines that sum to 'Materials'). Mirrors the by-item pivot's grouping."""
+    ids = [str(x).strip() for x in req.project_qbo_ids if x]
+    allowed = visible_project_qbo_ids(user)
+    if allowed is not None:
+        ids = [i for i in ids if i in allowed] if ids else list(allowed)
+    if not ids:
+        return {"lines": []}
+
+    ph = ", ".join(f":id{i}" for i in range(len(ids)))
+    params = {f"id{i}": v for i, v in enumerate(ids)}
+    params["item"] = req.item_name
+    is_other = req.item_name == "Other"
+
+    # Item match mirrors the pivot: an item_qbo_id maps to a name via the sales
+    # lines; 'Other' = unmapped (NULL or not in the mapping).
+    if is_other:
+        item_clause = ("(qtl.item_qbo_id IS NULL OR qtl.item_qbo_id NOT IN "
+                       "(SELECT item_qbo_id FROM myapp.qbo_sales_transaction_lines "
+                       " WHERE line_level='child' AND item_qbo_id IS NOT NULL))")
+    else:
+        item_clause = ("qtl.item_qbo_id IN (SELECT item_qbo_id FROM myapp.qbo_sales_transaction_lines "
+                       "WHERE line_level='child' AND item_qbo_id IS NOT NULL AND item_name = :item)")
+
+    if req.kind == "expense":
+        sql = text(f"""
+            SELECT JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json,'$.VendorRef.name')) AS vendor,
+                   qt.entity_type, qt.doc_number, qt.txn_date, qtl.description,
+                   CASE WHEN qt.entity_type='VendorCredit'
+                          OR (qt.entity_type='Purchase' AND JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json,'$.Credit'))='true')
+                        THEN -COALESCE(qtl.amount,0) ELSE COALESCE(qtl.amount,0) END AS amount
+            FROM myapp.qbo_customers qc
+            JOIN myapp.qbo_transaction_lines qtl ON qtl.line_customer_qbo_id = qc.qbo_id
+            JOIN myapp.qbo_transactions qt ON qt.id = qtl.transaction_id
+                 AND qt.entity_type IN ('Bill','Check','CreditCardCharge','Purchase','PurchaseOrder','VendorCredit')
+            WHERE qc.is_project = 1 AND qc.qbo_id IN ({ph}) AND {item_clause}
+            ORDER BY qt.txn_date DESC, qt.id DESC
+        """)
+    else:
+        # invoice / estimate lines (revenue side) from the sales lines
+        etype = "Invoice" if req.kind == "invoice" else "Estimate"
+        params["etype"] = etype
+        sql_item = "qstl.item_name = :item" if not is_other else \
+            "(qstl.item_name IS NULL OR qstl.item_qbo_id IS NULL)"
+        sql = text(f"""
+            SELECT qc.display_name AS vendor, qt.entity_type, qt.doc_number, qt.txn_date,
+                   qstl.description, COALESCE(qstl.amount,0) AS amount
+            FROM myapp.qbo_customers qc
+            JOIN myapp.qbo_transactions qt ON qt.customer_qbo_id = qc.qbo_id AND qt.entity_type = :etype
+            JOIN myapp.qbo_sales_transaction_lines qstl ON qstl.transaction_id = qt.id AND qstl.line_level='child'
+            WHERE qc.is_project = 1 AND qc.qbo_id IN ({ph}) AND {sql_item}
+            ORDER BY qt.txn_date DESC, qt.id DESC
+        """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql, params).mappings().all()
+    return {"lines": [{
+        "vendor": r["vendor"], "entity_type": r["entity_type"], "doc_number": r["doc_number"],
+        "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
+        "description": r["description"], "amount": float(r["amount"] or 0),
+    } for r in rows]}
+
+
 @router.post("/projects/financials/by-item")
 def projects_financials_by_item(req: FinancialsByItemRequest, user=Depends(get_current_user)):
     """

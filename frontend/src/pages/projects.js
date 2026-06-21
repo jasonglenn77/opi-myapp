@@ -1492,9 +1492,12 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
       const bgB = i%2 ? "#feecdb" : "#fff7ed";
       const bgC = i%2 ? "#dcfce7" : "#f0fdf4";
 
+      const chev = exp !== 0
+        ? `<button type="button" data-fin-expand="${escapeHtml(item)}" title="Show expense detail" style="border:none;background:none;cursor:pointer;color:rgba(0,0,0,0.35);padding:0 5px 0 0;font-size:11px;line-height:1;">▸</button>`
+        : `<span style="display:inline-block;width:14px;"></span>`;
       return `
-        <tr style="border-bottom:1px solid rgba(0,0,0,0.05);">
-          <td style="${cw("label")} padding:6px 8px; font-size:12px; font-weight:600; color:#1a1a2e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; background:#fff;">${escapeHtml(item)}</td>
+        <tr data-fin-row="${escapeHtml(item)}" style="border-bottom:1px solid rgba(0,0,0,0.05);">
+          <td style="${cw("label")} padding:6px 8px; font-size:12px; font-weight:600; color:#1a1a2e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; background:#fff;">${chev}${escapeHtml(item)}</td>
           ${vCell(est,bgA,dL,"est")}    ${vCell(inv,bgA,"","inv")}    ${dfCell(diffA,est,bgA,dR,false,"dA")}
           <td style="${cw("gap")} background:#fff;"></td>
           ${vCell(ec,bgB,dL,"ec")}      ${vCell(exp,bgB,"","exp")}    ${dfCell(diffB,ec,bgB,dR,true,"dB")}
@@ -1573,6 +1576,45 @@ async function openFinancialsModal(cardKey, filteredList, label = null) {
         </div>
 
       </div>`;
+
+    // ── Drill-down: chevron expands the raw expense lines behind an item ────────
+    const finMoney = (n) => (n < 0 ? "-" : "") + "$" + Math.abs(Math.round(n)).toLocaleString("en-US");
+    function renderFinLines(lines) {
+      if (!lines || !lines.length) return `<div style="padding:8px 12px 8px 28px;color:rgba(0,0,0,0.4);font-size:11px;">No detail lines.</div>`;
+      const body = lines.map(l => `<tr style="border-top:1px solid rgba(0,0,0,0.06);">
+        <td style="padding:4px 8px;">${escapeHtml(l.vendor || "—")}</td>
+        <td style="padding:4px 8px;color:rgba(0,0,0,0.5);white-space:nowrap;">${escapeHtml(l.entity_type || "")}${l.doc_number ? " #" + escapeHtml(l.doc_number) : ""}</td>
+        <td style="padding:4px 8px;color:rgba(0,0,0,0.5);white-space:nowrap;font-variant-numeric:tabular-nums;">${escapeHtml((l.txn_date || "").slice(0, 10))}</td>
+        <td style="padding:4px 8px;color:rgba(0,0,0,0.6);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(l.description || "")}">${escapeHtml(l.description || "")}</td>
+        <td style="padding:4px 8px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600;">${finMoney(l.amount)}</td>
+      </tr>`).join("");
+      return `<div style="padding:6px 8px 10px 28px;background:#fafafa;">
+        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+          <thead><tr style="color:rgba(0,0,0,0.4);text-align:left;">
+            <th style="padding:2px 8px;font-weight:700;">Vendor</th><th style="padding:2px 8px;font-weight:700;">Source</th>
+            <th style="padding:2px 8px;font-weight:700;">Date</th><th style="padding:2px 8px;font-weight:700;">Description</th>
+            <th style="padding:2px 8px;font-weight:700;text-align:right;">Amount</th>
+          </tr></thead><tbody>${body}</tbody>
+        </table></div>`;
+    }
+    document.querySelectorAll("#fin-body-tbl [data-fin-expand]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const item = btn.getAttribute("data-fin-expand");
+        const sel = (s) => `#fin-body-tbl tr[${s}="${CSS.escape(item)}"]`;
+        const existing = document.querySelector(sel("data-fin-detail"));
+        if (existing) { existing.remove(); btn.textContent = "▸"; return; }
+        btn.textContent = "▾";
+        const row = document.querySelector(sel("data-fin-row"));
+        const tr = document.createElement("tr");
+        tr.setAttribute("data-fin-detail", item);
+        tr.innerHTML = `<td colspan="11" style="padding:0;"><div style="padding:8px 12px 8px 28px;color:rgba(0,0,0,0.4);font-size:11px;">Loading…</div></td>`;
+        row.after(tr);
+        try {
+          const det = await api("/projects/financials/by-item/lines", { method: "POST", body: JSON.stringify({ project_qbo_ids: qboIds, item_name: item, kind: "expense" }) });
+          tr.querySelector("td").innerHTML = renderFinLines(det.lines);
+        } catch (e) { tr.querySelector("td").innerHTML = `<td colspan="11"><div style="padding:8px 12px 8px 28px;color:#dc2626;font-size:11px;">Failed to load detail.</div></td>`; }
+      });
+    });
 
     // Compensate header + footer for scrollbar width so columns stay aligned
     requestAnimationFrame(() => {
