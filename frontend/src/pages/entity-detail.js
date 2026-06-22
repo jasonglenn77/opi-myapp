@@ -5,6 +5,7 @@
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+import { mountKickoffPanel } from "./kickoff.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -98,6 +99,8 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
   };
 
   const typeBadge = `<span class="inline-flex rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${TYPE_STYLE[entityType] || "bg-black/10 text-black/50"}">${escapeHtml(entityType)}</span>`;
+  const isProject = entityType === "project";   // only projects get the Kickoff tab
+  let activeTab = "documents";
 
   mount(`
     <div class="w-full">
@@ -105,69 +108,99 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         <a href="#/customers" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← Back to Customers</a>
       </div>
       <div class="card flex flex-col overflow-hidden" style="height: calc(100vh - 150px); min-height: 420px;">
-        <div class="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-black/10">
+        <div class="shrink-0 px-4 sm:px-5 pt-4 border-b border-black/10">
           <div class="flex items-center gap-2 flex-wrap">
             ${typeBadge}
             <div class="text-base font-extrabold text-ink-900">${escapeHtml(entity.name || "Entity")}</div>
           </div>
-          <div class="text-xs text-black/50 mt-0.5">${escapeHtml(entity.customer_name || "")} · Documents</div>
+          <div class="text-xs text-black/50 mt-0.5 ${isProject ? "mb-2" : "pb-3"}">${escapeHtml(entity.customer_name || "")}</div>
+          ${isProject ? `<div id="tabBar" class="flex gap-1 -mb-px"></div>` : ""}
         </div>
-        <div class="flex-1 overflow-auto">
-          <div id="docTree"></div>
-        </div>
+        <div id="tabBody" class="flex-1 overflow-auto"></div>
       </div>
     </div>`, routeFn);
 
-  renderTree();
-
-  const host = document.getElementById("docTree");
-  host.addEventListener("click", async (e) => {
-    const tog = e.target.closest("[data-toggle]");
-    if (tog) {
-      const k = tog.getAttribute("data-toggle");
-      expanded.has(k) ? expanded.delete(k) : expanded.add(k);
-      renderTree();
-      return;
-    }
-    const up = e.target.closest("[data-up]");
-    if (up) {
-      const folder = up.getAttribute("data-up");
-      const input = document.createElement("input");
-      input.type = "file";
-      input.onchange = async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        const fd = new FormData();
-        fd.append("file", file);
-        up.disabled = true; up.textContent = "Uploading…";
+  // ── documents tab ───────────────────────────────────────────────────────────
+  function attachDocHandlers() {
+    const host = document.getElementById("docTree");
+    if (!host) return;
+    host.addEventListener("click", async (e) => {
+      const tog = e.target.closest("[data-toggle]");
+      if (tog) {
+        const k = tog.getAttribute("data-toggle");
+        expanded.has(k) ? expanded.delete(k) : expanded.add(k);
+        renderTree();
+        return;
+      }
+      const up = e.target.closest("[data-up]");
+      if (up) {
+        const folder = up.getAttribute("data-up");
+        const input = document.createElement("input");
+        input.type = "file";
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          const fd = new FormData();
+          fd.append("file", file);
+          up.disabled = true; up.textContent = "Uploading…";
+          try {
+            await api(`/documents/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}?folder=${encodeURIComponent(folder)}`, { method: "POST", body: fd });
+            expanded.add(folder);
+            await refetch();
+          } catch (err) { alert(`Upload failed: ${err.message}`); renderTree(); }
+        };
+        input.click();
+        return;
+      }
+      const dl = e.target.closest("[data-dl]");
+      if (dl) {
         try {
-          await api(`/documents/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}?folder=${encodeURIComponent(folder)}`, { method: "POST", body: fd });
-          expanded.add(folder);
+          const res = await api(`/documents/file/${dl.getAttribute("data-dl")}/url`);
+          if (res.url) window.open(res.url, "_blank");
+        } catch (err) { alert(`Could not open file: ${err.message}`); }
+        return;
+      }
+      const del = e.target.closest("[data-del]");
+      if (del) {
+        const name = del.getAttribute("data-dname") || "this file";
+        if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+        try {
+          await api(`/documents/file/${del.getAttribute("data-del")}`, { method: "DELETE" });
           await refetch();
-        } catch (err) { alert(`Upload failed: ${err.message}`); renderTree(); }
-      };
-      input.click();
-      return;
-    }
-    const dl = e.target.closest("[data-dl]");
-    if (dl) {
-      try {
-        const res = await api(`/documents/file/${dl.getAttribute("data-dl")}/url`);
-        if (res.url) window.open(res.url, "_blank");
-      } catch (err) { alert(`Could not open file: ${err.message}`); }
-      return;
-    }
-    const del = e.target.closest("[data-del]");
-    if (del) {
-      const name = del.getAttribute("data-dname") || "this file";
-      if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
-      try {
-        await api(`/documents/file/${del.getAttribute("data-del")}`, { method: "DELETE" });
-        await refetch();
-      } catch (err) { alert(`Delete failed: ${err.message}`); }
-      return;
-    }
-  });
+        } catch (err) { alert(`Delete failed: ${err.message}`); }
+        return;
+      }
+    });
+  }
+
+  function showDocuments() {
+    const body = document.getElementById("tabBody");
+    body.innerHTML = `<div id="docTree"></div>`;
+    renderTree();
+    attachDocHandlers();
+  }
+
+  function showKickoff() {
+    const body = document.getElementById("tabBody");
+    body.innerHTML = "";
+    mountKickoffPanel(body, entityId);
+  }
+
+  function renderTabs() {
+    const bar = document.getElementById("tabBar");
+    if (!bar) return;
+    const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
+    bar.innerHTML = btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process");
+    bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => {
+      const t = b.getAttribute("data-tab");
+      if (t === activeTab) return;
+      activeTab = t; renderTabs();
+      t === "kickoff" ? showKickoff() : showDocuments();
+    }));
+  }
+
+  if (isProject) renderTabs();
+  showDocuments();
 }
 
 function mount(bodyHtml, routeFn) {
