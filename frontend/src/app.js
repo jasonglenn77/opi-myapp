@@ -14,6 +14,7 @@ import { crewPortalPage } from "./pages/crew.js";
 import { customersPage } from "./pages/customers.js";
 import { settingsPage } from "./pages/settings.js";
 import { estimateTrackingPage } from "./pages/estimate-tracking.js";
+import { entityDetailPage } from "./pages/entity-detail.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -41,6 +42,7 @@ const ROUTE_ORDER = [
 ];
 
 function requiredCapForHash(hash) {
+  if (hash.startsWith("#/entity/")) return "page.customers";
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return "page.estimate";
   if (hash.startsWith("#/crew")) return "page.crew_portal";
   return ROUTE_CAPS[hash] || null;
@@ -109,6 +111,12 @@ async function route() {
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);
   if (hash === "#/customers") return customersPage(route);
+  if (hash.startsWith("#/entity/")) {
+    const m = hash.match(/^#\/entity\/(estimate|job|project)\/(.+)$/);
+    if (m) return entityDetailPage(route, { entityType: m[1], entityId: decodeURIComponent(m[2]) });
+    location.hash = "#/customers";
+    return;
+  }
   if (hash === "#/settings") return settingsPage(route);
   if (hash.startsWith("#/crew")) {
     const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);

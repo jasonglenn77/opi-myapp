@@ -37,6 +37,7 @@ from app.estimates.routes import router as estimates_router
 from app.cashflow.routes import router as cashflow_router
 from app.crew.routes import router as crew_router
 from app.customers.routes import router as customers_router
+from app.documents.routes import router as documents_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -46,6 +47,7 @@ app.include_router(estimates_router)
 app.include_router(cashflow_router)
 app.include_router(crew_router)
 app.include_router(customers_router)
+app.include_router(documents_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 

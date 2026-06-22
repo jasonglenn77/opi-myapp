@@ -30,6 +30,11 @@ def build_project_file_key(qbo_customer_id: int, filename: str) -> str:
     file_id = str(uuid.uuid4())
     return f"{S3_PREFIX}/{qbo_customer_id}/{file_id}{ext}"
 
+def build_document_key(entity_type: str, entity_id: str, folder: str, filename: str) -> str:
+    """S3 key for a document filed under an entity's folder (Phase 2)."""
+    ext = "." + filename.rsplit(".", 1)[1].lower() if "." in filename else ""
+    return f"{S3_PREFIX}/docs/{entity_type}/{entity_id}/{folder}/{uuid.uuid4()}{ext}"
+
 def public_file_url(key: str) -> str:
     return f"https://{AWS_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}"
 
