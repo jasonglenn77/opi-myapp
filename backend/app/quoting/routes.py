@@ -4,8 +4,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_capability
 from app.db import engine
 
 router = APIRouter(prefix="/api/quoting", tags=["quoting"])
@@ -35,6 +36,80 @@ def list_lookup_values(_user=Depends(get_current_user)):
         })
 
     return dict(grouped)
+
+
+# ---------------------------------------------------------------------------
+# Lookup-values admin (Settings → Lookup Tables). Manage the reference rows that
+# drive the app's dropdowns. Admin-only (page.settings). Categories are fixed
+# (they map to code); admins manage the ROWS within each category.
+# ---------------------------------------------------------------------------
+class LookupRow(BaseModel):
+    category: Optional[str] = None      # required on create; ignored on update
+    lookup_key: str
+    value_num: Optional[float] = None
+    value_text: Optional[str] = None
+    sort_order: Optional[int] = 0
+
+
+@router.get("/lookup-values/admin")
+def list_lookup_values_admin(_user=Depends(require_capability("page.settings"))):
+    """Same rows as the read endpoint but grouped with ids, for the admin UI."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, category, lookup_key, value_num, value_text, sort_order
+            FROM lookup_values ORDER BY category, sort_order, lookup_key
+        """)).mappings().all()
+    grouped = defaultdict(list)
+    for r in rows:
+        grouped[r["category"]].append({
+            "id": r["id"], "lookup_key": r["lookup_key"],
+            "value_num": float(r["value_num"]) if r["value_num"] is not None else None,
+            "value_text": r["value_text"], "sort_order": r["sort_order"],
+        })
+    return {"categories": [{"category": k, "rows": v} for k, v in sorted(grouped.items())]}
+
+
+@router.post("/lookup-values")
+def create_lookup_value(body: LookupRow, _user=Depends(require_capability("page.settings"))):
+    if not (body.category or "").strip():
+        raise HTTPException(status_code=400, detail="category is required")
+    if not (body.lookup_key or "").strip():
+        raise HTTPException(status_code=400, detail="key is required")
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("""
+                INSERT INTO lookup_values (category, lookup_key, value_num, value_text, sort_order)
+                VALUES (:c,:k,:n,:t,:s)
+            """), {"c": body.category.strip(), "k": body.lookup_key.strip(),
+                   "n": body.value_num, "t": (body.value_text or None), "s": body.sort_order or 0})
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="That key already exists in this category.")
+    return {"ok": True, "id": res.lastrowid}
+
+
+@router.patch("/lookup-values/{row_id}")
+def update_lookup_value(row_id: int, body: LookupRow, _user=Depends(require_capability("page.settings"))):
+    if not (body.lookup_key or "").strip():
+        raise HTTPException(status_code=400, detail="key is required")
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("""
+                UPDATE lookup_values SET lookup_key=:k, value_num=:n, value_text=:t, sort_order=:s
+                WHERE id=:id
+            """), {"k": body.lookup_key.strip(), "n": body.value_num,
+                   "t": (body.value_text or None), "s": body.sort_order or 0, "id": row_id})
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="That key already exists in this category.")
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Lookup value not found")
+    return {"ok": True}
+
+
+@router.delete("/lookup-values/{row_id}")
+def delete_lookup_value(row_id: int, _user=Depends(require_capability("page.settings"))):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM lookup_values WHERE id=:id"), {"id": row_id})
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +153,165 @@ def list_rental_rates(_user=Depends(get_current_user)):
                      FIELD(duration, 'day', 'week', 'month')
         """)).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Productivity-rates admin (Settings → Reference Data). Richer than lookup
+# values: each row is an install item with a standard and aggressive per-day
+# rate. aggressive_per_day is derived (standard × multiplier). page.settings.
+# ---------------------------------------------------------------------------
+class ProductivityRow(BaseModel):
+    category: Optional[str] = None        # required on create; ignored on update
+    item_name: str
+    standard_per_day: Optional[int] = 0
+    aggressive_multiplier: Optional[float] = 1.0
+    unit: Optional[str] = None
+    sort_order: Optional[int] = 0
+
+
+def _agg_per_day(std, mult):
+    return int(round((std or 0) * (mult if mult is not None else 1.0)))
+
+
+@router.get("/productivity-rates/admin")
+def list_productivity_rates_admin(_user=Depends(require_capability("page.settings"))):
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, category, item_name, standard_per_day, aggressive_multiplier,
+                   aggressive_per_day, unit, sort_order
+            FROM productivity_rates ORDER BY category, sort_order, item_name
+        """)).mappings().all()
+    grouped = defaultdict(list)
+    for r in rows:
+        grouped[r["category"]].append({
+            "id": r["id"], "item_name": r["item_name"],
+            "standard_per_day": r["standard_per_day"],
+            "aggressive_multiplier": float(r["aggressive_multiplier"]) if r["aggressive_multiplier"] is not None else None,
+            "aggressive_per_day": r["aggressive_per_day"],
+            "unit": r["unit"], "sort_order": r["sort_order"],
+        })
+    return {"categories": [{"category": k, "rows": v} for k, v in sorted(grouped.items())]}
+
+
+@router.post("/productivity-rates")
+def create_productivity_rate(body: ProductivityRow, _user=Depends(require_capability("page.settings"))):
+    if not (body.category or "").strip():
+        raise HTTPException(status_code=400, detail="category is required")
+    if not (body.item_name or "").strip():
+        raise HTTPException(status_code=400, detail="item name is required")
+    agg = _agg_per_day(body.standard_per_day, body.aggressive_multiplier)
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("""
+                INSERT INTO productivity_rates (category, item_name, standard_per_day,
+                    aggressive_multiplier, aggressive_per_day, unit, sort_order)
+                VALUES (:c,:i,:s,:m,:a,:u,:o)
+            """), {"c": body.category.strip(), "i": body.item_name.strip(),
+                   "s": body.standard_per_day or 0, "m": body.aggressive_multiplier,
+                   "a": agg, "u": (body.unit or None), "o": body.sort_order or 0})
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="That item already exists in this category.")
+    return {"ok": True, "id": res.lastrowid}
+
+
+@router.patch("/productivity-rates/{row_id}")
+def update_productivity_rate(row_id: int, body: ProductivityRow, _user=Depends(require_capability("page.settings"))):
+    if not (body.item_name or "").strip():
+        raise HTTPException(status_code=400, detail="item name is required")
+    agg = _agg_per_day(body.standard_per_day, body.aggressive_multiplier)
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("""
+                UPDATE productivity_rates SET item_name=:i, standard_per_day=:s,
+                    aggressive_multiplier=:m, aggressive_per_day=:a, unit=:u, sort_order=:o
+                WHERE id=:id
+            """), {"i": body.item_name.strip(), "s": body.standard_per_day or 0,
+                   "m": body.aggressive_multiplier, "a": agg, "u": (body.unit or None),
+                   "o": body.sort_order or 0, "id": row_id})
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="That item already exists in this category.")
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Productivity rate not found")
+    return {"ok": True}
+
+
+@router.delete("/productivity-rates/{row_id}")
+def delete_productivity_rate(row_id: int, _user=Depends(require_capability("page.settings"))):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM productivity_rates WHERE id=:id"), {"id": row_id})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Rental-rates admin. Flat list keyed by equipment × power × size × duration.
+# ---------------------------------------------------------------------------
+_DURATIONS = ("day", "week", "month")
+
+
+class RentalRow(BaseModel):
+    equipment_type: str
+    power_source: Optional[str] = None
+    size_class: Optional[str] = None
+    duration: str
+    price: Optional[float] = 0
+
+
+@router.get("/rental-rates/admin")
+def list_rental_rates_admin(_user=Depends(require_capability("page.settings"))):
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, equipment_type, power_source, size_class, duration,
+                   CAST(price AS DECIMAL(10,2)) AS price
+            FROM rental_rates
+            ORDER BY equipment_type, power_source, size_class,
+                     FIELD(duration, 'day', 'week', 'month')
+        """)).mappings().all()
+    return {"rows": [{**dict(r), "price": float(r["price"]) if r["price"] is not None else None} for r in rows]}
+
+
+@router.post("/rental-rates")
+def create_rental_rate(body: RentalRow, _user=Depends(require_capability("page.settings"))):
+    if not (body.equipment_type or "").strip():
+        raise HTTPException(status_code=400, detail="equipment type is required")
+    if body.duration not in _DURATIONS:
+        raise HTTPException(status_code=400, detail="duration must be day, week or month")
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("""
+                INSERT INTO rental_rates (equipment_type, power_source, size_class, duration, price)
+                VALUES (:e,:p,:s,:d,:pr)
+            """), {"e": body.equipment_type.strip(), "p": (body.power_source or None),
+                   "s": (body.size_class or None), "d": body.duration, "pr": body.price or 0})
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="That equipment/power/size/duration combination already exists.")
+    return {"ok": True, "id": res.lastrowid}
+
+
+@router.patch("/rental-rates/{row_id}")
+def update_rental_rate(row_id: int, body: RentalRow, _user=Depends(require_capability("page.settings"))):
+    if not (body.equipment_type or "").strip():
+        raise HTTPException(status_code=400, detail="equipment type is required")
+    if body.duration not in _DURATIONS:
+        raise HTTPException(status_code=400, detail="duration must be day, week or month")
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("""
+                UPDATE rental_rates SET equipment_type=:e, power_source=:p, size_class=:s,
+                    duration=:d, price=:pr WHERE id=:id
+            """), {"e": body.equipment_type.strip(), "p": (body.power_source or None),
+                   "s": (body.size_class or None), "d": body.duration, "pr": body.price or 0, "id": row_id})
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail="That equipment/power/size/duration combination already exists.")
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Rental rate not found")
+    return {"ok": True}
+
+
+@router.delete("/rental-rates/{row_id}")
+def delete_rental_rate(row_id: int, _user=Depends(require_capability("page.settings"))):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM rental_rates WHERE id=:id"), {"id": row_id})
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

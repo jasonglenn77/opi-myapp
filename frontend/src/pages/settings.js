@@ -1,6 +1,7 @@
-// Settings → Roles & Permissions. Admin-only. Create roles and manage the
-// default capabilities for each role (the admin role is locked). Capabilities
-// themselves are code-defined; here you assign which roles get them.
+// Settings — admin-only (page.settings). Two tabs:
+//   Roles & Permissions — create roles + assign default capabilities (admin locked).
+//   Lookup Tables       — CRUD the reference rows that drive the app's dropdowns
+//                         (lookup_values), grouped by category.
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 
@@ -26,22 +27,56 @@ const CAP_LABELS = {
   "projects.admin_tools": "Project admin tools (refresh/reset)",
 };
 const capLabel = (c) => CAP_LABELS[c] || c;
-const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const errDetail = (e) => { let d = e?.message || "Error"; try { const o = JSON.parse(d); if (o && o.detail) d = o.detail; } catch (_) {} return d; };
+const prettyCat = (c) => String(c || "").replace(/_/g, " ").replace(/\b\w/g, m => m.toUpperCase());
 
 export async function settingsPage(routeFn) {
-  let data;
-  try {
-    data = await api("/roles");
-  } catch (e) {
-    mount(`<div class="mx-auto w-full max-w-3xl"><div class="card p-5 text-sm text-red-700">Failed to load roles: ${esc(e.message || e)}</div></div>`, routeFn);
-    return;
+  let activeTab = "roles";
+
+  mount(`
+    <div class="w-full pb-3">
+      <div class="card p-0 overflow-hidden mb-3">
+        <div class="px-4 pt-4 pb-0">
+          <div class="text-lg font-extrabold">Settings</div>
+          <div class="text-xs text-black/50">Manage roles &amp; the reference data behind the app's dropdowns.</div>
+          <div id="setTabBar" class="flex gap-1 -mb-px mt-3 border-b border-black/10"></div>
+        </div>
+      </div>
+      <div id="setBody"></div>
+    </div>`, routeFn);
+
+  function renderTabs() {
+    const bar = document.getElementById("setTabBar");
+    if (!bar) return;
+    const btn = (k, l) => `<button type="button" data-stab="${k}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === k ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${l}</button>`;
+    bar.innerHTML = btn("roles", "Roles &amp; Permissions") + btn("lookups", "Lookup Values") + btn("rates", "Rate Tables");
+    bar.querySelectorAll("[data-stab]").forEach(b => b.addEventListener("click", () => {
+      const t = b.dataset.stab;
+      if (t === activeTab) return;
+      activeTab = t; renderTabs();
+      if (t === "lookups") showReference("lookup");
+      else if (t === "rates") showReference("rates");
+      else showRoles(routeFn);
+    }));
   }
+
+  renderTabs();
+  showRoles(routeFn);
+}
+
+// ── Roles tab ────────────────────────────────────────────────────────────────
+async function showRoles(routeFn) {
+  const body = document.getElementById("setBody");
+  body.innerHTML = `<div class="text-sm text-black/40 px-1 py-6">Loading roles…</div>`;
+  let data;
+  try { data = await api("/roles"); }
+  catch (e) { body.innerHTML = `<div class="card p-5 text-sm text-red-700">Failed to load roles: ${esc(errDetail(e))}</div>`; return; }
   const roles = data.roles || [];
   const allCaps = data.all_capabilities || [];
   const pageCaps = allCaps.filter(c => c.startsWith("page."));
   const actionCaps = allCaps.filter(c => !c.startsWith("page."));
 
-  // A capability checkbox grid for a role (disabled for the locked admin role).
   const capGrid = (role) => {
     const have = new Set(role.capabilities || []);
     const group = (title, caps) => `
@@ -60,7 +95,7 @@ export async function settingsPage(routeFn) {
   };
 
   const roleCard = (role) => `
-    <details class="card p-0 overflow-hidden" data-role="${role.id}">
+    <details class="card p-0 overflow-hidden mb-3" data-role="${role.id}">
       <summary class="px-4 py-3 cursor-pointer list-none flex items-center justify-between gap-3">
         <div class="min-w-0">
           <div class="flex items-center gap-2">
@@ -93,16 +128,16 @@ export async function settingsPage(routeFn) {
       </div>
     </details>`;
 
-  mount(`
-    <div class="mx-auto w-full max-w-3xl grid grid-cols-1 gap-3 pb-3">
-      <div class="card p-4 flex items-start justify-between gap-3">
-        <div>
-          <div class="text-lg font-extrabold">Roles &amp; Permissions</div>
-          <div class="text-xs text-black/50">Create roles and choose which capabilities each role grants by default. Per-user exceptions are still set on the Users page.</div>
-        </div>
-        <button id="newRoleBtn" class="btn-primary shrink-0">New role</button>
+  body.innerHTML = `
+    <div class="mx-auto max-w-4xl">
+    <div class="card p-4 flex items-start justify-between gap-3 mb-3">
+      <div>
+        <div class="text-base font-extrabold">Roles &amp; Permissions</div>
+        <div class="text-xs text-black/50">Create roles and choose which capabilities each role grants by default. Per-user exceptions are still set on the Users page.</div>
       </div>
-      ${roles.map(roleCard).join("")}
+      <button id="newRoleBtn" class="btn-primary shrink-0">New role</button>
+    </div>
+    ${roles.map(roleCard).join("")}
     </div>
 
     <div id="newRoleModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
@@ -137,17 +172,16 @@ export async function settingsPage(routeFn) {
           </div>
         </form>
       </div>
-    </div>`, routeFn);
+    </div>`;
 
   // ---- handlers ----
-  const setStatus = (id, text, ok) => {
+  const setStatus = (id, msg, ok) => {
     const el = document.querySelector(`[data-rolestatus="${id}"]`);
     if (!el) return;
-    el.textContent = text;
+    el.textContent = msg;
     el.className = "text-[11px] " + (ok === true ? "text-emerald-600" : ok === false ? "text-red-600" : "text-black/40");
-    if (ok === true) setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 1500);
+    if (ok === true) setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 1500);
   };
-  const errDetail = (e) => { let d = e?.message || "Error"; try { const o = JSON.parse(d); if (o && o.detail) d = o.detail; } catch (_) {} return d; };
 
   document.querySelectorAll("[data-rolesave]").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -167,12 +201,11 @@ export async function settingsPage(routeFn) {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.roledelete;
       if (!confirm("Delete this role? This can't be undone.")) return;
-      try { await api(`/roles/${id}`, { method: "DELETE" }); routeFn(); }
+      try { await api(`/roles/${id}`, { method: "DELETE" }); showRoles(routeFn); }
       catch (e) { setStatus(id, errDetail(e), false); }
     });
   });
 
-  // New-role modal
   const modal = document.getElementById("newRoleModal");
   const open = () => { modal.classList.remove("hidden"); modal.classList.add("flex"); };
   const close = () => { modal.classList.add("hidden"); modal.classList.remove("flex"); };
@@ -197,9 +230,200 @@ export async function settingsPage(routeFn) {
       description: document.getElementById("nrDesc").value.trim() || null,
       capabilities: [...document.querySelectorAll("input[data-newcap]:checked")].map(c => c.value),
     };
-    try { await api("/roles", { method: "POST", body: JSON.stringify(payload) }); close(); routeFn(); }
+    try { await api("/roles", { method: "POST", body: JSON.stringify(payload) }); close(); showRoles(routeFn); }
     catch (e) { msg.textContent = errDetail(e); }
   });
+}
+
+// ── Reference Data tabs ──────────────────────────────────────────────────────
+// Two tabs share this view via `mode`:
+//   "lookup" → lookup_values (simple key/number/text lists)
+//   "rates"  → productivity_rates + rental_rates (richer quoting rate tables)
+const numOrNull = (v) => { const s = String(v ?? "").trim(); if (s === "") return null; const n = Number(s); return Number.isNaN(n) ? null : n; };
+
+async function showReference(mode) {
+  const body = document.getElementById("setBody");
+  body.innerHTML = `<div class="text-sm text-black/40 px-1 py-6">Loading…</div>`;
+  let lookup = { categories: [] }, prod = { categories: [] }, rentals = { rows: [] };
+  try {
+    if (mode === "lookup") {
+      lookup = await api("/quoting/lookup-values/admin");
+    } else {
+      [prod, rentals] = await Promise.all([
+        api("/quoting/productivity-rates/admin"),
+        api("/quoting/rental-rates/admin"),
+      ]);
+    }
+  } catch (e) { body.innerHTML = `<div class="card p-5 text-sm text-red-700">Failed to load: ${esc(errDetail(e))}</div>`; return; }
+
+  let sel = mode === "lookup"
+    ? { kind: "lookup", key: lookup.categories[0]?.category || null }
+    : (prod.categories[0] ? { kind: "prod", key: prod.categories[0].category } : { kind: "rental", key: "rental_rates" });
+
+  body.innerHTML = `
+    <div class="grid grid-cols-1 md:grid-cols-[230px_1fr] gap-3">
+      <div class="card p-2 self-start" id="refNav"></div>
+      <div id="refPanel"></div>
+    </div>`;
+
+  const setMsg = (t, ok) => {
+    const m = document.getElementById("refMsg");
+    if (!m) return;
+    m.textContent = t;
+    m.className = "text-[11px] mt-2 min-h-[1rem] " + (ok ? "text-emerald-600" : "text-red-600");
+    if (ok) setTimeout(() => { if (m.textContent === t) m.textContent = ""; }, 1500);
+  };
+
+  function renderNav() {
+    const groups = mode === "lookup"
+      ? [{ title: "Categories", kind: "lookup", items: lookup.categories.map(c => ({ key: c.category, label: prettyCat(c.category), count: c.rows.length })) }]
+      : [
+          { title: "Productivity rates", kind: "prod", items: prod.categories.map(c => ({ key: c.category, label: c.category, count: c.rows.length })) },
+          { title: "Rentals", kind: "rental", items: [{ key: "rental_rates", label: "Rental Rates", count: rentals.rows.length }] },
+        ];
+    const host = document.getElementById("refNav");
+    host.innerHTML = groups.map(g => `
+      <div class="mb-1.5">
+        <div class="px-2 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wide text-black/35">${g.title}</div>
+        ${g.items.map(it => `
+          <button type="button" data-kind="${g.kind}" data-key="${esc(it.key)}" class="flex items-center justify-between gap-2 w-full text-left rounded-lg px-2 py-1.5 text-xs font-semibold ${sel.kind === g.kind && sel.key === it.key ? "bg-blue-50 text-blue-700" : "text-black/60 hover:bg-black/5"}">
+            <span class="truncate">${esc(it.label)}</span>
+            <span class="text-[10px] text-black/35 shrink-0">${it.count}</span>
+          </button>`).join("")}
+      </div>`).join("");
+    host.querySelectorAll("[data-kind]").forEach(b => b.addEventListener("click", () => {
+      sel = { kind: b.dataset.kind, key: b.dataset.key }; renderNav(); renderPanel();
+    }));
+  }
+
+  async function reloadAll() {
+    if (mode === "lookup") {
+      lookup = await api("/quoting/lookup-values/admin");
+    } else {
+      [prod, rentals] = await Promise.all([
+        api("/quoting/productivity-rates/admin"),
+        api("/quoting/rental-rates/admin"),
+      ]);
+    }
+    renderNav(); renderPanel();
+  }
+
+  // Generic editable grid. cols: {key,label,type:text|num|select|computed,w,step,options,placeholder,required}
+  function renderGrid({ title, code, note, cols, rows, endpoint, createExtra }) {
+    const cellInput = (c, r, attr) => {
+      if (c.type === "computed") return `<span class="text-black/45 tabular-nums">${r ? esc(r[c.key] ?? "—") : "—"}</span>`;
+      if (c.type === "select") return `<select ${attr}="${c.key}" class="input text-xs py-1 w-full">${c.options.map(o => `<option ${r && String(r[c.key]) === String(o) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+      const t = c.type === "num" ? "number" : "text";
+      const step = c.step ? `step="${c.step}"` : "";
+      const val = r ? esc(r[c.key] ?? "") : "";
+      return `<input type="${t}" ${step} ${attr}="${c.key}" class="input text-xs py-1 w-full" value="${val}" placeholder="${esc(c.placeholder || "")}">`;
+    };
+    const head = cols.map(c => `<th class="py-1.5 px-2 font-bold ${c.w || ""}">${esc(c.label)}</th>`).join("");
+    const rowHtml = (r) => `<tr class="border-b border-black/5" data-row="${r.id}">${cols.map(c => `<td class="py-1 px-2">${cellInput(c, r, "data-f")}</td>`).join("")}
+      <td class="py-1 pl-2 text-right whitespace-nowrap"><button type="button" data-save class="btn-primary text-[11px] px-2 py-1">Save</button><button type="button" data-del title="Delete" class="ml-1 rounded-lg border border-red-200 text-red-600 px-2 py-1 text-[11px] font-semibold hover:bg-red-50">✕</button></td></tr>`;
+    const addHtml = `<tr class="border-t-2 border-black/10 bg-black/[0.015]" data-newrow>${cols.map(c => `<td class="py-1 px-2">${c.type === "computed" ? `<span class="text-black/30">auto</span>` : cellInput(c, null, "data-nf")}</td>`).join("")}
+      <td class="py-1 pl-2 text-right"><button type="button" data-add class="btn-primary text-[11px] px-3 py-1">Add</button></td></tr>`;
+
+    document.getElementById("refPanel").innerHTML = `
+      <div class="card p-4">
+        <div class="text-base font-extrabold">${esc(title)}</div>
+        ${code ? `<div class="text-[11px] font-mono text-black/40">${esc(code)}</div>` : ""}
+        ${note ? `<div class="text-[11px] text-black/45 mt-2 mb-3">${note}</div>` : `<div class="mb-3"></div>`}
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead><tr class="text-black/45 text-left border-b border-black/10">${head}<th class="w-28"></th></tr></thead>
+            <tbody>${rows.map(rowHtml).join("")}${addHtml}</tbody>
+          </table>
+        </div>
+        <div id="refMsg" class="text-[11px] mt-2 min-h-[1rem]"></div>
+      </div>`;
+
+    const collect = (scope, attr) => {
+      const o = {};
+      cols.forEach(c => {
+        if (c.type === "computed") return;
+        const el = scope.querySelector(`[${attr}="${c.key}"]`);
+        if (!el) return;
+        o[c.key] = c.type === "num" ? numOrNull(el.value) : (el.value ?? "").trim();
+        if (c.type === "text" && !c.required && o[c.key] === "") o[c.key] = null;
+      });
+      return o;
+    };
+    const missingRequired = (payload) => cols.some(c => c.required && !String(payload[c.key] ?? "").trim());
+
+    const panel = document.getElementById("refPanel");
+    panel.querySelectorAll("[data-row]").forEach(tr => {
+      const id = tr.dataset.row;
+      tr.querySelector("[data-save]").addEventListener("click", async () => {
+        const b = collect(tr, "data-f");
+        if (missingRequired(b)) { setMsg("Please fill the required fields.", false); return; }
+        try { await api(`${endpoint}/${id}`, { method: "PATCH", body: JSON.stringify(b) }); setMsg("Saved ✓", true); await reloadAll(); }
+        catch (e) { setMsg(errDetail(e), false); }
+      });
+      tr.querySelector("[data-del]").addEventListener("click", async () => {
+        if (!confirm("Delete this row?")) return;
+        try { await api(`${endpoint}/${id}`, { method: "DELETE" }); await reloadAll(); }
+        catch (e) { setMsg(errDetail(e), false); }
+      });
+    });
+    const nr = panel.querySelector("[data-newrow]");
+    nr.querySelector("[data-add]").addEventListener("click", async () => {
+      const b = { ...collect(nr, "data-nf"), ...(createExtra || {}) };
+      if (missingRequired(b)) { setMsg("Please fill the required fields to add a row.", false); return; }
+      try { await api(endpoint, { method: "POST", body: JSON.stringify(b) }); await reloadAll(); }
+      catch (e) { setMsg(errDetail(e), false); }
+    });
+  }
+
+  function renderPanel() {
+    if (sel.kind === "lookup") {
+      const cat = lookup.categories.find(c => c.category === sel.key);
+      if (!cat) return;
+      renderGrid({
+        title: prettyCat(cat.category), code: cat.category,
+        note: `<span class="font-semibold">Key</span> = the label shown in the dropdown · <span class="font-semibold">Number</span> / <span class="font-semibold">Text</span> = optional values used by calculations · <span class="font-semibold">Order</span> = list position. Renaming a key may affect features that reference it by name.`,
+        cols: [
+          { key: "lookup_key", label: "Key", type: "text", required: true },
+          { key: "value_num", label: "Number", type: "num", step: "any", w: "w-28" },
+          { key: "value_text", label: "Text", type: "text" },
+          { key: "sort_order", label: "Order", type: "num", w: "w-20" },
+        ],
+        rows: cat.rows, endpoint: "/quoting/lookup-values", createExtra: { category: cat.category },
+      });
+    } else if (sel.kind === "prod") {
+      const cat = prod.categories.find(c => c.category === sel.key);
+      if (!cat) return;
+      renderGrid({
+        title: cat.category, code: "productivity_rates",
+        note: `Install productivity per crew-day. <span class="font-semibold">Aggressive/day</span> is auto-calculated from Standard × Multiplier.`,
+        cols: [
+          { key: "item_name", label: "Item", type: "text", required: true },
+          { key: "standard_per_day", label: "Std / day", type: "num", w: "w-24" },
+          { key: "aggressive_multiplier", label: "Aggr. ×", type: "num", step: "any", w: "w-20" },
+          { key: "aggressive_per_day", label: "Aggr. / day", type: "computed", w: "w-20" },
+          { key: "unit", label: "Unit", type: "text", w: "w-20" },
+          { key: "sort_order", label: "Order", type: "num", w: "w-16" },
+        ],
+        rows: cat.rows, endpoint: "/quoting/productivity-rates", createExtra: { category: cat.category },
+      });
+    } else {
+      renderGrid({
+        title: "Rental Rates", code: "rental_rates",
+        note: `Equipment rental pricing by power source, size class and duration.`,
+        cols: [
+          { key: "equipment_type", label: "Equipment", type: "text", required: true },
+          { key: "power_source", label: "Power", type: "text" },
+          { key: "size_class", label: "Size class", type: "text" },
+          { key: "duration", label: "Duration", type: "select", options: ["day", "week", "month"], w: "w-24" },
+          { key: "price", label: "Price", type: "num", step: "any", w: "w-24" },
+        ],
+        rows: rentals.rows, endpoint: "/quoting/rental-rates", createExtra: {},
+      });
+    }
+  }
+
+  renderNav();
+  renderPanel();
 }
 
 function mount(bodyHtml, routeFn) {

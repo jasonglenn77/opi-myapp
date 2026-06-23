@@ -1337,6 +1337,10 @@ body {
   width: 12rem;
 }
 
+.w-16 {
+  width: 4rem;
+}
+
 .min-w-0 {
   min-width: 0px;
 }
@@ -1719,6 +1723,10 @@ body {
   border-color: rgb(0 0 0 / 0.05);
 }
 
+.self-start {
+  align-self: flex-start;
+}
+
 .overflow-auto {
   overflow: auto;
 }
@@ -1847,6 +1855,10 @@ body {
 
 .border-b-2 {
   border-bottom-width: 2px;
+}
+
+.border-t-2 {
+  border-top-width: 2px;
 }
 
 .border-dashed {
@@ -2487,6 +2499,10 @@ body {
 
 .pt-5 {
   padding-top: 1.25rem;
+}
+
+.pb-0 {
+  padding-bottom: 0px;
 }
 
 .text-left {
@@ -3492,6 +3508,14 @@ body {
 @media (min-width: 768px) {
   .md\:grid-cols-2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .md\:grid-cols-\[210px_1fr\] {
+    grid-template-columns: 210px 1fr;
+  }
+
+  .md\:grid-cols-\[230px_1fr\] {
+    grid-template-columns: 230px 1fr;
   }
 }
 
