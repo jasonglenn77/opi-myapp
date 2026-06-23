@@ -49,19 +49,15 @@ export function foremanDetailHtml(projectLabel = "Your assigned project") {
         <button class="btn-primary w-full mt-3 opacity-50 cursor-not-allowed" disabled>Submit kickoff</button>
       `)}
 
-      ${section("Daily Update Submission", "S3 media + new forms", `
+      ${section("Daily Update — media capture", "S3 (future)", `
+        <div class="text-[11px] text-black/45 mb-2">The daily requirements checklist is above. These media captures attach to the daily update (wired after feedback).</div>
         <div class="space-y-2">
           ${drop("🎥", "30–60s progress video")}
           ${formItem("Project drawing PDF — mark progress")}
-          ${formItem("Daily toolbox talk form")}
           ${formItem("Anchoring submission", "Video: drill, vacuum, insert, torque, test")}
           ${formItem("Wire guidance form", "Videos: expansion joint, cut depth, loop continuity (ohms), epoxy machine cleaned")}
-          ${formItem("Safety forms", "Client-specific")}
-          ${formItem("Daily equipment checklist")}
           ${formItem("BOL / truck unloading", "Photo of materials on truck · BOL scan · report damage/shortage w/ photos")}
         </div>
-        <button class="btn-primary w-full mt-3 opacity-50 cursor-not-allowed" disabled>Review &amp; submit daily update</button>
-        <div class="text-[11px] text-black/40 mt-2">Forms are customizable to the scope of work / requirements.</div>
       `)}
 
       ${section("Equipment & Propane Service Request", "S3 + new form", `

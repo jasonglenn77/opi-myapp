@@ -229,6 +229,7 @@ def crew_hierarchy(user=Depends(require_capability("page.crew_portal"))):
         ce = attributed_cp.get((r["crew_id"], str(r["project_qbo_id"])), {"total": 0.0, "ytd": 0.0})
         projects_by_crew[r["crew_id"]].append({
             "qbo_customer_id": r["qbo_customer_id"],
+            "project_qbo_id": str(r["project_qbo_id"]),
             "project_name": r["project_name"],
             "start_date": str(r["start_date"]) if r["start_date"] else None,
             "end_date": str(r["end_date"]) if r["end_date"] else None,

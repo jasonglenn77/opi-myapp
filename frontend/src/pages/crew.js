@@ -8,6 +8,7 @@ import { api, getMe } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { foremanDetailHtml } from "./crew-foreman.js";
+import { mountDailyPanel } from "./daily.js";
 
 export async function crewPortalPage(routeFn, params = null) {
   const role = getMe()?.role || "";
@@ -97,9 +98,14 @@ export async function crewPortalPage(routeFn, params = null) {
     mount(`
       <div class="mx-auto w-full max-w-5xl grid grid-cols-1 gap-3 pb-3">
         <div><a href="#/crew/child/${params.childId}" class="text-xs font-semibold text-blue-600 hover:text-blue-800">← ${escapeHtml(crewName)} · other projects</a></div>
+        <div class="card p-0 overflow-hidden"><div id="crewDailyHost"></div></div>
         ${foremanDetailHtml(label)}
-        <div class="text-center text-[11px] text-black/30 pt-1">Skeleton — capture forms &amp; S3 uploads wired after feedback.</div>
+        <div class="text-center text-[11px] text-black/30 pt-1">Other capture forms &amp; S3 uploads wired after feedback.</div>
       </div>`, routeFn);
+    // the daily log keys on the project's QBO id (shared with the project page),
+    // not the internal qc.id used for crew-portal routing.
+    const dailyHost = document.getElementById("crewDailyHost");
+    if (dailyHost && pr?.project_qbo_id) mountDailyPanel(dailyHost, pr.project_qbo_id);
     return;
   }
 
