@@ -211,13 +211,16 @@ def _project_meta(conn, entity_id):
             break
         root_name, pq, guard = p["display_name"], p["parent_qbo_id"], guard + 1
 
+    # NB: projects.qbo_customer_id is the qbo_customers INTERNAL id, not the qbo_id,
+    # so resolve the project through qbo_customers rather than matching entity_id directly.
     pr = conn.execute(text("""
         SELECT p.id,
                COALESCE(p.start_date, MIN(psi.start_date)) AS start_date,
                COALESCE(p.end_date,   MAX(psi.end_date))   AS end_date
         FROM projects p
+        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
         LEFT JOIN project_schedule_items psi ON psi.project_id = p.id
-        WHERE p.qbo_customer_id = :id GROUP BY p.id
+        WHERE qc.qbo_id = :id GROUP BY p.id
     """), {"id": entity_id}).mappings().first()
 
     start_date = end_date = assigned_at = pm_name = None

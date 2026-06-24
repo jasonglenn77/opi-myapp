@@ -174,7 +174,8 @@ def _zeros():
 
 def generate_forecast(start_date: date | None = None,
                       opening_balance: float = 0.0,
-                      weeks: int = WEEKS) -> dict:
+                      weeks: int = WEEKS,
+                      include_projected: bool = False) -> dict:
     today = date.today()
     if start_date is None:
         start_date = _next_weekday(today, WEEK_END_WEEKDAY)  # coming Friday
@@ -197,12 +198,42 @@ def generate_forecast(start_date: date | None = None,
     recurring_rows = _outflow_recurring(today, weeks)
 
     # ---- weekly totals ----
-    inflow_totals = _column_sums(inflow_rows, weeks)
+    invoiced_totals = _column_sums(inflow_rows, weeks)
+
+    # optional projected (not-yet-invoiced) inflow, split into two groups:
+    #   in-progress (un-invoiced balance) and awarded-but-not-started (estimated)
+    projected_block = None
+    inflow_totals = list(invoiced_totals)
+    if include_projected:
+        active_rows = _inflow_projected(win_start, win_end, week_ends, weeks, "in_progress")
+        awarded_rows = _inflow_projected(win_start, win_end, week_ends, weeks, "not_started")
+
+        def _section(key, label, rows):
+            if not rows:
+                return None
+            wt = _column_sums(rows, weeks)
+            return {"key": key, "label": label, "rows": rows,
+                    "weekly_totals": [round(x, 2) for x in wt], "grand_total": round(sum(wt), 2)}
+
+        sections = [s for s in (
+            _section("proj_active", "In-progress — un-invoiced balance", active_rows),
+            _section("proj_awarded", "Awarded — not started (estimated)", awarded_rows),
+        ) if s]
+        proj_totals = _column_sums(active_rows + awarded_rows, weeks)
+        projected_block = {
+            "label": "Projected / TBD",
+            "sublabel": "by project end date",
+            "sections": sections,
+            "weekly_totals": [round(x, 2) for x in proj_totals],
+            "grand_total": round(sum(proj_totals), 2),
+        }
+        inflow_totals = [invoiced_totals[i] + proj_totals[i] for i in range(weeks)]
+
     ap_totals = _column_sums(ap_rows, weeks)
     rec_totals = _column_sums(recurring_rows, weeks)
     outflow_totals = [round(ap_totals[i] + rec_totals[i], 2) for i in range(weeks)]
 
-    # ---- rolling balance ----
+    # ---- rolling balance (inflow_totals already includes projected when on) ----
     opening = _zeros()
     surplus = _zeros()
     ending = _zeros()
@@ -213,6 +244,16 @@ def generate_forecast(start_date: date | None = None,
         bal = bal + inflow_totals[i] - outflow_totals[i]
         ending[i] = round(bal, 2)
 
+    inflow_obj = {
+        "label": "Cash Inflow",
+        "sublabel": "open invoices by due date" + (" + projected" if include_projected else ""),
+        "rows": inflow_rows,
+        "weekly_totals": [round(x, 2) for x in inflow_totals],
+        "grand_total": round(sum(inflow_totals), 2),
+    }
+    if projected_block:
+        inflow_obj["projected"] = projected_block
+
     return {
         "mode": "forecast",
         "as_of": today.isoformat(),
@@ -220,13 +261,7 @@ def generate_forecast(start_date: date | None = None,
         "weeks": weeks,
         "week_ends": [d.isoformat() for d in week_ends],
         "opening_balance": round(float(opening_balance), 2),
-        "inflow": {
-            "label": "Cash Inflow",
-            "sublabel": "open invoices by due date",
-            "rows": inflow_rows,
-            "weekly_totals": [round(x, 2) for x in inflow_totals],
-            "grand_total": round(sum(inflow_totals), 2),
-        },
+        "inflow": inflow_obj,
         "outflow": {
             "label": "Cash Outflow",
             "sections": [
@@ -344,6 +379,56 @@ def _inflow_invoices(win_start, win_end, week_index, weeks):
     with engine.connect() as conn:
         rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
     return _bucket_by_name(rows, week_index, weeks)
+
+
+# ---------------------------------------------------------------------------
+# Projected inflow: revenue still to be invoiced on ACTIVE projects.
+#   per project: expected = SUM(project-level Estimate totals)
+#                invoiced = SUM(project-level Invoice totals, paid + open)
+#                projected = max(0, expected - invoiced)   [the not-yet-billed part]
+# Bucketed by the project's assignment END date (project.end_date, falling back
+# to the latest schedule item). Already-past end dates are treated as imminent
+# (week 1). This never double-counts invoiced AR — only the un-billed remainder.
+# NB: projects.qbo_customer_id is the qbo_customers INTERNAL id (not the qbo_id).
+# ---------------------------------------------------------------------------
+def _inflow_projected(win_start, win_end, week_ends, weeks, status):
+    """Un-invoiced project balance for projects of the given status, bucketed by
+    the project's end date (falling back to schedule end, then start date)."""
+    sql = text("""
+        SELECT qc.qbo_id AS pid, qc.display_name AS name,
+               COALESCE(p.end_date,
+                        (SELECT MAX(psi.end_date) FROM project_schedule_items psi
+                         WHERE psi.project_id = p.id),
+                        p.start_date) AS bucket_date,
+               (SELECT COALESCE(SUM(e.total_amt), 0) FROM qbo_transactions e
+                WHERE e.entity_type = 'Estimate' AND e.customer_qbo_id = qc.qbo_id) AS expected,
+               (SELECT COALESCE(SUM(iv.total_amt), 0) FROM qbo_transactions iv
+                WHERE iv.entity_type = 'Invoice' AND iv.customer_qbo_id = qc.qbo_id) AS invoiced
+        FROM projects p
+        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+        WHERE p.status = :status
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"status": status}).mappings().all()
+
+    out = []
+    for r in rows:
+        remaining = float(r["expected"] or 0) - float(r["invoiced"] or 0)
+        bd = r["bucket_date"]
+        if remaining <= 0 or bd is None or bd > win_end:
+            continue  # nothing left to bill, no date, or beyond the window
+        # bucket by date; anything already past lands in week 1 (imminent)
+        idx = 0
+        for i, we in enumerate(week_ends):
+            if (we - timedelta(days=6)) <= bd <= we:
+                idx = i
+                break
+        weekly = [0.0] * weeks
+        weekly[idx] = round(remaining, 2)
+        out.append({"label": r["name"], "kind": "projected",
+                    "weekly": weekly, "total": round(remaining, 2)})
+    out.sort(key=lambda x: x["total"], reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------------------

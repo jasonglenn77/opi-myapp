@@ -14,6 +14,10 @@ export async function cashflowPage(routeFn) {
             <button id="cfModeActuals" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Actuals</button>
           </div>
           <div id="cfModeDesc" class="text-sm text-black/60 mt-2"></div>
+          <label id="cfProjectedWrap" class="mt-2 inline-flex items-center gap-2 text-sm text-black/70 cursor-pointer">
+            <input type="checkbox" id="cfProjected" class="h-4 w-4 rounded border-black/25" />
+            Include projected / TBD invoices <span class="text-black/40">(un-invoiced balance on active projects)</span>
+          </label>
         </div>
         <div class="flex flex-wrap items-end gap-3">
           <div>
@@ -82,6 +86,8 @@ export async function cashflowPage(routeFn) {
   const hint = document.getElementById("cfHint");
   const btnForecast = document.getElementById("cfModeForecast");
   const btnActuals = document.getElementById("cfModeActuals");
+  const projectedEl = document.getElementById("cfProjected");
+  const projectedWrap = document.getElementById("cfProjectedWrap");
 
   // ---- formatting helpers ----
   const cell = (n) => {
@@ -139,6 +145,10 @@ export async function cashflowPage(routeFn) {
           ${sectionHeader(d.inflow.label.toUpperCase() + (d.inflow.sublabel ? ` <span class="font-normal text-black/40 text-xs">(${d.inflow.sublabel})</span>` : ""), d.weeks)}
           ${dataRow(d.inflow.label, d.inflow.weekly_totals, { bold: true, toggleGroup: "inflow", bg: "#f4f7f5" })}
           ${detailRows(d.inflow.rows, "inflow", "#fbfdfb")}
+          ${(d.inflow.projected?.sections || []).map((s, i) =>
+            dataRow(s.label, s.weekly_totals, { toggleGroup: `proj${i}`, indent: true, bg: "#f4f7f5" }) +
+            detailRows(s.rows, `proj${i}`)
+          ).join("")}
 
           ${sectionHeader(d.outflow.label.toUpperCase(), d.weeks)}
           ${dataRow(d.outflow.label, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7" })}
@@ -184,6 +194,7 @@ export async function cashflowPage(routeFn) {
     btnForecast.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "forecast" ? active : "border-black/15"}`;
     btnActuals.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "actuals" ? active : "border-black/15"}`;
     weeksWrap.classList.toggle("hidden", mode !== "actuals");
+    projectedWrap.classList.toggle("hidden", mode !== "forecast");
     if (mode === "forecast") {
       modeDesc.textContent = "Forward 13 weeks — open invoices in, open bills + recurring run-rates out.";
       hint.textContent = "Opening balance is manual for now; it will auto-seed from your QuickBooks bank balance once account sync is added.";
@@ -200,6 +211,7 @@ export async function cashflowPage(routeFn) {
     if (!Number.isNaN(ob)) params.set("opening_balance", String(ob));
     if (startEl.value) params.set("start_date", startEl.value);
     if (mode === "actuals") params.set("weeks", String(parseInt(weeksEl.value, 10) || 13));
+    if (mode === "forecast" && projectedEl.checked) params.set("projected", "1");
     const endpoint = mode === "actuals" ? "actuals" : "forecast";
     try {
       const d = await api(`/cashflow/${endpoint}?${params.toString()}`);
@@ -222,6 +234,7 @@ export async function cashflowPage(routeFn) {
   btnForecast.addEventListener("click", () => setMode("forecast"));
   btnActuals.addEventListener("click", () => setMode("actuals"));
   document.getElementById("cfGenerate").addEventListener("click", load);
+  projectedEl.addEventListener("change", load);
 
   // ---- Categories modal ----
   const catModal = document.getElementById("cfCatModal");
