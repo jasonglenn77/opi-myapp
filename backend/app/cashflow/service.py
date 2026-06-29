@@ -175,84 +175,83 @@ def _zeros():
 def generate_forecast(start_date: date | None = None,
                       opening_balance: float = 0.0,
                       weeks: int = WEEKS,
-                      include_projected: bool = False) -> dict:
+                      inc_active: bool = True,
+                      inc_awarded: bool = True,
+                      inc_jobcost: bool = True) -> dict:
+    """Forward forecast as Committed (open invoices/bills + overhead run-rate)
+    plus toggleable Projected layers: projected inflow (in-progress + awarded
+    un-invoiced balance) and projected outflow (job-cost run-rate). Amounts dated
+    past the horizon roll into a `beyond` bucket. `inc_*` flags fold each
+    projected section into the weekly totals + rolling balance."""
     today = date.today()
     if start_date is None:
         start_date = _next_weekday(today, WEEK_END_WEEKDAY)  # coming Friday
 
-    # 13 week-ending dates; each week covers (week_end - 6) .. week_end
     week_ends = [start_date + timedelta(days=7 * i) for i in range(weeks)]
     win_start = week_ends[0] - timedelta(days=6)
     win_end = week_ends[-1]
+    beyond_cap = win_end + timedelta(days=180)   # how far past the window to gather "beyond"
 
-    def week_index(d):
-        if d is None:
-            return None
-        for i, we in enumerate(week_ends):
-            if (we - timedelta(days=6)) <= d <= we:
-                return i
-        return None
+    # ---- committed inflow / outflow ----
+    inv_rows = _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks)
+    ap_rows = _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks)
+    rec_rows = _outflow_recurring(today, weeks)
 
-    inflow_rows = _inflow_invoices(win_start, win_end, week_index, weeks)
-    ap_rows = _outflow_bills(win_start, win_end, week_index, weeks)
-    recurring_rows = _outflow_recurring(today, weeks)
+    # ---- projected inflow (two groups) + projected outflow (run-rate) ----
+    active_rows = _inflow_projected(win_start, win_end, week_ends, weeks, "in_progress")
+    awarded_rows = _inflow_projected(win_start, win_end, week_ends, weeks, "not_started")
+    job_rows = _outflow_jobcost_runrate(today, weeks)
 
-    # ---- weekly totals ----
-    invoiced_totals = _column_sums(inflow_rows, weeks)
+    def _beyond(rows):
+        return round(sum(r.get("beyond", 0.0) for r in rows), 2)
 
-    # optional projected (not-yet-invoiced) inflow, split into two groups:
-    #   in-progress (un-invoiced balance) and awarded-but-not-started (estimated)
-    projected_block = None
-    inflow_totals = list(invoiced_totals)
-    if include_projected:
-        active_rows = _inflow_projected(win_start, win_end, week_ends, weeks, "in_progress")
-        awarded_rows = _inflow_projected(win_start, win_end, week_ends, weeks, "not_started")
+    def _section(key, label, rows, included=None):
+        wt = _column_sums(rows, weeks)
+        s = {"key": key, "label": label, "rows": rows,
+             "weekly_totals": [round(x, 2) for x in wt],
+             "beyond": _beyond(rows), "grand_total": round(sum(wt), 2)}
+        if included is not None:
+            s["included"] = included
+        return s
 
-        def _section(key, label, rows):
-            if not rows:
-                return None
-            wt = _column_sums(rows, weeks)
-            return {"key": key, "label": label, "rows": rows,
-                    "weekly_totals": [round(x, 2) for x in wt], "grand_total": round(sum(wt), 2)}
+    inflow_committed = _section("invoiced", "Open invoices (by due date)", inv_rows)
+    inflow_projected = [
+        _section("proj_active", "In-progress — un-invoiced balance", active_rows, included=inc_active),
+        _section("proj_awarded", "Awarded — not started (estimated)", awarded_rows, included=inc_awarded),
+    ]
+    outflow_committed = [
+        _section("ap", "A/P — open bills", ap_rows),
+        _section("recurring", "Recurring — overhead & payroll (run-rate)", rec_rows),
+    ]
+    outflow_projected = [
+        _section("jobcost", "Projected — job costs (run-rate)", job_rows, included=inc_jobcost),
+    ]
 
-        sections = [s for s in (
-            _section("proj_active", "In-progress — un-invoiced balance", active_rows),
-            _section("proj_awarded", "Awarded — not started (estimated)", awarded_rows),
-        ) if s]
-        proj_totals = _column_sums(active_rows + awarded_rows, weeks)
-        projected_block = {
-            "label": "Projected / TBD",
-            "sublabel": "by project end date",
-            "sections": sections,
-            "weekly_totals": [round(x, 2) for x in proj_totals],
-            "grand_total": round(sum(proj_totals), 2),
-        }
-        inflow_totals = [invoiced_totals[i] + proj_totals[i] for i in range(weeks)]
+    # ---- combined weekly totals: committed always; projected only if included ----
+    inv_wt = inflow_committed["weekly_totals"]
+    act_wt, awd_wt = inflow_projected[0]["weekly_totals"], inflow_projected[1]["weekly_totals"]
+    ap_wt, rec_wt = outflow_committed[0]["weekly_totals"], outflow_committed[1]["weekly_totals"]
+    job_wt = outflow_projected[0]["weekly_totals"]
 
-    ap_totals = _column_sums(ap_rows, weeks)
-    rec_totals = _column_sums(recurring_rows, weeks)
-    outflow_totals = [round(ap_totals[i] + rec_totals[i], 2) for i in range(weeks)]
+    inflow_weekly = [round(inv_wt[i]
+                           + (act_wt[i] if inc_active else 0)
+                           + (awd_wt[i] if inc_awarded else 0), 2) for i in range(weeks)]
+    outflow_weekly = [round(ap_wt[i] + rec_wt[i]
+                            + (job_wt[i] if inc_jobcost else 0), 2) for i in range(weeks)]
 
-    # ---- rolling balance (inflow_totals already includes projected when on) ----
-    opening = _zeros()
-    surplus = _zeros()
-    ending = _zeros()
+    inflow_beyond = round(inflow_committed["beyond"]
+                          + (inflow_projected[0]["beyond"] if inc_active else 0)
+                          + (inflow_projected[1]["beyond"] if inc_awarded else 0), 2)
+    outflow_beyond = round(outflow_committed[0]["beyond"], 2)
+
+    # ---- rolling balance ----
+    opening, surplus, ending = _zeros(), _zeros(), _zeros()
     bal = float(opening_balance)
     for i in range(weeks):
         opening[i] = round(bal, 2)
-        surplus[i] = round(inflow_totals[i] - outflow_totals[i], 2)
-        bal = bal + inflow_totals[i] - outflow_totals[i]
+        surplus[i] = round(inflow_weekly[i] - outflow_weekly[i], 2)
+        bal = bal + inflow_weekly[i] - outflow_weekly[i]
         ending[i] = round(bal, 2)
-
-    inflow_obj = {
-        "label": "Cash Inflow",
-        "sublabel": "open invoices by due date" + (" + projected" if include_projected else ""),
-        "rows": inflow_rows,
-        "weekly_totals": [round(x, 2) for x in inflow_totals],
-        "grand_total": round(sum(inflow_totals), 2),
-    }
-    if projected_block:
-        inflow_obj["projected"] = projected_block
 
     return {
         "mode": "forecast",
@@ -261,23 +260,23 @@ def generate_forecast(start_date: date | None = None,
         "weeks": weeks,
         "week_ends": [d.isoformat() for d in week_ends],
         "opening_balance": round(float(opening_balance), 2),
-        "inflow": inflow_obj,
+        "inflow": {
+            "label": "Cash Inflow",
+            "committed": inflow_committed,
+            "projected": inflow_projected,
+            "weekly_totals": inflow_weekly,
+            "grand_total": round(sum(inflow_weekly), 2),
+            "beyond_total": inflow_beyond,
+        },
         "outflow": {
             "label": "Cash Outflow",
-            "sections": [
-                {"key": "ap", "label": "A/P — open bills", "rows": ap_rows,
-                 "weekly_totals": [round(x, 2) for x in ap_totals]},
-                {"key": "recurring", "label": "Recurring (run-rate)", "rows": recurring_rows,
-                 "weekly_totals": [round(x, 2) for x in rec_totals]},
-            ],
-            "weekly_totals": outflow_totals,
-            "grand_total": round(sum(outflow_totals), 2),
+            "committed": outflow_committed,
+            "projected": outflow_projected,
+            "weekly_totals": outflow_weekly,
+            "grand_total": round(sum(outflow_weekly), 2),
+            "beyond_total": outflow_beyond,
         },
-        "summary": {
-            "opening": opening,
-            "surplus": surplus,
-            "ending": ending,
-        },
+        "summary": {"opening": opening, "surplus": surplus, "ending": ending},
     }
 
 
@@ -357,7 +356,7 @@ def generate_actuals(start_date: date | None = None,
 # ---------------------------------------------------------------------------
 # Inflow: open Invoices by due date (deduped to the latest version per doc)
 # ---------------------------------------------------------------------------
-def _inflow_invoices(win_start, win_end, week_index, weeks):
+def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks):
     sql = text("""
         WITH latest AS (
             SELECT qt.id, qt.customer_qbo_id, qt.doc_number, qt.due_date, qt.balance_amt,
@@ -374,11 +373,11 @@ def _inflow_invoices(win_start, win_end, week_index, weeks):
         LEFT JOIN qbo_customers qc ON qc.qbo_id = l.customer_qbo_id
         WHERE l.rn = 1
           AND l.balance_amt > 0
-          AND l.due_date BETWEEN :ws AND :we
+          AND l.due_date BETWEEN :ws AND :bc
     """)
     with engine.connect() as conn:
-        rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
-    return _bucket_by_name(rows, week_index, weeks)
+        rows = conn.execute(sql, {"ws": win_start, "bc": beyond_cap}).mappings().all()
+    return _bucket(rows, week_ends, win_end, weeks)
 
 
 # ---------------------------------------------------------------------------
@@ -415,26 +414,30 @@ def _inflow_projected(win_start, win_end, week_ends, weeks, status):
     for r in rows:
         remaining = float(r["expected"] or 0) - float(r["invoiced"] or 0)
         bd = r["bucket_date"]
-        if remaining <= 0 or bd is None or bd > win_end:
-            continue  # nothing left to bill, no date, or beyond the window
-        # bucket by date; anything already past lands in week 1 (imminent)
-        idx = 0
-        for i, we in enumerate(week_ends):
-            if (we - timedelta(days=6)) <= bd <= we:
-                idx = i
-                break
+        if remaining <= 0 or bd is None:
+            continue  # nothing left to bill or no date to place it on
         weekly = [0.0] * weeks
-        weekly[idx] = round(remaining, 2)
-        out.append({"label": r["name"], "kind": "projected",
-                    "weekly": weekly, "total": round(remaining, 2)})
-    out.sort(key=lambda x: x["total"], reverse=True)
+        beyond = 0.0
+        if bd > win_end:
+            beyond = round(remaining, 2)        # past the 13-week horizon
+        else:
+            # bucket by date; anything already past lands in week 1 (imminent)
+            idx = 0
+            for i, we in enumerate(week_ends):
+                if (we - timedelta(days=6)) <= bd <= we:
+                    idx = i
+                    break
+            weekly[idx] = round(remaining, 2)
+        out.append({"label": r["name"], "kind": "projected", "weekly": weekly,
+                    "beyond": beyond, "total": round(sum(weekly), 2)})
+    out.sort(key=lambda x: x["total"] + x["beyond"], reverse=True)
     return out
 
 
 # ---------------------------------------------------------------------------
 # Outflow A/P: open Bills by due date, grouped by vendor
 # ---------------------------------------------------------------------------
-def _outflow_bills(win_start, win_end, week_index, weeks):
+def _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks):
     sql = text("""
         WITH latest AS (
             SELECT qt.id, qt.vendor_qbo_id, qt.doc_number, qt.due_date, qt.balance_amt,
@@ -451,11 +454,59 @@ def _outflow_bills(win_start, win_end, week_index, weeks):
         FROM latest
         WHERE rn = 1
           AND balance_amt > 0
-          AND due_date BETWEEN :ws AND :we
+          AND due_date BETWEEN :ws AND :bc
     """)
     with engine.connect() as conn:
-        rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
-    return _bucket_by_name(rows, week_index, weeks)
+        rows = conn.execute(sql, {"ws": win_start, "bc": beyond_cap}).mappings().all()
+    return _bucket(rows, week_ends, win_end, weeks)
+
+
+# ---------------------------------------------------------------------------
+# Projected outflow: trailing-13-week run-rate of the JOB-COST cash-out that the
+# committed view misses — vendor/contractor bill payments + job materials &
+# other operating purchases not already in the overhead/payroll run-rate.
+# Interim until the bi-weekly contractor payment schedule lands (then this is
+# replaced by precise scheduled crew payments). Respects the exclude list.
+# ---------------------------------------------------------------------------
+def _outflow_jobcost_runrate(today, weeks):
+    start = today - timedelta(weeks=RUNRATE_TRAILING_WEEKS)
+    excluded = _excluded_categories()
+    with engine.connect() as conn:
+        bp = conn.execute(text("""
+            SELECT COALESCE(SUM(total_amt), 0) FROM qbo_transactions
+            WHERE entity_type = 'BillPayment' AND txn_date >= :s AND txn_date < :t
+        """), {"s": start, "t": today}).scalar()
+        pur = conn.execute(text("""
+            SELECT SUBSTRING_INDEX(
+                     JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')),
+                     ':', 1) AS category,
+                   SUM(l.amount) AS total
+            FROM qbo_transactions qt
+            JOIN qbo_transaction_lines l ON l.transaction_id = qt.id
+            WHERE qt.entity_type = 'Purchase' AND qt.txn_date >= :s AND qt.txn_date < :t
+              AND JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name') IS NOT NULL
+            GROUP BY category
+        """), {"s": start, "t": today}).mappings().all()
+
+    # job materials & other = operating purchases not already in overhead/payroll
+    # and not on the user's exclude list (transfers/financing/contra)
+    other_total = 0.0
+    for r in pur:
+        cat = r["category"]
+        if cat in _CATEGORY_TO_ROW or cat in excluded:
+            continue
+        other_total += float(r["total"] or 0)
+
+    bp_weekly = round(float(bp or 0) / RUNRATE_TRAILING_WEEKS, 2)
+    other_weekly = round(other_total / RUNRATE_TRAILING_WEEKS, 2)
+    out = []
+    if bp_weekly > 0:
+        out.append({"label": "Vendor / contractor payments (run-rate)", "kind": "runrate",
+                    "weekly": [bp_weekly] * weeks, "beyond": 0.0, "total": round(bp_weekly * weeks, 2)})
+    if other_weekly > 0:
+        out.append({"label": "Job materials & other (run-rate)", "kind": "runrate",
+                    "weekly": [other_weekly] * weeks, "beyond": 0.0, "total": round(other_weekly * weeks, 2)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -499,8 +550,37 @@ def _outflow_recurring(today, weeks):
             "label": label,
             "kind": "runrate",
             "weekly": [wk] * weeks,
+            "beyond": 0.0,
             "total": round(wk * weeks, 2),
         })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Forecast bucketing: (name, due_date, amount) -> {name: weekly[13] + beyond}.
+# Dates after the window land in `beyond`; in-window dates in their week.
+# Callers exclude before-window dates via SQL (so past-due isn't double-placed).
+# ---------------------------------------------------------------------------
+def _bucket(rows, week_ends, win_end, weeks):
+    grouped = defaultdict(lambda: {"weekly": [0.0] * weeks, "beyond": 0.0})
+    for r in rows:
+        d = r["due_date"]
+        if d is None:
+            continue
+        amt = float(r["amount"] or 0)
+        if d > win_end:
+            grouped[r["name"]]["beyond"] += amt
+            continue
+        for i, we in enumerate(week_ends):
+            if (we - timedelta(days=6)) <= d <= we:
+                grouped[r["name"]]["weekly"][i] += amt
+                break
+    out = []
+    for name, v in grouped.items():
+        wk = [round(x, 2) for x in v["weekly"]]
+        out.append({"label": name, "kind": "scheduled", "weekly": wk,
+                    "beyond": round(v["beyond"], 2), "total": round(sum(wk), 2)})
+    out.sort(key=lambda x: x["total"] + x["beyond"], reverse=True)
     return out
 
 

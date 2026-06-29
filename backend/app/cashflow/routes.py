@@ -37,7 +37,9 @@ def opening_balance(_user=Depends(require_capability("page.cashflow"))):
 def forecast(
     start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to the coming Friday)"),
     opening_balance: float = Query(0.0, description="Starting cash balance for week 1 (until bank sync lands)"),
-    projected: bool = Query(False, description="Include projected/TBD un-invoiced revenue on active projects"),
+    inc_active: bool = Query(True, description="Include projected in-progress un-invoiced balance"),
+    inc_awarded: bool = Query(True, description="Include projected awarded/not-started estimates"),
+    inc_jobcost: bool = Query(True, description="Include projected job-cost run-rate outflow"),
     _user=Depends(require_capability("page.cashflow")),
 ):
     sd = None
@@ -46,7 +48,8 @@ def forecast(
             sd = datetime.strptime(start_date, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="start_date must be YYYY-MM-DD")
-    return service.generate_forecast(start_date=sd, opening_balance=opening_balance, include_projected=projected)
+    return service.generate_forecast(start_date=sd, opening_balance=opening_balance,
+                                     inc_active=inc_active, inc_awarded=inc_awarded, inc_jobcost=inc_jobcost)
 
 
 @router.get("/actuals")
