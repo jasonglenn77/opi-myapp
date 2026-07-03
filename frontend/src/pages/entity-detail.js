@@ -7,6 +7,7 @@ import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
+import { mountPaymentsPanel } from "./payments.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -193,17 +194,24 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     mountDailyPanel(body, entityId);
   }
 
+  function showPayments() {
+    const body = document.getElementById("tabBody");
+    body.innerHTML = "";
+    mountPaymentsPanel(body, entityId);
+  }
+
   function renderTabs() {
     const bar = document.getElementById("tabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log");
+    bar.innerHTML = btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("payments", "Payments");
     bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => {
       const t = b.getAttribute("data-tab");
       if (t === activeTab) return;
       activeTab = t; renderTabs();
       if (t === "kickoff") showKickoff();
       else if (t === "daily") showDaily();
+      else if (t === "payments") showPayments();
       else showDocuments();
     }));
   }
