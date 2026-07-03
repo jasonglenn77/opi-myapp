@@ -101,7 +101,7 @@ export async function mountPaymentsPanel(container, entityId) {
             <thead><tr class="text-black/45 text-left border-b border-black/10">
               <th class="py-1.5 px-2 font-bold">#</th>
               <th class="py-1.5 px-1.5 font-bold">Pay date</th>
-              <th class="py-1.5 px-1.5 font-bold text-right">Amount</th>
+              <th class="py-1.5 px-1.5 font-bold">Amount</th>
               <th class="py-1.5 px-1.5 font-bold">Send invoice</th>
               <th class="py-1.5 px-1.5 font-bold">Note</th>
               <th></th>

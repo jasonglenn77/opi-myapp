@@ -88,13 +88,18 @@ def _crew_options(conn):
 
 def _estimate_contract_labor(conn, entity_id):
     """Suggested contract labor = the 'Contract Labor' lines on the project's
-    estimate (from the sales-lines table, tagged to the project)."""
+    WON estimate(s) — Accepted/Converted only, so pending/un-won estimates and
+    change-orders don't inflate it. A project can have a main estimate plus
+    accepted change-orders, so these are summed. This is a starting suggestion;
+    the true crew offer comes from the job-offer (not yet built) and is editable.
+    """
     r = conn.execute(text("""
         SELECT ROUND(COALESCE(SUM(sl.amount), 0), 2)
         FROM qbo_sales_transaction_lines sl
         JOIN qbo_transactions t ON t.id = sl.transaction_id
         WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
           AND sl.project_customer_qbo_id = :id
+          AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
     """), {"id": entity_id}).scalar()
     return float(r or 0)
 
