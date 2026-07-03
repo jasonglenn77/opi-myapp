@@ -123,6 +123,7 @@ export async function crewPortalPage(routeFn, params = null) {
           ${metricChips(child.metrics)}
           <div class="mt-2">${childEarnings(child.earnings)}</div>
         </div>
+        <div id="crewOffersHost" class="empty:hidden"></div>
         <div class="card p-2">
           <div class="px-2 py-1 text-xs font-bold uppercase tracking-wide text-black/40">Projects (${projs.length})</div>
           <div class="divide-y divide-black/5">
@@ -131,7 +132,38 @@ export async function crewPortalPage(routeFn, params = null) {
         </div>
         <div class="text-center text-[11px] text-black/30 pt-1">Open a project for its foreman daily-execution view (skeleton).</div>
       </div>`, routeFn);
+    loadCrewOffers(child.id);
   };
+
+  const offerMoney = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
+  async function loadCrewOffers(crewId) {
+    const host = document.getElementById("crewOffersHost");
+    if (!host) return;
+    let offers;
+    try { offers = (await api(`/offers/crew/${crewId}`)).offers || []; } catch { return; }
+    const pending = offers.filter(o => o.status === "sent");
+    if (!pending.length) { host.innerHTML = ""; return; }
+    host.innerHTML = `<div class="card p-2 border-blue-200">
+      <div class="px-2 py-1 text-xs font-bold uppercase tracking-wide text-blue-700">Pending work offers (${pending.length})</div>
+      <div class="divide-y divide-black/5">
+        ${pending.map(o => `<div class="px-2 py-2 flex items-center justify-between gap-3">
+          <div class="min-w-0"><div class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(o.project_name || o.entity_id)}</div>
+            <div class="text-xs text-black/55">${offerMoney(o.labor_amount)}${o.scope ? " · " + escapeHtml(o.scope) : ""}</div></div>
+          <div class="flex gap-2 shrink-0">
+            <button data-oaccept="${o.id}" class="btn-primary text-[11px] px-3 py-1.5">Accept</button>
+            <button data-odecline="${o.id}" class="rounded-lg border border-black/15 px-3 py-1.5 text-[11px] font-semibold hover:bg-black/5">Decline</button>
+          </div></div>`).join("")}
+      </div></div>`;
+    host.querySelectorAll("[data-oaccept]").forEach(b => b.addEventListener("click", async () => {
+      try { await api(`/offers/${b.getAttribute("data-oaccept")}/respond`, { method: "POST", body: JSON.stringify({ status: "accepted" }) }); loadCrewOffers(crewId); }
+      catch (e) { alert(e.message); }
+    }));
+    host.querySelectorAll("[data-odecline]").forEach(b => b.addEventListener("click", async () => {
+      const note = prompt("Reason for declining (optional):") ?? "";
+      try { await api(`/offers/${b.getAttribute("data-odecline")}/respond`, { method: "POST", body: JSON.stringify({ status: "declined", note }) }); loadCrewOffers(crewId); }
+      catch (e) { alert(e.message); }
+    }));
+  }
 
   if (params && params.childId) {
     const found = findChild(params.childId);

@@ -41,6 +41,7 @@ from app.documents.routes import router as documents_router
 from app.kickoff.routes import router as kickoff_router
 from app.daily.routes import router as daily_router
 from app.payments.routes import router as payments_router
+from app.offers.routes import router as offers_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -54,6 +55,7 @@ app.include_router(documents_router)
 app.include_router(kickoff_router)
 app.include_router(daily_router)
 app.include_router(payments_router)
+app.include_router(offers_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
