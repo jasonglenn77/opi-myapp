@@ -71,6 +71,7 @@ def _project_meta(conn, entity_id):
         "start_date": str(pr["start_date"]) if pr and pr["start_date"] else None,
         "end_date": str(pr["end_date"]) if pr and pr["end_date"] else None,
         "suggested_crew_id": suggested_crew_id,
+        "suggested_contract_labor": _estimate_contract_labor(conn, entity_id),
     }
 
 
@@ -83,6 +84,47 @@ def _crew_options(conn):
         ORDER BY pc.name, wc.name
     """)).mappings().all()
     return [{"id": r["id"], "name": r["name"], "parent_name": r["parent_name"]} for r in rows]
+
+
+def _estimate_contract_labor(conn, entity_id):
+    """Suggested contract labor = the 'Contract Labor' lines on the project's
+    estimate (from the sales-lines table, tagged to the project)."""
+    r = conn.execute(text("""
+        SELECT ROUND(COALESCE(SUM(sl.amount), 0), 2)
+        FROM qbo_sales_transaction_lines sl
+        JOIN qbo_transactions t ON t.id = sl.transaction_id
+        WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
+          AND sl.project_customer_qbo_id = :id
+    """), {"id": entity_id}).scalar()
+    return float(r or 0)
+
+
+def _crew_vendor(conn, crew_id):
+    """The crew's QBO vendor id (crews carry the vendor at the parent level)."""
+    if not crew_id:
+        return None
+    r = conn.execute(text("""SELECT wc.vendor_qbo_id AS v, pc.vendor_qbo_id AS pv
+                             FROM work_crews wc LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+                             WHERE wc.id = :id"""), {"id": crew_id}).mappings().first()
+    if not r:
+        return None
+    return r["v"] or r["pv"]
+
+
+def _qbo_payments(conn, entity_id, vendor_qbo_id):
+    """Actual crew payments per QuickBooks = Bill lines from the crew's vendor
+    tagged to this project (bi-weekly payroll bills split across projects)."""
+    if not vendor_qbo_id:
+        return {"available": False, "total": 0.0, "payments": []}
+    rows = conn.execute(text("""
+        SELECT t.txn_date, t.doc_number, ROUND(SUM(l.amount), 2) AS amt
+        FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
+        WHERE l.line_customer_qbo_id = :id AND t.entity_type = 'Bill' AND t.vendor_qbo_id = :v
+        GROUP BY t.id, t.txn_date, t.doc_number ORDER BY t.txn_date
+    """), {"id": entity_id, "v": vendor_qbo_id}).mappings().all()
+    payments = [{"date": str(r["txn_date"]) if r["txn_date"] else None,
+                 "doc": r["doc_number"], "amount": float(r["amt"] or 0)} for r in rows]
+    return {"available": True, "total": round(sum(p["amount"] for p in payments), 2), "payments": payments}
 
 
 def _load(conn, entity_id):
@@ -135,10 +177,13 @@ def get_schedule(entity_id: str, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Project not found")
         schedule, installments = _load(conn, entity_id)
         crews = _crew_options(conn)
+        # actual crew payments from QuickBooks, for the effective crew
+        effective_crew = (schedule["crew_id"] if schedule else None) or meta.get("suggested_crew_id")
+        qbo = _qbo_payments(conn, entity_id, _crew_vendor(conn, effective_crew))
     return {"entity": {"type": "project", "id": entity_id, **meta},
             "schedule": schedule, "installments": installments,
             "summary": _summary(schedule, installments) if schedule else None,
-            "crews": crews}
+            "qbo": qbo, "crews": crews}
 
 
 def _parse_d(s):
