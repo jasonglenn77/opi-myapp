@@ -39,8 +39,10 @@ def _project_exists(conn, entity_id):
 def _estimate_suggestions(conn, entity_id):
     """Labor = Accepted/Converted estimate 'Contract Labor' lines; scope = the
     estimate's customer memo (best-effort)."""
+    # crew "your rate" = cost_amount (fallback to amount); amount is the
+    # customer rate used for revenue. Crew-facing pages use the your rate.
     labor = conn.execute(text("""
-        SELECT ROUND(COALESCE(SUM(sl.amount), 0), 2)
+        SELECT ROUND(COALESCE(SUM(COALESCE(sl.cost_amount, sl.amount)), 0), 2)
         FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
         WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
           AND sl.project_customer_qbo_id = :id

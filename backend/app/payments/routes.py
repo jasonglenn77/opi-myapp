@@ -94,7 +94,7 @@ def _estimate_contract_labor(conn, entity_id):
     the true crew offer comes from the job-offer (not yet built) and is editable.
     """
     r = conn.execute(text("""
-        SELECT ROUND(COALESCE(SUM(sl.amount), 0), 2)
+        SELECT ROUND(COALESCE(SUM(COALESCE(sl.cost_amount, sl.amount)), 0), 2)
         FROM qbo_sales_transaction_lines sl
         JOIN qbo_transactions t ON t.id = sl.transaction_id
         WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
@@ -135,8 +135,11 @@ def _qbo_payments(conn, entity_id, vendor_qbo_id):
 def _converted_estimates_with_labor(conn, entity_id):
     """Each Accepted/Converted estimate tagged to the project that has Contract
     Labor > 0 — the main estimate plus each change-order. One schedule per row."""
+    # crew "your rate" = cost_amount (falls back to amount when there's no
+    # separate cost); amount is the customer rate used for revenue/financials.
     rows = conn.execute(text("""
-        SELECT t.qbo_id, t.doc_number, t.txn_date, ROUND(SUM(sl.amount), 2) AS labor
+        SELECT t.qbo_id, t.doc_number, t.txn_date,
+               ROUND(SUM(COALESCE(sl.cost_amount, sl.amount)), 2) AS labor
         FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
         WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
           AND sl.project_customer_qbo_id = :id
