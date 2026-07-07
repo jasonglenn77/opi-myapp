@@ -132,45 +132,53 @@ def _qbo_payments(conn, entity_id, vendor_qbo_id):
     return {"available": True, "total": round(sum(p["amount"] for p in payments), 2), "payments": payments}
 
 
-def _load(conn, entity_id):
-    sched = conn.execute(text("""
-        SELECT s.id, s.entity_id, s.crew_id, s.contract_labor, s.start_date, s.end_date,
-               s.invoice_lead_days,
+def _converted_estimates_with_labor(conn, entity_id):
+    """Each Accepted/Converted estimate tagged to the project that has Contract
+    Labor > 0 — the main estimate plus each change-order. One schedule per row."""
+    rows = conn.execute(text("""
+        SELECT t.qbo_id, t.doc_number, t.txn_date, ROUND(SUM(sl.amount), 2) AS labor
+        FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
+        WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
+          AND sl.project_customer_qbo_id = :id
+          AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
+        GROUP BY t.qbo_id, t.doc_number, t.txn_date HAVING labor > 0 ORDER BY t.txn_date, t.doc_number
+    """), {"id": entity_id}).mappings().all()
+    return [{"qbo_id": r["qbo_id"], "doc_number": r["doc_number"],
+             "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
+             "contract_labor": float(r["labor"] or 0)} for r in rows]
+
+
+def _load_schedules(conn, entity_id):
+    """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
+    scheds = conn.execute(text("""
+        SELECT s.id, s.estimate_qbo_id, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
                TRIM(CONCAT(COALESCE(wc.name,''), CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (', pc.name, ')') ELSE '' END)) AS crew_name
         FROM project_payment_schedules s
-        LEFT JOIN work_crews wc ON wc.id = s.crew_id
-        LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+        LEFT JOIN work_crews wc ON wc.id = s.crew_id LEFT JOIN work_crews pc ON pc.id = wc.parent_id
         WHERE s.entity_id = :id
-    """), {"id": entity_id}).mappings().first()
-    if not sched:
-        return None, []
-    inst = conn.execute(text("""
-        SELECT id, seq, pay_date, amount, send_invoice_date, status, note
-        FROM project_payment_installments WHERE schedule_id=:sid ORDER BY seq, id
-    """), {"sid": sched["id"]}).mappings().all()
-    schedule = {
-        "id": sched["id"], "crew_id": sched["crew_id"], "crew_name": (sched["crew_name"] or "").strip() or None,
-        "contract_labor": float(sched["contract_labor"] or 0),
-        "start_date": str(sched["start_date"]) if sched["start_date"] else None,
-        "end_date": str(sched["end_date"]) if sched["end_date"] else None,
-        "invoice_lead_days": sched["invoice_lead_days"],
-    }
-    installments = [{
-        "id": r["id"], "seq": r["seq"],
-        "pay_date": str(r["pay_date"]) if r["pay_date"] else None,
-        "amount": float(r["amount"] or 0),
-        "send_invoice_date": str(r["send_invoice_date"]) if r["send_invoice_date"] else None,
-        "status": r["status"], "note": r["note"],
-    } for r in inst]
-    return schedule, installments
-
-
-def _summary(schedule, installments):
-    contract = schedule["contract_labor"] if schedule else 0.0
-    paid = round(sum(i["amount"] for i in installments if i["status"] == "paid"), 2)
-    scheduled = round(sum(i["amount"] for i in installments), 2)
-    return {"contract_labor": round(contract, 2), "paid_to_date": paid,
-            "remaining": round(contract - paid, 2), "scheduled_total": scheduled}
+    """), {"id": entity_id}).mappings().all()
+    out = {}
+    for sched in scheds:
+        inst = conn.execute(text("""SELECT id, seq, pay_date, amount, send_invoice_date, status, note
+             FROM project_payment_installments WHERE schedule_id=:sid ORDER BY seq, id"""),
+            {"sid": sched["id"]}).mappings().all()
+        schedule = {
+            "id": sched["id"], "estimate_qbo_id": sched["estimate_qbo_id"],
+            "crew_id": sched["crew_id"], "crew_name": (sched["crew_name"] or "").strip() or None,
+            "contract_labor": float(sched["contract_labor"] or 0),
+            "start_date": str(sched["start_date"]) if sched["start_date"] else None,
+            "end_date": str(sched["end_date"]) if sched["end_date"] else None,
+            "invoice_lead_days": sched["invoice_lead_days"],
+        }
+        installments = [{
+            "id": r["id"], "seq": r["seq"],
+            "pay_date": str(r["pay_date"]) if r["pay_date"] else None,
+            "amount": float(r["amount"] or 0),
+            "send_invoice_date": str(r["send_invoice_date"]) if r["send_invoice_date"] else None,
+            "status": r["status"], "note": r["note"],
+        } for r in inst]
+        out[sched["estimate_qbo_id"]] = (schedule, installments)
+    return out
 
 
 @router.get("/project/{entity_id}")
@@ -180,15 +188,25 @@ def get_schedule(entity_id: str, user=Depends(get_current_user)):
         meta = _project_meta(conn, entity_id)
         if not meta:
             raise HTTPException(status_code=404, detail="Project not found")
-        schedule, installments = _load(conn, entity_id)
+        estimates = _converted_estimates_with_labor(conn, entity_id)
+        sched_map = _load_schedules(conn, entity_id)
         crews = _crew_options(conn)
-        # actual crew payments from QuickBooks, for the effective crew
-        effective_crew = (schedule["crew_id"] if schedule else None) or meta.get("suggested_crew_id")
-        qbo = _qbo_payments(conn, entity_id, _crew_vendor(conn, effective_crew))
+        # actual crew payments (project-level) for the effective crew
+        eff_crew = next((s["crew_id"] for (s, _) in sched_map.values() if s and s.get("crew_id")), None) or meta.get("suggested_crew_id")
+        qbo = _qbo_payments(conn, entity_id, _crew_vendor(conn, eff_crew))
+
+    packages = []
+    for e in estimates:
+        s, insts = sched_map.get(e["qbo_id"], (None, []))
+        packages.append({**e, "schedule": s, "installments": insts,
+                         "scheduled_total": round(sum(i["amount"] for i in insts), 2)})
     return {"entity": {"type": "project", "id": entity_id, **meta},
-            "schedule": schedule, "installments": installments,
-            "summary": _summary(schedule, installments) if schedule else None,
-            "qbo": qbo, "crews": crews}
+            "estimates": packages, "qbo": qbo, "crews": crews,
+            "totals": {
+                "contract_labor": round(sum(e["contract_labor"] for e in estimates), 2),
+                "scheduled": round(sum(p["scheduled_total"] for p in packages), 2),
+                "paid_qbo": qbo["total"],
+            }}
 
 
 def _parse_d(s):
@@ -216,6 +234,8 @@ def _even_split(contract, start, end, lead_days):
 
 
 class GenerateReq(BaseModel):
+    estimate_qbo_id: str
+    estimate_doc_number: Optional[str] = None
     contract_labor: float
     start_date: str
     end_date: str
@@ -225,8 +245,10 @@ class GenerateReq(BaseModel):
 
 @router.post("/project/{entity_id}/generate")
 def generate(entity_id: str, body: GenerateReq, user=Depends(get_current_user)):
-    """Create/replace the schedule with an even-split set of installments."""
+    """Create/replace one estimate's schedule with an even-split set of installments."""
     _require(user)
+    if not body.estimate_qbo_id:
+        raise HTTPException(status_code=400, detail="estimate_qbo_id required")
     start, end = _parse_d(body.start_date), _parse_d(body.end_date)
     if not start or not end or end < start:
         raise HTTPException(status_code=400, detail="valid start/end dates required (end on/after start)")
@@ -235,20 +257,22 @@ def generate(entity_id: str, body: GenerateReq, user=Depends(get_current_user)):
     with engine.begin() as conn:
         if not _project_meta(conn, entity_id):
             raise HTTPException(status_code=404, detail="Project not found")
-        exists = conn.execute(text("SELECT id FROM project_payment_schedules WHERE entity_id=:e"),
-                              {"e": entity_id}).scalar()
+        exists = conn.execute(text("SELECT id FROM project_payment_schedules WHERE entity_id=:e AND estimate_qbo_id=:eq"),
+                              {"e": entity_id, "eq": body.estimate_qbo_id}).scalar()
         if exists:
             conn.execute(text("""UPDATE project_payment_schedules SET crew_id=:c, contract_labor=:cl,
-                                 start_date=:s, end_date=:en, invoice_lead_days=:l WHERE id=:id"""),
-                         {"c": body.crew_id, "cl": body.contract_labor, "s": start, "en": end, "l": lead, "id": exists})
+                                 estimate_doc_number=:dn, start_date=:s, end_date=:en, invoice_lead_days=:l WHERE id=:id"""),
+                         {"c": body.crew_id, "cl": body.contract_labor, "dn": body.estimate_doc_number,
+                          "s": start, "en": end, "l": lead, "id": exists})
             sid = exists
             conn.execute(text("DELETE FROM project_payment_installments WHERE schedule_id=:sid"), {"sid": sid})
         else:
             res = conn.execute(text("""INSERT INTO project_payment_schedules
-                                 (entity_id, crew_id, contract_labor, start_date, end_date, invoice_lead_days, created_by_user_id)
-                                 VALUES (:e,:c,:cl,:s,:en,:l,:u)"""),
-                               {"e": entity_id, "c": body.crew_id, "cl": body.contract_labor,
-                                "s": start, "en": end, "l": lead, "u": user.get("id")})
+                                 (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, contract_labor,
+                                  start_date, end_date, invoice_lead_days, created_by_user_id)
+                                 VALUES (:e,:eq,:dn,:c,:cl,:s,:en,:l,:u)"""),
+                               {"e": entity_id, "eq": body.estimate_qbo_id, "dn": body.estimate_doc_number,
+                                "c": body.crew_id, "cl": body.contract_labor, "s": start, "en": end, "l": lead, "u": user.get("id")})
             sid = res.lastrowid
         for r in rows:
             conn.execute(text("""INSERT INTO project_payment_installments
@@ -263,14 +287,23 @@ class SchedulePatch(BaseModel):
     crew_id: Optional[int] = None
 
 
-@router.patch("/project/{entity_id}/schedule")
-def patch_schedule(entity_id: str, body: SchedulePatch, user=Depends(get_current_user)):
+@router.patch("/schedule/{sid}")
+def patch_schedule(sid: int, body: SchedulePatch, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
-        n = conn.execute(text("UPDATE project_payment_schedules SET crew_id=:c WHERE entity_id=:e"),
-                         {"c": body.crew_id, "e": entity_id}).rowcount
+        n = conn.execute(text("UPDATE project_payment_schedules SET crew_id=:c WHERE id=:id"),
+                         {"c": body.crew_id, "id": sid}).rowcount
     if not n:
         raise HTTPException(status_code=404, detail="No schedule to update")
+    return {"ok": True}
+
+
+@router.delete("/schedule/{sid}")
+def delete_schedule(sid: int, user=Depends(get_current_user)):
+    _require(user)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM project_payment_installments WHERE schedule_id=:sid"), {"sid": sid})
+        conn.execute(text("DELETE FROM project_payment_schedules WHERE id=:id"), {"id": sid})
     return {"ok": True}
 
 
@@ -307,14 +340,12 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
     return {"ok": True}
 
 
-@router.post("/project/{entity_id}/installment")
-def add_installment(entity_id: str, body: InstallmentBody, user=Depends(get_current_user)):
+@router.post("/schedule/{sid}/installment")
+def add_installment(sid: int, body: InstallmentBody, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
-        sid = conn.execute(text("SELECT id FROM project_payment_schedules WHERE entity_id=:e"),
-                           {"e": entity_id}).scalar()
-        if not sid:
-            raise HTTPException(status_code=404, detail="No schedule — generate one first")
+        if not conn.execute(text("SELECT id FROM project_payment_schedules WHERE id=:sid"), {"sid": sid}).scalar():
+            raise HTTPException(status_code=404, detail="Schedule not found")
         nxt = conn.execute(text("SELECT COALESCE(MAX(seq),0)+1 FROM project_payment_installments WHERE schedule_id=:sid"),
                            {"sid": sid}).scalar()
         conn.execute(text("""INSERT INTO project_payment_installments
