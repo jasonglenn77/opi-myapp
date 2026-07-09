@@ -1,6 +1,6 @@
 app.onpointinstallers.com {
 
-    encode gzip
+    encode zstd gzip
 
     @api path /api/*
     reverse_proxy @api backend:8000
@@ -8,6 +8,15 @@ app.onpointinstallers.com {
     request_body {
         max_size 20MB
     }
+
+    # Static assets aren't content-hashed, so we can't cache-forever (a deploy
+    # would serve stale JS). Use "no-cache": the browser stores the file but
+    # revalidates via ETag, so unchanged files return a tiny 304 and a deploy is
+    # picked up immediately. Explicit header beats Caddy's heuristic freshness,
+    # which could otherwise serve a stale app shell after a deploy.
+    @assets path *.js *.css *.svg
+    header @assets Cache-Control "no-cache"
+    header /index.html Cache-Control "no-cache"
 
     root * /usr/share/caddy
     file_server

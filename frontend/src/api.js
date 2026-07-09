@@ -17,10 +17,40 @@ export function clearToken() {
   localStorage.removeItem("token");
   sessionStorage.removeItem("token");
   _me = null;
+  _getCache.clear();
+  _getInflight.clear();
 }
 
 /** Cached current user (role + capabilities + resource links) from /api/me. */
 let _me = null;
+
+// ── Lightweight GET cache ───────────────────────────────────────────────────
+// For read-only, sync-fed pages (Customers, hierarchies) so revisiting a page
+// within a session is instant instead of re-fetching a large payload every time.
+// Cache-first with a TTL; concurrent calls for the same path are de-duped.
+const _getCache = new Map();     // path -> { ts, data }
+const _getInflight = new Map();  // path -> Promise
+
+/** Cache-first GET. Returns cached data instantly if younger than ttl (ms),
+ *  otherwise fetches once and caches. Use only for endpoints where a few
+ *  minutes of staleness is acceptable (data comes from periodic QBO sync). */
+export async function apiCached(path, ttl = 120000) {
+  const hit = _getCache.get(path);
+  if (hit && Date.now() - hit.ts < ttl) return hit.data;
+  if (_getInflight.has(path)) return _getInflight.get(path);
+  const pr = api(path)
+    .then((data) => { _getCache.set(path, { ts: Date.now(), data }); _getInflight.delete(path); return data; })
+    .catch((err) => { _getInflight.delete(path); throw err; });
+  _getInflight.set(path, pr);
+  return pr;
+}
+
+/** Drop cached GETs — all, or only those whose path contains `prefix`.
+ *  Call after a mutation that would change a cached read. */
+export function invalidateCache(prefix) {
+  if (!prefix) { _getCache.clear(); return; }
+  for (const k of [..._getCache.keys()]) if (k.includes(prefix)) _getCache.delete(k);
+}
 
 export async function fetchMe(force = false) {
   if (_me && !force) return _me;

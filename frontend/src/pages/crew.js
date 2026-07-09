@@ -4,7 +4,7 @@
 //   child     (#/crew/child/<id>)                       one child crew: metrics + its projects
 //   project   (#/crew/child/<id>/project/<pid>)         foreman view, with "up" to the child crew
 // Entry depth depends on role (backend scopes /crew/hierarchy).
-import { api, getMe } from "../api.js";
+import { api, apiCached, getMe } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { foremanDetailHtml } from "./crew-foreman.js";
@@ -16,7 +16,7 @@ export async function crewPortalPage(routeFn, params = null) {
 
   let data;
   try {
-    data = await api("/crew/hierarchy");
+    data = await apiCached("/crew/hierarchy");
   } catch (e) {
     mount(`<div class="mx-auto w-full max-w-2xl"><div class="card p-5 text-sm text-red-700">Failed to load crews: ${escapeHtml(e.message || e)}</div></div>`, routeFn);
     return;

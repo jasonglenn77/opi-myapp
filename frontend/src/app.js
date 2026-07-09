@@ -73,19 +73,34 @@ async function route() {
       location.hash = "#/login";
       return loginPage(route);
     }
-    try {
-      // Force-refresh each navigation: re-validates the token and picks up any
-      // permission changes an admin made since the page loaded.
-      await fetchMe(true);
-    } catch (err) {
-      if (err && (err.status === 401 || err.status === 403)) {
-        clearToken();
-        location.hash = "#/login";
-        return loginPage(route);
+    if (!getMe()) {
+      // Cold start only: we have no cached user yet, so block on /me once to
+      // validate the token and load capabilities before rendering/guarding.
+      try {
+        await fetchMe(true);
+      } catch (err) {
+        if (err && (err.status === 401 || err.status === 403)) {
+          clearToken();
+          location.hash = "#/login";
+          return loginPage(route);
+        }
+        // Transient error (500/503/network): keep the user signed in and let the
+        // target page render; its own API calls surface backend errors.
+        console.warn("Token validation skipped (transient error):", err?.message || err);
       }
-      // Any other failure: keep the user signed in and let the target page render.
-      // The page's own API calls will surface their own errors if the backend is down.
-      console.warn("Token validation skipped (transient error):", err?.message || err);
+    } else {
+      // Warm navigation: render instantly from the cached user and refresh /me
+      // in the background so an admin's permission change is still picked up —
+      // without blocking every nav click on a round-trip.
+      fetchMe(true)
+        .then(() => applyNavPermissions())
+        .catch((err) => {
+          if (err && (err.status === 401 || err.status === 403)) {
+            clearToken();
+            location.hash = "#/login";
+            route();
+          }
+        });
     }
 
     // Reflect capabilities in the nav (no-op if /me was unavailable).

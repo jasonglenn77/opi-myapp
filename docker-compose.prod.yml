@@ -30,13 +30,10 @@ services:
       backend:
         condition: service_healthy
 
-  frontend:
-    build:
-      context: ./frontend
-    container_name: myapp-frontend
-    depends_on:
-      - backend
-    restart: unless-stopped
+# Note: Caddy serves the static frontend directly from ./frontend/src (see the
+# `root`/`file_server` in the Caddyfile), so there is no separate frontend web
+# server in prod. The old nginx `frontend` service was orphaned (nothing routed
+# to it) and has been removed.
 
 volumes:
   caddy_data:

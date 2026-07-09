@@ -94,7 +94,7 @@ export async function mountPaymentsPanel(container, entityId) {
       body = `<div class="flex items-end gap-3 flex-wrap mb-2">
           <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Crew</div>
             <select data-crewedit="${s.id}" class="input text-xs py-1.5">${crewOptions(data.crews, s.crew_id)}</select></label>
-          <div class="text-[11px] text-black/45 pb-1.5">${escapeHtml(ymd(s.start_date))} → ${escapeHtml(ymd(s.end_date))} · invoice ${s.invoice_lead_days}d before · scheduled <b>${money(scheduled)}</b>${mismatch ? ` <span class="text-red-600">(≠ labor)</span>` : ""}</div>
+          <div class="text-[11px] text-black/45 pb-1.5">${escapeHtml(ymd(s.start_date))} → ${escapeHtml(ymd(s.end_date))} · invoice ${s.invoice_lead_days}d before · scheduled <b data-cardsched="${s.id}">${money(scheduled)}</b><span data-cardmismatch="${s.id}" class="text-red-600"${mismatch ? "" : ' style="display:none"'}> (≠ labor)</span></div>
         </div>
         <div class="overflow-x-auto"><table class="w-full text-xs table-fixed">${COLGROUP}
           <thead><tr class="text-black/45 text-left border-b border-black/10">
@@ -104,7 +104,8 @@ export async function mountPaymentsPanel(container, entityId) {
           <tbody>${insts.map(instRow).join("")}</tbody></table></div>
         <div class="mt-2"><button type="button" data-add="${s.id}" class="rounded-lg border border-black/15 px-3 py-1 text-[11px] font-semibold hover:bg-black/5">+ Add installment</button></div>`;
     }
-    return `<div class="rounded-xl border border-black/10 p-3 mb-3">${header}${body}</div>`;
+    const cardAttrs = s ? ` data-card="${s.id}" data-labor2="${e.contract_labor}"` : "";
+    return `<div class="rounded-xl border border-black/10 p-3 mb-3"${cardAttrs}>${header}${body}</div>`;
   }
 
   function scheduleSection() {
@@ -119,7 +120,7 @@ export async function mountPaymentsPanel(container, entityId) {
       ${cards}
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-4 mb-3">
         ${chip("Total contract labor", t.contract_labor)}
-        ${chip("Total scheduled", t.scheduled)}
+        <div class="rounded-xl border border-black/10 bg-black/[0.015] px-3 py-2"><div class="text-[10px] font-bold uppercase tracking-wide text-black/35">Total scheduled</div><div class="text-sm font-extrabold" data-total-scheduled>${money(t.scheduled)}</div></div>
         ${chip("Actual paid (QuickBooks)", t.paid_qbo, "text-kpi-completed-text", qbo.available ? `${(qbo.payments || []).length} payment${(qbo.payments || []).length === 1 ? "" : "s"} · project-wide` : "no crew vendor")}
       </div>
       <div>
@@ -137,6 +138,25 @@ export async function mountPaymentsPanel(container, entityId) {
 
   function render() { container.innerHTML = `<div class="p-4 sm:p-5">${offerSection()}${scheduleSection()}</div>`; wire(); }
   async function reload() { try { await load(); render(); } catch (err) { alert(`Could not reload: ${err.message}`); } }
+  // Recompute the "scheduled" totals from the amount inputs and update them in
+  // place — used after an installment value edit so we don't rebuild the whole
+  // panel (which would lose scroll position and focus).
+  function refreshTotals() {
+    let grand = 0;
+    container.querySelectorAll("[data-card]").forEach(card => {
+      const sid = card.getAttribute("data-card");
+      const labor = parseFloat(card.getAttribute("data-labor2")) || 0;
+      let sum = 0;
+      card.querySelectorAll('[data-f="amount"]').forEach(inp => { sum += parseFloat(inp.value) || 0; });
+      grand += sum;
+      const b = card.querySelector(`[data-cardsched="${sid}"]`);
+      if (b) b.textContent = money(sum);
+      const mm = card.querySelector(`[data-cardmismatch="${sid}"]`);
+      if (mm) mm.style.display = Math.abs(sum - labor) >= 1 ? "" : "none";
+    });
+    const tot = container.querySelector("[data-total-scheduled]");
+    if (tot) tot.textContent = money(grand);
+  }
   const setMsg = (el, t, ok) => { if (el) { el.textContent = t; el.className = "text-xs font-semibold " + (ok ? "text-kpi-completed-text" : "text-red-600"); } };
 
   function wire() {
@@ -193,7 +213,9 @@ export async function mountPaymentsPanel(container, entityId) {
       tr.querySelectorAll("[data-f]").forEach(inp => inp.addEventListener("change", async () => {
         const f = inp.getAttribute("data-f");
         const val = f === "amount" ? (parseFloat(inp.value) || 0) : inp.value;
-        try { await api(`/payments/installment/${id}`, { method: "PATCH", body: JSON.stringify({ [f]: val }) }); await reload(); } catch (err) { alert(err.message); }
+        // Persist the single field, then update totals in place — no full
+        // re-render, so focus and scroll position are preserved.
+        try { await api(`/payments/installment/${id}`, { method: "PATCH", body: JSON.stringify({ [f]: val }) }); if (f === "amount") refreshTotals(); } catch (err) { alert(err.message); }
       }));
     });
     container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {

@@ -2,7 +2,7 @@
 // customer. Sort/filter/search across everything (flat), or group by customer
 // (default, collapsed → expand to see a customer's entities). Read-only;
 // reuses the Estimates-table patterns (fixed-portal filters, 3-state sort).
-import { api } from "../api.js";
+import { apiCached } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 
@@ -54,7 +54,7 @@ const humanizeStatus = (v) => (v || "").toString().trim().replace(/_/g, " ").rep
 
 export async function customersPage(routeFn) {
   let data;
-  try { data = await api("/customers/entities"); }
+  try { data = await apiCached("/customers/entities"); }
   catch (e) {
     mount(`<div class="w-full"><div class="card p-5 text-sm text-red-700">Failed to load customers: ${escapeHtml(e?.message || String(e))}</div></div>`, routeFn);
     return;
