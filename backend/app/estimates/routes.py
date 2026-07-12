@@ -198,6 +198,7 @@ def _load_estimate(conn, estimate_id: int):
 class EstimateCreate(BaseModel):
     qbo_customer_id: int
     quote_description: Optional[str] = None
+    contact_id: Optional[int] = None
 
 
 @router.post("")
@@ -221,10 +222,19 @@ def create_estimate(req: EstimateCreate, _user=Depends(get_current_user)):
                        "(must have job=0, active=1, is_project=0)"
             )
 
+        # A chosen contact must belong to this customer.
+        contact_id = req.contact_id
+        if contact_id is not None:
+            ok = conn.execute(text("SELECT 1 FROM contacts WHERE id=:id AND qbo_customer_id=:cid"),
+                              {"id": contact_id, "cid": customer["id"]}).scalar()
+            if not ok:
+                raise HTTPException(status_code=400, detail="Contact does not belong to this customer")
+
         result = conn.execute(text("""
-            INSERT INTO estimates (qbo_customer_id, qbo_customer_qbo_id, quote_description, status)
-            VALUES (:cid, :qid, :desc, 'draft')
-        """), {"cid": customer["id"], "qid": customer["qbo_id"], "desc": (req.quote_description or None)})
+            INSERT INTO estimates (qbo_customer_id, qbo_customer_qbo_id, contact_id, quote_description, status)
+            VALUES (:cid, :qid, :contact, :desc, 'draft')
+        """), {"cid": customer["id"], "qid": customer["qbo_id"], "contact": contact_id,
+               "desc": (req.quote_description or None)})
         return _load_estimate(conn, result.lastrowid)
 
 
@@ -653,9 +663,17 @@ def _load_estimate_or_404(estimate_id: int):
 #   metric lines) into estimate_revisions and increment revision_count.
 #   The frontend's "Save Revision" button on the Review tab calls this.
 # ---------------------------------------------------------------------------
+class RevisionMeta(BaseModel):
+    reason: Optional[str] = None
+    note: Optional[str] = None
+    total_amount: Optional[float] = None
+
+
 @router.post("/{estimate_id}/revisions")
-def save_estimate_revision(estimate_id: int, _user=Depends(get_current_user)):
+def save_estimate_revision(estimate_id: int, body: Optional[RevisionMeta] = None,
+                           user=Depends(get_current_user)):
     import json
+    meta = body or RevisionMeta()
 
     with engine.begin() as conn:
         # Verify the estimate exists.
@@ -692,9 +710,12 @@ def save_estimate_revision(estimate_id: int, _user=Depends(get_current_user)):
         next_rev = int(est["revision_count"] or 0) + 1
 
         conn.execute(text("""
-            INSERT INTO estimate_revisions (estimate_id, revision_number, snapshot_json)
-            VALUES (:eid, :rn, :snap)
-        """), {"eid": estimate_id, "rn": next_rev, "snap": snapshot_json})
+            INSERT INTO estimate_revisions
+                (estimate_id, revision_number, reason, note, total_amount, saved_by_user_id, snapshot_json)
+            VALUES (:eid, :rn, :reason, :note, :total, :uid, :snap)
+        """), {"eid": estimate_id, "rn": next_rev, "reason": (meta.reason or None),
+               "note": (meta.note or None), "total": meta.total_amount,
+               "uid": user.get("id"), "snap": snapshot_json})
 
         # Read the auto-stamped saved_at back so the client can show "last saved".
         saved = conn.execute(text("""
@@ -715,6 +736,78 @@ def save_estimate_revision(estimate_id: int, _user=Depends(get_current_user)):
         return {
             "ok":                   True,
             "revision_number":      next_rev,
+            "reason":               meta.reason or None,
             "saved_at":             str(saved_at) if saved_at else None,
             "latest_revision_date": str(saved_at.date()) if saved_at else None,
         }
+
+
+# NOTE: /analytics/revisions MUST be declared before /{estimate_id}/revisions —
+# otherwise Starlette matches the latter with estimate_id="analytics" → 422.
+@router.get("/analytics/revisions")
+def revision_analytics(_user=Depends(get_current_user)):
+    """Who revises: per-customer + per-contact revision activity and reason mix.
+    Only estimates that have at least one revision event are counted."""
+    with engine.connect() as conn:
+        by_customer = conn.execute(text("""
+            SELECT qc.qbo_id, qc.display_name AS name,
+                   COUNT(DISTINCT r.estimate_id) AS estimates_revised,
+                   COUNT(*) AS revision_events,
+                   ROUND(COUNT(*) / COUNT(DISTINCT r.estimate_id), 2) AS avg_per_estimate
+            FROM estimate_revisions r
+            JOIN estimates e ON e.id = r.estimate_id
+            JOIN qbo_customers qc ON qc.id = e.qbo_customer_id
+            GROUP BY qc.qbo_id, qc.display_name
+            ORDER BY revision_events DESC, estimates_revised DESC
+            LIMIT 100
+        """)).mappings().all()
+        by_contact = conn.execute(text("""
+            SELECT ct.id AS contact_id, ct.full_name AS contact_name, qc.display_name AS customer_name,
+                   COUNT(DISTINCT r.estimate_id) AS estimates_revised, COUNT(*) AS revision_events
+            FROM estimate_revisions r
+            JOIN estimates e ON e.id = r.estimate_id
+            JOIN contacts ct ON ct.id = e.contact_id
+            JOIN qbo_customers qc ON qc.id = e.qbo_customer_id
+            GROUP BY ct.id, ct.full_name, qc.display_name
+            ORDER BY revision_events DESC
+            LIMIT 100
+        """)).mappings().all()
+        by_reason = conn.execute(text("""
+            SELECT COALESCE(NULLIF(reason,''), '(unspecified)') AS reason, COUNT(*) AS n
+            FROM estimate_revisions GROUP BY reason ORDER BY n DESC
+        """)).mappings().all()
+        totals = conn.execute(text("""
+            SELECT COUNT(*) AS revision_events, COUNT(DISTINCT estimate_id) AS estimates_revised
+            FROM estimate_revisions
+        """)).mappings().first()
+    return {
+        "totals": {"revision_events": totals["revision_events"], "estimates_revised": totals["estimates_revised"]},
+        "by_customer": [{"qbo_id": r["qbo_id"], "name": r["name"],
+                         "estimates_revised": r["estimates_revised"], "revision_events": r["revision_events"],
+                         "avg_per_estimate": float(r["avg_per_estimate"] or 0)} for r in by_customer],
+        "by_contact": [{"contact_id": r["contact_id"], "contact_name": r["contact_name"],
+                        "customer_name": r["customer_name"], "estimates_revised": r["estimates_revised"],
+                        "revision_events": r["revision_events"]} for r in by_contact],
+        "by_reason": [{"reason": r["reason"], "n": r["n"]} for r in by_reason],
+    }
+
+
+@router.get("/{estimate_id}/revisions")
+def list_estimate_revisions(estimate_id: int, _user=Depends(get_current_user)):
+    """Revision history for one estimate (metadata only, not the full snapshots)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT r.revision_number, r.reason, r.note, r.total_amount, r.saved_at,
+                   TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS saved_by,
+                   u.email AS saved_by_email
+            FROM estimate_revisions r
+            LEFT JOIN users u ON u.id = r.saved_by_user_id
+            WHERE r.estimate_id = :eid
+            ORDER BY r.revision_number DESC
+        """), {"eid": estimate_id}).mappings().all()
+    return {"revisions": [{
+        "revision_number": r["revision_number"], "reason": r["reason"], "note": r["note"],
+        "total_amount": float(r["total_amount"]) if r["total_amount"] is not None else None,
+        "saved_at": str(r["saved_at"]) if r["saved_at"] else None,
+        "saved_by": (r["saved_by"] or "").strip() or r["saved_by_email"],
+    } for r in rows]}

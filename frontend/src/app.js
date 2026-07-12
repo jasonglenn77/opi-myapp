@@ -12,6 +12,8 @@ import { estimatePage } from "./pages/estimate.js";
 import { cashflowPage } from "./pages/cashflow.js";
 import { crewPortalPage } from "./pages/crew.js";
 import { customersPage } from "./pages/customers.js";
+import { contactsPage } from "./pages/contacts.js";
+import { pipelinePage } from "./pages/opportunities.js";
 import { settingsPage } from "./pages/settings.js";
 import { estimateTrackingPage } from "./pages/estimate-tracking.js";
 import { entityDetailPage } from "./pages/entity-detail.js";
@@ -25,6 +27,7 @@ const ROUTE_CAPS = {
   "#/financials": "page.financials",
   "#/cashflow":   "page.cashflow",
   "#/customers":  "page.customers",
+  "#/pipeline":   "page.estimate",
   "#/estimate":   "page.estimate",
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
@@ -126,6 +129,8 @@ async function route() {
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);
   if (hash === "#/customers") return customersPage(route);
+  if (hash === "#/contacts") return contactsPage(route);
+  if (hash === "#/pipeline") return pipelinePage(route);
   if (hash.startsWith("#/entity/")) {
     const m = hash.match(/^#\/entity\/(estimate|job|project)\/(.+)$/);
     if (m) return entityDetailPage(route, { entityType: m[1], entityId: decodeURIComponent(m[2]) });

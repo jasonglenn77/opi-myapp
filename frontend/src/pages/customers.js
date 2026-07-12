@@ -3,6 +3,7 @@
 // (default, collapsed → expand to see a customer's entities). Read-only;
 // reuses the Estimates-table patterns (fixed-portal filters, 3-state sort).
 import { apiCached } from "../api.js";
+import { openContactsModal } from "./contacts.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 
@@ -194,12 +195,16 @@ export async function customersPage(routeFn) {
           <td class="px-3 py-2 text-right text-[11px] text-black/50">${c.pipeline_value > 0 ? money(c.pipeline_value) + " pipeline" : ""}</td>
           <td class="px-3 py-2 text-right font-bold text-ink-900 tabular-nums">${money(c.invoiced)}</td>
           <td class="px-3 py-2 text-right tabular-nums ${c.open_ar > 0 ? "font-semibold text-amber-700" : "text-black/25"}">${c.open_ar > 0 ? money(c.open_ar) : "—"}</td>
-          <td class="px-3 py-2"></td></tr>`;
+          <td class="px-3 py-2 text-right"><button data-contacts="${escapeHtml(String(cid))}" data-cname="${escapeHtml(c.name)}" class="text-[11px] font-semibold text-blue-600 hover:underline whitespace-nowrap">Contacts</button></td></tr>`;
         const rows = open ? kids.map(r => `<tr class="border-b border-black/5 hover:bg-blue-50/60 cursor-pointer" data-entity="${escapeHtml(r.type)}|${escapeHtml(String(r.entity_id))}"><td class="px-2"></td>${COLS.map(c2 => c2.key === "customer_name" ? `<td></td>` : cell(r, c2)).join("")}</tr>`).join("") : "";
         return header + rows;
       }).join("") || `<tr><td colspan="${COLSPAN}" class="py-8 text-center text-black/40">No matches.</td></tr>`;
       tbody.querySelectorAll("[data-cust]").forEach(tr => tr.addEventListener("click", () => {
         const id = tr.dataset.cust; expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderRows();
+      }));
+      tbody.querySelectorAll("[data-contacts]").forEach(btn => btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openContactsModal(btn.getAttribute("data-contacts"), btn.getAttribute("data-cname"));
       }));
     }
     const cnt = document.getElementById("custCount");

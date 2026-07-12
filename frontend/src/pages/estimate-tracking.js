@@ -284,6 +284,7 @@ export async function estimateTrackingPage(routeFn) {
               <input id="estSearch" class="input text-xs py-1.5 w-full sm:w-56" placeholder="Search customer, est #…" />
               <label class="flex items-center gap-1.5 text-xs text-black/60 whitespace-nowrap"><input type="checkbox" id="showAll" class="h-4 w-4 rounded border-black/25"> Show all</label>
               <button id="clearFilters" type="button" class="rounded-xl border border-black/10 bg-gray-100 px-3 py-1.5 text-xs font-semibold hover:bg-black/5 whitespace-nowrap">Clear filters</button>
+              <button id="revAnalytics" type="button" class="rounded-xl border border-black/10 bg-gray-100 px-3 py-1.5 text-xs font-semibold hover:bg-black/5 whitespace-nowrap">Revision analytics</button>
             </div>
           </div>
           <div id="estCount" class="text-xs font-semibold text-black/50 mt-1.5"></div>
@@ -301,6 +302,7 @@ export async function estimateTrackingPage(routeFn) {
       </div>
     </div>`, routeFn);
 
+  document.getElementById("revAnalytics").addEventListener("click", openRevisionAnalyticsModal);
   document.getElementById("estSearch").addEventListener("input", (e) => { search = e.target.value; renderRows(); });
   document.getElementById("showAll").addEventListener("change", async (e) => { showAll = e.target.checked; try { await load(); rows = data.estimates || []; renderAll(); } catch (_) {} });
   document.getElementById("clearFilters").addEventListener("click", () => { for (const k of Object.keys(filters)) delete filters[k]; closePortals(); renderAll(); });
@@ -312,6 +314,41 @@ export async function estimateTrackingPage(routeFn) {
   });
 
   renderAll();
+}
+
+async function openRevisionAnalyticsModal() {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-5 max-h-[88vh] overflow-auto" data-card><div class="text-sm text-black/40">Loading…</div></div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) overlay.remove(); });
+  const card = overlay.querySelector("[data-card]");
+  try {
+    const d = await api("/estimates/analytics/revisions");
+    const chip = (label, val) => `<div class="rounded-xl border border-black/10 bg-black/[0.015] px-3 py-2"><div class="text-[10px] font-bold uppercase tracking-wide text-black/35">${label}</div><div class="text-lg font-extrabold text-ink-900">${val}</div></div>`;
+    const reasonMax = Math.max(1, ...d.by_reason.map((r) => r.n));
+    card.innerHTML = `
+      <div class="flex items-center justify-between mb-3"><div class="text-base font-bold text-ink-900">Revision analytics</div>
+        <button data-close class="text-black/40 hover:text-black/70 text-xl leading-none">&times;</button></div>
+      <div class="grid grid-cols-3 gap-2 mb-4">
+        ${chip("Revision events", d.totals.revision_events)}
+        ${chip("Estimates revised", d.totals.estimates_revised)}
+        ${chip("Reasons tracked", d.by_reason.length)}
+      </div>
+      <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-1">By reason</div>
+      <div class="space-y-1 mb-4">${d.by_reason.map((r) => `
+        <div class="flex items-center gap-2 text-xs"><div class="w-40 truncate text-black/60">${escapeHtml(r.reason)}</div>
+          <div class="flex-1 bg-black/5 rounded-full h-3 overflow-hidden"><div class="bg-blue-400 h-3" style="width:${Math.round(r.n / reasonMax * 100)}%"></div></div>
+          <div class="w-8 text-right tabular-nums font-semibold">${r.n}</div></div>`).join("") || `<div class="text-xs text-black/40">No data yet.</div>`}</div>
+      <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-1">Most-revised customers</div>
+      <div class="overflow-x-auto ${d.by_contact && d.by_contact.length ? "mb-4" : ""}"><table class="w-full text-xs">
+        <thead><tr class="text-left text-black/45 border-b border-black/10"><th class="py-1 pr-3 font-bold">Customer</th><th class="py-1 pr-3 font-bold text-right">Estimates</th><th class="py-1 pr-3 font-bold text-right">Revisions</th><th class="py-1 font-bold text-right">Avg/est</th></tr></thead>
+        <tbody>${(d.by_customer || []).slice(0, 15).map((c) => `<tr class="border-b border-black/5"><td class="py-1 pr-3 font-semibold text-ink-900">${escapeHtml(c.name || "—")}</td><td class="py-1 pr-3 text-right tabular-nums">${c.estimates_revised}</td><td class="py-1 pr-3 text-right tabular-nums">${c.revision_events}</td><td class="py-1 text-right tabular-nums">${c.avg_per_estimate}</td></tr>`).join("") || `<tr><td colspan="4" class="py-3 text-center text-black/40">No revisions saved yet.</td></tr>`}</tbody></table></div>
+      ${(d.by_contact && d.by_contact.length) ? `<div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-1">By contact</div>
+      <div class="overflow-x-auto"><table class="w-full text-xs"><thead><tr class="text-left text-black/45 border-b border-black/10"><th class="py-1 pr-3 font-bold">Contact</th><th class="py-1 pr-3 font-bold">Customer</th><th class="py-1 font-bold text-right">Revisions</th></tr></thead>
+        <tbody>${d.by_contact.slice(0, 15).map((c) => `<tr class="border-b border-black/5"><td class="py-1 pr-3 font-semibold text-ink-900">${escapeHtml(c.contact_name || "—")}</td><td class="py-1 pr-3 text-black/60">${escapeHtml(c.customer_name || "—")}</td><td class="py-1 text-right tabular-nums">${c.revision_events}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+    card.querySelector("[data-close]").addEventListener("click", () => overlay.remove());
+  } catch (e) { card.innerHTML = `<div class="text-sm text-red-700">Failed to load analytics.</div>`; }
 }
 
 function mount(bodyHtml, routeFn) {

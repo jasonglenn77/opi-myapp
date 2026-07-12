@@ -10,6 +10,7 @@ import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { api, hasCapability } from "../api.js";
 import { mountBaseQuotingMetrics } from "./base-quoting-metrics.js";
+import { contactFormModal } from "./contacts.js";
 import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
 
 // Top-level dispatcher for #/estimate. URL shapes:
@@ -170,6 +171,13 @@ async function renderEstimateList(routeFn) {
               <div id="neCustList" class="hidden absolute z-10 mt-1 w-full max-h-56 overflow-auto rounded-xl border border-black/10 bg-white shadow-lg text-ink-900"></div>
             </div>
           </div>
+          <div>
+            <div class="label mb-1">Contact <span class="text-black/40">(optional)</span></div>
+            <div class="flex gap-2">
+              <select id="neContact" class="input flex-1" disabled><option value="">Pick a customer first</option></select>
+              <button type="button" id="neNewContact" class="rounded-xl border border-black/15 px-2.5 text-xs font-semibold hover:bg-black/5 whitespace-nowrap" disabled>+ New</button>
+            </div>
+          </div>
           <div><div class="label mb-1">Description <span class="text-black/40">(optional)</span></div><input id="neDesc" class="input" placeholder="e.g. Rack install — Katy, TX"></div>
           <div><div class="label mb-1">QBO Estimate No. <span class="text-black/40">(optional — link now if you have it)</span></div><input id="neEstNo" class="input" placeholder="e.g. 7147"></div>
           <div class="text-sm text-red-700 min-h-[1.25rem]" id="neMsg"></div>
@@ -216,8 +224,26 @@ async function renderEstimateList(routeFn) {
   // ---- New estimate (searchable customer combobox) ----
   const neModal = document.getElementById("newEstModal");
   let selectedCustomerId = null;
+  let selectedCustomerQbo = null;   // {qbo_id, name} for loading contacts
   const custInput = document.getElementById("neCustInput");
   const custList = document.getElementById("neCustList");
+  const neContact = document.getElementById("neContact");
+  const neNewContact = document.getElementById("neNewContact");
+  const resetNeContacts = () => { neContact.innerHTML = `<option value="">Pick a customer first</option>`; neContact.disabled = true; neNewContact.disabled = true; };
+  const loadNeContacts = async (selectId) => {
+    if (!selectedCustomerQbo) return resetNeContacts();
+    try {
+      const d = await api(`/contacts/customer/${encodeURIComponent(selectedCustomerQbo.qbo_id)}`);
+      const list = (d.contacts || []).filter(c => c.active);
+      neContact.innerHTML = `<option value="">— none —</option>` +
+        list.map(c => `<option value="${c.id}" ${String(c.id) === String(selectId || "") ? "selected" : ""}>${escapeHtml(c.full_name || "contact")}</option>`).join("");
+      neContact.disabled = false; neNewContact.disabled = false;
+    } catch (_) { resetNeContacts(); }
+  };
+  neNewContact.addEventListener("click", () => {
+    if (!selectedCustomerQbo) return;
+    contactFormModal({ customer: selectedCustomerQbo, contact: null, onSaved: (saved) => loadNeContacts(saved?.id) });
+  });
   const renderCustList = () => {
     const q = custInput.value.trim().toLowerCase();
     const matches = customers.filter(c => (c.display_name || "").toLowerCase().includes(q)).slice(0, 50);
@@ -225,13 +251,16 @@ async function renderEstimateList(routeFn) {
     custList.classList.remove("hidden");
     custList.querySelectorAll("[data-cid]").forEach(b => b.addEventListener("mousedown", (e) => {
       e.preventDefault(); selectedCustomerId = parseInt(b.dataset.cid, 10); custInput.value = b.textContent; custList.classList.add("hidden");
+      const cust = customers.find(c => String(c.qbo_customer_id) === String(selectedCustomerId));
+      selectedCustomerQbo = cust ? { qbo_id: cust.qbo_id, name: cust.display_name } : null;
+      loadNeContacts();
     }));
   };
   custInput.addEventListener("focus", renderCustList);
-  custInput.addEventListener("input", () => { selectedCustomerId = null; renderCustList(); });
+  custInput.addEventListener("input", () => { selectedCustomerId = null; selectedCustomerQbo = null; resetNeContacts(); renderCustList(); });
   custInput.addEventListener("blur", () => setTimeout(() => custList.classList.add("hidden"), 150));
 
-  const openNe = () => { document.getElementById("neMsg").textContent = ""; selectedCustomerId = null; custInput.value = ""; document.getElementById("neDesc").value = ""; document.getElementById("neEstNo").value = ""; neModal.classList.remove("hidden"); neModal.classList.add("flex"); custInput.focus(); };
+  const openNe = () => { document.getElementById("neMsg").textContent = ""; selectedCustomerId = null; selectedCustomerQbo = null; resetNeContacts(); custInput.value = ""; document.getElementById("neDesc").value = ""; document.getElementById("neEstNo").value = ""; neModal.classList.remove("hidden"); neModal.classList.add("flex"); custInput.focus(); };
   const closeNe = () => { neModal.classList.add("hidden"); neModal.classList.remove("flex"); };
   document.getElementById("newEstBtn").addEventListener("click", openNe);
   document.getElementById("neCancel").addEventListener("click", closeNe);
@@ -240,7 +269,7 @@ async function renderEstimateList(routeFn) {
     e.preventDefault();
     if (!selectedCustomerId) { document.getElementById("neMsg").textContent = "Pick a customer from the list."; return; }
     try {
-      const created = await api("/estimates", { method: "POST", body: JSON.stringify({ qbo_customer_id: selectedCustomerId, quote_description: document.getElementById("neDesc").value.trim() || null }) });
+      const created = await api("/estimates", { method: "POST", body: JSON.stringify({ qbo_customer_id: selectedCustomerId, contact_id: neContact.value ? Number(neContact.value) : null, quote_description: document.getElementById("neDesc").value.trim() || null }) });
       const estNo = document.getElementById("neEstNo").value.trim();
       if (estNo) { try { await api(`/estimates/${created.id}/link-qbo`, { method: "POST", body: JSON.stringify({ est_no: estNo }) }); } catch (err) { let d = err?.message || ""; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} document.getElementById("neMsg").textContent = "Created, but link failed: " + d; return; } }
       location.hash = `#/estimate/${created.id}`;
@@ -730,6 +759,7 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
           </div>
           <div class="flex items-center gap-2">
             <span class="text-[11px] text-emerald-700" data-rev-saved-at></span>
+            ${rev > 0 ? `<button type="button" data-rev-history class="rounded-lg bg-slate-100 text-slate-700 text-sm px-3 py-2 font-semibold hover:bg-slate-200">History</button>` : ""}
             <button type="button" data-save-revision
                     class="btn-primary text-sm px-4 py-2">
               Save Revision
@@ -1139,30 +1169,93 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
     }
   }
 
-  // Save Revision button → POST snapshot → bump header rev count.
+  // Reasons a customer-driven revision happens (fixed list → clean analytics).
+  const REVISION_REASONS = ["Initial estimate", "Price / budget", "Scope change",
+    "Added items", "Removed items", "Material / spec change", "Timeline change",
+    "Clarification / correction", "Other"];
+
+  // Ask WHY before snapshotting, so we can report who revises + why.
+  function openRevisionSaveModal(currentTotal, onConfirm) {
+    const overlay = document.createElement("div");
+    overlay.className = "fixed inset-0 z-[80] bg-black/40 flex items-center justify-center p-4";
+    overlay.innerHTML = `
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+        <div class="text-base font-bold text-ink-900 mb-1">Save revision</div>
+        <div class="text-xs text-black/50 mb-3">Snapshots the current numbers (${fmtMoney(currentTotal)}) and logs why, for revision analytics.</div>
+        <label class="block mb-3"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div>
+          <select data-reason class="input text-sm py-1.5 w-full">${REVISION_REASONS.map(r => `<option>${r}</option>`).join("")}</select></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Note (optional)</div>
+          <textarea data-note rows="2" class="input text-sm py-1.5 w-full" placeholder="Detail, e.g. which items changed"></textarea></label>
+        <div class="mt-4 flex items-center justify-end gap-2">
+          <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+          <button data-save class="btn-primary text-sm px-4 py-1.5">Save revision</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector("[data-cancel]").addEventListener("click", close);
+    overlay.querySelector("[data-save]").addEventListener("click", () => {
+      const reason = overlay.querySelector("[data-reason]").value;
+      const note = overlay.querySelector("[data-note]").value.trim() || null;
+      close(); onConfirm({ reason, note });
+    });
+  }
+
+  async function openRevisionHistoryModal() {
+    const overlay = document.createElement("div");
+    overlay.className = "fixed inset-0 z-[80] bg-black/40 flex items-center justify-center p-4";
+    overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[85vh] overflow-auto" data-card><div class="text-sm text-black/40">Loading…</div></div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) overlay.remove(); });
+    const card = overlay.querySelector("[data-card]");
+    try {
+      const revs = (await api(`/estimates/${estimateId}/revisions`)).revisions || [];
+      card.innerHTML = `
+        <div class="flex items-center justify-between mb-3"><div class="text-base font-bold text-ink-900">Revision history</div>
+          <button data-close class="text-black/40 hover:text-black/70 text-xl leading-none">&times;</button></div>
+        ${revs.length ? `<div class="space-y-2">${revs.map(r => `
+          <div class="rounded-xl border border-black/10 px-3 py-2">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-semibold text-ink-900">Rev ${r.revision_number} <span class="text-black/40 font-normal">· ${escapeHtml(r.reason || "—")}</span></div>
+              <div class="text-xs tabular-nums text-black/60">${r.total_amount != null ? fmtMoney(r.total_amount) : ""}</div></div>
+            <div class="text-[11px] text-black/45">${escapeHtml((r.saved_at || "").slice(0, 10))}${r.saved_by ? " · " + escapeHtml(r.saved_by) : ""}${r.note ? " · " + escapeHtml(r.note) : ""}</div>
+          </div>`).join("")}</div>` : `<div class="text-sm text-black/45 py-4">No revisions saved yet.</div>`}`;
+      card.querySelector("[data-close]").addEventListener("click", () => overlay.remove());
+    } catch (e) { card.innerHTML = `<div class="text-sm text-red-700">Failed to load history.</div>`; }
+  }
+
+  // Save Revision button → capture reason → POST snapshot → bump header rev count.
   async function onSaveRevisionClick(e) {
     const btn = e.target.closest("[data-save-revision]");
     if (!btn || btn.hasAttribute("disabled")) return;
-    btn.setAttribute("disabled", "true");
-    const origText = btn.textContent;
-    btn.textContent = "Saving…";
-    try {
-      const resp = await api(`/estimates/${estimateId}/revisions`, { method: "POST" });
-      const newRev = Number(resp?.revision_number ?? 0);
-      if (estimateRow) {
-        estimateRow.revision_count       = newRev;
-        estimateRow.latest_revision_date = resp?.latest_revision_date ?? estimateRow.latest_revision_date;
+    const { cross } = computeAll();
+    openRevisionSaveModal(cross.grand_total, async ({ reason, note }) => {
+      btn.setAttribute("disabled", "true");
+      const origText = btn.textContent;
+      btn.textContent = "Saving…";
+      try {
+        const resp = await api(`/estimates/${estimateId}/revisions`, {
+          method: "POST", body: JSON.stringify({ reason, note, total_amount: cross.grand_total }),
+        });
+        const newRev = Number(resp?.revision_number ?? 0);
+        if (estimateRow) {
+          estimateRow.revision_count       = newRev;
+          estimateRow.latest_revision_date = resp?.latest_revision_date ?? estimateRow.latest_revision_date;
+        }
+        render();
+        const stamp = container.querySelector("[data-rev-saved-at]");
+        if (stamp) stamp.textContent = `Saved rev ${newRev}`;
+      } catch (err) {
+        alert("Save failed: " + (err?.message || err));
+      } finally {
+        btn.removeAttribute("disabled");
+        btn.textContent = origText;
       }
-      render();
-      const stamp = container.querySelector("[data-rev-saved-at]");
-      if (stamp) stamp.textContent = `Saved rev ${newRev}`;
-    } catch (err) {
-      alert("Save failed: " + (err?.message || err));
-    } finally {
-      btn.removeAttribute("disabled");
-      btn.textContent = origText;
-    }
+    });
   }
+
+  function onRevHistoryClick(e) { if (e.target.closest("[data-rev-history]")) openRevisionHistoryModal(); }
 
   // Rollup-row chevron clicks → toggle the per-set expansion panel.
   function onRollupToggleClick(e) {
@@ -1177,10 +1270,12 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
 
   container.addEventListener("change", onToggleChange);
   container.addEventListener("click", onSaveRevisionClick);
+  container.addEventListener("click", onRevHistoryClick);
   container.addEventListener("click", onRollupToggleClick);
   window.addEventListener("hashchange", () => {
     container.removeEventListener("change", onToggleChange);
     container.removeEventListener("click", onSaveRevisionClick);
+    container.removeEventListener("click", onRevHistoryClick);
     container.removeEventListener("click", onRollupToggleClick);
   }, { once: true });
 }
