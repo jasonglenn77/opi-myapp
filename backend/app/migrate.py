@@ -35,16 +35,20 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 def _split_statements(sql_text: str):
     """Split a migration file into individual statements.
 
-    Strips full-line `--` comments and splits on semicolons. This is sufficient
-    for our DDL/DML migrations (no semicolons inside string literals, no stored
-    procedures). If we ever need those, switch to a delimiter-aware parser.
+    Strips `--` line comments — BOTH full-line and trailing — before splitting on
+    semicolons, so a `;` inside a comment (e.g. "-- a; b") can't break a
+    statement. Sufficient for our DDL/DML migrations (no `--` or `;` inside string
+    literals, no stored procedures). If we ever need those, switch to a
+    delimiter-aware parser.
     """
-    lines = []
+    cleaned = []
     for line in sql_text.splitlines():
-        if line.strip().startswith("--"):
-            continue
-        lines.append(line)
-    joined = "\n".join(lines)
+        idx = line.find("--")
+        if idx != -1:
+            line = line[:idx]          # drop trailing comment (and full-line ones)
+        if line.strip():
+            cleaned.append(line)
+    joined = "\n".join(cleaned)
     return [s.strip() for s in joined.split(";") if s.strip()]
 
 
