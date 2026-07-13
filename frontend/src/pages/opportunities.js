@@ -18,6 +18,7 @@ const STATUS_META = {
 };
 const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
 const dash = (s) => (s == null || s === "" ? "—" : s);
+const humanRole = (r) => (r || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const days = (n) => (n == null ? "—" : `${n}d`);
 const pct = (n) => (n == null ? "—" : `${Math.round(n * 100)}%`);
 
@@ -210,7 +211,7 @@ function newOpportunityModal({ estimators, onSaved }) {
           <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Source</div>
             <select data-f="source" class="input text-sm py-1.5 w-full"><option value="">—</option>${SOURCES.map(s => `<option>${s}</option>`).join("")}</select></label>
           <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Estimator</div>
-            <select data-f="estimator_user_id" class="input text-sm py-1.5 w-full"><option value="">—</option>${estimators.map(u => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join("")}</select></label>
+            <select data-f="estimator_user_id" class="input text-sm py-1.5 w-full"><option value="">—</option>${estimators.map(u => `<option value="${u.id}">${escapeHtml(u.name)}${u.role ? ` — ${escapeHtml(humanRole(u.role))}` : ""}</option>`).join("")}</select></label>
         </div>
       </div>
       <div class="mt-4 flex items-center justify-end gap-2">

@@ -556,6 +556,7 @@ video {
 
 html {
   height: 100%;
+  color-scheme: light;
 }
 
 body {
@@ -564,6 +565,15 @@ body {
   background-color: rgb(11 15 20 / var(--tw-bg-opacity, 1));
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity, 1));
+}
+
+/* The body is dark with white text; native <select> option popups otherwise
+     inherit that white text (or the OS dark theme) and render unreadable. Force
+     option popups to dark-on-white everywhere. */
+
+option {
+  color: #0b0f14;
+  background-color: #ffffff;
 }
 
 .\!container {

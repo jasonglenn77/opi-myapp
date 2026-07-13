@@ -247,10 +247,11 @@ def list_estimators(_user=Depends(get_current_user)):
     """Active users assignable as an estimate owner (estimator)."""
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, TRIM(CONCAT(COALESCE(first_name,''),' ',COALESCE(last_name,''))) AS name, email
+            SELECT id, TRIM(CONCAT(COALESCE(first_name,''),' ',COALESCE(last_name,''))) AS name, email, role
             FROM users WHERE is_active = 1 ORDER BY name, email
         """)).mappings().all()
-    return [{"id": r["id"], "name": (r["name"] or "").strip() or r["email"], "email": r["email"]} for r in rows]
+    return [{"id": r["id"], "name": (r["name"] or "").strip() or r["email"], "email": r["email"],
+             "role": r["role"]} for r in rows]
 
 
 @router.get("/tracking")

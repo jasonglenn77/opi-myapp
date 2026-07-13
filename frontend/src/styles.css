@@ -5,8 +5,12 @@
 
 /* Nice defaults */
 @layer base {
-  html { height: 100%; }
+  html { height: 100%; color-scheme: light; }
   body { @apply bg-ink-900 text-white overflow-y-auto; }
+  /* The body is dark with white text; native <select> option popups otherwise
+     inherit that white text (or the OS dark theme) and render unreadable. Force
+     option popups to dark-on-white everywhere. */
+  option { color: #0b0f14; background-color: #ffffff; }
 }
 
 @layer utilities {
