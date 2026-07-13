@@ -15,8 +15,12 @@ const STATUS_CLS = { draft: "bg-slate-100 text-slate-700", sent: "bg-blue-100 te
 const CANCEL = "rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200";
 
 export async function mountChangeOrdersPanel(container, entityId) {
-  let data;
-  const load = async () => { data = await api(`/change-orders/project/${encodeURIComponent(entityId)}`); };
+  let data, opp = null;
+  const load = async () => {
+    data = await api(`/change-orders/project/${encodeURIComponent(entityId)}`);
+    // the pre-award opportunity this project came from (may be none for old projects)
+    try { opp = (await api(`/opportunities/by-project/${encodeURIComponent(entityId)}`)).opportunity; } catch (_) { opp = null; }
+  };
   try { await load(); }
   catch (e) { container.innerHTML = `<div class="p-5 text-sm text-red-700">Failed to load change orders: ${escapeHtml(e?.message || String(e))}</div>`; return; }
 
@@ -58,8 +62,30 @@ export async function mountChangeOrdersPanel(container, entityId) {
       </tbody></table></div>`;
   }
 
+  function originatingQuoteHtml() {
+    if (!opp) return "";
+    let cycle = null;
+    if (opp.rfq_received_date && opp.decided_at) {
+      const d = Math.round((new Date(opp.decided_at) - new Date(opp.rfq_received_date)) / 86400000);
+      if (d >= 0) cycle = d;
+    }
+    const meta = [
+      opp.contact_name && "Contact: " + opp.contact_name,
+      opp.estimator_name && "Estimator: " + opp.estimator_name,
+      opp.rfq_received_date && "RFQ " + ymd(opp.rfq_received_date),
+      cycle != null && `${cycle}d sales cycle`,
+    ].filter(Boolean).map(escapeHtml).join(" · ");
+    return `<div class="rounded-xl border border-indigo-200 bg-indigo-50/50 px-3 py-2.5 mb-4">
+      <div class="text-[10px] font-bold uppercase tracking-wide text-indigo-700/70 mb-0.5">Originating quote</div>
+      <div class="text-sm font-semibold text-ink-900">${opp.quote_number ? "#" + escapeHtml(opp.quote_number) + " · " : ""}${escapeHtml(opp.title || opp.customer_name || "—")}</div>
+      ${meta ? `<div class="text-[11px] text-black/55 mt-0.5">${meta}</div>` : ""}
+      <div class="text-[10px] text-black/40 mt-1">The estimator's estimate is the customer-facing PDF; the estimates below are the project cost-basis.</div>
+    </div>`;
+  }
+
   function render() {
     container.innerHTML = `<div class="p-4 sm:p-5">
+      ${originatingQuoteHtml()}
       <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
         <div class="text-[11px] font-bold uppercase tracking-wide text-black/40">Contract value &amp; change orders</div>
         <button id="coAdd" class="btn-primary text-xs px-3 py-1.5">+ Add change order</button>

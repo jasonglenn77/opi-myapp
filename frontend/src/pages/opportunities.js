@@ -96,7 +96,7 @@ export async function pipelinePage(routeFn) {
           <tr class="border-b border-black/5 hover:bg-black/[0.015]">
             <td class="py-1.5 pr-3 font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</td>
             <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.contact_name))}</td>
-            <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.title))}</td>
+            <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}</td>
             <td class="py-1.5 pr-3">${statusCell(o)}</td>
             <td class="py-1.5 pr-3 text-black/60 tabular-nums">${ymd(o.rfq_received_date)}</td>
             <td class="py-1.5 pr-3 text-black/60 tabular-nums">${ymd(o.target_start_date)}</td>
@@ -105,7 +105,14 @@ export async function pipelinePage(routeFn) {
           </tr>`).join("")}
         </tbody></table></div>`;
     listEl.querySelectorAll("[data-status]").forEach(sel => sel.addEventListener("change", async () => {
-      try { await api(`/opportunities/${sel.getAttribute("data-status")}`, { method: "PATCH", body: JSON.stringify({ status: sel.value }) }); loadMetrics(); loadList(); }
+      const id = sel.getAttribute("data-status");
+      if (sel.value === "won") {
+        // Won → prompt to link the QBO project (the handoff), or mark won to link later.
+        const opp = rows.find(o => String(o.id) === id);
+        openLinkProjectModal(opp, () => { loadMetrics(); loadList(); }, () => loadList());
+        return;
+      }
+      try { await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ status: sel.value }) }); loadMetrics(); loadList(); }
       catch (err) { alert(err.message); }
     }));
     listEl.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
@@ -121,6 +128,62 @@ export async function pipelinePage(routeFn) {
   renderFilters();
   loadMetrics();
   loadList();
+}
+
+// ── Won → link to QBO project (the handoff) ─────────────────────────────────
+function openLinkProjectModal(opp, onDone, onCancel) {
+  let picked = null;
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+      <div class="text-base font-bold text-ink-900 mb-1">Mark won — link to project</div>
+      <div class="text-xs text-black/50 mb-3">Once the office creates the project in QuickBooks (named with the quote # prefix), link it here so the quote flows through to the project.</div>
+      <div class="relative mb-1">
+        <input data-psearch class="input text-sm py-1.5 w-full" placeholder="Search project…" value="${escapeHtml(opp.quote_number || opp.title || "")}" autocomplete="off">
+        <div data-pmenu class="absolute z-20 mt-1 w-full bg-white border border-black/10 rounded-xl shadow-lg max-h-56 overflow-auto hidden"></div>
+      </div>
+      <div data-picked class="text-xs text-emerald-700 font-semibold mb-2 min-h-[1rem]"></div>
+      <div class="flex items-center justify-end gap-2">
+        <span data-msg class="text-xs font-semibold mr-auto"></span>
+        <button data-skip class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Won, link later</button>
+        <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+        <button data-save class="btn-primary text-sm px-4 py-1.5">Link &amp; mark won</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const input = overlay.querySelector("[data-psearch]");
+  const menu = overlay.querySelector("[data-pmenu]");
+  const pickedEl = overlay.querySelector("[data-picked]");
+  const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
+  let timer = null;
+  const search = async (q) => {
+    try {
+      const list = (await api(`/opportunities/project-options?q=${encodeURIComponent(q)}&limit=40`)).projects || [];
+      menu.innerHTML = list.length
+        ? list.map(pj => `<div class="px-3 py-1.5 text-sm hover:bg-blue-50 cursor-pointer" data-pq="${escapeHtml(pj.qbo_id)}">${escapeHtml(pj.name)}</div>`).join("")
+        : `<div class="px-3 py-1.5 text-xs text-black/40">No projects</div>`;
+      menu.classList.remove("hidden");
+      menu.querySelectorAll("[data-pq]").forEach(el => el.addEventListener("mousedown", (e) => {
+        e.preventDefault(); picked = { qbo_id: el.getAttribute("data-pq"), name: el.textContent };
+        input.value = picked.name; pickedEl.textContent = "→ " + picked.name; menu.classList.add("hidden");
+      }));
+    } catch (_) { /* ignore */ }
+  };
+  input.addEventListener("input", () => { picked = null; pickedEl.textContent = ""; clearTimeout(timer); timer = setTimeout(() => search(input.value.trim()), 180); });
+  input.addEventListener("focus", () => search(input.value.trim()));
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) { close(); onCancel && onCancel(); } });
+  overlay.querySelector("[data-cancel]").addEventListener("click", () => { close(); onCancel && onCancel(); });
+  overlay.querySelector("[data-skip]").addEventListener("click", async () => {
+    try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ status: "won" }) }); close(); onDone && onDone(); }
+    catch (err) { setMsg(err.message, false); }
+  });
+  overlay.querySelector("[data-save]").addEventListener("click", async () => {
+    if (!picked) return setMsg("Pick a project, or use “Won, link later”.", false);
+    try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ status: "won", project_qbo_id: picked.qbo_id }) }); close(); onDone && onDone(); }
+    catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+  });
 }
 
 // ── New Opportunity (RFQ intake) modal ──────────────────────────────────────

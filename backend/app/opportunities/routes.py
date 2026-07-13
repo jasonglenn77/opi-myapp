@@ -40,7 +40,8 @@ _SELECT = """
     SELECT o.id, o.qbo_customer_id, qc.qbo_id AS customer_qbo_id, qc.display_name AS customer_name,
            o.contact_id, ct.full_name AS contact_name,
            o.title, o.source, o.rfq_received_date, o.target_start_date,
-           o.quote_number, o.qbo_estimate_id, o.app_estimate_id, o.project_qbo_id,
+           o.quote_number, o.qbo_estimate_id, o.app_estimate_id,
+           o.project_qbo_id, pj.display_name AS project_name,
            o.estimator_user_id,
            TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS estimator_name,
            u.email AS estimator_email,
@@ -50,6 +51,7 @@ _SELECT = """
     JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
     LEFT JOIN contacts ct ON ct.id = o.contact_id
     LEFT JOIN users u ON u.id = o.estimator_user_id
+    LEFT JOIN qbo_customers pj ON pj.qbo_id = o.project_qbo_id COLLATE utf8mb4_unicode_ci
 """
 
 
@@ -62,7 +64,8 @@ def _row(r):
         "rfq_received_date": str(r["rfq_received_date"]) if r["rfq_received_date"] else None,
         "target_start_date": str(r["target_start_date"]) if r["target_start_date"] else None,
         "quote_number": r["quote_number"], "qbo_estimate_id": r["qbo_estimate_id"],
-        "app_estimate_id": r["app_estimate_id"], "project_qbo_id": r["project_qbo_id"],
+        "app_estimate_id": r["app_estimate_id"],
+        "project_qbo_id": r["project_qbo_id"], "project_name": r["project_name"],
         "estimator_user_id": r["estimator_user_id"], "estimator_name": est if r["estimator_user_id"] else None,
         "status": r["status"],
         "received_at": str(r["received_at"]) if r["received_at"] else None,
@@ -163,6 +166,33 @@ def metrics(days: int = 365, user=Depends(get_current_user)):
     }
 
 
+# NOTE: /project-options and /by-project/* MUST precede /{opp_id} (int) so they
+# aren't captured as an opp_id and 422'd.
+@router.get("/project-options")
+def project_options(q: Optional[str] = None, limit: int = 30, user=Depends(get_current_user)):
+    """Searchable QBO project list for linking a won opportunity."""
+    _require(user)
+    limit = max(1, min(int(limit or 30), 100))
+    like = f"%{(q or '').strip()}%"
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT qbo_id, display_name FROM qbo_customers
+            WHERE is_project = 1 AND (:q = '' OR display_name LIKE :like)
+            ORDER BY display_name LIMIT :limit
+        """), {"q": (q or "").strip(), "like": like, "limit": limit}).mappings().all()
+    return {"projects": [{"qbo_id": r["qbo_id"], "name": r["display_name"]} for r in rows]}
+
+
+@router.get("/by-project/{project_qbo_id}")
+def opportunity_for_project(project_qbo_id: str, user=Depends(get_current_user)):
+    """The opportunity linked to a project — powers the project's 'originating quote'."""
+    _require(user)
+    with engine.connect() as conn:
+        row = conn.execute(text(_SELECT + " WHERE o.project_qbo_id = :p ORDER BY o.id DESC LIMIT 1"),
+                           {"p": project_qbo_id}).mappings().first()
+    return {"opportunity": _row(row) if row else None}
+
+
 @router.get("/{opp_id}")
 def get_opportunity(opp_id: int, user=Depends(get_current_user)):
     _require(user)
@@ -219,6 +249,7 @@ class OpportunityPatch(BaseModel):
     estimator_user_id: Optional[int] = None
     quote_number: Optional[str] = None
     status: Optional[str] = None
+    project_qbo_id: Optional[str] = None   # link the won opportunity to its QBO project ("" to unlink)
     notes: Optional[str] = None
 
 
@@ -237,13 +268,19 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
         cur = conn.execute(text("SELECT * FROM opportunities WHERE id=:id"), {"id": opp_id}).mappings().first()
         if not cur:
             raise HTTPException(status_code=404, detail="Opportunity not found")
+        if fields.get("project_qbo_id"):
+            okp = conn.execute(text("SELECT 1 FROM qbo_customers WHERE qbo_id=:p AND is_project=1"),
+                               {"p": fields["project_qbo_id"]}).scalar()
+            if not okp:
+                raise HTTPException(status_code=400, detail="project_qbo_id is not a project")
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
-                "estimator_user_id", "quote_number", "status", "notes"}
+                "estimator_user_id", "quote_number", "status", "project_qbo_id", "notes"}
+        nullable = ("rfq_received_date", "target_start_date", "project_qbo_id")
         sets, params = [], {"id": opp_id}
         for k, v in fields.items():
             if k in cols:
                 sets.append(f"{k} = :{k}")
-                params[k] = v or None if k in ("rfq_received_date", "target_start_date") else v
+                params[k] = (v or None) if k in nullable else v
         # stamp the stage timestamp on a status transition (once)
         if "status" in fields:
             stamp = _STATUS_STAMP.get(fields["status"])
