@@ -164,22 +164,28 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
   const wire_override_n = overrideOrNull(set?.wire_guidance_labor_day_override);
   const wire_adder_n    = numOr0(set?.wire_guidance_project_time_adder);
 
-  // D22 Travel Days, D23/D24 Tab Labor Days
+  // Contract-labor days honor the manual "Tab Labor Days" override when it's set,
+  // matching the workbook — the override drives the contract-labor COST (H44/H220),
+  // not just the buffer/lodging days. (Fix: previously H44/H220 always used the
+  // production-computed line days, so any overridden estimate under-priced labor.)
+  const rack_days_eff = rack_override_n != null ? rack_override_n : rack_days;
+  const wire_days_eff = wire_override_n != null ? wire_override_n : wire_days;
+
+  // D22 Travel Days, D23/D24 Tab Labor Days (the on-site "Project Labor Days —
+  // Cost"). These are the BASE labor days only; the project-time-adder creates the
+  // separate buffer line (M20/M21) and must NOT inflate the lodging/on-site days
+  // (matches the workbook, whose "Project Labor Days - Cost" excludes the adder).
   const D22 = travel_override != null
     ? travel_override
     : travel_days_per_crew * crew_count * mobilizations;
-  const D23 = ceilHalf(
-    ((rack_override_n != null ? rack_override_n + rack_adder_n : rack_days + rack_adder_n)) * env_factor
-  );
-  const D24 = ceilHalf(
-    ((wire_override_n != null ? wire_override_n + wire_adder_n : wire_days + wire_adder_n)) * env_factor
-  );
+  const D23 = ceilHalf((rack_override_n != null ? rack_override_n : rack_days) * env_factor);
+  const D24 = ceilHalf((wire_override_n != null ? wire_override_n : wire_days) * env_factor);
 
   // Top-level section dollar totals
-  const H44  = rack_days * labor_cost_per_day;            // Rack Contract Labor $
+  const H44  = rack_days_eff * labor_cost_per_day;        // Rack Contract Labor $
   const H39  = mat_rack;                                  // Materials Rack $
   const H214 = mat_wire;                                  // Materials WG $
-  const H220 = wire_days * labor_cost_per_day;            // WG Contract Labor $
+  const H220 = wire_days_eff * labor_cost_per_day;        // WG Contract Labor $
   const H187 = rent_rack;                                 // Rentals Rack $
   const H226 = rent_wire;                                 // Rentals WG $
   const H248 = wg_add;                                    // WG Add'l Items $
@@ -333,7 +339,10 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const otherRackDumpster = sumOtherRentalsByLabel("other_rentals_rack_install", "dumpster");
   const otherRackPropane  = sumOtherRentalsByLabel("other_rentals_rack_install", "propane");
   const otherRackRest     = sumSectionExtCosts("other_rentals_rack_install") - otherRackDumpster - otherRackPropane;
-  const S11 = ceil10(H187 + otherRackRest);
+  // Equipment-Lifts = the base rack rentals + the "everything else" other-rentals.
+  // (Fix: was H187, which already folds in propane/dumpster — those are split into
+  // their own lines S12/S13, so using H187 double-counted them.)
+  const S11 = ceil10(sumSectionExtCosts("rentals_rack_install") + otherRackRest);
   const S12 = ceil10(otherRackDumpster);
   const S13 = ceil10(otherRackPropane);
   const S14 = ceil10((S11 + S12) / (1 - rent_rack_pct || 1) + S13 - (S11 + S12 + S13));
@@ -358,7 +367,8 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const S20 = ceil10(M21 * D13 / (1 - rack_profit_pct || 1));
   const otherWgPropane = sumOtherRentalsByLabel("other_rentals_wire_guidance", "propane");
   const otherWgRest    = sumSectionExtCosts("other_rentals_wire_guidance") - otherWgPropane;
-  const S21 = ceil10(H226 + otherWgRest);
+  // Floor Scrubber = base WG rentals + "everything else" (propane split to S22).
+  const S21 = ceil10(sumSectionExtCosts("rentals_wire_guidance") + otherWgRest);
   const S22 = ceil10(otherWgPropane);
   const wglb_sub = S16 + S17 + S18 + S19;
   let S23;
