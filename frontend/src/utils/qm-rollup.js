@@ -78,7 +78,6 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
   const travel_hrs        = Number(est.one_way_travel_hrs ?? 0) || 0;
   const crew_count        = Number(est.crew_count ?? 0) || 0;
   const crew_size_key     = est.crew_size || "";
-  const lodging_per_day   = Number(est.lodging_cost_per_day ?? 0) || 0;
   const mgmt_pct_pts      = Number(est.mgmt_travel_multiplier ?? 0) || 0;
   const mgmt_pct          = mgmt_pct_pts / 100;
   const rack_profit_pct   = (Number(est.rack_install_profit_target  ?? 0) || 0) / 100;
@@ -94,6 +93,15 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
     labor_cost_per_day = ((travel_hrs > 1 ? oot : local) / 5) * crew_size_num;
   }
   const labor_cost_per_travel_day = labor_cost_per_day;
+
+  // Lodging/day is DERIVED like labor: (Hotel/AB&B base ÷ 5) × crew size, and 0
+  // for local jobs (travel ≤ 1 hr). Matches the ROLL UP lodging formula
+  // =IF(D18>1, IF(days>6, Hotel, AB&B), 0)/5 × crew-size. Hotel & AB&B are both
+  // $425 today, so the >6-day switch is currently a no-op.
+  const lodging_base = lookupValueNum(lookups, "lodging", "Hotel");
+  const lodging_per_day = (travel_hrs > 1 && crew_size_num != null && lodging_base != null)
+    ? (lodging_base / 5) * crew_size_num : 0;
+
   const travel_days_per_crew = travelDaysFromHrs(lookups, travel_hrs);
 
   // Per-set type override wins; else fall back to estimate-level setting.
@@ -223,7 +231,7 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
     mat_rack, mat_wire, rent_rack, rent_wire, wg_add,
     D22, D23, D24, M20, M21,
     H39, H44, H38, H214, H220, H213, H187, H226, H248,
-    lodging, mgmt_travel, travel_day_costs: G35,
+    lodging, lodging_per_day, mgmt_travel, travel_day_costs: G35,
     travel_costs_total,
     grand_total,
   };
@@ -297,7 +305,7 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const G34  = rollup.mgmt_travel;
   const G35  = rollup.travel_day_costs;
   const D13  = rollup.labor_cost_per_day;
-  const D15  = Number(est.lodging_cost_per_day ?? 0) || 0;
+  const D15  = rollup.lodging_per_day;
   const D21  = Number(est.one_way_travel_hrs   ?? 0) || 0;
   const D22  = rollup.D22;
   const D23  = rollup.D23;

@@ -2374,6 +2374,26 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       ? '<span class="text-black/30">—</span>'
       : fmtMoney(v);
   }
+  // Lodging/Day is DERIVED like Labor: (Hotel/AB&B base ÷ 5) × crew size, and $0
+  // for local jobs (travel ≤ 1 hr). Mirrors the workbook's ROLL UP lodging formula.
+  function computeLodgingCostPerDay() {
+    const h = Number(state.one_way_travel_hrs);
+    if (Number.isNaN(h)) return "";
+    const crewKey = state.crew_size;
+    if (!crewKey) return "";
+    const crewNum = lookupValueNum("crew_size", crewKey);
+    if (crewNum == null) return "";
+    if (h <= 1) return 0;
+    const base = lookupValueNum("lodging", "Hotel");   // Hotel = AB&B = $425 today
+    if (base == null) return "";
+    return (base / 5) * crewNum;
+  }
+  function lodgingCostPerDayHtml() {
+    const v = state.lodging_cost_per_day;
+    return (v === "" || v == null)
+      ? '<span class="text-black/30">—</span>'
+      : fmtMoney(v);
+  }
 
   // Travel Days Per Crew, Per Mobilization — Excel:
   //   =IF(travel_hrs <= 38, VLOOKUP(travel_hrs, step_table, 2, TRUE) * 2,
@@ -2620,6 +2640,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   state.downtime_day_price_target = computeDowntimePrice(state.one_way_travel_hrs);
   state.labor_cost_per_day        = computeLaborCostPerDay();
   state.labor_cost_per_travel_day = state.labor_cost_per_day;
+  state.lodging_cost_per_day       = computeLodgingCostPerDay();
   state.travel_days_per_crew_per_mob = computeTravelDaysPerCrewPerMob();
 
   // ── Estimate state bridge to other pages ──────────────────────────────────
@@ -2705,7 +2726,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       ${giYesNoPct("Project Time Budget Adder?", "project_time_budget_adder", "project_time_budget_pct")}
 
       ${subHead("Operating Costs")}
-      ${giNumber("Lodging Cost / Day", "lodging_cost_per_day", { step: "1", suffix: "$/day", placeholder: "Enter $" })}
+      ${giCalc("Lodging Cost / Day", "lodging_cost_per_day")}
       ${giNumber("Mgmt Travel Multiplier", "mgmt_travel_multiplier", { step: "0.00001", suffix: "%", placeholder: "Enter %" })}
 
       ${subHead("Profit Targets")}
@@ -2793,6 +2814,8 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       state.labor_cost_per_travel_day = state.labor_cost_per_day;
       setCalcCell("labor_cost_per_day", laborCostPerDayHtml());
       setCalcCell("labor_cost_per_travel_day", laborCostPerDayHtml());
+      state.lodging_cost_per_day = computeLodgingCostPerDay();
+      setCalcCell("lodging_cost_per_day", lodgingCostPerDayHtml());
     }
 
     // Bridge any state change relevant to the Quoting Metrics page.
