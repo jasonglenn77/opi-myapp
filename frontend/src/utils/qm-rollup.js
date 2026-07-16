@@ -313,6 +313,13 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const mobs = rollup.mobilizations;
   const M20  = rollup.M20;
   const M21  = rollup.M21;
+  // The workbook books the ENTIRE project buffer (rack + wire) into the
+  // Installation bundle's Buffer line and credits the wire portion back out of
+  // the Wire-Guidance bundle (a negative "Buffer" line). So Installation uses
+  // the combined buffer; WG carries the wire buffer in its Contract Labor line
+  // (so OH&P marks it up) and then subtracts it as a credit. For rack-only
+  // estimates M21 = 0, so this is a no-op and those totals are unchanged.
+  const M_total = M20 + M21;
 
   // Estimate-level inputs
   const breakOutMob      = est.breaking_out_mobilization;
@@ -326,18 +333,18 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   // ── Installation Labor Bundle (S3–S9) ───────────────────────────────────
   let S4_raw = 0;
   if (H44 > 0) {
-    S4_raw = isYes(breakOutMob) ? (H44 - M20 * D13) : (H44 - M20 * D13 + G35);
+    S4_raw = isYes(breakOutMob) ? (H44 - M_total * D13) : (H44 - M_total * D13 + G35);
   }
   const S4 = ceil10(S4_raw);
   const S5 = ceil10(H39);
   const S6 = ceil10(S4 === 0 ? 0 : G34);
-  const S7 = ceil10(M20 * D13 / (1 - rack_profit_pct || 1));
+  const S7 = ceil10(M_total * D13 / (1 - rack_profit_pct || 1));
   const S8 = ceil10(
     S4 !== 0 && D21 > 1
       ? (isNo(breakOutMob) ? (D22 + D23) * D15 : D23 * D15)
       : 0
   );
-  const U4 = ceil10(D23 * D13 - M20 * D13);
+  const U4 = ceil10(D23 * D13 - M_total * D13);
   const T4 = ceil10(U4 === 0 ? 0 : G35);
   const U8 = ceil10(D23 * D15);
   const T8 = ceil10(U8 === 0 ? 0 : ((D22 + D23) * D15 - U8));
@@ -368,11 +375,15 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const rentals_total = S11 + S12 + S13 + S14;
 
   // ── Wire Guidance Labor Bundle (S15–S23) ────────────────────────────────
+  // WG Contract Labor CARRIES the wire buffer (+ M21*D13) so it lands in the
+  // OH&P base (S23) at the wire-guidance margin; the buffer is then credited
+  // back on the negative S20 line (the workbook books the buffer $ in the
+  // Installation bundle instead — see M_total above).
   let S16_raw;
   if (isNo(breakOutMob)) {
-    S16_raw = G35 + H220 - M21 * D13 - (S4 > 0 ? G35 : 0);
+    S16_raw = G35 + H220 + M21 * D13 - (S4 > 0 ? G35 : 0);
   } else {
-    S16_raw = H220 - M21 * D13;
+    S16_raw = H220 + M21 * D13;
   }
   const S16 = ceil10(S16_raw);
   const S17 = ceil10(H214);
@@ -383,7 +394,9 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const T19 = T16 > 0 ? ((D22 + D23) * D15 - U8) : 0;
   const U19 = ceil10(D24 * D15);
   const S19 = ceil10(T19 + U19);
-  const S20 = ceil10(M21 * D13 / (1 - rack_profit_pct || 1));
+  // Negative credit: the wire buffer $ is booked in the Installation bundle
+  // (M_total), so remove it here to avoid double-counting.
+  const S20 = ceil10(-M21 * D13 / (1 - rack_profit_pct || 1));
   const otherWgPropane = sumOtherRentalsByLabel("other_rentals_wire_guidance", "propane");
   const otherWgRest    = sumSectionExtCosts("other_rentals_wire_guidance") - otherWgPropane;
   // Floor Scrubber = base WG rentals + "everything else" (propane split to S22).
