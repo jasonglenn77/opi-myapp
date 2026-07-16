@@ -157,22 +157,27 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
 
   // Buffer days. The estimate-level "Project Time Budget Adder? (Yes/No + %)"
   // sets the buffer as a PERCENT of the labor days (matches the workbook). A
-  // per-set day adder, if explicitly entered, overrides that %. (Fix: the % field
-  // existed on the form but was never wired into the calc, so a workbook-style
-  // "Yes, 10%" produced no buffer.)
-  const rack_override = set?.rack_install_labor_day_override;
-  const wire_override = set?.wire_guidance_labor_day_override;
+  // per-set day adder, if explicitly entered, overrides that %.
+  //
+  // The buffer BASE is the PRODUCTION days (rack_days/wire_days, the per-metrics
+  // line-item total) — NOT the labor-day override. The workbook's BASE sheet
+  // Buffer Day Counter is:
+  //   counter = ceilHalf((base+adder)*env) - ceilHalf(base*env)
+  //   base = production days (G185/G224);  adder = base * budget%
+  // The labor-day override only drives the contract-labor COST (H44/H220), never
+  // the buffer. (Verified against 7 workbooks: 7028/7104/7119/7124/7192 + the
+  // breakout=Yes 7029/7115. The workbook's rare manual cells — the "simple-quote
+  // override" K20 and the rack↔wire redistribution A34 — are intentionally NOT
+  // modeled; they're one-offs like 7003's manual OH&P override.)
   const hasNum = (v) => v != null && v !== "" && !Number.isNaN(Number(v));
   const budget_pct = isYes(est.project_time_budget_adder)
     ? (Number(est.project_time_budget_pct ?? 0) || 0) / 100 : 0;
-  const rack_base_days = hasNum(rack_override) ? Number(rack_override) : rack_days;
-  const wire_base_days = hasNum(wire_override) ? Number(wire_override) : wire_days;
   const rack_adder = hasNum(set?.rack_install_project_time_adder)
-    ? Number(set.rack_install_project_time_adder) : rack_base_days * budget_pct;
+    ? Number(set.rack_install_project_time_adder) : rack_days * budget_pct;
   const wire_adder = hasNum(set?.wire_guidance_project_time_adder)
-    ? Number(set.wire_guidance_project_time_adder) : wire_base_days * budget_pct;
-  const M20 = computeBufferDays(rack_override, rack_adder, rack_days, env_factor);
-  const M21 = computeBufferDays(wire_override, wire_adder, wire_days, env_factor);
+    ? Number(set.wire_guidance_project_time_adder) : wire_days * budget_pct;
+  const M20 = computeBufferDays(null, rack_adder, rack_days, env_factor);
+  const M21 = computeBufferDays(null, wire_adder, wire_days, env_factor);
 
   const overrideOrNull = (v) => (v != null && v !== "" && Number(v) > 0) ? Number(v) : null;
   const numOr0         = (v) => Number(v ?? 0) || 0;
