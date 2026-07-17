@@ -37,22 +37,31 @@ def _resolve_customer(conn, customer_qbo_id):
 
 
 _SELECT = """
-    SELECT o.id, o.qbo_customer_id, qc.qbo_id AS customer_qbo_id, qc.display_name AS customer_name,
-           o.contact_id, ct.full_name AS contact_name,
+    SELECT o.id, o.qbo_customer_id, qc.qbo_id AS customer_qbo_id,
+           COALESCE(qc.display_name, o.customer_name_raw) AS customer_name,
+           o.contact_id, COALESCE(ct.full_name, o.contact_name_raw) AS contact_name,
            o.title, o.source, o.rfq_received_date, o.target_start_date,
            o.quote_number, o.qbo_estimate_id, o.app_estimate_id,
            o.project_qbo_id, pj.display_name AS project_name,
            o.estimator_user_id,
            TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS estimator_name,
            u.email AS estimator_email,
-           o.status, o.received_at, o.quoting_started_at, o.sent_at, o.decided_at,
+           o.status, o.pipeline_status, o.quoted_by,
+           o.city, o.state, o.labor_days, o.travel_days, o.total_revisions,
+           o.contract_value, o.order_value, o.ohp_amount, o.ohp_pct,
+           o.order_date, o.quote_sent_date, o.expected_decision_date,
+           o.received_at, o.quoting_started_at, o.sent_at, o.decided_at,
            o.notes, o.created_at, o.updated_at
     FROM opportunities o
-    JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
+    LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
     LEFT JOIN contacts ct ON ct.id = o.contact_id
     LEFT JOIN users u ON u.id = o.estimator_user_id
     LEFT JOIN qbo_customers pj ON pj.qbo_id = o.project_qbo_id COLLATE utf8mb4_unicode_ci
 """
+
+
+def _num(v):
+    return float(v) if v is not None else None
 
 
 def _row(r):
@@ -67,7 +76,15 @@ def _row(r):
         "app_estimate_id": r["app_estimate_id"],
         "project_qbo_id": r["project_qbo_id"], "project_name": r["project_name"],
         "estimator_user_id": r["estimator_user_id"], "estimator_name": est if r["estimator_user_id"] else None,
-        "status": r["status"],
+        "status": r["status"], "pipeline_status": r["pipeline_status"], "quoted_by": r["quoted_by"],
+        "city": r["city"], "state": r["state"],
+        "labor_days": _num(r["labor_days"]), "travel_days": _num(r["travel_days"]),
+        "total_revisions": r["total_revisions"],
+        "contract_value": _num(r["contract_value"]), "order_value": _num(r["order_value"]),
+        "ohp_amount": _num(r["ohp_amount"]), "ohp_pct": _num(r["ohp_pct"]),
+        "order_date": str(r["order_date"]) if r["order_date"] else None,
+        "quote_sent_date": str(r["quote_sent_date"]) if r["quote_sent_date"] else None,
+        "expected_decision_date": str(r["expected_decision_date"]) if r["expected_decision_date"] else None,
         "received_at": str(r["received_at"]) if r["received_at"] else None,
         "quoting_started_at": str(r["quoting_started_at"]) if r["quoting_started_at"] else None,
         "sent_at": str(r["sent_at"]) if r["sent_at"] else None,
@@ -79,6 +96,7 @@ def _row(r):
 
 @router.get("")
 def list_opportunities(status: Optional[str] = None, customer_qbo_id: Optional[str] = None,
+                       q: Optional[str] = None, limit: int = 200, offset: int = 0,
                        user=Depends(get_current_user)):
     _require(user)
     where, params = [], {}
@@ -91,13 +109,35 @@ def list_opportunities(status: Optional[str] = None, customer_qbo_id: Optional[s
     if customer_qbo_id:
         where.append("qc.qbo_id = :cq")
         params["cq"] = str(customer_qbo_id)
-    sql = _SELECT + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY o.created_at DESC, o.id DESC"
-    stmt = text(sql)
+    if q:
+        # display_name (utf8mb4_unicode_ci) and customer_name_raw (utf8mb4_0900_ai_ci)
+        # have different collations, so COALESCE(...) LIKE errors without an explicit
+        # COLLATE. Pin both to unicode_ci for the comparison.
+        where.append(
+            "(COALESCE(qc.display_name COLLATE utf8mb4_unicode_ci, "
+            "o.customer_name_raw COLLATE utf8mb4_unicode_ci) LIKE :q "
+            "OR o.title COLLATE utf8mb4_unicode_ci LIKE :q "
+            "OR o.quote_number COLLATE utf8mb4_unicode_ci LIKE :q)")
+        params["q"] = f"%{q}%"
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    # Seeded rows share a created_at, so order by the RFQ/received date (then quote#).
+    order = (" ORDER BY COALESCE(o.rfq_received_date, DATE(o.created_at)) DESC, "
+             "o.id DESC LIMIT :limit OFFSET :offset")
+    params["limit"], params["offset"] = limit, offset
+    count_stmt = text("SELECT COUNT(*) FROM opportunities o "
+                      "LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id" + where_sql)
+    stmt = text(_SELECT + where_sql + order)
     if "open" in params:
         stmt = stmt.bindparams(bindparam("open", expanding=True))  # IN (...) list
+        count_stmt = count_stmt.bindparams(bindparam("open", expanding=True))
     with engine.connect() as conn:
+        total = conn.execute(count_stmt, {k: v for k, v in params.items()
+                                          if k not in ("limit", "offset")}).scalar()
         rows = conn.execute(stmt, params).mappings().all()
-    return {"opportunities": [_row(r) for r in rows]}
+    return {"opportunities": [_row(r) for r in rows], "total": total,
+            "limit": limit, "offset": offset}
 
 
 @router.get("/metrics")

@@ -21,6 +21,27 @@ const dash = (s) => (s == null || s === "" ? "—" : s);
 const humanRole = (r) => (r || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const days = (n) => (n == null ? "—" : `${n}d`);
 const pct = (n) => (n == null ? "—" : `${Math.round(n * 100)}%`);
+const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString());
+
+// Colour the granular pipeline stage by its leading win-probability. Falls back
+// to the lifecycle status label when no stage was captured (app-native RFQs).
+function stageChip(o) {
+  const ps = o.pipeline_status;
+  if (!ps) {
+    const m = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
+    return `<span class="text-[10px] font-semibold rounded px-1.5 py-0.5 ${m.cls}">${m.label}</span>`;
+  }
+  const m = /^(\d+)%/.exec(ps);
+  const p = m ? Number(m[1]) : null;
+  const cls = p == null ? "bg-slate-100 text-slate-700"
+    : p >= 100 ? "bg-emerald-100 text-emerald-800"
+    : p >= 60 ? "bg-blue-100 text-blue-800"
+    : p >= 40 ? "bg-indigo-100 text-indigo-800"
+    : p >= 20 ? "bg-amber-100 text-amber-800"
+    : "bg-black/10 text-black/50";
+  const short = ps.replace(/\s*>.*$/, "").replace(/,.*$/, "");
+  return `<span class="text-[10px] font-semibold rounded px-1.5 py-0.5 ${cls}" title="${escapeHtml(ps)}">${escapeHtml(short)}</span>`;
+}
 
 export async function pipelinePage(routeFn) {
   let estimators = [];
@@ -41,13 +62,16 @@ export async function pipelinePage(routeFn) {
     </div>`;
   setShell({ title: "", subtitle: "", bodyHtml: body, showLogout: true, routeFn });
 
-  let statusFilter = "";
+  let statusFilter = "open";   // 2,900+ historical rows — default to the working pipeline
+  let searchQ = "";
+  let offset = 0;
+  const PAGE = 200;
   const metricsEl = document.getElementById("pMetrics");
   const listEl = document.getElementById("pList");
   const filtersEl = document.getElementById("pFilters");
 
   const chip = (label, val, sub = "") =>
-    `<div class="rounded-xl border border-black/10 bg-black/[0.015] px-3 py-2">
+    `<div class="rounded-xl border border-black/5 bg-white shadow-sm px-3 py-2">
        <div class="text-[10px] font-bold uppercase tracking-wide text-black/35">${label}</div>
        <div class="text-lg font-extrabold text-ink-900">${val}</div>${sub ? `<div class="text-[10px] text-black/40">${sub}</div>` : ""}</div>`;
 
@@ -65,12 +89,20 @@ export async function pipelinePage(routeFn) {
   };
 
   const renderFilters = () => {
-    const opts = [["", "All"], ["open", "Open"], ...Object.entries(STATUS_META).map(([k, v]) => [k, v.label])];
-    filtersEl.innerHTML = opts.map(([k, label]) =>
-      `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("");
+    const opts = [["open", "Open"], ...Object.entries(STATUS_META).map(([k, v]) => [k, v.label]), ["", "All"]];
+    filtersEl.innerHTML =
+      opts.map(([k, label]) =>
+        `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("") +
+      `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search customer / job / quote #…"
+              class="input text-xs py-1 px-2 ml-auto w-64">`;
     filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
-      statusFilter = b.getAttribute("data-sf"); renderFilters(); loadList();
+      statusFilter = b.getAttribute("data-sf"); offset = 0; renderFilters(); loadList();
     }));
+    const sb = filtersEl.querySelector("[data-search]");
+    let t = null;
+    sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); offset = 0; loadList(); }, 250); });
+    // keep focus after re-render
+    if (document.activeElement === sb) sb.focus();
   };
 
   const statusCell = (o) => {
@@ -82,29 +114,47 @@ export async function pipelinePage(routeFn) {
 
   const loadList = async () => {
     let d;
-    try { d = await api(`/opportunities${statusFilter ? `?status=${statusFilter}` : ""}`); }
+    const qs = new URLSearchParams();
+    if (statusFilter) qs.set("status", statusFilter);
+    if (searchQ) qs.set("q", searchQ);
+    qs.set("limit", PAGE); qs.set("offset", offset);
+    try { d = await api(`/opportunities?${qs.toString()}`); }
     catch (e) { listEl.innerHTML = `<div class="text-red-700">Failed to load pipeline.</div>`; return; }
     const rows = d.opportunities || [];
-    if (!rows.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No opportunities${statusFilter ? " in this stage" : " yet"}. Click “New opportunity” to log an RFQ.</div>`; return; }
+    const total = d.total ?? rows.length;
+    if (!rows.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No opportunities${searchQ ? " match your search" : statusFilter ? " in this stage" : " yet"}. Click “New opportunity” to log an RFQ.</div>`; return; }
+    const from = offset + 1, to = offset + rows.length;
+    const pager = total > PAGE ? `
+      <div class="flex items-center justify-between mt-3 text-xs text-black/50">
+        <span>Showing <b>${from}–${to}</b> of <b>${total.toLocaleString()}</b></span>
+        <div class="flex gap-2">
+          <button data-pg="prev" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${offset <= 0 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">← Prev</button>
+          <button data-pg="next" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${to >= total ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">Next →</button>
+        </div></div>` : `<div class="mt-2 text-xs text-black/40">${total.toLocaleString()} total</div>`;
     listEl.innerHTML = `
       <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead><tr class="text-left text-black/45 border-b border-black/10">
-          <th class="py-2 pr-3 font-bold">Customer</th><th class="py-2 pr-3 font-bold">Contact</th>
+          <th class="py-2 pr-3 font-bold">Quote #</th><th class="py-2 pr-3 font-bold">Customer</th>
           <th class="py-2 pr-3 font-bold">Job</th><th class="py-2 pr-3 font-bold">Stage</th>
-          <th class="py-2 pr-3 font-bold">RFQ</th><th class="py-2 pr-3 font-bold">Target start</th>
-          <th class="py-2 pr-3 font-bold">Estimator</th><th class="py-2 font-bold text-right"></th></tr></thead>
+          <th class="py-2 pr-3 font-bold text-right">Value</th>
+          <th class="py-2 pr-3 font-bold">RFQ</th><th class="py-2 pr-3 font-bold">By</th>
+          <th class="py-2 font-bold text-right"></th></tr></thead>
         <tbody>${rows.map(o => `
           <tr class="border-b border-black/5 hover:bg-black/[0.015]">
-            <td class="py-1.5 pr-3 font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</td>
-            <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.contact_name))}</td>
+            <td class="py-1.5 pr-3 font-semibold text-ink-900 tabular-nums">${escapeHtml(dash(o.quote_number))}</td>
+            <td class="py-1.5 pr-3 font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}${o.contact_name ? `<div class="text-[10px] text-black/40 font-normal">${escapeHtml(o.contact_name)}</div>` : ""}</td>
             <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}</td>
-            <td class="py-1.5 pr-3">${statusCell(o)}</td>
+            <td class="py-1.5 pr-3">${stageChip(o)}<div class="mt-0.5">${statusCell(o)}</div></td>
+            <td class="py-1.5 pr-3 text-right tabular-nums text-black/70">${money(o.contract_value)}</td>
             <td class="py-1.5 pr-3 text-black/60 tabular-nums">${ymd(o.rfq_received_date)}</td>
-            <td class="py-1.5 pr-3 text-black/60 tabular-nums">${ymd(o.target_start_date)}</td>
-            <td class="py-1.5 pr-3 text-black/60">${escapeHtml(dash(o.estimator_name))}</td>
+            <td class="py-1.5 pr-3 text-black/60">${escapeHtml(dash(o.quoted_by || o.estimator_name))}</td>
             <td class="py-1.5 text-right"><button data-del="${o.id}" title="Delete" class="text-xs text-red-600 font-semibold hover:underline">Delete</button></td>
           </tr>`).join("")}
-        </tbody></table></div>`;
+        </tbody></table></div>${pager}`;
+    listEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
+      offset = b.getAttribute("data-pg") === "next" ? offset + PAGE : Math.max(0, offset - PAGE);
+      loadList(); listEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
     listEl.querySelectorAll("[data-status]").forEach(sel => sel.addEventListener("change", async () => {
       const id = sel.getAttribute("data-status");
       if (sel.value === "won") {
