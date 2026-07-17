@@ -23,7 +23,7 @@ import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
 //   #/estimate/{id}/review              -> Review / Rollup tab
 //   #/base-quoting-metrics              -> legacy URL; redirected to the picker
 export async function estimatePage(routeFn) {
-  const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|project-rentals|option\/(\d+)))?\/?$/);
+  const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|send-qbo|project-rentals|option\/(\d+)))?\/?$/);
   if (!m) return renderEstimateList(routeFn);
   const estimateId = Number(m[1]);
   const tabPath    = m[2] || "general";
@@ -424,6 +424,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
           </button>` : ""}
         <div class="flex-1"></div>
         ${tabBtn(`${baseUrl}/review`, "Review", tab === "review")}
+        ${tabBtn(`${baseUrl}/send-qbo`, "Send to QBO", tab === "send-qbo")}
       </div>
     </div>`;
 
@@ -559,6 +560,158 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   if (tab === "review") {
     return renderReviewTab(tabBody, estimateId, metricSets, estimate);
   }
+  if (tab === "send-qbo") {
+    return renderSendToQboTab(tabBody, estimateId, metricSets, estimate);
+  }
+}
+
+// ── Send to QBO tab ──────────────────────────────────────────────────────────
+// Lays out the QuickBooks-shaped bundle lines (from computeSetBundles — validated
+// against OPI's workbooks) per enabled set, each line copy-to-clipboard, plus the
+// QBO header fields. Each line has a manual-override input (persisted per estimate
+// in localStorage) so an estimator can nudge a final number — the rare hand-typed
+// one-off — without leaving the app; the override drives the copy value + totals.
+async function renderSendToQboTab(container, estimateId, initialMetricSets, estimateRow) {
+  container.innerHTML = `<div class="card px-5 py-4 text-sm text-black/50">Loading…</div>`;
+  let lookups, allLines;
+  try {
+    [lookups, allLines] = await Promise.all([
+      api("/quoting/lookup-values"),
+      api(`/quoting/metric-lines?estimate_id=${estimateId}`),
+    ]);
+  } catch (err) {
+    container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">Failed to load: ${escapeHtml(err?.message || String(err))}</div>`;
+    return;
+  }
+  let estimateState = {};
+  try { const raw = localStorage.getItem("opi_estimate_state_v1"); if (raw) estimateState = JSON.parse(raw) || {}; } catch {}
+
+  const metricSets = [...(initialMetricSets || [])];
+  const linesBySet = new Map();
+  for (const l of allLines) { const s = l.metric_set_id; if (!linesBySet.has(s)) linesBySet.set(s, []); linesBySet.get(s).push(l); }
+  const ordered = [
+    ...metricSets.filter(s => s.kind === "base"),
+    ...metricSets.filter(s => s.kind === "option").sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
+    ...metricSets.filter(s => s.kind === "project_rentals"),
+  ].filter(s => Number(s.is_enabled) === 1);
+  const kindLabel = (k) => k === "base" ? "Base" : k === "option" ? "Option" : k === "project_rentals" ? "Project Rentals" : (k || "—");
+  const BUNDLE_ORDER = ["installation", "rentals", "wg_labor", "wg_additional", "mobilization", "remobilization", "downtime"];
+  const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
+
+  // Per-estimate manual overrides: { "setId|bundleKey|lineIdx": number }
+  const OVR_KEY = `opi_qbo_overrides_${estimateId}`;
+  let overrides = {}; try { overrides = JSON.parse(localStorage.getItem(OVR_KEY) || "{}") || {}; } catch {}
+  const saveOvr = () => localStorage.setItem(OVR_KEY, JSON.stringify(overrides));
+  const eff = (key, computed) => (key in overrides ? Number(overrides[key]) : Number(computed) || 0);
+
+  let flash = null;
+  const copy = (text, tag) => {
+    navigator.clipboard?.writeText(String(text)).then(() => { flash = tag; render(); setTimeout(() => { flash = null; render(); }, 900); });
+  };
+
+  function hdrField(label, value) {
+    const v = value == null || value === "" ? "" : String(value);
+    return `<div class="flex items-center gap-2 py-1">
+      <div class="text-[10px] font-bold uppercase tracking-wide text-black/40 w-28 shrink-0">${label}</div>
+      <div class="text-sm text-ink-900 font-semibold flex-1 truncate">${escapeHtml(v || "—")}</div>
+      ${v ? `<button data-copy="${escapeHtml(v)}" data-tag="h:${label}" class="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-black/10 hover:bg-black/5">${flash === "h:" + label ? "✓" : "copy"}</button>` : ""}
+    </div>`;
+  }
+
+  function render() {
+    const e = estimateRow || {};
+    const contact = [e.contact_first, e.contact_last].filter(Boolean).join(" ");
+    const header = `
+      <div class="card px-4 py-3">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-sm font-extrabold text-ink-900">QuickBooks header</div>
+          <div class="text-[11px] text-black/40">Type these into the QBO estimate, then copy each bundle line below.</div>
+        </div>
+        <div class="grid sm:grid-cols-2 gap-x-6">
+          ${hdrField("Quote #", e.quote_number)}
+          ${hdrField("Customer", e.customer_display_name)}
+          ${hdrField("Description", e.quote_description)}
+          ${hdrField("Contact", contact)}
+          ${hdrField("End user", e.end_user)}
+          ${hdrField("Quoted by", e.quoted_by)}
+        </div>
+      </div>`;
+
+    const setCards = ordered.map(set => {
+      const lines = linesBySet.get(set.id) || [];
+      const bundles = computeSetBundles({ set, lines, lookups, estimateState });
+      const label = `${kindLabel(set.kind)}${set.label && set.kind !== "base" ? " · " + set.label : ""}`;
+      let setTotal = 0;
+      const bundleBlocks = BUNDLE_ORDER.map(bk => {
+        const b = bundles[bk];
+        if (!b) return "";
+        const rows = b.lines.map(([lbl, val], idx) => {
+          const key = `${set.id}|${bk}|${idx}`;
+          const v = eff(key, val);
+          const overridden = key in overrides;
+          return { lbl, key, v, overridden };
+        });
+        const btotal = rows.reduce((s, r) => s + r.v, 0);
+        if (btotal === 0 && rows.every(r => r.v === 0)) return "";
+        setTotal += btotal;
+        const copyBlock = rows.map(r => `${r.lbl}\t${Math.round(r.v)}`).join("\n");
+        return `
+          <div class="border border-black/10 rounded-xl overflow-hidden">
+            <div class="flex items-center justify-between bg-black/[0.03] px-3 py-1.5">
+              <div class="text-xs font-bold text-ink-900">${escapeHtml(b.title)}</div>
+              <div class="flex items-center gap-2">
+                <div class="text-xs font-extrabold tabular-nums text-ink-900">${money(btotal)}</div>
+                <button data-copyblock="${escapeHtml(copyBlock)}" data-tag="b:${set.id}:${bk}" class="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-black/10 hover:bg-black/5 bg-white">${flash === "b:" + set.id + ":" + bk ? "✓ copied" : "copy all"}</button>
+              </div>
+            </div>
+            <table class="w-full text-xs">
+              <tbody>${rows.map(r => `
+                <tr class="border-t border-black/5">
+                  <td class="px-3 py-1 text-black/70">${escapeHtml(r.lbl)}</td>
+                  <td class="px-2 py-1 w-28">
+                    <input data-ovr="${r.key}" value="${Math.round(r.v)}" inputmode="numeric"
+                      class="w-24 text-right tabular-nums text-xs rounded border px-1.5 py-0.5 ${r.overridden ? "border-amber-400 bg-amber-50 text-amber-800 font-semibold" : "border-black/10"}">
+                  </td>
+                  <td class="px-2 py-1 w-8 text-right">
+                    ${r.overridden ? `<button data-reset="${r.key}" title="Reset to computed" class="text-[10px] text-amber-600 hover:underline">↺</button>` : ""}
+                  </td>
+                  <td class="px-2 py-1 w-10 text-right">
+                    <button data-copy="${Math.round(r.v)}" data-tag="l:${r.key}" class="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-black/10 hover:bg-black/5">${flash === "l:" + r.key ? "✓" : "copy"}</button>
+                  </td>
+                </tr>`).join("")}
+              </tbody>
+            </table>
+          </div>`;
+      }).filter(Boolean).join("");
+      return `
+        <div class="card px-4 py-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-sm font-extrabold text-ink-900">${escapeHtml(label)}</div>
+            <div class="text-xs text-black/50">Set total <span class="font-extrabold text-ink-900">${money(setTotal)}</span></div>
+          </div>
+          <div class="grid gap-2">${bundleBlocks || `<div class="text-xs text-black/40 py-2">No priced bundles in this set.</div>`}</div>
+        </div>`;
+    }).join("");
+
+    container.innerHTML = `<div class="grid gap-3">
+      <div class="text-[11px] text-black/50 px-1">Amounts come from the validated bundle calc. Edit any cell to override the exact number you'll type into QBO (saved on this device); ↺ resets it.</div>
+      ${header}${setCards || `<div class="card px-5 py-4 text-sm text-black/50">No enabled metric sets.</div>`}
+    </div>`;
+
+    container.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => copy(b.getAttribute("data-copy"), b.getAttribute("data-tag"))));
+    container.querySelectorAll("[data-copyblock]").forEach(b => b.addEventListener("click", () => copy(b.getAttribute("data-copyblock"), b.getAttribute("data-tag"))));
+    container.querySelectorAll("[data-reset]").forEach(b => b.addEventListener("click", () => { delete overrides[b.getAttribute("data-reset")]; saveOvr(); render(); }));
+    container.querySelectorAll("[data-ovr]").forEach(inp => {
+      inp.addEventListener("change", () => {
+        const key = inp.getAttribute("data-ovr");
+        const n = Number(String(inp.value).replace(/[^0-9.\-]/g, ""));
+        if (!Number.isFinite(n)) { render(); return; }
+        overrides[key] = n; saveOvr(); render();
+      });
+    });
+  }
+
+  render();
 }
 
 function renderBaseTab(container, estimateId) {
