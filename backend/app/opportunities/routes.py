@@ -387,7 +387,7 @@ def delete_opportunity(opp_id: int, user=Depends(get_current_user)):
 # ── Opportunity → Quoting-metrics estimate (the pipeline↔quote spine) ─────────
 def _opp_for_quote(conn, opp_id):
     o = conn.execute(text(
-        "SELECT o.id, o.qbo_customer_id, qc.qbo_id AS customer_qbo_id, o.contact_id, "
+        "SELECT o.id, o.qbo_customer_id, qc.qbo_id AS customer_qbo_id, o.contact_id, o.contact_name_raw, "
         "o.title, o.quoted_by, o.city, o.state, o.rfq_received_date, o.target_start_date, "
         "o.quote_number, o.app_estimate_id, o.status "
         "FROM opportunities o LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id "
@@ -411,12 +411,26 @@ def start_quote(opp_id: int, user=Depends(get_current_user)):
             {"cid": o["qbo_customer_id"]}).mappings().first()
         if not cust:
             raise HTTPException(status_code=400, detail="Opportunity customer is not an eligible estimating customer.")
+        # Prefill the contact's name too (the General Info form shows first/last),
+        # falling back to the opportunity's free-text contact name.
+        c_first = c_last = None
+        if o["contact_id"]:
+            ct = conn.execute(text("SELECT first_name, last_name FROM contacts WHERE id=:id"),
+                              {"id": o["contact_id"]}).mappings().first()
+            if ct:
+                c_first, c_last = ct["first_name"], ct["last_name"]
+        if not c_first and not c_last and o.get("contact_name_raw"):
+            parts = str(o["contact_name_raw"]).split()
+            c_first = parts[0] if parts else None
+            c_last = " ".join(parts[1:]) if len(parts) > 1 else None
         res = conn.execute(text("""
             INSERT INTO estimates
-              (qbo_customer_id, qbo_customer_qbo_id, contact_id, quote_description, quoted_by,
+              (qbo_customer_id, qbo_customer_qbo_id, contact_id, contact_first, contact_last,
+               quote_description, quoted_by,
                project_city, project_state, date_of_request, start_date, quote_number, status)
-            VALUES (:cid,:qid,:contact,:desc,:by,:city,:state,:req,:start,:qnum,'draft')
+            VALUES (:cid,:qid,:contact,:cfirst,:clast,:desc,:by,:city,:state,:req,:start,:qnum,'draft')
         """), {"cid": cust["id"], "qid": cust["qbo_id"], "contact": o["contact_id"],
+               "cfirst": c_first, "clast": c_last,
                "desc": o["title"], "by": o["quoted_by"],
                "city": o["city"], "state": (o["state"] or None) if not o["state"] or len(o["state"]) <= 2 else None,
                "req": o["rfq_received_date"], "start": o["target_start_date"],
