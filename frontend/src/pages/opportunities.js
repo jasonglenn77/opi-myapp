@@ -16,6 +16,18 @@ const STATUS_META = {
   lost:      { label: "Lost",      cls: "bg-rose-100 text-rose-700" },
   declined:  { label: "Declined",  cls: "bg-black/10 text-black/50" },
 };
+// OPI win-probability status colors — mirror the Estimates (tracking) page.
+const OPI_STATUS_COLORS = {
+  "": "bg-sky-100 text-sky-800",
+  "0% Lost": "bg-red-100 text-red-700",
+  "0% Inactive": "bg-orange-100 text-orange-700",
+  "20% Verbal - Budgetary, Project Uncertain": "bg-yellow-100 text-yellow-800",
+  "40% Competitive, Multiple Bidders": "bg-sky-100 text-sky-800",
+  "60% Project Confirmed, Customer Well-Positioned": "bg-blue-700 text-white",
+  "80% Verbal Approval, Very likely to Receive Order": "bg-purple-100 text-purple-800",
+  "80% Red Flag > Goes to Ops Tab": "bg-red-700 text-white",
+  "100% Won > Goes to Ops Tab": "bg-green-700 text-white",
+};
 const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
 const dash = (s) => (s == null || s === "" ? "—" : s);
 const humanRole = (r) => (r || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -113,21 +125,18 @@ export async function pipelinePage(routeFn) {
     return `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
   };
 
-  // Stage cell: the editable win-probability status (OPI's 20/80% system) drives
-  // the row; the lifecycle stage (received/quoting/sent/won/lost) is derived and
-  // shown as a small badge below.
-  const stageCell = (o) => {
-    const p = /^(\d+)%/.exec(o.pipeline_status || "");
-    const pn = p ? Number(p[1]) : null;
-    const selCls = pn == null ? "bg-slate-100 text-slate-700"
-      : pn >= 100 ? "bg-emerald-100 text-emerald-800" : pn >= 60 ? "bg-blue-100 text-blue-800"
-      : pn >= 40 ? "bg-indigo-100 text-indigo-800" : pn >= 20 ? "bg-amber-100 text-amber-800"
-      : "bg-black/10 text-black/50";
+  // Lifecycle stage (received/quoting/sent/won/lost) — derived from the OPI status.
+  const stageBadge = (o) => {
+    const m = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
+    return `<span class="text-[10px] font-bold uppercase tracking-wide rounded px-1.5 py-0.5 ${m.cls}" title="Lifecycle stage (derived from the OPI status)">${m.label}</span>`;
+  };
+  // OPI win-probability status (the 20/80% system) — editable, mirrors the
+  // Estimates page's status column (same values + colors).
+  const opiStatusCell = (o) => {
+    const selCls = OPI_STATUS_COLORS[o.pipeline_status || ""] || "bg-sky-100 text-sky-800";
     const opts = `<option value=""></option>` + pipelineStatuses.map(s =>
       `<option value="${escapeHtml(s)}" ${s === o.pipeline_status ? "selected" : ""}>${escapeHtml(s.replace(/\s*>.*$/, ""))}</option>`).join("");
-    const m = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
-    return `<select data-pstatus="${o.id}" title="Win-probability status" class="text-[10px] font-semibold rounded px-1 py-0.5 border-0 max-w-[8.5rem] ${selCls} cursor-pointer">${opts}</select>
-      <div class="mt-0.5"><span class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 ${m.cls}" title="Lifecycle stage (derived)">${m.label}</span></div>`;
+    return `<select data-pstatus="${o.id}" title="OPI status" class="text-[10px] font-semibold rounded px-1 py-0.5 border-0 max-w-[9rem] ${selCls} cursor-pointer">${opts}</select>`;
   };
 
   const num = (v) => (v == null || v === "" ? "—" : Number(v).toLocaleString());
@@ -157,29 +166,32 @@ export async function pipelinePage(routeFn) {
       </button>`;
     return `<button data-log="${o.id}" class="text-[11px] text-blue-600 font-semibold hover:underline">+ log</button>`;
   };
-  // Columns mirror the "2. Rolling Revenue" sheet. Each is sortable unless nosort.
+  // Column order per OPI: stage, status, follow-up, quote, By, RFQ, quote#,
+  // Customer, Contact, job, then the rest. Each sortable unless nosort.
   const COLS = [
-    { key: "stage", label: "Stage", td: (o) => stageCell(o) },
-    { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
-    { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}${o.contact_name ? `<div class="text-[10px] text-black/40">${escapeHtml(o.contact_name)}</div>` : ""}` },
-    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}` },
+    { key: "stage", label: "Stage", td: (o) => stageBadge(o) },
+    { key: "pipeline_status", label: "Status", td: (o) => opiStatusCell(o) },
+    { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
+    { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
     { key: "quoted_by", label: "By", cls: "text-black/60", td: (o) => escapeHtml(dash(o.quoted_by || o.estimator_name)) },
+    { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
+    { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
+    { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}` },
+    { key: "contact_name", label: "Contact", cls: "text-black/60", td: (o) => escapeHtml(dash(o.contact_name)) },
+    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}` },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
     { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => valueCell(o) },
-    { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
     { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
     { key: "target_end_date", label: "End", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_end_date) },
-    { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
-    { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
     { key: "workbook_url", label: "Metrics", nosort: true, cls: "whitespace-nowrap", td: (o) => linkCell(o) },
     { key: "doc_count", label: "Docs", align: "center", td: (o) => `<button data-docs="${o.id}" class="inline-flex items-center gap-0.5 font-semibold ${o.doc_count ? "text-blue-700" : "text-black/40"} hover:underline" title="Attachments (RFQ, drawings, quote, PO)">📎${o.doc_count || 0}</button>` },
   ];
 
   const NUMERIC = new Set(["labor_days", "travel_days", "ohp_pct", "ohp_amount", "contract_value", "order_value", "total_revisions"]);
   const sortVal = (o, key) => {
-    if (key === "stage") return (o.pipeline_status || o.status || "").toLowerCase();
+    if (key === "stage") return (o.status || "").toLowerCase();
     if (NUMERIC.has(key)) { const n = Number(o[key]); return Number.isFinite(n) ? n : -Infinity; }
     return (o[key] ?? "").toString().toLowerCase();
   };
