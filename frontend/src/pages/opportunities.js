@@ -110,6 +110,14 @@ export async function pipelinePage(routeFn) {
     if (document.activeElement === sb) sb.focus();
   };
 
+  const quoteCell = (o) => {
+    if (o.app_estimate_id)
+      return `<a href="#/estimate/${o.app_estimate_id}" class="text-xs font-semibold text-blue-700 hover:underline whitespace-nowrap">Open quote →</a>`;
+    if (!o.customer_qbo_id)
+      return `<span class="text-xs text-black/25" title="Link a QuickBooks customer first">—</span>`;
+    return `<button data-startq="${o.id}" class="text-xs font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
+  };
+
   const statusCell = (o) => {
     const cur = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
     const opts = Object.entries(STATUS_META).map(([k, v]) =>
@@ -144,6 +152,7 @@ export async function pipelinePage(routeFn) {
           <th class="py-2 pr-3 font-bold">Job</th><th class="py-2 pr-3 font-bold">Stage</th>
           <th class="py-2 pr-3 font-bold text-right">Value</th>
           <th class="py-2 pr-3 font-bold">RFQ</th><th class="py-2 pr-3 font-bold">By</th>
+          <th class="py-2 pr-3 font-bold">Quote</th>
           <th class="py-2 font-bold text-right"></th></tr></thead>
         <tbody>${rows.map(o => `
           <tr class="border-b border-black/5 hover:bg-black/[0.015]">
@@ -154,6 +163,7 @@ export async function pipelinePage(routeFn) {
             <td class="py-1.5 pr-3 text-right tabular-nums text-black/70">${money(o.contract_value)}</td>
             <td class="py-1.5 pr-3 text-black/60 tabular-nums">${ymd(o.rfq_received_date)}</td>
             <td class="py-1.5 pr-3 text-black/60">${escapeHtml(dash(o.quoted_by || o.estimator_name))}</td>
+            <td class="py-1.5 pr-3">${quoteCell(o)}</td>
             <td class="py-1.5 text-right"><button data-del="${o.id}" title="Delete" class="text-xs text-red-600 font-semibold hover:underline">Delete</button></td>
           </tr>`).join("")}
         </tbody></table></div>${pager}`;
@@ -176,6 +186,10 @@ export async function pipelinePage(routeFn) {
       if (!confirm("Delete this opportunity?")) return;
       try { await api(`/opportunities/${b.getAttribute("data-del")}`, { method: "DELETE" }); loadMetrics(); loadList(); }
       catch (err) { alert(err.message); }
+    }));
+    listEl.querySelectorAll("[data-startq]").forEach(b => b.addEventListener("click", () => {
+      const opp = rows.find(o => String(o.id) === b.getAttribute("data-startq"));
+      startQuoteModal(opp, () => { loadMetrics(); loadList(); });
     }));
   };
 
@@ -240,6 +254,66 @@ function openLinkProjectModal(opp, onDone, onCancel) {
     if (!picked) return setMsg("Pick a project, or use “Won, link later”.", false);
     try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ status: "won", project_qbo_id: picked.qbo_id }) }); close(); onDone && onDone(); }
     catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+  });
+}
+
+// ── Start / link a quoting-metrics estimate from an opportunity ──────────────
+function startQuoteModal(opp, onDone) {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+      <div class="text-base font-bold text-ink-900 mb-1">Start a quote</div>
+      <div class="text-xs text-black/50 mb-4">${escapeHtml(opp.customer_name || "")}${opp.title ? " — " + escapeHtml(opp.title) : ""}</div>
+      <button data-create class="w-full text-left rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-4 py-3 mb-2">
+        <div class="text-sm font-bold text-emerald-800">Create a new estimate</div>
+        <div class="text-xs text-emerald-700/80">Prefills customer, contact, description, dates, quote # from this RFQ.</div>
+      </button>
+      <div class="rounded-xl border border-black/10 px-4 py-3">
+        <div class="text-sm font-bold text-ink-900 mb-1">Link an existing estimate</div>
+        <select data-existing class="input text-sm py-1.5 w-full mb-2"><option value="">Loading…</option></select>
+        <button data-link class="btn-primary text-xs px-3 py-1.5 disabled:opacity-40" disabled>Link selected</button>
+      </div>
+      <div class="mt-4 flex items-center justify-end gap-2">
+        <span data-msg class="text-xs font-semibold mr-auto"></span>
+        <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-cancel]").addEventListener("click", close);
+  const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
+  const sel = overlay.querySelector("[data-existing]");
+  const linkBtn = overlay.querySelector("[data-link]");
+
+  overlay.querySelector("[data-create]").addEventListener("click", async () => {
+    setMsg("Creating…", true);
+    try {
+      const r = await api(`/opportunities/${opp.id}/start-quote`, { method: "POST" });
+      close(); onDone && onDone();
+      location.hash = `#/estimate/${r.estimate_id}`;
+    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+  });
+
+  (async () => {
+    try {
+      const list = (await api(`/opportunities/${opp.id}/quote-options`)).estimates || [];
+      sel.innerHTML = list.length
+        ? `<option value="">— pick an estimate —</option>` + list.map(e =>
+            `<option value="${e.id}">#${e.id}${e.quote_number ? ` · ${escapeHtml(e.quote_number)}` : ""} — ${escapeHtml(e.quote_description || "untitled")} (${e.status})</option>`).join("")
+        : `<option value="">No existing estimates for this customer</option>`;
+    } catch (_) { sel.innerHTML = `<option value="">Couldn't load estimates</option>`; }
+  })();
+  sel.addEventListener("change", () => { linkBtn.disabled = !sel.value; });
+  linkBtn.addEventListener("click", async () => {
+    if (!sel.value) return;
+    setMsg("Linking…", true);
+    try {
+      await api(`/opportunities/${opp.id}/link-quote`, { method: "POST", body: JSON.stringify({ app_estimate_id: Number(sel.value) }) });
+      close(); onDone && onDone();
+      location.hash = `#/estimate/${sel.value}`;
+    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
   });
 }
 

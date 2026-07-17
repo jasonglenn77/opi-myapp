@@ -293,6 +293,7 @@ class OpportunityPatch(BaseModel):
     quote_number: Optional[str] = None
     status: Optional[str] = None
     project_qbo_id: Optional[str] = None   # link the won opportunity to its QBO project ("" to unlink)
+    app_estimate_id: Optional[int] = None  # link an existing quoting-metrics estimate (0/null to unlink)
     notes: Optional[str] = None
 
 
@@ -317,8 +318,9 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
             if not okp:
                 raise HTTPException(status_code=400, detail="project_qbo_id is not a project")
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
-                "estimator_user_id", "quote_number", "status", "project_qbo_id", "notes"}
-        nullable = ("rfq_received_date", "target_start_date", "project_qbo_id")
+                "estimator_user_id", "quote_number", "status", "project_qbo_id", "notes",
+                "app_estimate_id"}
+        nullable = ("rfq_received_date", "target_start_date", "project_qbo_id", "app_estimate_id")
         sets, params = [], {"id": opp_id}
         for k, v in fields.items():
             if k in cols:
@@ -343,3 +345,95 @@ def delete_opportunity(opp_id: int, user=Depends(get_current_user)):
     if not n:
         raise HTTPException(status_code=404, detail="Opportunity not found")
     return {"ok": True}
+
+
+# ── Opportunity → Quoting-metrics estimate (the pipeline↔quote spine) ─────────
+def _opp_for_quote(conn, opp_id):
+    o = conn.execute(text(
+        "SELECT o.id, o.qbo_customer_id, qc.qbo_id AS customer_qbo_id, o.contact_id, "
+        "o.title, o.quoted_by, o.city, o.state, o.rfq_received_date, o.target_start_date, "
+        "o.quote_number, o.app_estimate_id, o.status "
+        "FROM opportunities o LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id "
+        "WHERE o.id = :id"), {"id": opp_id}).mappings().first()
+    if not o:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+    return o
+
+
+@router.post("/{opp_id}/start-quote")
+def start_quote(opp_id: int, user=Depends(get_current_user)):
+    """Create a NEW quoting-metrics estimate prefilled from this opportunity and
+    link the two. Moves the opportunity into 'quoting'."""
+    _require(user)
+    with engine.begin() as conn:
+        o = _opp_for_quote(conn, opp_id)
+        if not o["qbo_customer_id"]:
+            raise HTTPException(status_code=400, detail="Link a QuickBooks customer to this opportunity first.")
+        cust = conn.execute(text(
+            "SELECT id, qbo_id FROM qbo_customers WHERE id=:cid AND job=0 AND active=1 AND is_project=0"),
+            {"cid": o["qbo_customer_id"]}).mappings().first()
+        if not cust:
+            raise HTTPException(status_code=400, detail="Opportunity customer is not an eligible estimating customer.")
+        res = conn.execute(text("""
+            INSERT INTO estimates
+              (qbo_customer_id, qbo_customer_qbo_id, contact_id, quote_description, quoted_by,
+               project_city, project_state, date_of_request, start_date, quote_number, status)
+            VALUES (:cid,:qid,:contact,:desc,:by,:city,:state,:req,:start,:qnum,'draft')
+        """), {"cid": cust["id"], "qid": cust["qbo_id"], "contact": o["contact_id"],
+               "desc": o["title"], "by": o["quoted_by"],
+               "city": o["city"], "state": (o["state"] or None) if not o["state"] or len(o["state"]) <= 2 else None,
+               "req": o["rfq_received_date"], "start": o["target_start_date"],
+               "qnum": o["quote_number"]})
+        est_id = res.lastrowid
+        sets = ["app_estimate_id = :eid"]
+        params = {"eid": est_id, "id": opp_id}
+        if o["status"] in ("received",):
+            sets.append("status = 'quoting'")
+            sets.append("quoting_started_at = COALESCE(quoting_started_at, NOW())")
+        conn.execute(text(f"UPDATE opportunities SET {', '.join(sets)} WHERE id=:id"), params)
+    return {"estimate_id": est_id}
+
+
+@router.get("/{opp_id}/quote-options")
+def quote_options(opp_id: int, user=Depends(get_current_user)):
+    """Existing quoting-metrics estimates for this opportunity's customer, to link."""
+    _require(user)
+    with engine.connect() as conn:
+        o = _opp_for_quote(conn, opp_id)
+        if not o["qbo_customer_id"]:
+            return {"estimates": []}
+        rows = conn.execute(text("""
+            SELECT id, quote_description, quote_number, status, qbo_estimate_id, created_at
+            FROM estimates WHERE qbo_customer_id = :cid
+            ORDER BY created_at DESC, id DESC LIMIT 50
+        """), {"cid": o["qbo_customer_id"]}).mappings().all()
+    return {"estimates": [{
+        "id": r["id"], "quote_description": r["quote_description"], "quote_number": r["quote_number"],
+        "status": r["status"], "linked_qbo": bool(r["qbo_estimate_id"]),
+        "created_at": str(r["created_at"]) if r["created_at"] else None,
+    } for r in rows]}
+
+
+class LinkQuote(BaseModel):
+    app_estimate_id: int
+
+
+@router.post("/{opp_id}/link-quote")
+def link_quote(opp_id: int, body: LinkQuote, user=Depends(get_current_user)):
+    """Link an EXISTING estimate to this opportunity (must be the same customer)."""
+    _require(user)
+    with engine.begin() as conn:
+        o = _opp_for_quote(conn, opp_id)
+        est = conn.execute(text("SELECT id, qbo_customer_id FROM estimates WHERE id=:eid"),
+                           {"eid": body.app_estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        if o["qbo_customer_id"] and est["qbo_customer_id"] != o["qbo_customer_id"]:
+            raise HTTPException(status_code=400, detail="That estimate belongs to a different customer.")
+        sets = ["app_estimate_id = :eid"]
+        if o["status"] in ("received",):
+            sets.append("status = 'quoting'")
+            sets.append("quoting_started_at = COALESCE(quoting_started_at, NOW())")
+        conn.execute(text(f"UPDATE opportunities SET {', '.join(sets)} WHERE id=:id"),
+                     {"eid": body.app_estimate_id, "id": opp_id})
+    return {"ok": True, "estimate_id": body.app_estimate_id}
