@@ -1148,6 +1148,11 @@ option {
   display: none;
 }
 
+.size-3 {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
 .size-3\.5 {
   width: 0.875rem;
   height: 0.875rem;
@@ -1563,6 +1568,10 @@ option {
 
 .animate-pulse {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.cursor-default {
+  cursor: default;
 }
 
 .cursor-not-allowed {
@@ -3382,6 +3391,10 @@ option {
 .hover\:bg-amber-50:hover {
   --tw-bg-opacity: 1;
   background-color: rgb(255 251 235 / var(--tw-bg-opacity, 1));
+}
+
+.hover\:bg-black\/10:hover {
+  background-color: rgb(0 0 0 / 0.1);
 }
 
 .hover\:bg-black\/5:hover {

@@ -28,6 +28,7 @@ const OPI_STATUS_COLORS = {
   "80% Red Flag > Goes to Ops Tab": "bg-red-700 text-white",
   "100% Won > Goes to Ops Tab": "bg-green-700 text-white",
 };
+const FUNNEL = (active) => `<svg class="size-3 ${active ? "text-blue-600" : "text-black/30"}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`;
 const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
 const dash = (s) => (s == null || s === "" ? "—" : s);
 const humanRole = (r) => (r || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -204,6 +205,7 @@ export async function pipelinePage(routeFn) {
       if (stageFilter && o.pipeline_status !== stageFilter) return false;
       if (unlinkedOnly && o.customer_qbo_id) return false;
       if (q && !(`${o.customer_name || ""} ${o.title || ""} ${o.quote_number || ""} ${o.contact_name || ""} ${o.quoted_by || ""}`).toLowerCase().includes(q)) return false;
+      if (!passColFilters(o)) return false;
       return true;
     });
     out.sort((a, b) => { const av = sortVal(a, sortKey), bv = sortVal(b, sortKey); return (av < bv ? -1 : av > bv ? 1 : 0) * (sortDir === "asc" ? 1 : -1); });
@@ -217,6 +219,55 @@ export async function pipelinePage(routeFn) {
     else { sortKey = "rfq_received_date"; sortDir = "desc"; }   // 3rd click resets
     page = 0; render();
   };
+
+  // ── Per-column header filters (mirrors the Customers table's funnel filters) ─
+  let colFilters = {};
+  const DATE_KEYS = new Set(["rfq_received_date", "target_start_date", "target_end_date", "last_contact_date"]);
+  const MULTI_KEYS = new Set(["stage", "pipeline_status", "quoted_by"]);
+  const NOFILTER = new Set(["quote", "workbook_url"]);
+  const filterType = (key) => NUMERIC.has(key) ? "num" : DATE_KEYS.has(key) ? "date" : MULTI_KEYS.has(key) ? "multi" : "text";
+  const filterVal = (o, key) => key === "stage" ? (STATUS_META[o.status]?.label || o.status || "") : (o[key] ?? "");
+  const filterOptions = (key) => [...new Set(allRows.map(o => filterVal(o, key)).filter(v => v !== "" && v != null).map(String))].sort();
+  const filterActive = (key) => { const f = colFilters[key]; if (f == null) return false; if (Array.isArray(f)) return f.length > 0; if (typeof f === "object") return !!(f.from || f.to || f.min || f.max); return !!f; };
+  const passColFilters = (o) => {
+    for (const c of COLS) {
+      if (NOFILTER.has(c.key)) continue;
+      const f = colFilters[c.key]; if (f == null) continue;
+      const t = filterType(c.key);
+      if (t === "text") { if (f && !String(filterVal(o, c.key)).toLowerCase().includes(String(f).toLowerCase())) return false; }
+      else if (t === "multi") { if (f.length && !f.includes(String(filterVal(o, c.key)))) return false; }
+      else if (t === "num") { const v = Number(o[c.key]); if (f.min !== "" && f.min != null && !(v >= +f.min)) return false; if (f.max !== "" && f.max != null && !(v <= +f.max)) return false; }
+      else if (t === "date") { const v = String(o[c.key] || "").slice(0, 10); if (f.from && (!v || v < f.from)) return false; if (f.to && (!v || v > f.to)) return false; }
+    }
+    return true;
+  };
+  const closeFilterPortal = () => document.getElementById("oppFilterPortal")?.remove();
+  function openFilterPortal(key, anchor) {
+    closeFilterPortal();
+    const col = COLS.find(c => c.key === key); if (!col) return;
+    const t = filterType(key);
+    const footer = `<div class="mt-2.5 flex justify-end gap-1.5"><button data-fclear class="rounded-lg border border-black/10 px-2.5 py-1 text-xs font-semibold hover:bg-black/5">Clear</button><button data-fdone class="btn-primary text-xs px-2.5 py-1">Done</button></div>`;
+    let content = `<div class="text-[10px] font-bold text-black/40 mb-1.5">Filter ${escapeHtml(col.label)}</div>`;
+    if (t === "text") content += `<input data-finput class="input text-xs py-1 w-full" value="${escapeHtml(colFilters[key] || "")}" placeholder="Type to filter…">${footer}`;
+    else if (t === "multi") { const sel = colFilters[key] || []; content += `<div class="flex flex-col max-h-[220px] overflow-auto">${filterOptions(key).map(v => `<label class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-black/[0.04] cursor-pointer text-xs"><input type="checkbox" data-fcheck value="${escapeHtml(v)}" ${sel.includes(String(v)) ? "checked" : ""} class="h-3.5 w-3.5"><span class="truncate">${escapeHtml(v)}</span></label>`).join("") || `<div class="text-xs text-black/40 px-1.5 py-1">No values</div>`}</div>${footer}`; }
+    else if (t === "num") { const f = colFilters[key] || { min: "", max: "" }; content += `<div class="flex flex-col gap-2"><input type="number" data-frange="min" class="input text-xs py-1" value="${escapeHtml(f.min || "")}" placeholder="Min"><input type="number" data-frange="max" class="input text-xs py-1" value="${escapeHtml(f.max || "")}" placeholder="Max"></div>${footer}`; }
+    else if (t === "date") { const f = colFilters[key] || { from: "", to: "" }; content += `<div class="flex flex-col gap-2"><div><div class="text-[10px] text-black/40 mb-0.5">From</div><input type="date" data-fdate="from" class="input text-xs py-1" value="${escapeHtml(f.from || "")}"></div><div><div class="text-[10px] text-black/40 mb-0.5">To</div><input type="date" data-fdate="to" class="input text-xs py-1" value="${escapeHtml(f.to || "")}"></div></div>${footer}`; }
+    const rect = anchor.getBoundingClientRect(), w = 230;
+    let left = rect.left; if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+    const portal = document.createElement("div");
+    portal.id = "oppFilterPortal"; portal.className = "fixed z-[200] rounded-xl border border-black/10 bg-white p-3 shadow-xl text-ink-900";
+    portal.style.cssText = `top:${rect.bottom + 4}px; left:${left}px; width:${w}px;`;
+    portal.innerHTML = content;
+    document.body.appendChild(portal);
+    const reflow = () => render();  // re-filter; portal lives on <body>, survives listEl re-render
+    portal.querySelector("[data-finput]")?.addEventListener("input", (e) => { colFilters[key] = e.target.value; page = 0; reflow(); });
+    portal.querySelectorAll("[data-fcheck]").forEach(cb => cb.addEventListener("change", () => { const arr = colFilters[key] || []; colFilters[key] = cb.checked ? [...arr, cb.value] : arr.filter(v => v !== cb.value); page = 0; reflow(); }));
+    portal.querySelectorAll("[data-frange]").forEach(i => i.addEventListener("input", () => { colFilters[key] = colFilters[key] || { min: "", max: "" }; colFilters[key][i.dataset.frange] = i.value; page = 0; reflow(); }));
+    portal.querySelectorAll("[data-fdate]").forEach(i => i.addEventListener("change", () => { colFilters[key] = colFilters[key] || { from: "", to: "" }; colFilters[key][i.dataset.fdate] = i.value; page = 0; reflow(); }));
+    portal.querySelector("[data-fclear]")?.addEventListener("click", () => { delete colFilters[key]; closeFilterPortal(); page = 0; render(); });
+    portal.querySelector("[data-fdone]")?.addEventListener("click", () => { closeFilterPortal(); render(); });
+    portal.querySelector("input")?.focus();
+  }
 
   const renderFilters = () => {
     const stages = [...new Set(allRows.map(o => o.pipeline_status).filter(Boolean))].sort();
@@ -256,7 +307,11 @@ export async function pipelinePage(routeFn) {
     listEl.innerHTML = `
       <table class="w-full text-xs" style="min-width:1180px;">
         <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
-          ${COLS.map(c => `<th class="py-2 pr-3 font-bold whitespace-nowrap bg-white ${c.align === "right" ? "text-right" : ""} ${c.nosort ? "" : "cursor-pointer select-none hover:text-black/70"}" ${c.nosort ? "" : `data-sort="${c.key}"`}>${c.label}${c.nosort ? "" : arrow(c.key)}</th>`).join("")}
+          ${COLS.map(c => `<th class="py-2 pr-3 font-bold whitespace-nowrap bg-white ${c.align === "right" ? "text-right" : ""}">
+            <span class="inline-flex items-center gap-0.5 ${c.align === "right" ? "flex-row-reverse" : ""}">
+              <button ${c.nosort ? "" : `data-sort="${c.key}"`} class="${c.nosort ? "cursor-default" : "cursor-pointer select-none hover:text-black/70"} font-bold">${c.label}${c.nosort ? "" : arrow(c.key)}</button>
+              ${NOFILTER.has(c.key) ? "" : `<button data-filter="${c.key}" title="Filter" class="inline-flex h-4 w-4 items-center justify-center rounded hover:bg-black/10 ${filterActive(c.key) ? "bg-blue-50" : ""}">${FUNNEL(filterActive(c.key))}</button>`}
+            </span></th>`).join("")}
           <th class="py-2 font-bold text-right bg-white"></th></tr></thead>
         <tbody>${slice.map(o => `
           <tr class="border-b border-black/5 hover:bg-black/[0.02] align-top">
@@ -273,6 +328,7 @@ export async function pipelinePage(routeFn) {
           <button data-pg="next" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page >= pages - 1 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">Next →</button>
         </div></div>` : `<div class="pt-2 mt-1 border-t border-black/5 text-[11px] text-black/40">${total.toLocaleString()} rows</div>`;
     listEl.querySelectorAll("[data-sort]").forEach(th => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
+    listEl.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", (e) => { e.stopPropagation(); openFilterPortal(b.getAttribute("data-filter"), b); }));
     pagerEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
       page = b.getAttribute("data-pg") === "next" ? page + 1 : Math.max(0, page - 1);
       render(); listEl.scrollTop = 0;
@@ -339,6 +395,12 @@ export async function pipelinePage(routeFn) {
 
   document.getElementById("pNew").addEventListener("click", () =>
     newOpportunityModal({ estimators, onSaved: () => { loadMetrics(); load(); } }));
+
+  listEl.addEventListener("scroll", closeFilterPortal);
+  document.addEventListener("mousedown", (e) => {
+    const p = document.getElementById("oppFilterPortal");
+    if (p && !p.contains(e.target) && !e.target.closest("[data-filter]")) closeFilterPortal();
+  });
 
   loadMetrics();
   load();
