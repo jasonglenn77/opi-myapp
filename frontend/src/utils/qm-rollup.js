@@ -155,61 +155,53 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
                   + sumExt("other_rentals_wire_guidance");
   const wg_add    = sumExt("wire_guidance_additional");
 
-  // Buffer days. The estimate-level "Project Time Budget Adder? (Yes/No + %)"
-  // sets the buffer as a PERCENT of the labor days (matches the workbook). A
-  // per-set day adder, if explicitly entered, overrides that %.
-  //
-  // The buffer BASE is the PRODUCTION days (rack_days/wire_days, the per-metrics
-  // line-item total) — NOT the labor-day override. The workbook's BASE sheet
-  // Buffer Day Counter is:
-  //   counter = ceilHalf((base+adder)*env) - ceilHalf(base*env)
-  //   base = production days (G185/G224);  adder = base * budget%
-  // The labor-day override only drives the contract-labor COST (H44/H220), never
-  // the buffer. (Verified against 7 workbooks: 7028/7104/7119/7124/7192 + the
-  // breakout=Yes 7029/7115. The workbook's rare manual cells — the "simple-quote
-  // override" K20 and the rack↔wire redistribution A34 — are intentionally NOT
-  // modeled; they're one-offs like 7003's manual OH&P override.)
+  // ── Contract-labor days, buffer & lodging days (the workbook's "Tab Labor
+  // Days", BASE-sheet D23/D24) ────────────────────────────────────────────────
+  // The labor-day override, when set, is the RAW "Labor Day Override for Simple
+  // Quotes" (workbook cell K20) — a hand estimate. Otherwise the base is the
+  // per-metrics PRODUCTION days (line-item total G185/G224). Then:
+  //   Tab Labor Days  D23 = ceilHalf((base + adder) * env)   ← drives contract labor + lodging
+  //   Buffer counter  M20 = D23 - ceilHalf(base * env)
+  //   Contract Labor  H44 = D23 * labor_cost_per_day
+  //   adder = per-set manual adder if entered, else base * budget%
+  // ceilHalf rounds the day estimate UP to the nearest half-day, so a raw 3.1
+  // becomes 3.5 — which is why contract labor uses 3.5, not 3.1. This mirrors the
+  // BASE-sheet formula =ceiling(if(K20>0,K20+L20,G185+L20)*H28,0.5) and the buffer
+  // counter =ceiling((base+adder)*env,0.5)-ceiling(base*env,0.5). (The rare manual
+  // rack↔wire redistribution cell A34 is intentionally not modeled — a one-off.)
   const hasNum = (v) => v != null && v !== "" && !Number.isNaN(Number(v));
-  const budget_pct = isYes(est.project_time_budget_adder)
-    ? (Number(est.project_time_budget_pct ?? 0) || 0) / 100 : 0;
-  const rack_adder = hasNum(set?.rack_install_project_time_adder)
-    ? Number(set.rack_install_project_time_adder) : rack_days * budget_pct;
-  const wire_adder = hasNum(set?.wire_guidance_project_time_adder)
-    ? Number(set.wire_guidance_project_time_adder) : wire_days * budget_pct;
-  const M20 = computeBufferDays(null, rack_adder, rack_days, env_factor);
-  const M21 = computeBufferDays(null, wire_adder, wire_days, env_factor);
-
   const overrideOrNull = (v) => (v != null && v !== "" && Number(v) > 0) ? Number(v) : null;
-  const numOr0         = (v) => Number(v ?? 0) || 0;
 
   const travel_override = overrideOrNull(set?.travel_labor_day_override);
   const rack_override_n = overrideOrNull(set?.rack_install_labor_day_override);
-  const rack_adder_n    = numOr0(set?.rack_install_project_time_adder);
   const wire_override_n = overrideOrNull(set?.wire_guidance_labor_day_override);
-  const wire_adder_n    = numOr0(set?.wire_guidance_project_time_adder);
 
-  // Contract-labor days honor the manual "Tab Labor Days" override when it's set,
-  // matching the workbook — the override drives the contract-labor COST (H44/H220),
-  // not just the buffer/lodging days. (Fix: previously H44/H220 always used the
-  // production-computed line days, so any overridden estimate under-priced labor.)
-  const rack_days_eff = rack_override_n != null ? rack_override_n : rack_days;
-  const wire_days_eff = wire_override_n != null ? wire_override_n : wire_days;
+  // base = simple-quote override (K20) if set, else production days.
+  const base_rack = rack_override_n != null ? rack_override_n : rack_days;
+  const base_wire = wire_override_n != null ? wire_override_n : wire_days;
 
-  // D22 Travel Days, D23/D24 Tab Labor Days (the on-site "Project Labor Days —
-  // Cost"). These are the BASE labor days only; the project-time-adder creates the
-  // separate buffer line (M20/M21) and must NOT inflate the lodging/on-site days
-  // (matches the workbook, whose "Project Labor Days - Cost" excludes the adder).
+  const budget_pct = isYes(est.project_time_budget_adder)
+    ? (Number(est.project_time_budget_pct ?? 0) || 0) / 100 : 0;
+  const rack_adder = hasNum(set?.rack_install_project_time_adder)
+    ? Number(set.rack_install_project_time_adder) : base_rack * budget_pct;
+  const wire_adder = hasNum(set?.wire_guidance_project_time_adder)
+    ? Number(set.wire_guidance_project_time_adder) : base_wire * budget_pct;
+
   const D22 = travel_override != null
     ? travel_override
     : travel_days_per_crew * crew_count * mobilizations;
-  const D23 = ceilHalf((rack_override_n != null ? rack_override_n : rack_days) * env_factor);
-  const D24 = ceilHalf((wire_override_n != null ? wire_override_n : wire_days) * env_factor);
+  // Tab Labor Days — includes the time-adder, rounded up to the half-day.
+  const D23 = ceilHalf((base_rack + rack_adder) * env_factor);
+  const D24 = ceilHalf((base_wire + wire_adder) * env_factor);
+  // Buffer counter = Tab Labor Days − ceilHalf(base).
+  const M20 = D23 - ceilHalf(base_rack * env_factor);
+  const M21 = D24 - ceilHalf(base_wire * env_factor);
 
-  // Top-level section dollar totals
-  const H44  = rack_days_eff * labor_cost_per_day;        // Rack Contract Labor $
+  // Top-level section dollar totals. Contract labor uses Tab Labor Days (D23/D24).
+  const H44  = D23 * labor_cost_per_day;                  // Rack Contract Labor $
   const H39  = mat_rack;                                  // Materials Rack $
   const H214 = mat_wire;                                  // Materials WG $
-  const H220 = wire_days_eff * labor_cost_per_day;        // WG Contract Labor $
+  const H220 = D24 * labor_cost_per_day;                  // WG Contract Labor $
   const H187 = rent_rack;                                 // Rentals Rack $
   const H226 = rent_wire;                                 // Rentals WG $
   const H248 = wg_add;                                    // WG Add'l Items $
