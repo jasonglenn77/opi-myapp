@@ -47,6 +47,7 @@ _SELECT = """
            TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS estimator_name,
            u.email AS estimator_email,
            o.status, o.pipeline_status, o.quoted_by,
+           o.last_contact_date, o.follow_up_count, o.last_comm_type, o.most_recent_revision_date,
            o.city, o.state, o.labor_days, o.travel_days, o.total_revisions,
            o.contract_value, o.order_value, o.ohp_amount, o.ohp_pct,
            o.order_date, o.quote_sent_date, o.expected_decision_date,
@@ -77,6 +78,9 @@ def _row(r):
         "project_qbo_id": r["project_qbo_id"], "project_name": r["project_name"],
         "estimator_user_id": r["estimator_user_id"], "estimator_name": est if r["estimator_user_id"] else None,
         "status": r["status"], "pipeline_status": r["pipeline_status"], "quoted_by": r["quoted_by"],
+        "last_contact_date": str(r["last_contact_date"]) if r["last_contact_date"] else None,
+        "follow_up_count": r["follow_up_count"], "last_comm_type": r["last_comm_type"],
+        "most_recent_revision_date": str(r["most_recent_revision_date"]) if r["most_recent_revision_date"] else None,
         "city": r["city"], "state": r["state"],
         "labor_days": _num(r["labor_days"]), "travel_days": _num(r["travel_days"]),
         "total_revisions": r["total_revisions"],
@@ -412,6 +416,55 @@ def quote_options(opp_id: int, user=Depends(get_current_user)):
         "status": r["status"], "linked_qbo": bool(r["qbo_estimate_id"]),
         "created_at": str(r["created_at"]) if r["created_at"] else None,
     } for r in rows]}
+
+
+# ── Pipeline contact-logging (Rolling Revenue follow-up workflow) ─────────────
+class ContactLogIn(BaseModel):
+    contact_date: Optional[str] = None          # defaults to today
+    communication_type: Optional[str] = None    # LVM | PC | ES | ER
+    notes: Optional[str] = None
+
+
+@router.get("/{opp_id}/contact-log")
+def contact_log(opp_id: int, user=Depends(get_current_user)):
+    _require(user)
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, contact_date, communication_type, notes, created_at
+            FROM customer_contact_log WHERE opportunity_id = :id
+            ORDER BY contact_date DESC, id DESC
+        """), {"id": opp_id}).mappings().all()
+    return {"log": [{
+        "id": r["id"], "contact_date": str(r["contact_date"]) if r["contact_date"] else None,
+        "communication_type": r["communication_type"], "notes": r["notes"],
+        "created_at": str(r["created_at"]) if r["created_at"] else None,
+    } for r in rows]}
+
+
+@router.post("/{opp_id}/contact-log")
+def add_contact_log(opp_id: int, body: ContactLogIn, user=Depends(get_current_user)):
+    """Log a follow-up on this opportunity and refresh its running summary
+    (last contact date, follow-up count, last comm type) — mirrors the RR sheet."""
+    _require(user)
+    with engine.begin() as conn:
+        o = conn.execute(text("SELECT id, qbo_customer_id FROM opportunities WHERE id=:id"),
+                         {"id": opp_id}).mappings().first()
+        if not o:
+            raise HTTPException(status_code=404, detail="Opportunity not found")
+        conn.execute(text("""
+            INSERT INTO customer_contact_log (qbo_customer_id, opportunity_id, contact_date, communication_type, notes)
+            VALUES (:cid, :oid, COALESCE(:d, CURDATE()), :ct, :notes)
+        """), {"cid": o["qbo_customer_id"], "oid": opp_id,
+               "d": body.contact_date or None, "ct": body.communication_type, "notes": body.notes})
+        conn.execute(text("""
+            UPDATE opportunities SET
+              last_contact_date = GREATEST(COALESCE(last_contact_date, '1900-01-01'), COALESCE(:d, CURDATE())),
+              follow_up_count = COALESCE(follow_up_count, 0) + 1,
+              last_comm_type = COALESCE(:ct, last_comm_type)
+            WHERE id = :id
+        """), {"d": body.contact_date or None, "ct": body.communication_type, "id": opp_id})
+        row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp_id}).mappings().first()
+    return {"opportunity": _row(row)}
 
 
 class LinkQuote(BaseModel):

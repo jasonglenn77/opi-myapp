@@ -85,6 +85,11 @@ for i in range(8, len(rows)):
         'quote_number': sql_str(quote),
         'pipeline_status': sql_str(pstat),
         'status': sql_str(lc),
+        # contact-logging summary (RR: Last Contact / Follow Up Qty / Comm Type / Revision date)
+        'last_contact_date': sql_str(date(g(r, 2))),
+        'follow_up_count': int(num(g(r, 3))) if num(g(r, 3)) is not None else 'NULL',
+        'last_comm_type': sql_str(g(r, 4)) if g(r, 4) in ('LVM', 'PC', 'ES', 'ER') else 'NULL',
+        'most_recent_revision_date': sql_str(date(g(r, 8))),
         'quoted_by': sql_str(g(r, 11)),
         'city': sql_str(g(r, 14)),
         'state': sql_str(g(r, 15)),

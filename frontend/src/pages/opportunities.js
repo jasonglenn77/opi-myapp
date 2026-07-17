@@ -44,8 +44,9 @@ function stageChip(o) {
 }
 
 export async function pipelinePage(routeFn) {
-  let estimators = [];
+  let estimators = [], commTypes = [];
   try { estimators = await api(`/estimates/estimators`); } catch (_) { estimators = []; }
+  try { commTypes = (await api(`/quoting/lookup-values`)).communication_type || []; } catch (_) { commTypes = []; }
 
   const body = `
     <div class="w-full">
@@ -112,6 +113,15 @@ export async function pipelinePage(routeFn) {
   };
 
   const num = (v) => (v == null || v === "" ? "—" : Number(v).toLocaleString());
+  const commLabel = (k) => (commTypes.find(c => c.key === k)?.value_text) || k || "";
+  const followupCell = (o) => {
+    if (o.last_contact_date || o.follow_up_count)
+      return `<button data-log="${o.id}" class="text-left group">
+        <div class="tabular-nums text-black/70 group-hover:underline">${ymd(o.last_contact_date)}</div>
+        <div class="text-[10px] text-black/40">${o.follow_up_count || 0}× ${escapeHtml(o.last_comm_type || "")}</div>
+      </button>`;
+    return `<button data-log="${o.id}" class="text-[11px] text-blue-600 font-semibold hover:underline">+ log</button>`;
+  };
   // Columns mirror the "2. Rolling Revenue" sheet. Each is sortable unless nosort.
   const COLS = [
     { key: "stage", label: "Stage", td: (o) => `${stageChip(o)}<div class="mt-0.5">${statusCell(o)}</div>` },
@@ -125,6 +135,7 @@ export async function pipelinePage(routeFn) {
     { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => money(o.contract_value) },
     { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
     { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
+    { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
     { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
   ];
 
@@ -226,6 +237,13 @@ export async function pipelinePage(routeFn) {
     listEl.querySelectorAll("[data-startq]").forEach(b => b.addEventListener("click", () => {
       const opp = allRows.find(o => String(o.id) === b.getAttribute("data-startq"));
       startQuoteModal(opp, () => { loadMetrics(); load(); });
+    }));
+    listEl.querySelectorAll("[data-log]").forEach(b => b.addEventListener("click", () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-log"));
+      contactLogModal(opp, commTypes, (updated) => {
+        if (updated) { const i = allRows.findIndex(o => o.id === updated.id); if (i >= 0) allRows[i] = updated; }
+        render();
+      });
     }));
   };
 
@@ -356,6 +374,74 @@ function startQuoteModal(opp, onDone) {
       location.hash = `#/estimate/${sel.value}`;
     } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
   });
+}
+
+// ── Contact log (follow-up workflow) modal ───────────────────────────────────
+function contactLogModal(opp, commTypes, onDone) {
+  const ymd2 = (s) => (s ? String(s).slice(0, 10) : "—");
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[90vh] overflow-auto">
+      <div class="text-base font-bold text-ink-900 mb-0.5">Follow-up log</div>
+      <div class="text-xs text-black/50 mb-3">${escapeHtml(opp.customer_name || "")}${opp.title ? " — " + escapeHtml(opp.title) : ""}</div>
+      <div class="rounded-xl border border-black/10 p-3 mb-3">
+        <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-2">Log a contact</div>
+        <div class="grid grid-cols-2 gap-2 mb-2">
+          <label class="block"><div class="text-[10px] text-black/40 mb-0.5">Date</div><input data-f="date" type="date" class="input text-sm py-1.5 w-full"></label>
+          <label class="block"><div class="text-[10px] text-black/40 mb-0.5">Type</div>
+            <select data-f="ct" class="input text-sm py-1.5 w-full"><option value="">—</option>${commTypes.map(c => `<option value="${escapeHtml(c.key)}">${escapeHtml(c.key)} — ${escapeHtml(c.value_text || "")}</option>`).join("")}</select></label>
+        </div>
+        <input data-f="notes" class="input text-sm py-1.5 w-full mb-2" placeholder="Notes (optional)">
+        <div class="flex items-center justify-end gap-2">
+          <span data-msg class="text-xs font-semibold mr-auto"></span>
+          <button data-add class="btn-primary text-sm px-4 py-1.5">Add entry</button>
+        </div>
+      </div>
+      <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-1">History</div>
+      <div data-history class="text-sm text-black/50">Loading…</div>
+      <div class="mt-4 flex justify-end">
+        <button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  let changed = false;
+  const close = () => { overlay.remove(); };
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+  const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
+  const val = (f) => overlay.querySelector(`[data-f="${f}"]`);
+  const histEl = overlay.querySelector("[data-history]");
+
+  const loadHistory = async () => {
+    try {
+      const log = (await api(`/opportunities/${opp.id}/contact-log`)).log || [];
+      histEl.innerHTML = log.length
+        ? `<div class="divide-y divide-black/5">${log.map(e => `
+            <div class="py-1.5 flex items-baseline gap-2">
+              <span class="tabular-nums text-black/60 w-24 shrink-0">${ymd2(e.contact_date)}</span>
+              <span class="font-semibold text-ink-900 w-10 shrink-0">${escapeHtml(e.communication_type || "—")}</span>
+              <span class="text-black/60">${escapeHtml(e.notes || "")}</span>
+            </div>`).join("")}</div>`
+        : `<div class="text-black/40 py-2">No entries logged yet.</div>`;
+    } catch (_) { histEl.innerHTML = `<div class="text-red-600 py-2">Couldn't load history.</div>`; }
+  };
+
+  overlay.querySelector("[data-add]").addEventListener("click", async () => {
+    const payload = { contact_date: val("date").value || null, communication_type: val("ct").value || null, notes: val("notes").value.trim() || null };
+    if (!payload.communication_type && !payload.notes) return setMsg("Pick a type or add a note.", false);
+    setMsg("Saving…", true);
+    try {
+      const r = await api(`/opportunities/${opp.id}/contact-log`, { method: "POST", body: JSON.stringify(payload) });
+      changed = true;
+      Object.assign(opp, r.opportunity || {});
+      onDone && onDone(r.opportunity);
+      val("notes").value = ""; setMsg("Logged ✓", true);
+      loadHistory();
+    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+  });
+
+  loadHistory();
 }
 
 // ── New Opportunity (RFQ intake) modal ──────────────────────────────────────

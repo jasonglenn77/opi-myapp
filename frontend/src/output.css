@@ -3554,6 +3554,10 @@ option {
   opacity: 0.4;
 }
 
+.group:hover .group-hover\:underline {
+  text-decoration-line: underline;
+}
+
 .peer:checked ~ .peer-checked\:bg-emerald-500 {
   --tw-bg-opacity: 1;
   background-color: rgb(16 185 129 / var(--tw-bg-opacity, 1));
