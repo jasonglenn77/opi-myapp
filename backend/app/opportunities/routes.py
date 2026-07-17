@@ -41,7 +41,8 @@ _SELECT = """
            COALESCE(qc.display_name, o.customer_name_raw) AS customer_name,
            o.contact_id, COALESCE(ct.full_name, o.contact_name_raw) AS contact_name,
            o.title, o.source, o.rfq_received_date, o.target_start_date,
-           o.quote_number, o.qbo_estimate_id, o.app_estimate_id,
+           o.quote_number, o.qbo_estimate_id, o.app_estimate_id, o.workbook_url,
+           o.target_end_date, o.discounted_contract_value, o.metrics_source,
            o.project_qbo_id, pj.display_name AS project_name,
            o.estimator_user_id,
            TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS estimator_name,
@@ -78,7 +79,10 @@ def _row(r):
         "rfq_received_date": str(r["rfq_received_date"]) if r["rfq_received_date"] else None,
         "target_start_date": str(r["target_start_date"]) if r["target_start_date"] else None,
         "quote_number": r["quote_number"], "qbo_estimate_id": r["qbo_estimate_id"],
-        "app_estimate_id": r["app_estimate_id"],
+        "app_estimate_id": r["app_estimate_id"], "workbook_url": r["workbook_url"],
+        "target_end_date": str(r["target_end_date"]) if r["target_end_date"] else None,
+        "discounted_contract_value": _num(r["discounted_contract_value"]),
+        "metrics_source": r["metrics_source"],
         "project_qbo_id": r["project_qbo_id"], "project_name": r["project_name"],
         "estimator_user_id": r["estimator_user_id"], "estimator_name": est if r["estimator_user_id"] else None,
         "status": r["status"], "pipeline_status": r["pipeline_status"], "quoted_by": r["quoted_by"],
@@ -303,6 +307,9 @@ class OpportunityPatch(BaseModel):
     status: Optional[str] = None
     project_qbo_id: Optional[str] = None   # link the won opportunity to its QBO project ("" to unlink)
     app_estimate_id: Optional[int] = None  # link an existing quoting-metrics estimate (0/null to unlink)
+    workbook_url: Optional[str] = None     # Google-Drive link to the (external) quoting-metrics workbook
+    target_end_date: Optional[str] = None
+    discounted_contract_value: Optional[float] = None
     notes: Optional[str] = None
 
 
@@ -327,9 +334,12 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
             if not okp:
                 raise HTTPException(status_code=400, detail="project_qbo_id is not a project")
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
-                "estimator_user_id", "quote_number", "status", "project_qbo_id", "notes",
-                "app_estimate_id"}
-        nullable = ("rfq_received_date", "target_start_date", "project_qbo_id", "app_estimate_id")
+                "target_end_date", "estimator_user_id", "quote_number", "status",
+                "project_qbo_id", "notes", "app_estimate_id", "workbook_url",
+                "discounted_contract_value"}
+        nullable = ("rfq_received_date", "target_start_date", "target_end_date",
+                    "project_qbo_id", "app_estimate_id", "workbook_url",
+                    "discounted_contract_value")
         sets, params = [], {"id": opp_id}
         for k, v in fields.items():
             if k in cols:
@@ -495,3 +505,44 @@ def link_quote(opp_id: int, body: LinkQuote, user=Depends(get_current_user)):
         conn.execute(text(f"UPDATE opportunities SET {', '.join(sets)} WHERE id=:id"),
                      {"eid": body.app_estimate_id, "id": opp_id})
     return {"ok": True, "estimate_id": body.app_estimate_id}
+
+
+@router.get("/by-estimate/{app_estimate_id}")
+def opportunity_for_estimate(app_estimate_id: int, user=Depends(get_current_user)):
+    """The pipeline opportunity linked to an in-app estimate (for the estimate
+    page to offer 'Update pipeline'). Null if the estimate isn't linked."""
+    _require(user)
+    with engine.connect() as conn:
+        row = conn.execute(text(_SELECT + " WHERE o.app_estimate_id = :e ORDER BY o.id LIMIT 1"),
+                           {"e": app_estimate_id}).mappings().first()
+    return {"opportunity": _row(row) if row else None}
+
+
+class SyncMetrics(BaseModel):
+    contract_value: Optional[float] = None
+    ohp_amount: Optional[float] = None
+    ohp_pct: Optional[float] = None
+    labor_days: Optional[float] = None
+    travel_days: Optional[float] = None
+
+
+@router.post("/by-estimate/{app_estimate_id}/sync-metrics")
+def sync_metrics_from_estimate(app_estimate_id: int, body: SyncMetrics, user=Depends(get_current_user)):
+    """Push an in-app estimate's computed rollup summary onto its linked pipeline
+    row (the go-forward model: new quotes feed the pipeline from the app calc).
+    Marks the row metrics_source='app' so the UI can badge it."""
+    _require(user)
+    with engine.begin() as conn:
+        opp = conn.execute(text("SELECT id FROM opportunities WHERE app_estimate_id=:e ORDER BY id LIMIT 1"),
+                           {"e": app_estimate_id}).mappings().first()
+        if not opp:
+            raise HTTPException(status_code=404, detail="No pipeline row is linked to this estimate.")
+        conn.execute(text("""
+            UPDATE opportunities SET
+              contract_value = :cv, ohp_amount = :oa, ohp_pct = :op,
+              labor_days = :ld, travel_days = :td, metrics_source = 'app'
+            WHERE id = :id
+        """), {"cv": body.contract_value, "oa": body.ohp_amount, "op": body.ohp_pct,
+               "ld": body.labor_days, "td": body.travel_days, "id": opp["id"]})
+        row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp["id"]}).mappings().first()
+    return {"opportunity": _row(row)}

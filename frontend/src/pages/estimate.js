@@ -776,6 +776,11 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
     if (raw) estimateState = JSON.parse(raw) || {};
   } catch {}
 
+  // The go-forward model: if this estimate feeds a pipeline row, offer to push
+  // its computed summary onto that row (contract value / OH&P / labor days).
+  let linkedOpp = null;
+  try { linkedOpp = (await api(`/opportunities/by-estimate/${estimateId}`)).opportunity; } catch {}
+
   const fmtMoney = (n) => {
     const v = Number(n);
     if (!Number.isFinite(v)) return "$0";
@@ -912,6 +917,9 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
           </div>
           <div class="flex items-center gap-2">
             <span class="text-[11px] text-emerald-700" data-rev-saved-at></span>
+            <span class="text-[11px] font-semibold" data-sync-msg></span>
+            ${linkedOpp ? `<button type="button" data-sync-pipeline title="Push this quote's totals onto pipeline row ${escapeHtml(linkedOpp.quote_number || "#" + linkedOpp.id)}"
+                    class="rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-sm px-3 py-2 font-semibold hover:bg-blue-100">Update pipeline</button>` : ""}
             ${rev > 0 ? `<button type="button" data-rev-history class="rounded-lg bg-slate-100 text-slate-700 text-sm px-3 py-2 font-semibold hover:bg-slate-200">History</button>` : ""}
             <button type="button" data-save-revision
                     class="btn-primary text-sm px-4 py-2">
@@ -1410,6 +1418,32 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
 
   function onRevHistoryClick(e) { if (e.target.closest("[data-rev-history]")) openRevisionHistoryModal(); }
 
+  // Update pipeline → push this quote's computed summary onto its linked row.
+  // labor/travel are DAY counts (D23+D24 on-site, D22 travel); OH&P $ = projected
+  // profit and OH&P % = margin, matching the Rolling-Revenue columns.
+  async function onSyncPipelineClick(e) {
+    const btn = e.target.closest("[data-sync-pipeline]");
+    if (!btn || btn.hasAttribute("disabled")) return;
+    const { perSet, cross } = computeAll();
+    const on = perSet.filter(({ set }) => Number(set.is_enabled) === 1);
+    const payload = {
+      contract_value: cross.price_to_customer,
+      ohp_amount:     cross.projected_profit,
+      ohp_pct:        Math.round((cross.projected_margin || 0) * 1000) / 10,
+      labor_days:     on.reduce((s, r) => s + (Number(r.rollup.D23) || 0) + (Number(r.rollup.D24) || 0), 0),
+      travel_days:    on.reduce((s, r) => s + (Number(r.rollup.D22) || 0), 0),
+    };
+    const msg = container.querySelector("[data-sync-msg]");
+    btn.setAttribute("disabled", "true"); const t = btn.textContent; btn.textContent = "Updating…";
+    try {
+      await api(`/opportunities/by-estimate/${estimateId}/sync-metrics`, { method: "POST", body: JSON.stringify(payload) });
+      if (msg) { msg.textContent = "Pipeline updated ✓"; msg.className = "text-[11px] font-semibold text-emerald-700"; }
+    } catch (err) {
+      let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch {}
+      if (msg) { msg.textContent = d; msg.className = "text-[11px] font-semibold text-red-600"; }
+    } finally { btn.removeAttribute("disabled"); btn.textContent = t; }
+  }
+
   // Rollup-row chevron clicks → toggle the per-set expansion panel.
   function onRollupToggleClick(e) {
     const row = e.target.closest("[data-rollup-toggle]");
@@ -1424,6 +1458,7 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
   container.addEventListener("change", onToggleChange);
   container.addEventListener("click", onSaveRevisionClick);
   container.addEventListener("click", onRevHistoryClick);
+  container.addEventListener("click", onSyncPipelineClick);
   container.addEventListener("click", onRollupToggleClick);
   window.addEventListener("hashchange", () => {
     container.removeEventListener("change", onToggleChange);

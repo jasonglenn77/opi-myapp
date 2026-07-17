@@ -52,7 +52,7 @@ export async function pipelinePage(routeFn) {
     <div class="w-full">
       <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
         <div><h1 class="text-xl font-extrabold text-ink-900">Pipeline</h1>
-          <p class="text-xs text-black/50">RFQ intake → quoting → sent → won/lost. Turn-times start the moment an RFQ is logged.</p></div>
+          <p class="text-xs text-black/50">RFQ → quote → sent → won/lost. Historical rows carry their Rolling-Revenue summary + a link to the QuickBooks estimate; the detailed quoting-metrics <b>workbook lives in Google Drive</b> (the “Metrics ↗” link). New quotes are built in-app via <b>Start quote</b> and feed the row live.</p></div>
         <button id="pNew" class="btn-primary text-sm px-4 py-2">+ New opportunity</button>
       </div>
       <div id="pMetrics" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4"></div>
@@ -116,6 +116,23 @@ export async function pipelinePage(routeFn) {
 
   const num = (v) => (v == null || v === "" ? "—" : Number(v).toLocaleString());
   const commLabel = (k) => (commTypes.find(c => c.key === k)?.value_text) || k || "";
+  // Value cell: contract value + a discounted sub-line, + an "app" badge when the
+  // figures came live from the in-app quoting-metrics estimate (vs seeded RR).
+  const valueCell = (o) => {
+    const app = o.metrics_source === "app"
+      ? ` <span class="align-middle text-[8px] font-bold uppercase rounded px-1 bg-blue-100 text-blue-700" title="Figures from the in-app quoting-metrics estimate">app</span>` : "";
+    // "Discounted Contract Value" in RR is actually the probability-WEIGHTED value
+    // (contract × win-probability) — expected pipeline revenue, not a sale discount.
+    const wtd = (o.discounted_contract_value != null && o.discounted_contract_value !== o.contract_value)
+      ? `<div class="text-[10px] text-black/45" title="Weighted value = contract × win probability (expected pipeline revenue)">${money(o.discounted_contract_value)} wtd</div>` : "";
+    return `${money(o.contract_value)}${app}${wtd}`;
+  };
+  // The RR "Link" column: an external Google-Drive link to the detailed
+  // quoting-metrics workbook (we don't import it). Click to open or set/change.
+  const linkCell = (o) => o.workbook_url
+    ? `<a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="text-indigo-700 font-semibold hover:underline" title="Open the quoting-metrics workbook in Google Drive">Metrics ↗</a>
+       <button data-editlink="${o.id}" class="text-[10px] text-black/30 hover:text-black/60 ml-1" title="Edit link">✎</button>`
+    : `<button data-editlink="${o.id}" class="text-[11px] text-black/35 hover:text-indigo-700 hover:underline" title="Paste the Google-Drive workbook link">+ link</button>`;
   const followupCell = (o) => {
     if (o.last_contact_date || o.follow_up_count)
       return `<button data-log="${o.id}" class="text-left group">
@@ -134,11 +151,13 @@ export async function pipelinePage(routeFn) {
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
-    { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => money(o.contract_value) },
+    { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => valueCell(o) },
     { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
     { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
+    { key: "target_end_date", label: "End", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_end_date) },
     { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
     { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
+    { key: "workbook_url", label: "Metrics", nosort: true, cls: "whitespace-nowrap", td: (o) => linkCell(o) },
     { key: "doc_count", label: "Docs", align: "center", td: (o) => `<button data-docs="${o.id}" class="inline-flex items-center gap-0.5 font-semibold ${o.doc_count ? "text-blue-700" : "text-black/40"} hover:underline" title="Attachments (RFQ, drawings, quote, PO)">📎${o.doc_count || 0}</button>` },
   ];
 
@@ -251,6 +270,14 @@ export async function pipelinePage(routeFn) {
     listEl.querySelectorAll("[data-docs]").forEach(b => b.addEventListener("click", () => {
       const opp = allRows.find(o => String(o.id) === b.getAttribute("data-docs"));
       opportunityDocsModal(opp, (count) => { if (count != null) opp.doc_count = count; render(); });
+    }));
+    listEl.querySelectorAll("[data-editlink]").forEach(b => b.addEventListener("click", async () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-editlink"));
+      const url = prompt("Google-Drive link to the quoting-metrics workbook:", opp.workbook_url || "");
+      if (url === null) return;   // cancelled
+      const v = url.trim() || null;
+      try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ workbook_url: v }) }); opp.workbook_url = v; render(); }
+      catch (err) { alert(err.message); }
     }));
   };
 
