@@ -1492,6 +1492,10 @@ option {
   max-width: 420px;
 }
 
+.max-w-\[8\.5rem\] {
+  max-width: 8.5rem;
+}
+
 .max-w-full {
   max-width: 100%;
 }
@@ -3370,6 +3374,11 @@ option {
   border-color: rgb(147 197 253 / var(--tw-border-opacity, 1));
 }
 
+.hover\:bg-amber-200:hover {
+  --tw-bg-opacity: 1;
+  background-color: rgb(253 230 138 / var(--tw-bg-opacity, 1));
+}
+
 .hover\:bg-amber-50:hover {
   --tw-bg-opacity: 1;
   background-color: rgb(255 251 235 / var(--tw-bg-opacity, 1));
@@ -3563,6 +3572,10 @@ option {
 
 .active\:bg-white\/5:active {
   background-color: rgb(255 255 255 / 0.05);
+}
+
+.disabled\:text-black\/30:disabled {
+  color: rgb(0 0 0 / 0.3);
 }
 
 .disabled\:opacity-30:disabled {

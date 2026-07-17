@@ -44,9 +44,13 @@ function stageChip(o) {
 }
 
 export async function pipelinePage(routeFn) {
-  let estimators = [], commTypes = [];
+  let estimators = [], commTypes = [], pipelineStatuses = [];
   try { estimators = await api(`/estimates/estimators`); } catch (_) { estimators = []; }
-  try { commTypes = (await api(`/quoting/lookup-values`)).communication_type || []; } catch (_) { commTypes = []; }
+  try {
+    const lv = await api(`/quoting/lookup-values`);
+    commTypes = lv.communication_type || [];
+    pipelineStatuses = (lv.estimate_pipeline_status || []).map(o => o.key);
+  } catch (_) {}
 
   const body = `
     <div class="w-full">
@@ -55,10 +59,11 @@ export async function pipelinePage(routeFn) {
           <p class="text-xs text-black/50">RFQ → quote → sent → won/lost. Historical rows carry their Rolling-Revenue summary + a link to the QuickBooks estimate; the detailed quoting-metrics <b>workbook lives in Google Drive</b> (the “Metrics ↗” link). New quotes are built in-app via <b>Start quote</b> and feed the row live.</p></div>
         <button id="pNew" class="btn-primary text-sm px-4 py-2">+ New opportunity</button>
       </div>
-      <div id="pMetrics" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4"></div>
-      <div class="card p-3 sm:p-4">
-        <div class="flex items-center gap-2 mb-3 flex-wrap" id="pFilters"></div>
-        <div id="pList" class="text-sm text-black/40 py-6">Loading…</div>
+      <div id="pMetrics" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3"></div>
+      <div class="card p-3 sm:p-4 flex flex-col overflow-hidden" style="height: calc(100vh - 235px); min-height: 420px;">
+        <div class="flex items-center gap-2 mb-3 flex-wrap shrink-0" id="pFilters"></div>
+        <div id="pList" class="flex-1 overflow-auto text-sm text-black/40">Loading…</div>
+        <div id="pPager" class="shrink-0"></div>
       </div>
     </div>`;
   setShell({ title: "", subtitle: "", bodyHtml: body, showLogout: true, routeFn });
@@ -77,6 +82,7 @@ export async function pipelinePage(routeFn) {
   const PAGE = 100;
   const metricsEl = document.getElementById("pMetrics");
   const listEl = document.getElementById("pList");
+  const pagerEl = document.getElementById("pPager");
   const filtersEl = document.getElementById("pFilters");
 
   const chip = (label, val, sub = "") =>
@@ -107,11 +113,21 @@ export async function pipelinePage(routeFn) {
     return `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
   };
 
-  const statusCell = (o) => {
-    const cur = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
-    const opts = Object.entries(STATUS_META).map(([k, v]) =>
-      `<option value="${k}" ${k === o.status ? "selected" : ""}>${v.label}</option>`).join("");
-    return `<select data-status="${o.id}" class="text-[10px] font-semibold rounded-full px-1.5 py-0.5 border-0 ${cur.cls} cursor-pointer">${opts}</select>`;
+  // Stage cell: the editable win-probability status (OPI's 20/80% system) drives
+  // the row; the lifecycle stage (received/quoting/sent/won/lost) is derived and
+  // shown as a small badge below.
+  const stageCell = (o) => {
+    const p = /^(\d+)%/.exec(o.pipeline_status || "");
+    const pn = p ? Number(p[1]) : null;
+    const selCls = pn == null ? "bg-slate-100 text-slate-700"
+      : pn >= 100 ? "bg-emerald-100 text-emerald-800" : pn >= 60 ? "bg-blue-100 text-blue-800"
+      : pn >= 40 ? "bg-indigo-100 text-indigo-800" : pn >= 20 ? "bg-amber-100 text-amber-800"
+      : "bg-black/10 text-black/50";
+    const opts = `<option value=""></option>` + pipelineStatuses.map(s =>
+      `<option value="${escapeHtml(s)}" ${s === o.pipeline_status ? "selected" : ""}>${escapeHtml(s.replace(/\s*>.*$/, ""))}</option>`).join("");
+    const m = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
+    return `<select data-pstatus="${o.id}" title="Win-probability status" class="text-[10px] font-semibold rounded px-1 py-0.5 border-0 max-w-[8.5rem] ${selCls} cursor-pointer">${opts}</select>
+      <div class="mt-0.5"><span class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 ${m.cls}" title="Lifecycle stage (derived)">${m.label}</span></div>`;
   };
 
   const num = (v) => (v == null || v === "" ? "—" : Number(v).toLocaleString());
@@ -143,9 +159,9 @@ export async function pipelinePage(routeFn) {
   };
   // Columns mirror the "2. Rolling Revenue" sheet. Each is sortable unless nosort.
   const COLS = [
-    { key: "stage", label: "Stage", td: (o) => `${stageChip(o)}<div class="mt-0.5">${statusCell(o)}</div>` },
+    { key: "stage", label: "Stage", td: (o) => stageCell(o) },
     { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
-    { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <span class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="No matching QuickBooks customer">unlinked</span>` : ""}${o.contact_name ? `<div class="text-[10px] text-black/40">${escapeHtml(o.contact_name)}</div>` : ""}` },
+    { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}${o.contact_name ? `<div class="text-[10px] text-black/40">${escapeHtml(o.contact_name)}</div>` : ""}` },
     { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}` },
     { key: "quoted_by", label: "By", cls: "text-black/60", td: (o) => escapeHtml(dash(o.quoted_by || o.estimator_name)) },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
@@ -200,7 +216,11 @@ export async function pipelinePage(routeFn) {
       `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
       `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search…" class="input text-xs py-1 px-2 ml-auto w-52">` +
       `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>`;
-    filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => { statusFilter = b.getAttribute("data-sf"); page = 0; renderFilters(); render(); }));
+    filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
+      const k = b.getAttribute("data-sf");
+      statusFilter = (k && k === statusFilter) ? "" : k;  // click the active pill → back to All
+      page = 0; renderFilters(); render();
+    }));
     filtersEl.querySelector("[data-stage]").addEventListener("change", (e) => { stageFilter = e.target.value; page = 0; render(); });
     filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => { unlinkedOnly = !unlinkedOnly; page = 0; renderFilters(); render(); });
     const sb = filtersEl.querySelector("[data-search]");
@@ -214,41 +234,52 @@ export async function pipelinePage(routeFn) {
     const total = rows.length;
     const countEl = filtersEl.querySelector("[data-count]");
     if (countEl) countEl.textContent = `${total.toLocaleString()} of ${allRows.length.toLocaleString()}`;
-    if (!total) { listEl.innerHTML = `<div class="text-black/45 py-4 text-sm">No opportunities match. ${searchQ || stageFilter || unlinkedOnly ? "Adjust the filters." : "Click “New opportunity” to log an RFQ."}</div>`; return; }
+    if (!total) { listEl.innerHTML = `<div class="text-black/45 py-4 text-sm">No opportunities match. ${searchQ || stageFilter || unlinkedOnly ? "Adjust the filters." : "Click “New opportunity” to log an RFQ."}</div>`; pagerEl.innerHTML = ""; return; }
     const pages = Math.ceil(total / PAGE);
     if (page >= pages) page = pages - 1;
     const slice = rows.slice(page * PAGE, page * PAGE + PAGE);
     const from = page * PAGE + 1, to = page * PAGE + slice.length;
-    const pager = total > PAGE ? `
-      <div class="flex items-center justify-between mt-3 text-xs text-black/50">
-        <span>Showing <b>${from.toLocaleString()}–${to.toLocaleString()}</b> of <b>${total.toLocaleString()}</b></span>
-        <div class="flex gap-2">
-          <button data-pg="prev" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page <= 0 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">← Prev</button>
-          <span class="px-1 py-1">Page ${page + 1} / ${pages}</span>
-          <button data-pg="next" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page >= pages - 1 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">Next →</button>
-        </div></div>` : "";
+    // Table fills the card; header sticks, body scrolls vertically, min-width
+    // drives the horizontal scrollbar (mirrors the Customers table).
     listEl.innerHTML = `
-      <div class="overflow-x-auto"><table class="w-full text-xs">
-        <thead><tr class="text-left text-black/45 border-b border-black/10">
-          ${COLS.map(c => `<th class="py-2 pr-3 font-bold whitespace-nowrap ${c.align === "right" ? "text-right" : ""} ${c.nosort ? "" : "cursor-pointer select-none hover:text-black/70"}" ${c.nosort ? "" : `data-sort="${c.key}"`}>${c.label}${c.nosort ? "" : arrow(c.key)}</th>`).join("")}
-          <th class="py-2 font-bold text-right"></th></tr></thead>
+      <table class="w-full text-xs" style="min-width:1180px;">
+        <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
+          ${COLS.map(c => `<th class="py-2 pr-3 font-bold whitespace-nowrap bg-white ${c.align === "right" ? "text-right" : ""} ${c.nosort ? "" : "cursor-pointer select-none hover:text-black/70"}" ${c.nosort ? "" : `data-sort="${c.key}"`}>${c.label}${c.nosort ? "" : arrow(c.key)}</th>`).join("")}
+          <th class="py-2 font-bold text-right bg-white"></th></tr></thead>
         <tbody>${slice.map(o => `
           <tr class="border-b border-black/5 hover:bg-black/[0.02] align-top">
             ${COLS.map(c => `<td class="py-1.5 pr-3 ${c.align === "right" ? "text-right" : ""} ${c.cls || ""}">${c.td(o)}</td>`).join("")}
             <td class="py-1.5 text-right"><button data-del="${o.id}" title="Delete" class="text-red-600 font-semibold hover:underline">Delete</button></td>
           </tr>`).join("")}
-        </tbody></table></div>${pager}`;
+        </tbody></table>`;
+    pagerEl.innerHTML = total > PAGE ? `
+      <div class="flex items-center justify-between pt-2 mt-1 border-t border-black/5 text-xs text-black/50">
+        <span>Showing <b>${from.toLocaleString()}–${to.toLocaleString()}</b> of <b>${total.toLocaleString()}</b></span>
+        <div class="flex gap-2 items-center">
+          <button data-pg="prev" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page <= 0 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">← Prev</button>
+          <span class="px-1 py-1">Page ${page + 1} / ${pages}</span>
+          <button data-pg="next" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page >= pages - 1 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">Next →</button>
+        </div></div>` : `<div class="pt-2 mt-1 border-t border-black/5 text-[11px] text-black/40">${total.toLocaleString()} rows</div>`;
     listEl.querySelectorAll("[data-sort]").forEach(th => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
-    listEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
+    pagerEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
       page = b.getAttribute("data-pg") === "next" ? page + 1 : Math.max(0, page - 1);
-      render(); listEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      render(); listEl.scrollTop = 0;
     }));
-    listEl.querySelectorAll("[data-status]").forEach(sel => sel.addEventListener("change", async () => {
-      const id = sel.getAttribute("data-status");
+    listEl.querySelectorAll("[data-pstatus]").forEach(sel => sel.addEventListener("change", async () => {
+      const id = sel.getAttribute("data-pstatus");
       const opp = allRows.find(o => String(o.id) === id);
-      if (sel.value === "won") { openLinkProjectModal(opp, () => { loadMetrics(); load(); }, () => render()); return; }
-      try { await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ status: sel.value }) }); if (opp) opp.status = sel.value; loadMetrics(); render(); }
-      catch (err) { alert(err.message); }
+      const pv = sel.value || null;
+      // "Won"/"Red Flag" → the won handoff (link the QBO project)
+      if (pv && (/won/i.test(pv) || /red flag/i.test(pv))) {
+        try { await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ pipeline_status: pv }) }); if (opp) { opp.pipeline_status = pv; opp.status = "won"; } } catch (err) { alert(err.message); return; }
+        openLinkProjectModal(opp, () => { loadMetrics(); load(); }, () => { loadMetrics(); render(); });
+        return;
+      }
+      try {
+        const r = await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ pipeline_status: pv }) });
+        if (opp && r.opportunity) { opp.pipeline_status = r.opportunity.pipeline_status; opp.status = r.opportunity.status; }
+        loadMetrics(); render();
+      } catch (err) { alert(err.message); }
     }));
     listEl.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Delete this opportunity?")) return;
@@ -278,6 +309,13 @@ export async function pipelinePage(routeFn) {
       const v = url.trim() || null;
       try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ workbook_url: v }) }); opp.workbook_url = v; render(); }
       catch (err) { alert(err.message); }
+    }));
+    listEl.querySelectorAll("[data-linkcust]").forEach(b => b.addEventListener("click", () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-linkcust"));
+      linkCustomerModal(opp, (updated) => {
+        if (updated) { const i = allRows.findIndex(o => o.id === updated.id); if (i >= 0) allRows[i] = updated; }
+        render();
+      });
     }));
   };
 
@@ -407,6 +445,37 @@ function startQuoteModal(opp, onDone) {
       close(); onDone && onDone();
       location.hash = `#/estimate/${sel.value}`;
     } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+  });
+}
+
+// ── Link an unlinked opportunity to a QBO customer ───────────────────────────
+function linkCustomerModal(opp, onDone) {
+  let customer = null;
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+      <div class="text-base font-bold text-ink-900 mb-1">Link to a customer</div>
+      <div class="text-xs text-black/50 mb-3">Rolling-Revenue name: <b>${escapeHtml(opp.customer_name || "—")}</b>. Pick the matching QuickBooks customer.</div>
+      <div data-cust class="mb-3"></div>
+      <div class="flex items-center justify-end gap-2">
+        <span data-msg class="text-xs font-semibold mr-auto"></span>
+        <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+        <button data-save class="btn-primary text-sm px-4 py-1.5">Link</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-cancel]").addEventListener("click", close);
+  const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
+  customerCombobox(overlay.querySelector("[data-cust]"), { onPick: (c) => { customer = c; } });
+  overlay.querySelector("[data-save]").addEventListener("click", async () => {
+    if (!customer) return setMsg("Pick a customer.", false);
+    try {
+      const r = await api(`/opportunities/${opp.id}/link-customer`, { method: "POST", body: JSON.stringify({ customer_qbo_id: customer.qbo_id }) });
+      close(); onDone && onDone(r.opportunity);
+    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch {} setMsg(d, false); }
   });
 }
 
@@ -561,7 +630,7 @@ function newOpportunityModal({ estimators, onSaved }) {
         <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Contact</div>
           <div class="flex gap-2">
             <select data-contact class="input text-sm py-1.5 flex-1" disabled><option value="">Pick a customer first</option></select>
-            <button data-newcontact class="rounded-lg border border-black/15 px-2.5 py-1 text-xs font-semibold hover:bg-black/5 whitespace-nowrap" disabled>+ New</button>
+            <button data-newcontact class="rounded-lg border border-black/15 px-2.5 py-1 text-xs font-semibold text-ink-900 hover:bg-black/5 whitespace-nowrap disabled:text-black/30" disabled>+ New</button>
           </div></label>
         <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Job / description</div><input data-f="title" class="input text-sm py-1.5 w-full" placeholder="e.g. Rack install — Odessa TX"></label>
         <div class="grid grid-cols-2 gap-2">

@@ -25,6 +25,19 @@ DECIDED_STATUSES = ("won", "lost", "declined")
 ALL_STATUSES = OPEN_STATUSES + DECIDED_STATUSES
 
 
+def _lifecycle_from_stage(pstat):
+    """Map the granular win-probability stage (estimate_pipeline_status lookup)
+    onto the lifecycle status. Matches the Rolling-Revenue import mapping."""
+    p = (pstat or "").lower()
+    if "won" in p or "red flag" in p:
+        return "won"
+    if "lost" in p:
+        return "lost"
+    if "inactive" in p:
+        return "declined"
+    return "sent"   # 20/40/60/80% verbal — a quote exists, awaiting decision
+
+
 def _require(user):
     if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_ESTIMATE)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -305,6 +318,7 @@ class OpportunityPatch(BaseModel):
     estimator_user_id: Optional[int] = None
     quote_number: Optional[str] = None
     status: Optional[str] = None
+    pipeline_status: Optional[str] = None  # granular win-probability stage (OPI's 20/80% system)
     project_qbo_id: Optional[str] = None   # link the won opportunity to its QBO project ("" to unlink)
     app_estimate_id: Optional[int] = None  # link an existing quoting-metrics estimate (0/null to unlink)
     workbook_url: Optional[str] = None     # Google-Drive link to the (external) quoting-metrics workbook
@@ -333,10 +347,14 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
                                {"p": fields["project_qbo_id"]}).scalar()
             if not okp:
                 raise HTTPException(status_code=400, detail="project_qbo_id is not a project")
+        # OPI manages RFQs by the granular win-probability stage (pipeline_status);
+        # setting it derives the lifecycle status (unless status is set explicitly).
+        if "pipeline_status" in fields and "status" not in fields:
+            fields["status"] = _lifecycle_from_stage(fields["pipeline_status"])
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
                 "target_end_date", "estimator_user_id", "quote_number", "status",
-                "project_qbo_id", "notes", "app_estimate_id", "workbook_url",
-                "discounted_contract_value"}
+                "pipeline_status", "project_qbo_id", "notes", "app_estimate_id",
+                "workbook_url", "discounted_contract_value"}
         nullable = ("rfq_received_date", "target_start_date", "target_end_date",
                     "project_qbo_id", "app_estimate_id", "workbook_url",
                     "discounted_contract_value")
@@ -505,6 +523,27 @@ def link_quote(opp_id: int, body: LinkQuote, user=Depends(get_current_user)):
         conn.execute(text(f"UPDATE opportunities SET {', '.join(sets)} WHERE id=:id"),
                      {"eid": body.app_estimate_id, "id": opp_id})
     return {"ok": True, "estimate_id": body.app_estimate_id}
+
+
+class LinkCustomer(BaseModel):
+    customer_qbo_id: str
+
+
+@router.post("/{opp_id}/link-customer")
+def link_customer(opp_id: int, body: LinkCustomer, user=Depends(get_current_user)):
+    """Resolve a QBO customer and attach it to an opportunity — for the ~5% of
+    seeded rows whose customer name didn't auto-match (the 'unlinked' badge)."""
+    _require(user)
+    with engine.begin() as conn:
+        cust = _resolve_customer(conn, body.customer_qbo_id)
+        if not cust:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        n = conn.execute(text("UPDATE opportunities SET qbo_customer_id=:cid WHERE id=:id"),
+                         {"cid": cust["id"], "id": opp_id}).rowcount
+        if not n:
+            raise HTTPException(status_code=404, detail="Opportunity not found")
+        row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp_id}).mappings().first()
+    return {"opportunity": _row(row)}
 
 
 @router.get("/by-estimate/{app_estimate_id}")
