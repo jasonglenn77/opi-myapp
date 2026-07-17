@@ -122,7 +122,7 @@ def list_opportunities(status: Optional[str] = None, customer_qbo_id: Optional[s
             "OR o.title COLLATE utf8mb4_unicode_ci LIKE :q "
             "OR o.quote_number COLLATE utf8mb4_unicode_ci LIKE :q)")
         params["q"] = f"%{q}%"
-    limit = max(1, min(int(limit), 1000))
+    limit = max(1, min(int(limit), 5000))
     offset = max(0, int(offset))
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     # Seeded rows share a created_at, so order by the RFQ/received date (then quote#).

@@ -1343,6 +1343,10 @@ option {
   width: 1.25rem;
 }
 
+.w-52 {
+  width: 13rem;
+}
+
 .w-56 {
   width: 14rem;
 }
@@ -1462,6 +1466,10 @@ option {
 
 .max-w-\[12rem\] {
   max-width: 12rem;
+}
+
+.max-w-\[16rem\] {
+  max-width: 16rem;
 }
 
 .max-w-\[220px\] {

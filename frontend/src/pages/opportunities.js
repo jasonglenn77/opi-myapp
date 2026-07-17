@@ -62,11 +62,18 @@ export async function pipelinePage(routeFn) {
     </div>`;
   setShell({ title: "", subtitle: "", bodyHtml: body, showLogout: true, routeFn });
 
-  let statusFilter = "open";   // 2,900+ historical rows — default to the working pipeline
+  // Client-side model: fetch all rows once, then filter/sort/paginate in JS
+  // (same pattern as the Contacts/Assignment tables). ~3k rows is fine in memory
+  // and makes sorting + column filtering instant.
+  let allRows = [];
+  let statusFilter = "open";   // lifecycle bucket; historical rows default hidden
+  let stageFilter = "";        // granular win-probability stage (pipeline_status)
   let searchQ = "";
   let unlinkedOnly = false;    // rows whose customer didn't resolve to a QBO customer
-  let offset = 0;
-  const PAGE = 200;
+  let sortKey = "rfq_received_date";
+  let sortDir = "desc";
+  let page = 0;
+  const PAGE = 100;
   const metricsEl = document.getElementById("pMetrics");
   const listEl = document.getElementById("pList");
   const filtersEl = document.getElementById("pFilters");
@@ -89,116 +96,150 @@ export async function pipelinePage(routeFn) {
     } catch (_) { metricsEl.innerHTML = ""; }
   };
 
-  const renderFilters = () => {
-    const opts = [["open", "Open"], ...Object.entries(STATUS_META).map(([k, v]) => [k, v.label]), ["", "All"]];
-    filtersEl.innerHTML =
-      opts.map(([k, label]) =>
-        `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("") +
-      `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
-      `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search customer / job / quote #…"
-              class="input text-xs py-1 px-2 ml-auto w-64">`;
-    filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
-      statusFilter = b.getAttribute("data-sf"); offset = 0; renderFilters(); loadList();
-    }));
-    filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => {
-      unlinkedOnly = !unlinkedOnly; offset = 0; renderFilters(); loadList();
-    });
-    const sb = filtersEl.querySelector("[data-search]");
-    let t = null;
-    sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); offset = 0; loadList(); }, 250); });
-    // keep focus after re-render
-    if (document.activeElement === sb) sb.focus();
-  };
-
   const quoteCell = (o) => {
     if (o.app_estimate_id)
-      return `<a href="#/estimate/${o.app_estimate_id}" class="text-xs font-semibold text-blue-700 hover:underline whitespace-nowrap">Open quote →</a>`;
+      return `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap">Open quote →</a>`;
     if (!o.customer_qbo_id)
-      return `<span class="text-xs text-black/25" title="Link a QuickBooks customer first">—</span>`;
-    return `<button data-startq="${o.id}" class="text-xs font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
+      return `<span class="text-black/25" title="Link a QuickBooks customer first">—</span>`;
+    return `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
   };
 
   const statusCell = (o) => {
     const cur = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
     const opts = Object.entries(STATUS_META).map(([k, v]) =>
       `<option value="${k}" ${k === o.status ? "selected" : ""}>${v.label}</option>`).join("");
-    return `<select data-status="${o.id}" class="text-[11px] font-semibold rounded-full px-2 py-0.5 border-0 ${cur.cls} cursor-pointer">${opts}</select>`;
+    return `<select data-status="${o.id}" class="text-[10px] font-semibold rounded-full px-1.5 py-0.5 border-0 ${cur.cls} cursor-pointer">${opts}</select>`;
   };
 
-  const loadList = async () => {
-    let d;
-    const qs = new URLSearchParams();
-    if (statusFilter) qs.set("status", statusFilter);
-    if (searchQ) qs.set("q", searchQ);
-    if (unlinkedOnly) qs.set("unlinked", "1");
-    qs.set("limit", PAGE); qs.set("offset", offset);
-    try { d = await api(`/opportunities?${qs.toString()}`); }
-    catch (e) { listEl.innerHTML = `<div class="text-red-700">Failed to load pipeline.</div>`; return; }
-    const rows = d.opportunities || [];
-    const total = d.total ?? rows.length;
-    if (!rows.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No opportunities${searchQ ? " match your search" : statusFilter ? " in this stage" : " yet"}. Click “New opportunity” to log an RFQ.</div>`; return; }
-    const from = offset + 1, to = offset + rows.length;
+  const num = (v) => (v == null || v === "" ? "—" : Number(v).toLocaleString());
+  // Columns mirror the "2. Rolling Revenue" sheet. Each is sortable unless nosort.
+  const COLS = [
+    { key: "stage", label: "Stage", td: (o) => `${stageChip(o)}<div class="mt-0.5">${statusCell(o)}</div>` },
+    { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
+    { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <span class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="No matching QuickBooks customer">unlinked</span>` : ""}${o.contact_name ? `<div class="text-[10px] text-black/40">${escapeHtml(o.contact_name)}</div>` : ""}` },
+    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}` },
+    { key: "quoted_by", label: "By", cls: "text-black/60", td: (o) => escapeHtml(dash(o.quoted_by || o.estimator_name)) },
+    { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
+    { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
+    { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
+    { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => money(o.contract_value) },
+    { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
+    { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
+    { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
+  ];
+
+  const NUMERIC = new Set(["labor_days", "travel_days", "ohp_pct", "ohp_amount", "contract_value", "order_value", "total_revisions"]);
+  const sortVal = (o, key) => {
+    if (key === "stage") return (o.pipeline_status || o.status || "").toLowerCase();
+    if (NUMERIC.has(key)) { const n = Number(o[key]); return Number.isFinite(n) ? n : -Infinity; }
+    return (o[key] ?? "").toString().toLowerCase();
+  };
+  const OPEN = new Set(["received", "quoting", "sent"]);
+  const visible = () => {
+    const q = searchQ.toLowerCase();
+    let out = allRows.filter(o => {
+      if (statusFilter === "open") { if (!OPEN.has(o.status)) return false; }
+      else if (statusFilter && o.status !== statusFilter) return false;
+      if (stageFilter && o.pipeline_status !== stageFilter) return false;
+      if (unlinkedOnly && o.customer_qbo_id) return false;
+      if (q && !(`${o.customer_name || ""} ${o.title || ""} ${o.quote_number || ""} ${o.contact_name || ""} ${o.quoted_by || ""}`).toLowerCase().includes(q)) return false;
+      return true;
+    });
+    out.sort((a, b) => { const av = sortVal(a, sortKey), bv = sortVal(b, sortKey); return (av < bv ? -1 : av > bv ? 1 : 0) * (sortDir === "asc" ? 1 : -1); });
+    return out;
+  };
+
+  const arrow = (k) => sortKey !== k ? "" : (sortDir === "asc" ? " ▲" : " ▼");
+  const onHeaderClick = (k) => {
+    if (sortKey !== k) { sortKey = k; sortDir = "asc"; }
+    else if (sortDir === "asc") sortDir = "desc";
+    else { sortKey = "rfq_received_date"; sortDir = "desc"; }   // 3rd click resets
+    page = 0; render();
+  };
+
+  const renderFilters = () => {
+    const stages = [...new Set(allRows.map(o => o.pipeline_status).filter(Boolean))].sort();
+    const pills = [["open", "Open"], ...Object.entries(STATUS_META).map(([k, v]) => [k, v.label]), ["", "All"]];
+    filtersEl.innerHTML =
+      pills.map(([k, label]) =>
+        `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("") +
+      `<select data-stage class="input text-xs py-1 px-2 max-w-[16rem]"><option value="">All stages</option>${stages.map(s => `<option value="${escapeHtml(s)}" ${stageFilter === s ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select>` +
+      `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
+      `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search…" class="input text-xs py-1 px-2 ml-auto w-52">` +
+      `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>`;
+    filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => { statusFilter = b.getAttribute("data-sf"); page = 0; renderFilters(); render(); }));
+    filtersEl.querySelector("[data-stage]").addEventListener("change", (e) => { stageFilter = e.target.value; page = 0; render(); });
+    filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => { unlinkedOnly = !unlinkedOnly; page = 0; renderFilters(); render(); });
+    const sb = filtersEl.querySelector("[data-search]");
+    let t = null;
+    sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); page = 0; render(); }, 200); });
+    if (document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute("data-search") != null) sb.focus();
+  };
+
+  const render = () => {
+    const rows = visible();
+    const total = rows.length;
+    const countEl = filtersEl.querySelector("[data-count]");
+    if (countEl) countEl.textContent = `${total.toLocaleString()} of ${allRows.length.toLocaleString()}`;
+    if (!total) { listEl.innerHTML = `<div class="text-black/45 py-4 text-sm">No opportunities match. ${searchQ || stageFilter || unlinkedOnly ? "Adjust the filters." : "Click “New opportunity” to log an RFQ."}</div>`; return; }
+    const pages = Math.ceil(total / PAGE);
+    if (page >= pages) page = pages - 1;
+    const slice = rows.slice(page * PAGE, page * PAGE + PAGE);
+    const from = page * PAGE + 1, to = page * PAGE + slice.length;
     const pager = total > PAGE ? `
       <div class="flex items-center justify-between mt-3 text-xs text-black/50">
-        <span>Showing <b>${from}–${to}</b> of <b>${total.toLocaleString()}</b></span>
+        <span>Showing <b>${from.toLocaleString()}–${to.toLocaleString()}</b> of <b>${total.toLocaleString()}</b></span>
         <div class="flex gap-2">
-          <button data-pg="prev" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${offset <= 0 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">← Prev</button>
-          <button data-pg="next" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${to >= total ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">Next →</button>
-        </div></div>` : `<div class="mt-2 text-xs text-black/40">${total.toLocaleString()} total</div>`;
+          <button data-pg="prev" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page <= 0 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">← Prev</button>
+          <span class="px-1 py-1">Page ${page + 1} / ${pages}</span>
+          <button data-pg="next" class="rounded-lg border border-black/15 px-2.5 py-1 font-semibold ${page >= pages - 1 ? "opacity-40 pointer-events-none" : "hover:bg-black/5"}">Next →</button>
+        </div></div>` : "";
     listEl.innerHTML = `
-      <div class="overflow-x-auto"><table class="w-full text-sm">
+      <div class="overflow-x-auto"><table class="w-full text-xs">
         <thead><tr class="text-left text-black/45 border-b border-black/10">
-          <th class="py-2 pr-3 font-bold">Quote #</th><th class="py-2 pr-3 font-bold">Customer</th>
-          <th class="py-2 pr-3 font-bold">Job</th><th class="py-2 pr-3 font-bold">Stage</th>
-          <th class="py-2 pr-3 font-bold text-right">Value</th>
-          <th class="py-2 pr-3 font-bold">RFQ</th><th class="py-2 pr-3 font-bold">By</th>
-          <th class="py-2 pr-3 font-bold">Quote</th>
+          ${COLS.map(c => `<th class="py-2 pr-3 font-bold whitespace-nowrap ${c.align === "right" ? "text-right" : ""} ${c.nosort ? "" : "cursor-pointer select-none hover:text-black/70"}" ${c.nosort ? "" : `data-sort="${c.key}"`}>${c.label}${c.nosort ? "" : arrow(c.key)}</th>`).join("")}
           <th class="py-2 font-bold text-right"></th></tr></thead>
-        <tbody>${rows.map(o => `
-          <tr class="border-b border-black/5 hover:bg-black/[0.015]">
-            <td class="py-1.5 pr-3 font-semibold text-ink-900 tabular-nums">${escapeHtml(dash(o.quote_number))}</td>
-            <td class="py-1.5 pr-3 font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}${!o.customer_qbo_id && o.customer_name ? ` <span class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="No matching QuickBooks customer — revisit to link">unlinked</span>` : ""}${o.contact_name ? `<div class="text-[10px] text-black/40 font-normal">${escapeHtml(o.contact_name)}</div>` : ""}</td>
-            <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}</td>
-            <td class="py-1.5 pr-3">${stageChip(o)}<div class="mt-0.5">${statusCell(o)}</div></td>
-            <td class="py-1.5 pr-3 text-right tabular-nums text-black/70">${money(o.contract_value)}</td>
-            <td class="py-1.5 pr-3 text-black/60 tabular-nums">${ymd(o.rfq_received_date)}</td>
-            <td class="py-1.5 pr-3 text-black/60">${escapeHtml(dash(o.quoted_by || o.estimator_name))}</td>
-            <td class="py-1.5 pr-3">${quoteCell(o)}</td>
-            <td class="py-1.5 text-right"><button data-del="${o.id}" title="Delete" class="text-xs text-red-600 font-semibold hover:underline">Delete</button></td>
+        <tbody>${slice.map(o => `
+          <tr class="border-b border-black/5 hover:bg-black/[0.02] align-top">
+            ${COLS.map(c => `<td class="py-1.5 pr-3 ${c.align === "right" ? "text-right" : ""} ${c.cls || ""}">${c.td(o)}</td>`).join("")}
+            <td class="py-1.5 text-right"><button data-del="${o.id}" title="Delete" class="text-red-600 font-semibold hover:underline">Delete</button></td>
           </tr>`).join("")}
         </tbody></table></div>${pager}`;
+    listEl.querySelectorAll("[data-sort]").forEach(th => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
     listEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
-      offset = b.getAttribute("data-pg") === "next" ? offset + PAGE : Math.max(0, offset - PAGE);
-      loadList(); listEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      page = b.getAttribute("data-pg") === "next" ? page + 1 : Math.max(0, page - 1);
+      render(); listEl.scrollIntoView({ behavior: "smooth", block: "start" });
     }));
     listEl.querySelectorAll("[data-status]").forEach(sel => sel.addEventListener("change", async () => {
       const id = sel.getAttribute("data-status");
-      if (sel.value === "won") {
-        // Won → prompt to link the QBO project (the handoff), or mark won to link later.
-        const opp = rows.find(o => String(o.id) === id);
-        openLinkProjectModal(opp, () => { loadMetrics(); loadList(); }, () => loadList());
-        return;
-      }
-      try { await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ status: sel.value }) }); loadMetrics(); loadList(); }
+      const opp = allRows.find(o => String(o.id) === id);
+      if (sel.value === "won") { openLinkProjectModal(opp, () => { loadMetrics(); load(); }, () => render()); return; }
+      try { await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ status: sel.value }) }); if (opp) opp.status = sel.value; loadMetrics(); render(); }
       catch (err) { alert(err.message); }
     }));
     listEl.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Delete this opportunity?")) return;
-      try { await api(`/opportunities/${b.getAttribute("data-del")}`, { method: "DELETE" }); loadMetrics(); loadList(); }
+      const id = b.getAttribute("data-del");
+      try { await api(`/opportunities/${id}`, { method: "DELETE" }); allRows = allRows.filter(o => String(o.id) !== id); loadMetrics(); render(); }
       catch (err) { alert(err.message); }
     }));
     listEl.querySelectorAll("[data-startq]").forEach(b => b.addEventListener("click", () => {
-      const opp = rows.find(o => String(o.id) === b.getAttribute("data-startq"));
-      startQuoteModal(opp, () => { loadMetrics(); loadList(); });
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-startq"));
+      startQuoteModal(opp, () => { loadMetrics(); load(); });
     }));
   };
 
-  document.getElementById("pNew").addEventListener("click", () =>
-    newOpportunityModal({ estimators, onSaved: () => { loadMetrics(); loadList(); } }));
+  const load = async () => {
+    try { const d = await api(`/opportunities?limit=5000`); allRows = d.opportunities || []; }
+    catch (e) { listEl.innerHTML = `<div class="text-red-700 text-sm">Failed to load pipeline.</div>`; return; }
+    renderFilters(); render();
+  };
 
-  renderFilters();
+  document.getElementById("pNew").addEventListener("click", () =>
+    newOpportunityModal({ estimators, onSaved: () => { loadMetrics(); load(); } }));
+
   loadMetrics();
-  loadList();
+  load();
 }
 
 // ── Won → link to QBO project (the handoff) ─────────────────────────────────
