@@ -96,7 +96,8 @@ def _row(r):
 
 @router.get("")
 def list_opportunities(status: Optional[str] = None, customer_qbo_id: Optional[str] = None,
-                       q: Optional[str] = None, limit: int = 200, offset: int = 0,
+                       q: Optional[str] = None, unlinked: Optional[int] = None,
+                       limit: int = 200, offset: int = 0,
                        user=Depends(get_current_user)):
     _require(user)
     where, params = [], {}
@@ -106,6 +107,8 @@ def list_opportunities(status: Optional[str] = None, customer_qbo_id: Optional[s
     elif status in ALL_STATUSES:
         where.append("o.status = :st")
         params["st"] = status
+    if unlinked:
+        where.append("o.qbo_customer_id IS NULL")
     if customer_qbo_id:
         where.append("qc.qbo_id = :cq")
         params["cq"] = str(customer_qbo_id)

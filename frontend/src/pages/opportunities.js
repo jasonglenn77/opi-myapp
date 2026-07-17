@@ -64,6 +64,7 @@ export async function pipelinePage(routeFn) {
 
   let statusFilter = "open";   // 2,900+ historical rows — default to the working pipeline
   let searchQ = "";
+  let unlinkedOnly = false;    // rows whose customer didn't resolve to a QBO customer
   let offset = 0;
   const PAGE = 200;
   const metricsEl = document.getElementById("pMetrics");
@@ -93,11 +94,15 @@ export async function pipelinePage(routeFn) {
     filtersEl.innerHTML =
       opts.map(([k, label]) =>
         `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("") +
+      `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
       `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search customer / job / quote #…"
               class="input text-xs py-1 px-2 ml-auto w-64">`;
     filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
       statusFilter = b.getAttribute("data-sf"); offset = 0; renderFilters(); loadList();
     }));
+    filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => {
+      unlinkedOnly = !unlinkedOnly; offset = 0; renderFilters(); loadList();
+    });
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
     sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); offset = 0; loadList(); }, 250); });
@@ -117,6 +122,7 @@ export async function pipelinePage(routeFn) {
     const qs = new URLSearchParams();
     if (statusFilter) qs.set("status", statusFilter);
     if (searchQ) qs.set("q", searchQ);
+    if (unlinkedOnly) qs.set("unlinked", "1");
     qs.set("limit", PAGE); qs.set("offset", offset);
     try { d = await api(`/opportunities?${qs.toString()}`); }
     catch (e) { listEl.innerHTML = `<div class="text-red-700">Failed to load pipeline.</div>`; return; }
@@ -142,7 +148,7 @@ export async function pipelinePage(routeFn) {
         <tbody>${rows.map(o => `
           <tr class="border-b border-black/5 hover:bg-black/[0.015]">
             <td class="py-1.5 pr-3 font-semibold text-ink-900 tabular-nums">${escapeHtml(dash(o.quote_number))}</td>
-            <td class="py-1.5 pr-3 font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}${o.contact_name ? `<div class="text-[10px] text-black/40 font-normal">${escapeHtml(o.contact_name)}</div>` : ""}</td>
+            <td class="py-1.5 pr-3 font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}${!o.customer_qbo_id && o.customer_name ? ` <span class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="No matching QuickBooks customer — revisit to link">unlinked</span>` : ""}${o.contact_name ? `<div class="text-[10px] text-black/40 font-normal">${escapeHtml(o.contact_name)}</div>` : ""}</td>
             <td class="py-1.5 pr-3 text-black/70">${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}</td>
             <td class="py-1.5 pr-3">${stageChip(o)}<div class="mt-0.5">${statusCell(o)}</div></td>
             <td class="py-1.5 pr-3 text-right tabular-nums text-black/70">${money(o.contract_value)}</td>
