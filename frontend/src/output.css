@@ -2919,6 +2919,11 @@ option {
   color: rgb(22 101 52 / var(--tw-text-opacity, 1));
 }
 
+.text-indigo-700 {
+  --tw-text-opacity: 1;
+  color: rgb(67 56 202 / var(--tw-text-opacity, 1));
+}
+
 .text-indigo-700\/70 {
   color: rgb(67 56 202 / 0.7);
 }

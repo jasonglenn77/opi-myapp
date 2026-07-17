@@ -99,7 +99,9 @@ export async function pipelinePage(routeFn) {
 
   const quoteCell = (o) => {
     if (o.app_estimate_id)
-      return `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap">Open quote →</a>`;
+      return `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap" title="In-app quoting-metrics estimate">Open quote →</a>`;
+    if (o.qbo_estimate_id)
+      return `<a href="#/entity/estimate/${escapeHtml(o.qbo_estimate_id)}" class="font-semibold text-indigo-700 hover:underline whitespace-nowrap" title="Open the QuickBooks estimate (the sent quote)">QBO estimate →</a>`;
     if (!o.customer_qbo_id)
       return `<span class="text-black/25" title="Link a QuickBooks customer first">—</span>`;
     return `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
