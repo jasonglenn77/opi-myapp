@@ -43,12 +43,13 @@ FOLDER_TREE = [
     {"key": "9_marketing", "label": "9 Marketing", "stage": "project"},
 ]
 
-VALID_TYPES = ("estimate", "job", "project")
+VALID_TYPES = ("estimate", "job", "project", "opportunity")
 
 
 def _gated_tree(entity_type: str):
-    """Estimates: estimate-stage folders only. Jobs/projects: all folders."""
-    if entity_type == "estimate":
+    """Estimates + opportunities: estimate-stage folders (RFQ, Drawings, BOM,
+    Quotes, POs). Jobs/projects: all folders."""
+    if entity_type in ("estimate", "opportunity"):
         return [n for n in FOLDER_TREE if n.get("stage") == "estimate"]
     return FOLDER_TREE
 
@@ -93,6 +94,17 @@ def _entity_meta(conn, etype, eid):
         if not r:
             return None
         nm = (f"#{r['doc_number']} {r['memo'] or ''}").strip() if r["doc_number"] else (r["memo"] or "Estimate")
+        return {"name": nm, "customer_name": r["cust"]}
+    if etype == "opportunity":
+        r = conn.execute(text("""
+            SELECT o.title, o.quote_number,
+                   COALESCE(qc.display_name, o.customer_name_raw) AS cust
+            FROM opportunities o LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
+            WHERE o.id = :id
+        """), {"id": eid}).mappings().first()
+        if not r:
+            return None
+        nm = r["title"] or (f"Quote #{r['quote_number']}" if r["quote_number"] else "Opportunity")
         return {"name": nm, "customer_name": r["cust"]}
     return None
 

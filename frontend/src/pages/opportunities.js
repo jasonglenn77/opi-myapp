@@ -137,6 +137,7 @@ export async function pipelinePage(routeFn) {
     { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
     { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
     { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
+    { key: "doc_count", label: "Docs", align: "center", td: (o) => `<button data-docs="${o.id}" class="inline-flex items-center gap-0.5 font-semibold ${o.doc_count ? "text-blue-700" : "text-black/40"} hover:underline" title="Attachments (RFQ, drawings, quote, PO)">📎${o.doc_count || 0}</button>` },
   ];
 
   const NUMERIC = new Set(["labor_days", "travel_days", "ohp_pct", "ohp_amount", "contract_value", "order_value", "total_revisions"]);
@@ -244,6 +245,10 @@ export async function pipelinePage(routeFn) {
         if (updated) { const i = allRows.findIndex(o => o.id === updated.id); if (i >= 0) allRows[i] = updated; }
         render();
       });
+    }));
+    listEl.querySelectorAll("[data-docs]").forEach(b => b.addEventListener("click", () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-docs"));
+      opportunityDocsModal(opp, (count) => { if (count != null) opp.doc_count = count; render(); });
     }));
   };
 
@@ -442,6 +447,76 @@ function contactLogModal(opp, commTypes, onDone) {
   });
 
   loadHistory();
+}
+
+// ── Opportunity attachments (RFQ / drawings / quote PDF / PO) modal ──────────
+function opportunityDocsModal(opp, onDone) {
+  const fmtBytes = (n) => { n = Number(n) || 0; if (n < 1024) return n + " B"; if (n < 1048576) return (n / 1024).toFixed(0) + " KB"; return (n / 1048576).toFixed(1) + " MB"; };
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[90vh] overflow-auto">
+      <div class="text-base font-bold text-ink-900 mb-0.5">Attachments</div>
+      <div class="text-xs text-black/50 mb-3">${escapeHtml(opp.customer_name || "")}${opp.title ? " — " + escapeHtml(opp.title) : ""}</div>
+      <div data-body class="text-sm text-black/50">Loading…</div>
+      <div class="mt-4 flex justify-end">
+        <button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const bodyEl = overlay.querySelector("[data-body]");
+  let total = 0;
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+
+  const load = async () => {
+    let data;
+    try { data = await api(`/documents/opportunity/${opp.id}`); }
+    catch (e) { bodyEl.innerHTML = `<div class="text-red-600 py-2">Couldn't load attachments.</div>`; return; }
+    const files = data.files || {};
+    total = Object.values(files).reduce((s, arr) => s + arr.length, 0);
+    onDone && onDone(total);
+    bodyEl.innerHTML = (data.tree || []).map(node => {
+      const list = files[node.key] || [];
+      return `
+        <div class="border border-black/10 rounded-xl mb-2">
+          <div class="flex items-center justify-between px-3 py-2 bg-black/[0.02]">
+            <span class="text-xs font-bold text-ink-900">${escapeHtml(node.label)}${list.length ? ` <span class="text-black/40 font-normal">(${list.length})</span>` : ""}</span>
+            <label class="inline-flex items-center gap-1 rounded-lg border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-black/70 hover:bg-black/5 cursor-pointer">
+              Upload<input type="file" class="hidden" data-up="${escapeHtml(node.key)}"></label>
+          </div>
+          ${list.length ? `<div class="divide-y divide-black/5">${list.map(f => `
+            <div class="flex items-center justify-between px-3 py-1.5">
+              <button data-dl="${f.id}" class="text-left text-blue-700 hover:underline truncate mr-2">${escapeHtml(f.filename)}</button>
+              <div class="flex items-center gap-2 shrink-0">
+                <span class="text-[10px] text-black/40">${fmtBytes(f.size_bytes)}</span>
+                <button data-rm="${f.id}" class="text-[10px] text-black/35 hover:text-red-600 hover:underline">remove</button>
+              </div>
+            </div>`).join("")}</div>` : `<div class="px-3 py-2 text-[11px] text-black/35">No files.</div>`}
+        </div>`;
+    }).join("");
+
+    bodyEl.querySelectorAll("[data-up]").forEach(inp => inp.addEventListener("change", async () => {
+      const folder = inp.getAttribute("data-up");
+      const file = inp.files[0]; if (!file) return;
+      const fd = new FormData(); fd.append("file", file);
+      const label = inp.closest("label"); const orig = label.innerHTML;
+      label.innerHTML = "Uploading…";
+      try { await api(`/documents/opportunity/${opp.id}?folder=${encodeURIComponent(folder)}`, { method: "POST", body: fd }); load(); }
+      catch (err) { alert(err?.message || "Upload failed"); label.innerHTML = orig; }
+    }));
+    bodyEl.querySelectorAll("[data-dl]").forEach(b => b.addEventListener("click", async () => {
+      try { const r = await api(`/documents/file/${b.getAttribute("data-dl")}/url`); window.open(r.url, "_blank"); }
+      catch (err) { alert(err?.message || "Couldn't open file"); }
+    }));
+    bodyEl.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("Remove this file?")) return;
+      try { await api(`/documents/file/${b.getAttribute("data-rm")}`, { method: "DELETE" }); load(); }
+      catch (err) { alert(err?.message || "Delete failed"); }
+    }));
+  };
+  load();
 }
 
 // ── New Opportunity (RFQ intake) modal ──────────────────────────────────────

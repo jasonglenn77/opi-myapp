@@ -52,12 +52,16 @@ _SELECT = """
            o.contract_value, o.order_value, o.ohp_amount, o.ohp_pct,
            o.order_date, o.quote_sent_date, o.expected_decision_date,
            o.received_at, o.quoting_started_at, o.sent_at, o.decided_at,
-           o.notes, o.created_at, o.updated_at
+           o.notes, o.created_at, o.updated_at,
+           COALESCE(dc.c, 0) AS doc_count
     FROM opportunities o
     LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
     LEFT JOIN contacts ct ON ct.id = o.contact_id
     LEFT JOIN users u ON u.id = o.estimator_user_id
     LEFT JOIN qbo_customers pj ON pj.qbo_id = o.project_qbo_id COLLATE utf8mb4_unicode_ci
+    LEFT JOIN (SELECT entity_id, COUNT(*) AS c FROM documents
+               WHERE entity_type='opportunity' GROUP BY entity_id) dc
+           ON dc.entity_id COLLATE utf8mb4_unicode_ci = CAST(o.id AS CHAR) COLLATE utf8mb4_unicode_ci
 """
 
 
@@ -94,6 +98,7 @@ def _row(r):
         "sent_at": str(r["sent_at"]) if r["sent_at"] else None,
         "decided_at": str(r["decided_at"]) if r["decided_at"] else None,
         "notes": r["notes"],
+        "doc_count": int(r["doc_count"] or 0),
         "created_at": str(r["created_at"]) if r["created_at"] else None,
     }
 
