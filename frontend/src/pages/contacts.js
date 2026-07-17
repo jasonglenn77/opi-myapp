@@ -34,7 +34,7 @@ export function customerCombobox(host, { onPick, placeholder = "Search customerâ
       const d = await api(`/contacts/customer-options?q=${encodeURIComponent(q)}&limit=40`);
       const list = d.customers || [];
       menu.innerHTML = list.length
-        ? list.map(c => `<div class="px-3 py-1.5 text-sm hover:bg-blue-50 cursor-pointer" data-qbo="${escapeHtml(c.qbo_id)}">${escapeHtml(c.name)}</div>`).join("")
+        ? list.map(c => `<div class="px-3 py-1.5 text-sm text-ink-900 hover:bg-blue-50 cursor-pointer" data-qbo="${escapeHtml(c.qbo_id)}">${escapeHtml(c.name)}</div>`).join("")
         : `<div class="px-3 py-1.5 text-xs text-black/40">No matches</div>`;
       menu.classList.remove("hidden");
       menu.querySelectorAll("[data-qbo]").forEach(el => el.addEventListener("mousedown", (e) => {
