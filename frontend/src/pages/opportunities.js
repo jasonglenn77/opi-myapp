@@ -89,6 +89,7 @@ export async function pipelinePage(routeFn) {
   let stageFilter = "";        // granular win-probability stage (pipeline_status)
   let searchQ = "";
   let unlinkedOnly = false;    // rows whose customer didn't resolve to a QBO customer
+  let showInactive = false;    // archived rows are hidden until asked for
   let sortKey = "rfq_received_date";
   let sortDir = "desc";
   let page = 0;
@@ -203,6 +204,7 @@ export async function pipelinePage(routeFn) {
       if (statusFilter === "open") { if (!OPEN.has(o.status)) return false; }
       else if (statusFilter && o.status !== statusFilter) return false;
       if (stageFilter && o.pipeline_status !== stageFilter) return false;
+      if (!showInactive && o.active === false) return false;   // archived rows hidden by default
       if (unlinkedOnly && o.customer_qbo_id) return false;
       if (q && !(`${o.customer_name || ""} ${o.title || ""} ${o.quote_number || ""} ${o.contact_name || ""} ${o.quoted_by || ""}`).toLowerCase().includes(q)) return false;
       if (!passColFilters(o)) return false;
@@ -277,6 +279,7 @@ export async function pipelinePage(routeFn) {
         `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("") +
       `<select data-stage class="input text-xs py-1 px-2 max-w-[16rem]"><option value="">All stages</option>${stages.map(s => `<option value="${escapeHtml(s)}" ${stageFilter === s ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select>` +
       `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
+      `<button data-showinactive class="rounded-full px-2.5 py-1 text-xs font-semibold border ${showInactive ? "bg-slate-600 text-white border-slate-600" : "border-black/15 text-black/50 hover:bg-black/5"}" title="Include archived (inactive) opportunities">Inactive</button>` +
       `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search…" class="input text-xs py-1 px-2 ml-auto w-52">` +
       `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>`;
     filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
@@ -286,6 +289,7 @@ export async function pipelinePage(routeFn) {
     }));
     filtersEl.querySelector("[data-stage]").addEventListener("change", (e) => { stageFilter = e.target.value; page = 0; render(); });
     filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => { unlinkedOnly = !unlinkedOnly; page = 0; renderFilters(); render(); });
+    filtersEl.querySelector("[data-showinactive]").addEventListener("click", () => { showInactive = !showInactive; page = 0; renderFilters(); render(); });
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
     sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); page = 0; render(); }, 200); });
@@ -314,9 +318,12 @@ export async function pipelinePage(routeFn) {
             </span></th>`).join("")}
           <th class="py-2 font-bold text-right bg-white"></th></tr></thead>
         <tbody>${slice.map(o => `
-          <tr class="border-b border-black/5 hover:bg-black/[0.02] align-top">
+          <tr class="border-b border-black/5 hover:bg-black/[0.02] align-top ${o.active === false ? "opacity-50" : ""}">
             ${COLS.map(c => `<td class="py-1.5 pr-3 ${c.align === "right" ? "text-right" : ""} ${c.cls || ""}">${c.td(o)}</td>`).join("")}
-            <td class="py-1.5 text-right"><button data-del="${o.id}" title="Delete" class="text-red-600 font-semibold hover:underline">Delete</button></td>
+            <td class="py-1.5 text-right whitespace-nowrap">
+              <button data-edit="${o.id}" class="text-blue-600 font-semibold hover:underline">Edit</button>
+              <button data-inactive="${o.id}" data-act="${o.active === false ? 0 : 1}" class="ml-2 font-semibold hover:underline ${o.active === false ? "text-emerald-700" : "text-amber-700"}">${o.active === false ? "Reactivate" : "Deactivate"}</button>
+            </td>
           </tr>`).join("")}
         </tbody></table>`;
     pagerEl.innerHTML = total > PAGE ? `
@@ -349,11 +356,23 @@ export async function pipelinePage(routeFn) {
         loadMetrics(); render();
       } catch (err) { alert(err.message); }
     }));
-    listEl.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
-      if (!confirm("Delete this opportunity?")) return;
-      const id = b.getAttribute("data-del");
-      try { await api(`/opportunities/${id}`, { method: "DELETE" }); allRows = allRows.filter(o => String(o.id) !== id); loadMetrics(); render(); }
-      catch (err) { alert(err.message); }
+    listEl.querySelectorAll("[data-inactive]").forEach(b => b.addEventListener("click", async () => {
+      const id = b.getAttribute("data-inactive");
+      const makeActive = b.getAttribute("data-act") === "0";   // currently inactive → reactivate
+      const opp = allRows.find(o => String(o.id) === id);
+      if (!makeActive && !confirm("Mark this opportunity inactive? It stays available under the “Inactive” filter.")) return;
+      try {
+        await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ active: makeActive }) });
+        if (opp) opp.active = makeActive;
+        loadMetrics(); render();
+      } catch (err) { alert(err.message); }
+    }));
+    listEl.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-edit"));
+      editOpportunityModal(opp, (updated) => {
+        if (updated) { const i = allRows.findIndex(o => o.id === updated.id); if (i >= 0) allRows[i] = updated; }
+        render();
+      });
     }));
     listEl.querySelectorAll("[data-startq]").forEach(b => b.addEventListener("click", () => {
       const opp = allRows.find(o => String(o.id) === b.getAttribute("data-startq"));
@@ -519,6 +538,69 @@ function startQuoteModal(opp, onDone) {
       close(); onDone && onDone();
       location.hash = `#/estimate/${sel.value}`;
     } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+  });
+}
+
+// ── Edit an opportunity (job / contact / notes / dates) ──────────────────────
+function editOpportunityModal(opp, onDone) {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[90vh] overflow-auto">
+      <div class="text-base font-bold text-ink-900 mb-0.5">Edit opportunity</div>
+      <div class="text-xs text-black/50 mb-3">${escapeHtml(opp.customer_name || "")}${opp.quote_number ? ` · Quote #${escapeHtml(opp.quote_number)}` : ""}</div>
+      <div class="space-y-3">
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Job / description</div>
+          <input data-f="title" class="input text-sm py-1.5 w-full" value="${escapeHtml(opp.title || "")}"></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Contact</div>
+          <select data-f="contact_id" class="input text-sm py-1.5 w-full"><option value="">— loading —</option></select>
+          <div class="text-[10px] text-black/40 mt-0.5">${opp.contact_name ? "Current: " + escapeHtml(opp.contact_name) : "No contact set"}</div></label>
+        <div class="grid grid-cols-2 gap-2">
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target start</div>
+            <input data-f="target_start_date" type="date" class="input text-sm py-1.5 w-full" value="${escapeHtml((opp.target_start_date || "").slice(0,10))}"></label>
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target end</div>
+            <input data-f="target_end_date" type="date" class="input text-sm py-1.5 w-full" value="${escapeHtml((opp.target_end_date || "").slice(0,10))}"></label>
+        </div>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Notes</div>
+          <textarea data-f="notes" rows="3" class="input text-sm py-1.5 w-full">${escapeHtml(opp.notes || "")}</textarea></label>
+      </div>
+      <div class="mt-4 flex items-center justify-end gap-2">
+        <span data-msg class="text-xs font-semibold mr-auto"></span>
+        <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+        <button data-save class="btn-primary text-sm px-4 py-1.5">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-cancel]").addEventListener("click", close);
+  const val = (f) => overlay.querySelector(`[data-f="${f}"]`);
+  const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
+
+  // contacts for this customer
+  (async () => {
+    const sel = val("contact_id");
+    if (!opp.customer_qbo_id) { sel.innerHTML = `<option value="">— link a customer first —</option>`; sel.disabled = true; return; }
+    try {
+      const list = (await api(`/contacts/customer/${encodeURIComponent(opp.customer_qbo_id)}`)).contacts || [];
+      sel.innerHTML = `<option value="">— none —</option>` + list.map(c =>
+        `<option value="${c.id}" ${String(c.id) === String(opp.contact_id || "") ? "selected" : ""}>${escapeHtml(c.full_name || "contact")}</option>`).join("");
+    } catch (_) { sel.innerHTML = `<option value="">Couldn't load contacts</option>`; }
+  })();
+
+  overlay.querySelector("[data-save]").addEventListener("click", async () => {
+    const payload = {
+      title: val("title").value.trim() || null,
+      contact_id: val("contact_id").value ? Number(val("contact_id").value) : null,
+      target_start_date: val("target_start_date").value || null,
+      target_end_date: val("target_end_date").value || null,
+      notes: val("notes").value.trim() || null,
+    };
+    setMsg("Saving…", true);
+    try {
+      const r = await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      close(); onDone && onDone(r.opportunity);
+    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch {} setMsg(d, false); }
   });
 }
 

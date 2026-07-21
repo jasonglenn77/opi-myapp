@@ -60,7 +60,7 @@ _SELECT = """
            o.estimator_user_id,
            TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS estimator_name,
            u.email AS estimator_email,
-           o.status, o.pipeline_status, o.quoted_by,
+           o.status, o.active, o.pipeline_status, o.quoted_by,
            o.last_contact_date, o.follow_up_count, o.last_comm_type, o.most_recent_revision_date,
            o.city, o.state, o.labor_days, o.travel_days, o.total_revisions,
            o.contract_value, o.order_value, o.ohp_amount, o.ohp_pct,
@@ -98,7 +98,7 @@ def _row(r):
         "metrics_source": r["metrics_source"],
         "project_qbo_id": r["project_qbo_id"], "project_name": r["project_name"],
         "estimator_user_id": r["estimator_user_id"], "estimator_name": est if r["estimator_user_id"] else None,
-        "status": r["status"], "pipeline_status": r["pipeline_status"], "quoted_by": r["quoted_by"],
+        "status": r["status"], "active": bool(r["active"]), "pipeline_status": r["pipeline_status"], "quoted_by": r["quoted_by"],
         "last_contact_date": str(r["last_contact_date"]) if r["last_contact_date"] else None,
         "follow_up_count": r["follow_up_count"], "last_comm_type": r["last_comm_type"],
         "most_recent_revision_date": str(r["most_recent_revision_date"]) if r["most_recent_revision_date"] else None,
@@ -319,6 +319,7 @@ class OpportunityPatch(BaseModel):
     quote_number: Optional[str] = None
     status: Optional[str] = None
     pipeline_status: Optional[str] = None  # granular win-probability stage (OPI's 20/80% system)
+    active: Optional[bool] = None          # False = archived (mark inactive instead of delete)
     project_qbo_id: Optional[str] = None   # link the won opportunity to its QBO project ("" to unlink)
     app_estimate_id: Optional[int] = None  # link an existing quoting-metrics estimate (0/null to unlink)
     workbook_url: Optional[str] = None     # Google-Drive link to the (external) quoting-metrics workbook
@@ -353,7 +354,7 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
             fields["status"] = _lifecycle_from_stage(fields["pipeline_status"])
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
                 "target_end_date", "estimator_user_id", "quote_number", "status",
-                "pipeline_status", "project_qbo_id", "notes", "app_estimate_id",
+                "pipeline_status", "project_qbo_id", "notes", "app_estimate_id", "active",
                 "workbook_url", "discounted_contract_value"}
         nullable = ("rfq_received_date", "target_start_date", "target_end_date",
                     "project_qbo_id", "app_estimate_id", "workbook_url",
