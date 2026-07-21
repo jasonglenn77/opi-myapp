@@ -9,6 +9,30 @@ from app.db import engine
 
 router = APIRouter(prefix="/api/estimates", tags=["estimates"])
 
+# Values the blank quoting-metrics workbook ships with, so a new quote opens
+# pre-filled the way estimators expect (they only change what's job-specific).
+# Job-specific fields (travel hours, dates, location) are intentionally NOT
+# defaulted. The frontend highlights any field changed away from these.
+ESTIMATE_DEFAULTS = {
+    "equipment_requirement":        "LP (Liquid Propane)",
+    "rack_height":                  "Shorter than 25' (300\")",
+    "crew_count":                   1,
+    "crew_size":                    "Full",
+    "estimate_type":                "Standard",
+    "breaking_out_mobilization":    "No",
+    "rent_wire_guidance_equipment": "Yes",
+    "project_time_budget_adder":    "Yes",
+    "project_time_budget_pct":      5.0,
+    "rack_install_profit_target":   42.0,
+    "wire_guidance_profit_target":  42.0,
+    "rental_rack_profit_target":    30.0,
+    "rental_wire_profit_target":    0.0,
+    "mobilization_profit_target":   -1.5,
+    "mgmt_travel_multiplier":       3.57,
+}
+ESTIMATE_DEFAULT_COLS = ", ".join(ESTIMATE_DEFAULTS)
+ESTIMATE_DEFAULT_VALS = ", ".join(f":{k}" for k in ESTIMATE_DEFAULTS)
+
 
 # ---------------------------------------------------------------------------
 # GET /api/estimates/customers
@@ -230,11 +254,12 @@ def create_estimate(req: EstimateCreate, _user=Depends(get_current_user)):
             if not ok:
                 raise HTTPException(status_code=400, detail="Contact does not belong to this customer")
 
-        result = conn.execute(text("""
-            INSERT INTO estimates (qbo_customer_id, qbo_customer_qbo_id, contact_id, quote_description, status)
-            VALUES (:cid, :qid, :contact, :desc, 'draft')
+        result = conn.execute(text(f"""
+            INSERT INTO estimates (qbo_customer_id, qbo_customer_qbo_id, contact_id, quote_description, status,
+                                   {ESTIMATE_DEFAULT_COLS})
+            VALUES (:cid, :qid, :contact, :desc, 'draft', {ESTIMATE_DEFAULT_VALS})
         """), {"cid": customer["id"], "qid": customer["qbo_id"], "contact": contact_id,
-               "desc": (req.quote_description or None)})
+               "desc": (req.quote_description or None), **ESTIMATE_DEFAULTS})
         return _load_estimate(conn, result.lastrowid)
 
 

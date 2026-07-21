@@ -16,6 +16,7 @@ from sqlalchemy import text, bindparam
 from app.db import engine
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_ESTIMATE
+from app.estimates.routes import ESTIMATE_DEFAULTS, ESTIMATE_DEFAULT_COLS, ESTIMATE_DEFAULT_VALS
 
 router = APIRouter(prefix="/api/opportunities", tags=["opportunities"])
 
@@ -424,13 +425,16 @@ def start_quote(opp_id: int, user=Depends(get_current_user)):
             parts = str(o["contact_name_raw"]).split()
             c_first = parts[0] if parts else None
             c_last = " ".join(parts[1:]) if len(parts) > 1 else None
-        res = conn.execute(text("""
+        res = conn.execute(text(f"""
             INSERT INTO estimates
               (qbo_customer_id, qbo_customer_qbo_id, contact_id, contact_first, contact_last,
                quote_description, quoted_by,
-               project_city, project_state, date_of_request, start_date, quote_number, status)
-            VALUES (:cid,:qid,:contact,:cfirst,:clast,:desc,:by,:city,:state,:req,:start,:qnum,'draft')
-        """), {"cid": cust["id"], "qid": cust["qbo_id"], "contact": o["contact_id"],
+               project_city, project_state, date_of_request, start_date, quote_number, status,
+               {ESTIMATE_DEFAULT_COLS})
+            VALUES (:cid,:qid,:contact,:cfirst,:clast,:desc,:by,:city,:state,:req,:start,:qnum,'draft',
+                    {ESTIMATE_DEFAULT_VALS})
+        """), {**ESTIMATE_DEFAULTS,
+               "cid": cust["id"], "qid": cust["qbo_id"], "contact": o["contact_id"],
                "cfirst": c_first, "clast": c_last,
                "desc": o["title"], "by": o["quoted_by"],
                "city": o["city"], "state": (o["state"] or None) if not o["state"] or len(o["state"]) <= 2 else None,

@@ -13,6 +13,53 @@ import { mountBaseQuotingMetrics } from "./base-quoting-metrics.js";
 import { contactFormModal } from "./contacts.js";
 import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
 
+// The blank quoting-metrics workbook's defaults (mirrors ESTIMATE_DEFAULTS on the
+// backend, which pre-fills them on a new quote). Any General Info field changed
+// away from these gets highlighted, so estimators can see at a glance what they
+// tuned for this job vs. what's still standard.
+const GI_DEFAULTS = {
+  equipment_requirement:        "LP (Liquid Propane)",
+  rack_height:                  "Shorter than 25' (300\")",
+  crew_count:                   1,
+  crew_size:                    "Full",
+  estimate_type:                "Standard",
+  breaking_out_mobilization:    "No",
+  rent_wire_guidance_equipment: "Yes",
+  project_time_budget_adder:    "Yes",
+  project_time_budget_pct:      5,
+  rack_install_profit_target:   42,
+  wire_guidance_profit_target:  42,
+  rental_rack_profit_target:    30,
+  rental_wire_profit_target:    0,
+  mobilization_profit_target:   -1.5,
+  mgmt_travel_multiplier:       3.57,
+};
+const CHANGED_CLS = ["ring-2", "ring-amber-300", "bg-amber-50/60"];
+
+// Flag every General Info input whose value differs from the workbook default.
+function markChangedFields(root) {
+  root.querySelectorAll("[data-est-input]").forEach((el) => {
+    const key = el.getAttribute("data-est-input");
+    if (!(key in GI_DEFAULTS)) return;
+    const def = GI_DEFAULTS[key];
+    const cur = el.value;
+    let changed;
+    if (cur === "" || cur == null) {
+      changed = false;                               // blank = not yet touched
+    } else if (typeof def === "number") {
+      const n = Number(String(cur).replace(/[^0-9.\-]/g, ""));
+      changed = !Number.isFinite(n) || Math.abs(n - def) > 1e-9;
+    } else {
+      changed = String(cur).trim() !== String(def).trim();
+    }
+    el.classList.toggle("ring-2", changed);
+    el.classList.toggle("ring-amber-300", changed);
+    el.classList.toggle("bg-amber-50/60", changed);
+    if (changed) el.title = `Changed from default (${def})`;
+    else if (el.title && el.title.startsWith("Changed from default")) el.title = "";
+  });
+}
+
 // Top-level dispatcher for #/estimate. URL shapes:
 //   #/estimate                          -> customer picker
 //   #/estimate/{id}                     -> defaults to General Info tab
@@ -990,128 +1037,92 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
     // Aggregate row with optional per-set expansion. `valueOf(rollup)` picks
     // the per-set contribution to this row's total. `subRows` are an optional
     // nested breakdown (e.g. Materials + Contract Labor under Rack Install).
+    // A rollup line rendered as a table row: label, one column per enabled set
+    // (Base, Option 1, …) showing that set's contribution, then the total — so
+    // the estimator can see how each total was derived instead of expanding rows.
     const rollupRow = (label, amount, opts = {}) => {
-      const isBold     = opts.bold === true;
-      const isSubRow   = opts.sub === true;
-      const expandKey  = opts.expandKey;
-      const expanded   = expandKey ? expandedRows.has(expandKey) : false;
-      const valueOf    = opts.valueOf;
-      const subRows    = opts.subRows || [];
-
-      const chevron = expandKey
-        ? `<svg class="w-3 h-3 text-black/40 shrink-0 transition-transform ${expanded ? "rotate-90" : ""}" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-             <path d="M9 6l6 6-6 6"/>
-           </svg>`
-        : `<span class="w-3 h-3 inline-block"></span>`;
+      const isBold   = opts.bold === true;
+      const isSubRow = opts.sub === true;
+      const valueOf  = opts.valueOf;
+      const subRows  = opts.subRows || [];
 
       const labelClass = isBold
         ? "font-extrabold uppercase tracking-wide text-black/70"
-        : (isSubRow ? "text-black/55" : "text-black/70");
+        : (isSubRow ? "text-black/55 pl-6" : "text-black/70");
       const valueClass = isBold ? "font-extrabold text-ink-900" : "";
-      const rowClass = [
-        "flex items-baseline justify-between py-1.5",
-        isBold ? "border-t border-black/20 pt-2 mt-1" : "",
-        isSubRow ? "pl-6 text-xs" : "text-sm",
-        expandKey ? "cursor-pointer hover:bg-black/[0.02] -mx-2 px-2 rounded" : "",
-      ].filter(Boolean).join(" ");
+      const sizeClass  = isSubRow ? "text-xs" : "text-sm";
 
-      const headerHtml = `
-        <div class="${rowClass}" ${expandKey ? `data-rollup-toggle="${escapeHtml(expandKey)}"` : ""}>
-          <span class="flex items-baseline gap-1.5">
-            ${expandKey ? chevron : ""}
-            <span class="${labelClass}">${escapeHtml(label)}</span>
-          </span>
-          <span class="tabular-nums ${valueClass}">${fmtMoney(amount)}</span>
-        </div>`;
+      const setCells = enabledSets.map(({ rollup }) =>
+        `<td class="py-1.5 px-2 text-right tabular-nums text-black/50 ${isSubRow ? "text-[11px]" : "text-xs"}">${
+          valueOf ? fmtMoney(valueOf(rollup)) : ""
+        }</td>`).join("");
 
-      // Sub-rows (always shown when present, e.g. Materials/Contract Labor)
+      const row = `
+        <tr class="${isBold ? "border-t border-black/20" : ""}">
+          <td class="py-1.5 pr-3 whitespace-nowrap ${sizeClass} ${labelClass}">${escapeHtml(label)}</td>
+          ${setCells}
+          <td class="py-1.5 pl-3 text-right tabular-nums ${sizeClass} ${valueClass}">${fmtMoney(amount)}</td>
+        </tr>`;
+
       const subRowsHtml = subRows.map(sr =>
-        rollupRow(sr.label, sr.amount, { sub: true, expandKey: sr.expandKey, valueOf: sr.valueOf })
+        rollupRow(sr.label, sr.amount, { sub: true, valueOf: sr.valueOf })
       ).join("");
 
-      // Per-set expansion panel — only present if expandKey + valueOf were
-      // provided. Hidden until the user toggles the row.
-      const expansionHtml = (expandKey && valueOf)
-        ? `<div class="${expanded ? "" : "hidden"} pl-6 pb-1" data-rollup-detail="${escapeHtml(expandKey)}">
-             ${enabledSets.length === 0
-               ? `<div class="text-[11px] italic text-black/40 py-1">No enabled sets contribute.</div>`
-               : enabledSets.map(({ set, rollup }) => `
-                   <div class="flex items-baseline justify-between py-0.5 text-[11px] text-black/55">
-                     <span>${escapeHtml(setLabel(set))}</span>
-                     <span class="tabular-nums">${fmtMoney(valueOf(rollup))}</span>
-                   </div>`).join("")}
-           </div>`
-        : "";
-
-      return headerHtml + subRowsHtml + expansionHtml;
+      return row + subRowsHtml;
     };
 
-    const crossHtml = `
+    // Wraps rollup rows in a table with a per-set column header.
+    const rollupTable = (title, rowsHtml) => `
       <div class="card px-5 py-4">
         <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10">
-          Cost Summary
+          ${escapeHtml(title)}
           <span class="text-[11px] italic text-black/40 font-normal normal-case tracking-normal">
-            (sum across enabled sets · click a row for per-set breakdown)
+            (each enabled set, then the project total)
           </span>
         </div>
-        <div class="pt-3">
-          ${rollupRow("Travel Costs",          cross.travel_costs_total, {
-            expandKey: "travel_costs_total",
-            valueOf: (r) => r.travel_costs_total,
-          })}
-          ${rollupRow("Rack Install (Mat + Labor)", cross.H38, {
-            expandKey: "H38",
-            valueOf: (r) => r.H38,
-            subRows: [
-              { label: "Materials",       amount: cross.H39, expandKey: "H39", valueOf: (r) => r.H39 },
-              { label: "Contract Labor",  amount: cross.H44, expandKey: "H44", valueOf: (r) => r.H44 },
-            ],
-          })}
-          ${rollupRow("Rentals — Rack Install",  cross.H187, {
-            expandKey: "H187", valueOf: (r) => r.H187,
-          })}
-          ${rollupRow("Wire Guidance (Mat + Labor)", cross.H213, {
-            expandKey: "H213",
-            valueOf: (r) => r.H213,
-            subRows: [
-              { label: "Materials",      amount: cross.H214, expandKey: "H214", valueOf: (r) => r.H214 },
-              { label: "Contract Labor", amount: cross.H220, expandKey: "H220", valueOf: (r) => r.H220 },
-            ],
-          })}
-          ${rollupRow("Rentals — Wire Guidance", cross.H226, {
-            expandKey: "H226", valueOf: (r) => r.H226,
-          })}
-          ${rollupRow("Wire Guidance Add'l Items", cross.H248, {
-            expandKey: "H248", valueOf: (r) => r.H248,
-          })}
-          ${rollupRow("Project Total",           cross.grand_total, { bold: true })}
+        <div class="pt-2 overflow-x-auto">
+          <table class="w-full">
+            <thead><tr class="text-[10px] uppercase tracking-wide text-black/40 border-b border-black/5">
+              <th class="text-left py-1 pr-3"></th>
+              ${enabledSets.map(({ set }) => `<th class="py-1 px-2 text-right font-bold whitespace-nowrap">${escapeHtml(setLabel(set))}</th>`).join("")}
+              <th class="py-1 pl-3 text-right font-bold">Total</th>
+            </tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
         </div>
       </div>`;
+
+    const crossHtml = rollupTable("Cost Summary", `
+      ${rollupRow("Travel Costs", cross.travel_costs_total, { valueOf: (r) => r.travel_costs_total })}
+      ${rollupRow("Rack Install (Mat + Labor)", cross.H38, {
+        valueOf: (r) => r.H38,
+        subRows: [
+          { label: "Materials",      amount: cross.H39, valueOf: (r) => r.H39 },
+          { label: "Contract Labor", amount: cross.H44, valueOf: (r) => r.H44 },
+        ],
+      })}
+      ${rollupRow("Rentals — Rack Install", cross.H187, { valueOf: (r) => r.H187 })}
+      ${rollupRow("Wire Guidance (Mat + Labor)", cross.H213, {
+        valueOf: (r) => r.H213,
+        subRows: [
+          { label: "Materials",      amount: cross.H214, valueOf: (r) => r.H214 },
+          { label: "Contract Labor", amount: cross.H220, valueOf: (r) => r.H220 },
+        ],
+      })}
+      ${rollupRow("Rentals — Wire Guidance", cross.H226, { valueOf: (r) => r.H226 })}
+      ${rollupRow("Wire Guidance Add'l Items", cross.H248, { valueOf: (r) => r.H248 })}
+      ${rollupRow("Project Total", cross.grand_total, { bold: true, valueOf: (r) => r.grand_total })}
+    `);
 
     // Travel Costs aggregate card — mirrors the per-set Travel Costs card
     // that lives on Base/Option/PR tabs, but summed across enabled sets and
     // expandable to show each set's contribution.
-    const travelCostsHtml = `
-      <div class="card px-5 py-4">
-        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10">
-          Travel Costs
-          <span class="text-[11px] italic text-black/40 font-normal normal-case tracking-normal">
-            (sum across enabled sets · click a row for per-set breakdown)
-          </span>
-        </div>
-        <div class="pt-3">
-          ${rollupRow("Lodging",          cross.lodging, {
-            expandKey: "lodging", valueOf: (r) => r.lodging,
-          })}
-          ${rollupRow("Mgmt Travel",      cross.mgmt_travel, {
-            expandKey: "mgmt_travel", valueOf: (r) => r.mgmt_travel,
-          })}
-          ${rollupRow("Travel Day Costs", cross.travel_day_costs, {
-            expandKey: "travel_day_costs", valueOf: (r) => r.travel_day_costs,
-          })}
-          ${rollupRow("Travel Costs Total", cross.travel_costs_total, { bold: true })}
-        </div>
-      </div>`;
+    const travelCostsHtml = rollupTable("Travel Costs", `
+      ${rollupRow("Lodging",          cross.lodging,          { valueOf: (r) => r.lodging })}
+      ${rollupRow("Mgmt Travel",      cross.mgmt_travel,      { valueOf: (r) => r.mgmt_travel })}
+      ${rollupRow("Travel Day Costs", cross.travel_day_costs, { valueOf: (r) => r.travel_day_costs })}
+      ${rollupRow("Travel Costs Total", cross.travel_costs_total, { bold: true, valueOf: (r) => r.travel_costs_total })}
+    `);
 
     // Cells migrated from the General Info "Output Variables" / "Results"
     // cards. Pricing/profit uses a simple "price = cost / (1 - profit%)"
@@ -3019,12 +3030,13 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   // fires N times and the chevron appears "stuck."
   container.addEventListener("input", (e) => {
     const el = e.target.closest("[data-est-input]");
-    if (el) syncFromEl(el);
+    if (el) { syncFromEl(el); markChangedFields(container); }
   });
   container.addEventListener("change", (e) => {
     const el = e.target.closest("[data-est-input]");
-    if (el) syncFromEl(el);
+    if (el) { syncFromEl(el); markChangedFields(container); }
   });
+  markChangedFields(container);   // initial pass on the freshly-rendered form
 
   // Date placeholder swap: blank date fields render as text (so the
   // "Select Date" placeholder shows), become a real date picker on focus,
