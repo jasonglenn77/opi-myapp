@@ -147,10 +147,14 @@ def unlock_estimate(estimate_id: int, _user=Depends(get_current_user)):
     return {"ok": True}
 
 
-@router.get("/{estimate_id}/revisions")
-def list_revisions(estimate_id: int, _user=Depends(get_current_user)):
+# NOTE: path is /quote-revisions, NOT /revisions — /{id}/revisions is already the
+# Save-Revision snapshot history (a different feature), and FastAPI resolves
+# same-path routes in declaration order, so /revisions here would shadow it.
+@router.get("/{estimate_id}/quote-revisions")
+def list_quote_revisions(estimate_id: int, _user=Depends(get_current_user)):
     """All revisions of this quote (the estimates sharing its opportunity), newest
-    first, so the estimate page can show the revision history."""
+    first, so the estimate page + pipeline can show the revision history."""
+    cols = "id, revision_no, locked, status, created_at, quote_number, quote_description"
     with engine.connect() as conn:
         opp = conn.execute(text("SELECT opportunity_id, app_estimate_id FROM estimates e "
                                 "LEFT JOIN opportunities o ON o.id = e.opportunity_id WHERE e.id=:id"),
@@ -159,17 +163,18 @@ def list_revisions(estimate_id: int, _user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Estimate not found")
         oid = opp["opportunity_id"]
         if not oid:
-            rows = conn.execute(text("SELECT id, revision_no, locked, status, created_at, quote_number "
-                                     "FROM estimates WHERE id=:id"), {"id": estimate_id}).mappings().all()
+            rows = conn.execute(text(f"SELECT {cols} FROM estimates WHERE id=:id"),
+                                {"id": estimate_id}).mappings().all()
             current = estimate_id
         else:
-            rows = conn.execute(text("SELECT id, revision_no, locked, status, created_at, quote_number "
-                                     "FROM estimates WHERE opportunity_id=:o ORDER BY revision_no DESC, id DESC"),
+            rows = conn.execute(text(f"SELECT {cols} FROM estimates WHERE opportunity_id=:o "
+                                     "ORDER BY revision_no DESC, id DESC"),
                                 {"o": oid}).mappings().all()
             current = opp["app_estimate_id"]
     return {"current_estimate_id": current, "revisions": [{
         "id": r["id"], "revision_no": r["revision_no"], "locked": bool(r["locked"]),
-        "status": r["status"], "quote_number": r["quote_number"], "is_current": r["id"] == current,
+        "status": r["status"], "quote_number": r["quote_number"],
+        "quote_description": r["quote_description"], "is_current": r["id"] == current,
         "created_at": str(r["created_at"]) if r["created_at"] else None,
     } for r in rows]}
 

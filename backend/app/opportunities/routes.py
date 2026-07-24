@@ -69,7 +69,8 @@ _SELECT = """
            o.order_date, o.quote_sent_date, o.expected_decision_date,
            o.received_at, o.quoting_started_at, o.sent_at, o.decided_at,
            o.notes, o.created_at, o.updated_at,
-           COALESCE(dc.c, 0) AS doc_count
+           COALESCE(dc.c, 0) AS doc_count,
+           (SELECT COUNT(*) FROM estimates e2 WHERE e2.opportunity_id = o.id) AS revision_count
     FROM opportunities o
     LEFT JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
     LEFT JOIN contacts ct ON ct.id = o.contact_id
@@ -118,6 +119,7 @@ def _row(r):
         "decided_at": str(r["decided_at"]) if r["decided_at"] else None,
         "notes": r["notes"],
         "doc_count": int(r["doc_count"] or 0),
+        "revision_count": int(r["revision_count"] or 0),
         "created_at": str(r["created_at"]) if r["created_at"] else None,
     }
 

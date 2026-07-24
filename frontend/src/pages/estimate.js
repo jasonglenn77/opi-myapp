@@ -665,7 +665,7 @@ async function openRevisionsModal(estimateId) {
   overlay.querySelector("[data-close]").addEventListener("click", close);
   const body = overlay.querySelector("[data-body]");
   try {
-    const d = await api(`/estimates/${estimateId}/revisions`);
+    const d = await api(`/estimates/${estimateId}/quote-revisions`);
     const rows = d.revisions || [];
     body.innerHTML = rows.map(r => `
       <a href="#/estimate/${r.id}" data-goto class="flex items-center justify-between py-2 px-2 -mx-2 rounded-lg hover:bg-black/[0.03] ${String(r.id) === String(estimateId) ? "bg-blue-50/60" : ""}">

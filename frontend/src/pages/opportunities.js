@@ -94,6 +94,8 @@ export async function pipelinePage(routeFn) {
   let sortDir = "desc";
   let page = 0;
   const PAGE = 100;
+  const expanded = new Set();      // opp ids whose revision sub-rows are open
+  const revCache = new Map();      // opp id → revisions[] (lazy-loaded)
   const metricsEl = document.getElementById("pMetrics");
   const listEl = document.getElementById("pList");
   const pagerEl = document.getElementById("pPager");
@@ -125,6 +127,56 @@ export async function pipelinePage(routeFn) {
     if (!o.customer_qbo_id)
       return `<span class="text-black/25" title="Link a QuickBooks customer first">—</span>`;
     return `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
+  };
+
+  // Expander caret in the Quote cell — present when this opportunity has an in-app
+  // quote (so it has ≥1 revision). Shows the revision count when > 1.
+  const caret = (o) => {
+    if (!o.app_estimate_id) return "";
+    const n = o.revision_count || 1;
+    return `<button data-exp="${o.id}" class="mr-1 align-middle inline-flex items-center gap-0.5 text-black/40 hover:text-blue-700" title="${n} revision${n > 1 ? "s" : ""}">
+      <svg class="size-3 transition-transform ${expanded.has(o.id) ? "rotate-90" : ""}" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+      ${n > 1 ? `<span class="text-[10px] font-bold">${n}</span>` : ""}
+    </button>`;
+  };
+  // One revision line inside the expanded sub-row.
+  const revRow = (o, r) => {
+    const badge = r.is_current
+      ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-emerald-100 text-emerald-700">current</span>`
+      : r.locked ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-slate-200 text-slate-600">🔒 locked</span>`
+      : `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-amber-100 text-amber-700">draft</span>`;
+    return `<div class="flex items-center gap-3 py-1.5 text-xs">
+      <div class="font-bold text-ink-900 w-16 shrink-0">Rev ${r.revision_no}</div>
+      <div class="w-20 shrink-0">${badge}</div>
+      <div class="text-black/55 flex-1 min-w-0 truncate">${escapeHtml(r.quote_description || "—")}</div>
+      <div class="text-black/40 w-16 shrink-0">${escapeHtml(r.status || "")}</div>
+      <div class="text-black/40 tabular-nums w-24 shrink-0">${r.created_at ? escapeHtml(r.created_at.slice(0, 10)) : ""}</div>
+      <a href="#/estimate/${r.id}" class="font-semibold text-blue-700 hover:underline shrink-0">Open →</a>
+      <div class="w-14 shrink-0 text-right">${r.locked ? `<button data-unlockrev="${r.id}" data-opp="${o.id}" class="font-semibold text-amber-700 hover:underline">Unlock</button>` : ""}</div>
+    </div>`;
+  };
+  // The expanded sub-row (spans the whole table) listing this opportunity's revisions.
+  const subRowHtml = (o) => {
+    if (!expanded.has(o.id)) return "";
+    const revs = revCache.get(o.id);
+    const inner = revs == null
+      ? `<div class="text-xs text-black/40 py-2">Loading revisions…</div>`
+      : `<div class="pl-6 max-w-3xl">
+           <div class="flex items-center justify-between mb-1">
+             <div class="text-[10px] font-bold uppercase tracking-wide text-black/40">Revisions · Quote #${escapeHtml(o.quote_number || "—")}</div>
+             <button data-newrev="${o.id}" class="text-[11px] font-semibold text-emerald-700 hover:underline">+ New revision</button>
+           </div>
+           <div class="divide-y divide-black/5">${revs.map(r => revRow(o, r)).join("") || `<div class="text-xs text-black/40 py-2">No revisions.</div>`}</div>
+         </div>`;
+    return `<tr class="bg-slate-50/70 border-b border-black/5"><td colspan="${COLS.length + 1}" class="px-3 py-2">${inner}</td></tr>`;
+  };
+
+  // Lazy-load a row's revisions into the cache.
+  const loadRevs = async (oppId) => {
+    const o = allRows.find(x => x.id === oppId);
+    if (!o || !o.app_estimate_id) { revCache.set(oppId, []); return; }
+    try { const d = await api(`/estimates/${o.app_estimate_id}/quote-revisions`); revCache.set(oppId, d.revisions || []); }
+    catch (_) { revCache.set(oppId, []); }
   };
 
   // Lifecycle stage (received/quoting/sent/won/lost) — derived from the OPI status.
@@ -174,7 +226,7 @@ export async function pipelinePage(routeFn) {
     { key: "stage", label: "Stage", td: (o) => stageBadge(o) },
     { key: "pipeline_status", label: "Status", td: (o) => opiStatusCell(o) },
     { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
-    { key: "quote", label: "Quote", nosort: true, td: (o) => quoteCell(o) },
+    { key: "quote", label: "Quote", nosort: true, td: (o) => caret(o) + quoteCell(o) },
     { key: "quoted_by", label: "By", cls: "text-black/60", td: (o) => escapeHtml(dash(o.quoted_by || o.estimator_name)) },
     { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
     { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
@@ -324,7 +376,7 @@ export async function pipelinePage(routeFn) {
               <button data-edit="${o.id}" class="text-blue-600 font-semibold hover:underline">Edit</button>
               <button data-inactive="${o.id}" data-act="${o.active === false ? 0 : 1}" class="ml-2 font-semibold hover:underline ${o.active === false ? "text-emerald-700" : "text-amber-700"}">${o.active === false ? "Reactivate" : "Deactivate"}</button>
             </td>
-          </tr>`).join("")}
+          </tr>${subRowHtml(o)}`).join("")}
         </tbody></table>`;
     pagerEl.innerHTML = total > PAGE ? `
       <div class="flex items-center justify-between pt-2 mt-1 border-t border-black/5 text-xs text-black/50">
@@ -336,6 +388,31 @@ export async function pipelinePage(routeFn) {
         </div></div>` : `<div class="pt-2 mt-1 border-t border-black/5 text-[11px] text-black/40">${total.toLocaleString()} rows</div>`;
     listEl.querySelectorAll("[data-sort]").forEach(th => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
     listEl.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", (e) => { e.stopPropagation(); openFilterPortal(b.getAttribute("data-filter"), b); }));
+    // Revision expander: toggle the sub-row; lazy-load revisions on first open.
+    listEl.querySelectorAll("[data-exp]").forEach(b => b.addEventListener("click", async () => {
+      const id = Number(b.getAttribute("data-exp"));
+      if (expanded.has(id)) { expanded.delete(id); render(); return; }
+      expanded.add(id); render();               // shows "Loading…"
+      if (!revCache.has(id)) { await loadRevs(id); render(); }
+    }));
+    // + New revision from the pipeline: duplicate current quote → open the new draft.
+    listEl.querySelectorAll("[data-newrev]").forEach(b => b.addEventListener("click", async () => {
+      const id = Number(b.getAttribute("data-newrev"));
+      const o = allRows.find(x => x.id === id);
+      if (!o || !o.app_estimate_id) return;
+      if (!confirm("Create a new revision? This duplicates the current quote, locks the current revision, and opens the new draft.")) return;
+      try {
+        const r = await api(`/estimates/${o.app_estimate_id}/revise`, { method: "POST" });
+        location.hash = `#/estimate/${r.estimate_id}`;
+      } catch (err) { alert(err.message || "Failed to create revision"); }
+    }));
+    // Unlock a superseded revision so it can be edited directly.
+    listEl.querySelectorAll("[data-unlockrev]").forEach(b => b.addEventListener("click", async () => {
+      const rid = b.getAttribute("data-unlockrev");
+      const oppId = Number(b.getAttribute("data-opp"));
+      try { await api(`/estimates/${rid}/unlock`, { method: "POST" }); revCache.delete(oppId); await loadRevs(oppId); render(); }
+      catch (err) { alert(err.message || "Failed to unlock"); }
+    }));
     pagerEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
       page = b.getAttribute("data-pg") === "next" ? page + 1 : Math.max(0, page - 1);
       render(); listEl.scrollTop = 0;
@@ -409,6 +486,7 @@ export async function pipelinePage(routeFn) {
   const load = async () => {
     try { const d = await api(`/opportunities?limit=5000`); allRows = d.opportunities || []; }
     catch (e) { listEl.innerHTML = `<div class="text-red-700 text-sm">Failed to load pipeline.</div>`; return; }
+    expanded.clear(); revCache.clear();   // stale after a reload
     renderFilters(); render();
   };
 
