@@ -397,6 +397,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const projectRentalsSet = metricSets.find(s => s.kind === "project_rentals") || null;
 
+  const isLocked = !!estimate.locked;
   const headerHtml = `
     <div class="card px-5 py-3">
       <div class="flex items-center justify-between gap-3">
@@ -405,13 +406,20 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
           <div class="min-w-0">
             <div class="text-base font-extrabold truncate">${escapeHtml(estimate.customer_display_name || "(Unknown customer)")}</div>
             <div class="text-xs text-black/50 truncate">
-              Estimate #${estimateId}${estimate.customer_email ? " · " + escapeHtml(estimate.customer_email) : ""}
-              · Rev ${estimate.revision_count ?? 0}
+              Quote #${escapeHtml(estimate.quote_number || "—")} · <b>Revision ${estimate.revision_no ?? 1}</b>${estimate.customer_email ? " · " + escapeHtml(estimate.customer_email) : ""}
             </div>
           </div>
         </div>
-        <div class="text-[11px] text-black/40 whitespace-nowrap">B155.1</div>
+        <div class="flex items-center gap-2 shrink-0">
+          ${isLocked
+            ? `<span class="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold px-2 py-1">🔒 Locked</span>
+               <button data-unlock class="rounded-lg border border-amber-300 text-amber-800 text-xs font-semibold px-3 py-1.5 hover:bg-amber-50">Unlock to edit</button>`
+            : ""}
+          <button data-new-revision class="rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-xs font-semibold px-3 py-1.5 hover:bg-blue-100">+ New revision</button>
+          <button data-revisions class="rounded-lg border border-black/15 text-black/60 text-xs font-semibold px-3 py-1.5 hover:bg-black/5">Revisions</button>
+        </div>
       </div>
+      ${isLocked ? `<div class="mt-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">This is a superseded revision — read-only. Use <b>Unlock to edit</b> to reopen it, or <b>+ New revision</b> to duplicate the current quote.</div>` : ""}
     </div>`;
 
   const baseUrl = `#/estimate/${estimateId}`;
@@ -491,6 +499,34 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     window.addEventListener("hashchange", () => {
       if (pageTitleBlock) pageTitleBlock.style.display = "";
     }, { once: true });
+  }
+
+  // ── Revision controls (feedback #1) ────────────────────────────────────────
+  document.querySelector("[data-new-revision]")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (!confirm("Create a new revision? This duplicates the current quote (same quote #, next revision number) and locks this one.")) return;
+    btn.disabled = true; btn.textContent = "Creating…";
+    try {
+      const r = await api(`/estimates/${estimateId}/revise`, { method: "POST" });
+      location.hash = `#/estimate/${r.estimate_id}`;
+    } catch (err) { alert(err?.message || "Failed to create revision"); btn.disabled = false; btn.textContent = "+ New revision"; }
+  });
+  document.querySelector("[data-unlock]")?.addEventListener("click", async (e) => {
+    if (!confirm("Unlock this superseded revision so it can be edited directly? (This does not create a new revision.)")) return;
+    try { await api(`/estimates/${estimateId}/unlock`, { method: "POST" }); location.reload(); }
+    catch (err) { alert(err?.message || "Failed to unlock"); }
+  });
+  document.querySelector("[data-revisions]")?.addEventListener("click", () => openRevisionsModal(estimateId));
+
+  // Locked revisions are read-only: disable data-entry controls in the tab body
+  // (tabs re-render on navigation, so observe and re-apply).
+  if (isLocked) {
+    const tb = document.querySelector("[data-tab-body]");
+    const lockInputs = () => tb?.querySelectorAll("input, select, textarea").forEach(el => { el.disabled = true; });
+    lockInputs();
+    const mo = new MutationObserver(lockInputs);
+    if (tb) mo.observe(tb, { childList: true, subtree: true });
+    window.addEventListener("hashchange", () => mo.disconnect(), { once: true });
   }
 
   // Wire +Add Option / +Project Rentals / × delete-set. POST creates a new
@@ -610,6 +646,37 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   if (tab === "send-qbo") {
     return renderSendToQboTab(tabBody, estimateId, metricSets, estimate);
   }
+}
+
+// ── Revisions history modal ──────────────────────────────────────────────────
+async function openRevisionsModal(estimateId) {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 max-h-[85vh] overflow-auto">
+      <div class="text-base font-bold text-ink-900 mb-0.5">Revisions</div>
+      <div class="text-xs text-black/50 mb-3">Each revision is a separate quoting-metrics under the same quote number. The current revision drives the pipeline row.</div>
+      <div data-body class="text-sm text-black/50">Loading…</div>
+      <div class="mt-4 flex justify-end"><button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Close</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+  const body = overlay.querySelector("[data-body]");
+  try {
+    const d = await api(`/estimates/${estimateId}/revisions`);
+    const rows = d.revisions || [];
+    body.innerHTML = rows.map(r => `
+      <a href="#/estimate/${r.id}" data-goto class="flex items-center justify-between py-2 px-2 -mx-2 rounded-lg hover:bg-black/[0.03] ${String(r.id) === String(estimateId) ? "bg-blue-50/60" : ""}">
+        <div>
+          <div class="font-semibold text-ink-900">Revision ${r.revision_no}${r.is_current ? ` <span class="text-[10px] font-bold uppercase text-emerald-700">current</span>` : ""}${r.locked ? ` <span class="text-[10px]">🔒</span>` : ""}</div>
+          <div class="text-[10px] text-black/40">Quote #${escapeHtml(r.quote_number || "—")} · ${r.status}${r.created_at ? " · " + escapeHtml(r.created_at.slice(0,10)) : ""}</div>
+        </div>
+        <span class="text-[11px] font-semibold ${String(r.id) === String(estimateId) ? "text-black/40" : "text-blue-600"}">${String(r.id) === String(estimateId) ? "viewing" : "open →"}</span>
+      </a>`).join("") || `<div class="text-black/40 py-2">No revisions.</div>`;
+    body.querySelectorAll("[data-goto]").forEach(a => a.addEventListener("click", () => close()));
+  } catch (e) { body.innerHTML = `<div class="text-red-600 py-2">Couldn't load revisions.</div>`; }
 }
 
 // ── Send to QBO tab ──────────────────────────────────────────────────────────

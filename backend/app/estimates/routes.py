@@ -33,6 +33,146 @@ ESTIMATE_DEFAULTS = {
 ESTIMATE_DEFAULT_COLS = ", ".join(ESTIMATE_DEFAULTS)
 ESTIMATE_DEFAULT_VALS = ", ".join(f":{k}" for k in ESTIMATE_DEFAULTS)
 
+# App-minted quote numbers start at 8000 (legacy QBO/Rolling-Revenue numbers top
+# out ~7300), so app-generated quotes are continuous with — but distinct from —
+# the old sequence. Once the app owns the number, a won opportunity uses it to
+# create the QBO project.
+QUOTE_NUMBER_START = 8000
+
+
+def next_quote_number(conn):
+    """Mint the next sequential app quote number (>= 8000), scanning both
+    opportunities and estimates so numbers never collide."""
+    nxt = conn.execute(text(f"""
+        SELECT COALESCE(MAX(n), :start - 1) + 1 FROM (
+            SELECT CAST(quote_number AS UNSIGNED) n FROM opportunities
+              WHERE quote_number REGEXP '^[0-9]+$' AND CAST(quote_number AS UNSIGNED) >= :start
+            UNION ALL
+            SELECT CAST(quote_number AS UNSIGNED) n FROM estimates
+              WHERE quote_number REGEXP '^[0-9]+$' AND CAST(quote_number AS UNSIGNED) >= :start
+        ) t
+    """), {"start": QUOTE_NUMBER_START}).scalar()
+    return str(int(nxt))
+
+
+# Columns copied when duplicating a quoting-metrics into a new revision. Excludes
+# id/timestamps and the QBO-link/ready state (a new revision starts as a fresh draft).
+_EST_COPY = [
+    "opportunity_id", "qbo_customer_id", "qbo_customer_qbo_id", "contact_id", "quote_number",
+    "quote_description", "contact_first", "contact_last", "end_user", "quoted_by", "quote_notes",
+    "date_of_request", "start_date", "project_city", "project_state", "end_date", "one_way_travel_hrs",
+    "equipment_requirement", "rack_height", "project_time_budget_adder", "project_time_budget_pct",
+    "rack_install_profit_target", "rental_rack_profit_target", "mobilization_profit_target", "estimate_type",
+    "breaking_out_mobilization", "rent_wire_guidance_equipment", "crew_count", "crew_size",
+    "wire_guidance_profit_target", "rental_wire_profit_target", "lodging_cost_per_day", "mgmt_travel_multiplier",
+]
+_SET_COPY = [
+    "kind", "label", "sort_order", "is_enabled", "mobilizations", "estimate_type_override",
+    "installation_environment", "wire_guidance_linear_footage", "scissor_lifts_per_crew", "forklifts_per_crew",
+    "scrubbers_per_wire_scope", "saws_per_wire_scope", "rack_install_labor_day_override",
+    "rack_install_project_time_adder", "rack_install_buffer_day_counter", "wire_guidance_labor_day_override",
+    "wire_guidance_project_time_adder", "wire_guidance_buffer_day_counter", "downtime_labor_day_override",
+    "travel_labor_day_override",
+]
+_LINE_COPY = [
+    "section_code", "line_kind", "sort_order", "productivity_rate_id", "rental_rate_id", "label",
+    "qty", "mobilizations", "unit_price", "ext_cost", "std_total", "agg_total", "notes",
+]
+
+
+def _clone_estimate(conn, src_id, overrides):
+    """Deep-copy an estimate (header + metric sets + lines) into a new row.
+    `overrides` replaces/adds columns on the new estimate. Returns the new id."""
+    src = conn.execute(text("SELECT * FROM estimates WHERE id=:id"), {"id": src_id}).mappings().first()
+    if not src:
+        raise HTTPException(status_code=404, detail="Estimate not found")
+    cols = list(_EST_COPY) + list(overrides.keys())
+    params = {c: src[c] for c in _EST_COPY}
+    params.update(overrides)
+    new_id = conn.execute(
+        text(f"INSERT INTO estimates ({', '.join(cols)}) VALUES ({', '.join(':' + c for c in cols)})"),
+        params).lastrowid
+    for s in conn.execute(text("SELECT * FROM quote_metric_sets WHERE estimate_id=:e ORDER BY id"),
+                          {"e": src_id}).mappings().all():
+        sp = {c: s[c] for c in _SET_COPY}
+        sp["eid"] = new_id
+        new_set = conn.execute(
+            text(f"INSERT INTO quote_metric_sets (estimate_id, {', '.join(_SET_COPY)}) "
+                 f"VALUES (:eid, {', '.join(':' + c for c in _SET_COPY)})"), sp).lastrowid
+        for ln in conn.execute(text("SELECT * FROM quote_metric_lines WHERE metric_set_id=:s ORDER BY id"),
+                               {"s": s["id"]}).mappings().all():
+            lp = {c: ln[c] for c in _LINE_COPY}
+            lp["sid"] = new_set
+            conn.execute(text(f"INSERT INTO quote_metric_lines (metric_set_id, {', '.join(_LINE_COPY)}) "
+                              f"VALUES (:sid, {', '.join(':' + c for c in _LINE_COPY)})"), lp)
+    return new_id
+
+
+@router.post("/{estimate_id}/revise")
+def revise_estimate(estimate_id: int, _user=Depends(get_current_user)):
+    """Duplicate this quoting-metrics into a NEW revision (same quote #, rev+1),
+    lock the prior revisions, and point the opportunity at the new one."""
+    with engine.begin() as conn:
+        src = conn.execute(text("SELECT id, opportunity_id, revision_no FROM estimates WHERE id=:id"),
+                           {"id": estimate_id}).mappings().first()
+        if not src:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        opp_id = src["opportunity_id"]
+        if opp_id:
+            mx = conn.execute(text("SELECT COALESCE(MAX(revision_no),0) FROM estimates WHERE opportunity_id=:o"),
+                              {"o": opp_id}).scalar()
+        else:
+            mx = src["revision_no"] or 1
+        new_rev = int(mx) + 1
+        new_id = _clone_estimate(conn, estimate_id,
+                                 {"revision_no": new_rev, "status": "draft", "locked": 0})
+        if opp_id:
+            conn.execute(text("UPDATE estimates SET locked=1 WHERE opportunity_id=:o AND id<>:n"),
+                         {"o": opp_id, "n": new_id})
+            conn.execute(text("UPDATE opportunities SET app_estimate_id=:n WHERE id=:o"),
+                         {"n": new_id, "o": opp_id})
+        else:
+            conn.execute(text("UPDATE estimates SET locked=1 WHERE id=:s"), {"s": estimate_id})
+    return {"estimate_id": new_id, "revision_no": new_rev}
+
+
+@router.post("/{estimate_id}/unlock")
+def unlock_estimate(estimate_id: int, _user=Depends(get_current_user)):
+    """Unlock a superseded revision so it can be edited directly (not a new
+    revision — the estimator explicitly chose to reopen an older quote)."""
+    with engine.begin() as conn:
+        n = conn.execute(text("UPDATE estimates SET locked=0 WHERE id=:id"), {"id": estimate_id}).rowcount
+    if not n:
+        raise HTTPException(status_code=404, detail="Estimate not found")
+    return {"ok": True}
+
+
+@router.get("/{estimate_id}/revisions")
+def list_revisions(estimate_id: int, _user=Depends(get_current_user)):
+    """All revisions of this quote (the estimates sharing its opportunity), newest
+    first, so the estimate page can show the revision history."""
+    with engine.connect() as conn:
+        opp = conn.execute(text("SELECT opportunity_id, app_estimate_id FROM estimates e "
+                                "LEFT JOIN opportunities o ON o.id = e.opportunity_id WHERE e.id=:id"),
+                           {"id": estimate_id}).mappings().first()
+        if not opp:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        oid = opp["opportunity_id"]
+        if not oid:
+            rows = conn.execute(text("SELECT id, revision_no, locked, status, created_at, quote_number "
+                                     "FROM estimates WHERE id=:id"), {"id": estimate_id}).mappings().all()
+            current = estimate_id
+        else:
+            rows = conn.execute(text("SELECT id, revision_no, locked, status, created_at, quote_number "
+                                     "FROM estimates WHERE opportunity_id=:o ORDER BY revision_no DESC, id DESC"),
+                                {"o": oid}).mappings().all()
+            current = opp["app_estimate_id"]
+    return {"current_estimate_id": current, "revisions": [{
+        "id": r["id"], "revision_no": r["revision_no"], "locked": bool(r["locked"]),
+        "status": r["status"], "quote_number": r["quote_number"], "is_current": r["id"] == current,
+        "created_at": str(r["created_at"]) if r["created_at"] else None,
+    } for r in rows]}
+
 
 # ---------------------------------------------------------------------------
 # GET /api/estimates/customers
@@ -647,6 +787,9 @@ def update_estimate(estimate_id: int, req: EstimatePatch, _user=Depends(get_curr
     payload = req.model_dump(exclude_unset=True)
     if not payload:
         return _load_estimate_or_404(estimate_id)
+    with engine.connect() as conn:
+        if conn.execute(text("SELECT locked FROM estimates WHERE id=:id"), {"id": estimate_id}).scalar():
+            raise HTTPException(status_code=409, detail="This revision is locked. Unlock it to edit, or create a new revision.")
 
     set_clauses = []
     params: dict = {"id": estimate_id}

@@ -16,7 +16,8 @@ from sqlalchemy import text, bindparam
 from app.db import engine
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_ESTIMATE
-from app.estimates.routes import ESTIMATE_DEFAULTS, ESTIMATE_DEFAULT_COLS, ESTIMATE_DEFAULT_VALS
+from app.estimates.routes import (ESTIMATE_DEFAULTS, ESTIMATE_DEFAULT_COLS,
+                                  ESTIMATE_DEFAULT_VALS, next_quote_number)
 
 router = APIRouter(prefix="/api/opportunities", tags=["opportunities"])
 
@@ -425,24 +426,32 @@ def start_quote(opp_id: int, user=Depends(get_current_user)):
             parts = str(o["contact_name_raw"]).split()
             c_first = parts[0] if parts else None
             c_last = " ".join(parts[1:]) if len(parts) > 1 else None
+        # App-mint a quote number if this opportunity doesn't already have one
+        # (seeded rows keep their legacy 72xx; new app quotes get 8000+).
+        qnum = o["quote_number"] or next_quote_number(conn)
         res = conn.execute(text(f"""
             INSERT INTO estimates
-              (qbo_customer_id, qbo_customer_qbo_id, contact_id, contact_first, contact_last,
+              (opportunity_id, revision_no,
+               qbo_customer_id, qbo_customer_qbo_id, contact_id, contact_first, contact_last,
                quote_description, quoted_by,
                project_city, project_state, date_of_request, start_date, quote_number, status,
                {ESTIMATE_DEFAULT_COLS})
-            VALUES (:cid,:qid,:contact,:cfirst,:clast,:desc,:by,:city,:state,:req,:start,:qnum,'draft',
+            VALUES (:oid, 1, :cid,:qid,:contact,:cfirst,:clast,:desc,:by,:city,:state,:req,:start,:qnum,'draft',
                     {ESTIMATE_DEFAULT_VALS})
         """), {**ESTIMATE_DEFAULTS,
+               "oid": opp_id,
                "cid": cust["id"], "qid": cust["qbo_id"], "contact": o["contact_id"],
                "cfirst": c_first, "clast": c_last,
                "desc": o["title"], "by": o["quoted_by"],
                "city": o["city"], "state": (o["state"] or None) if not o["state"] or len(o["state"]) <= 2 else None,
                "req": o["rfq_received_date"], "start": o["target_start_date"],
-               "qnum": o["quote_number"]})
+               "qnum": qnum})
         est_id = res.lastrowid
         sets = ["app_estimate_id = :eid"]
         params = {"eid": est_id, "id": opp_id}
+        if not o["quote_number"]:                     # write the minted number back to the opportunity
+            sets.append("quote_number = :qnum")
+            params["qnum"] = qnum
         if o["status"] in ("received",):
             sets.append("status = 'quoting'")
             sets.append("quoting_started_at = COALESCE(quoting_started_at, NOW())")
