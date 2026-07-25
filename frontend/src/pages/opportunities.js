@@ -67,19 +67,31 @@ export async function pipelinePage(routeFn) {
 
   const body = `
     <div class="w-full">
-      <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-        <div><h1 class="text-xl font-extrabold text-ink-900">Pipeline</h1>
-          <p class="text-xs text-black/50">RFQ → quote → sent → won/lost. Historical rows carry their Rolling-Revenue summary + a link to the QuickBooks estimate; the detailed quoting-metrics <b>workbook lives in Google Drive</b> (the “Metrics ↗” link). New quotes are built in-app via <b>Start quote</b> and feed the row live.</p></div>
-        <button id="pNew" class="btn-primary text-sm px-4 py-2">+ New opportunity</button>
-      </div>
-      <div id="pMetrics" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3"></div>
-      <div class="card p-3 sm:p-4 flex flex-col overflow-hidden" style="height: calc(100vh - 235px); min-height: 420px;">
-        <div class="flex items-center gap-2 mb-3 flex-wrap shrink-0" id="pFilters"></div>
+      <div id="pMetrics" class="grid grid-cols-3 lg:grid-cols-6 gap-2 mb-2"></div>
+      <div class="card p-3 flex flex-col overflow-hidden" id="pCard" style="min-height: 340px;">
+        <div class="flex items-center gap-2 mb-2 flex-wrap shrink-0" id="pFilters"></div>
         <div id="pList" class="flex-1 overflow-auto text-sm text-black/40">Loading…</div>
         <div id="pPager" class="shrink-0"></div>
       </div>
     </div>`;
-  setShell({ title: "", subtitle: "", bodyHtml: body, showLogout: true, routeFn });
+  setShell({
+    title: "Pipeline",
+    subtitle: "RFQ → quote → sent → won / lost. New quotes are built in-app via Start quote; the metrics workbook opens in Drive.",
+    bodyHtml: body, showLogout: true, routeFn,
+  });
+
+  // Size the table card to fill exactly the space left in the viewport so the
+  // whole page fits (no page-level vertical scroll) and the table's own
+  // horizontal scrollbar stays visible at the card's bottom edge.
+  const sizeCard = () => {
+    const card = document.getElementById("pCard");
+    if (!card) return;
+    const top = card.getBoundingClientRect().top;
+    // Leave room for the shell's bottom padding (pb-6 ≈ 24px) + a small gap so
+    // the page itself never gains a vertical scrollbar.
+    card.style.height = Math.max(340, window.innerHeight - top - 30) + "px";
+  };
+  window.addEventListener("resize", sizeCard);
 
   // Client-side model: fetch all rows once, then filter/sort/paginate in JS
   // (same pattern as the Contacts/Assignment tables). ~3k rows is fine in memory
@@ -102,9 +114,10 @@ export async function pipelinePage(routeFn) {
   const filtersEl = document.getElementById("pFilters");
 
   const chip = (label, val, sub = "") =>
-    `<div class="rounded-xl border border-black/5 bg-white shadow-sm px-3 py-2">
-       <div class="text-[10px] font-bold uppercase tracking-wide text-black/35">${label}</div>
-       <div class="text-lg font-extrabold text-ink-900">${val}</div>${sub ? `<div class="text-[10px] text-black/40">${sub}</div>` : ""}</div>`;
+    `<div class="rounded-xl border border-black/5 bg-white shadow-sm px-3 py-1.5 flex items-baseline justify-between gap-2">
+       <div class="min-w-0"><div class="text-[9px] font-bold uppercase tracking-wide text-black/35 truncate">${label}</div>
+       ${sub ? `<div class="text-[9px] text-black/40 truncate">${sub}</div>` : ""}</div>
+       <div class="text-base font-extrabold text-ink-900 shrink-0">${val}</div></div>`;
 
   const loadMetrics = async () => {
     try {
@@ -117,6 +130,7 @@ export async function pipelinePage(routeFn) {
         chip("Quote→sent", days(m.avg_days_received_to_sent), "avg prep") +
         chip("Sent→decision", days(m.avg_days_sent_to_decided), "sales cycle");
     } catch (_) { metricsEl.innerHTML = ""; }
+    sizeCard();   // chip heights settled → recompute the card height
   };
 
   const quoteCell = (o) => {
@@ -333,7 +347,8 @@ export async function pipelinePage(routeFn) {
       `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
       `<button data-showinactive class="rounded-full px-2.5 py-1 text-xs font-semibold border ${showInactive ? "bg-slate-600 text-white border-slate-600" : "border-black/15 text-black/50 hover:bg-black/5"}" title="Include archived (inactive) opportunities">Inactive</button>` +
       `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search…" class="input text-xs py-1 px-2 ml-auto w-52">` +
-      `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>`;
+      `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>` +
+      `<button data-new class="btn-primary text-xs px-3 py-1.5 whitespace-nowrap">+ New</button>`;
     filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
       const k = b.getAttribute("data-sf");
       statusFilter = (k && k === statusFilter) ? "" : k;  // click the active pill → back to All
@@ -342,6 +357,8 @@ export async function pipelinePage(routeFn) {
     filtersEl.querySelector("[data-stage]").addEventListener("change", (e) => { stageFilter = e.target.value; page = 0; render(); });
     filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => { unlinkedOnly = !unlinkedOnly; page = 0; renderFilters(); render(); });
     filtersEl.querySelector("[data-showinactive]").addEventListener("click", () => { showInactive = !showInactive; page = 0; renderFilters(); render(); });
+    filtersEl.querySelector("[data-new]").addEventListener("click", () =>
+      newOpportunityModal({ estimators, onSaved: () => { loadMetrics(); load(); } }));
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
     sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); page = 0; render(); }, 200); });
@@ -487,11 +504,8 @@ export async function pipelinePage(routeFn) {
     try { const d = await api(`/opportunities?limit=5000`); allRows = d.opportunities || []; }
     catch (e) { listEl.innerHTML = `<div class="text-red-700 text-sm">Failed to load pipeline.</div>`; return; }
     expanded.clear(); revCache.clear();   // stale after a reload
-    renderFilters(); render();
+    renderFilters(); render(); sizeCard();
   };
-
-  document.getElementById("pNew").addEventListener("click", () =>
-    newOpportunityModal({ estimators, onSaved: () => { loadMetrics(); load(); } }));
 
   listEl.addEventListener("scroll", closeFilterPortal);
   document.addEventListener("mousedown", (e) => {
@@ -501,6 +515,7 @@ export async function pipelinePage(routeFn) {
 
   loadMetrics();
   load();
+  requestAnimationFrame(sizeCard);   // after first paint, once layout settles
 }
 
 // ── Won → link to QBO project (the handoff) ─────────────────────────────────
