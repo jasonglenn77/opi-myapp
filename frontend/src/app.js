@@ -150,7 +150,10 @@ async function route() {
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);
-  if (hash === "#/estimates" || hash.startsWith("#/estimates")) return estimateTrackingPage(route);
+  // Estimates-tracking page retired: the pipeline supersedes estimator/QBO-estimate
+  // tracking, and project estimates get a purpose-built view during the project
+  // flow. The page fn + endpoints/data are kept for that future buildout.
+  if (hash === "#/estimates" || hash.startsWith("#/estimates")) { location.hash = "#/pipeline"; return; }
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return estimatePage(route);
 
   // placeholder pages
