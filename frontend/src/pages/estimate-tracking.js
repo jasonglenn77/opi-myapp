@@ -278,7 +278,7 @@ export async function estimateTrackingPage(routeFn) {
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
               <div class="text-base font-extrabold text-ink-900">Estimates</div>
-              <div class="text-xs text-black/50">Sort &amp; filter columns · edit status/owner inline · expand for contacts. New estimate? <a href="#/estimate" class="text-blue-600 font-semibold hover:underline">Quoting Metrics</a>.</div>
+              <div class="text-xs text-black/50">Sort &amp; filter columns · edit status/owner inline · expand for contacts. New quote? Start it from the <a href="#/pipeline" class="text-blue-600 font-semibold hover:underline">Pipeline</a>.</div>
             </div>
             <div class="flex items-center gap-2 flex-wrap">
               <input id="estSearch" class="input text-xs py-1.5 w-full sm:w-56" placeholder="Search customer, est #…" />

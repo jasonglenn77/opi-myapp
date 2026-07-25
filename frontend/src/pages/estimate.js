@@ -71,7 +71,10 @@ function markChangedFields(root) {
 //   #/base-quoting-metrics              -> legacy URL; redirected to the picker
 export async function estimatePage(routeFn) {
   const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|send-qbo|project-rentals|option\/(\d+)))?\/?$/);
-  if (!m) return renderEstimateList(routeFn);
+  // The standalone quoting-metrics list is retired — the pipeline is the single
+  // front door for quotes. Only the workbook editor (#/estimate/{id}) lives here;
+  // a bare #/estimate redirects to the pipeline.
+  if (!m) { location.hash = "#/pipeline"; return; }
   const estimateId = Number(m[1]);
   const tabPath    = m[2] || "general";
   const tab        = tabPath.split("/")[0];   // "general" | "base" | "review" | "project-rentals" | "option"
@@ -384,7 +387,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
       title: "",
       bodyHtml: `<div class="card px-5 py-4 text-sm text-red-600">
         Failed to load estimate #${estimateId}: ${escapeHtml(err?.message || String(err))}
-        <div class="pt-2"><a href="#/estimate" class="text-blue-600 underline">← Back to customers</a></div>
+        <div class="pt-2"><a href="#/pipeline" class="text-blue-600 underline">← Back to pipeline</a></div>
       </div>`,
       showLogout: true,
       routeFn,
@@ -398,11 +401,16 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   const projectRentalsSet = metricSets.find(s => s.kind === "project_rentals") || null;
 
   const isLocked = !!estimate.locked;
+  // Context-aware back link: quotes that belong to a pipeline opportunity return
+  // to the pipeline (their real origin); orphan quotes fall back to the list.
+  // The standalone list is retired, so every quote returns to the pipeline.
+  const backHref = "#/pipeline";
+  const backLabel = "pipeline";
   const headerHtml = `
     <div class="card px-5 py-3">
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-baseline gap-4 min-w-0">
-          <a href="#/estimate" class="text-xs font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap">← Back to customers</a>
+          <a href="${backHref}" class="text-xs font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap">← Back to ${backLabel}</a>
           <div class="min-w-0">
             <div class="text-base font-extrabold truncate">${escapeHtml(estimate.customer_display_name || "(Unknown customer)")}</div>
             <div class="text-xs text-black/50 truncate">
