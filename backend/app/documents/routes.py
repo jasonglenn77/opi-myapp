@@ -46,6 +46,22 @@ FOLDER_TREE = [
 VALID_TYPES = ("estimate", "job", "project", "opportunity")
 
 
+def store_document_bytes(entity_type, entity_id, folder, filename, body,
+                         content_type="application/octet-stream", user_id=None):
+    """Store raw bytes as a document (S3 put + `documents` row). Reused by the
+    estimate-PDF endpoint to file a generated quote into the '4 Quotes' folder.
+    Returns the new document id."""
+    key = build_document_key(entity_type, str(entity_id), folder, filename)
+    s3_client.put_object(Bucket=AWS_BUCKET, Key=key, Body=body, ContentType=content_type)
+    with engine.begin() as conn:
+        return conn.execute(text("""
+            INSERT INTO documents (entity_type, entity_id, folder, s3_bucket, s3_key,
+                original_filename, content_type, size_bytes, uploaded_by_user_id)
+            VALUES (:t,:i,:f,:b,:k,:fn,:ct,:sz,:u)
+        """), {"t": entity_type, "i": str(entity_id), "f": folder, "b": AWS_BUCKET, "k": key,
+               "fn": filename, "ct": content_type, "sz": len(body), "u": user_id}).lastrowid
+
+
 def _gated_tree(entity_type: str):
     """Estimates + opportunities: estimate-stage folders (RFQ, Drawings, BOM,
     Quotes, POs). Jobs/projects: all folders."""

@@ -1,11 +1,14 @@
-from typing import Optional
+from datetime import date
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.auth import get_current_user
 from app.db import engine
+from app.estimates.pdf import render_estimate_pdf
 
 router = APIRouter(prefix="/api/estimates", tags=["estimates"])
 
@@ -362,6 +365,66 @@ def _load_estimate(conn, estimate_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Estimate not found")
     return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/estimates/{id}/pdf  — app-generated customer estimate PDF (step 7/9).
+# Client sends the aggregated, editable quote data (scope, lines, total) computed
+# by qm-rollup.js; server fills header defaults from the estimate, renders the PDF
+# (pure-Python xhtml2pdf), and — when save=true — files it into the opportunity's
+# "4 Quotes" folder. Preview/download otherwise.
+# ---------------------------------------------------------------------------
+class EstimatePdfLine(BaseModel):
+    label: str = ""
+    description: str = ""
+    amount: float = 0.0
+
+
+class EstimatePdfRequest(BaseModel):
+    scope: str = ""
+    notes: str = ""
+    lines: List[EstimatePdfLine] = []
+    total: float = 0.0
+    quote_date: Optional[str] = None
+    project_name: Optional[str] = None
+    save: bool = False
+
+
+@router.post("/{estimate_id}/pdf")
+def estimate_pdf(estimate_id: int, req: EstimatePdfRequest, user=Depends(get_current_user)):
+    with engine.connect() as conn:
+        est = _load_estimate(conn, estimate_id)
+    contact = " ".join(x for x in [est.get("contact_first"), est.get("contact_last")] if x).strip()
+    loc = ", ".join(x for x in [est.get("project_city"), est.get("project_state")] if x)
+    data = {
+        "company":      est.get("customer_display_name"),
+        "contact":      contact,
+        "location":     loc,
+        "quote_number": est.get("quote_number"),
+        "quote_date":   req.quote_date or date.today().isoformat(),
+        "project_name": req.project_name or est.get("quote_description"),
+        "estimator":    est.get("quoted_by"),
+        "revision_no":  est.get("revision_no"),
+        "scope":        req.scope,
+        "notes":        req.notes,
+        "lines":        [ln.model_dump() for ln in req.lines],
+        "total":        req.total,
+    }
+    pdf = render_estimate_pdf(data)
+    qn = est.get("quote_number") or estimate_id
+    rev = est.get("revision_no") or 1
+    if req.save:
+        # File into the opportunity's "4 Quotes" folder (falls back to the estimate).
+        from app.documents.routes import store_document_bytes
+        ent_type = "opportunity" if est.get("opportunity_id") else "estimate"
+        ent_id = est.get("opportunity_id") or estimate_id
+        fname = f"Estimate-{qn}-rev{rev}.pdf"
+        doc_id = store_document_bytes(ent_type, ent_id, "4_quotes", fname, pdf,
+                                      "application/pdf", user.get("id"))
+        return {"ok": True, "document_id": doc_id, "filename": fname,
+                "entity_type": ent_type, "entity_id": ent_id}
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="Estimate-{qn}.pdf"'})
 
 
 class EstimateCreate(BaseModel):
