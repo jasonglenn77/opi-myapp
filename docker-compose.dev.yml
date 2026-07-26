@@ -27,6 +27,9 @@ services:
       DB_NAME: ${MYSQL_DATABASE}
       DB_USER: ${MYSQL_USER}
       DB_PASSWORD: ${MYSQL_PASSWORD}
+      # Dev shares the prod S3 bucket; write under a separate prefix so local
+      # testing never pollutes prod's real document store (prod uses "projects").
+      S3_PREFIX: dev
     depends_on:
       mysql:
         condition: service_healthy
