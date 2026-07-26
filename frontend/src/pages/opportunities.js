@@ -824,11 +824,11 @@ function opportunityDocsModal(opp, onDone) {
     bodyEl.innerHTML = (data.tree || []).map(node => {
       const list = files[node.key] || [];
       return `
-        <div class="border border-black/10 rounded-xl mb-2">
+        <div data-drop="${escapeHtml(node.key)}" class="border border-black/10 rounded-xl mb-2 border-dashed border-transparent" style="border-color:rgba(0,0,0,0.1)">
           <div class="flex items-center justify-between px-3 py-2 bg-black/[0.02]">
             <span class="text-xs font-bold text-ink-900">${escapeHtml(node.label)}${list.length ? ` <span class="text-black/40 font-normal">(${list.length})</span>` : ""}</span>
             <label class="inline-flex items-center gap-1 rounded-lg border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-black/70 hover:bg-black/5 cursor-pointer">
-              Upload<input type="file" class="hidden" data-up="${escapeHtml(node.key)}"></label>
+              Upload<input type="file" multiple class="hidden" data-up="${escapeHtml(node.key)}"></label>
           </div>
           ${list.length ? `<div class="divide-y divide-black/5">${list.map(f => `
             <div class="flex items-center justify-between px-3 py-1.5">
@@ -837,19 +837,40 @@ function opportunityDocsModal(opp, onDone) {
                 <span class="text-[10px] text-black/40">${fmtBytes(f.size_bytes)}</span>
                 <button data-rm="${f.id}" class="text-[10px] text-black/35 hover:text-red-600 hover:underline">remove</button>
               </div>
-            </div>`).join("")}</div>` : `<div class="px-3 py-2 text-[11px] text-black/35">No files.</div>`}
+            </div>`).join("")}</div>` : `<div class="px-3 py-3 text-[11px] text-black/35 text-center">Drag files here, or use <b class="font-semibold">Upload</b>.</div>`}
         </div>`;
     }).join("");
 
-    bodyEl.querySelectorAll("[data-up]").forEach(inp => inp.addEventListener("change", async () => {
-      const folder = inp.getAttribute("data-up");
-      const file = inp.files[0]; if (!file) return;
-      const fd = new FormData(); fd.append("file", file);
-      const label = inp.closest("label"); const orig = label.innerHTML;
-      label.innerHTML = "Uploading…";
-      try { await api(`/documents/opportunity/${opp.id}?folder=${encodeURIComponent(folder)}`, { method: "POST", body: fd }); load(); }
-      catch (err) { alert(err?.message || "Upload failed"); label.innerHTML = orig; }
+    // Shared uploader (used by the file picker AND drag-and-drop). Uploads each
+    // file sequentially to the folder, then refreshes.
+    const uploadFiles = async (folder, files) => {
+      const arr = [...(files || [])]; if (!arr.length) return;
+      try {
+        for (const file of arr) {
+          const fd = new FormData(); fd.append("file", file);
+          await api(`/documents/opportunity/${opp.id}?folder=${encodeURIComponent(folder)}`, { method: "POST", body: fd });
+        }
+        load();
+      } catch (err) { alert(err?.message || "Upload failed"); }
+    };
+
+    bodyEl.querySelectorAll("[data-up]").forEach(inp => inp.addEventListener("change", () => {
+      const label = inp.closest("label"); const orig = label.innerHTML; label.innerHTML = "Uploading…";
+      uploadFiles(inp.getAttribute("data-up"), inp.files).finally(() => { label.innerHTML = orig; });
     }));
+
+    // Drag-and-drop: highlight the folder card on dragover, upload on drop.
+    bodyEl.querySelectorAll("[data-drop]").forEach(zone => {
+      const on = () => { zone.style.borderColor = "#4f7f61"; zone.classList.add("bg-brand-50"); };
+      const off = () => { zone.style.borderColor = "rgba(0,0,0,0.1)"; zone.classList.remove("bg-brand-50"); };
+      zone.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; on(); });
+      zone.addEventListener("dragleave", (e) => { if (!zone.contains(e.relatedTarget)) off(); });
+      zone.addEventListener("drop", (e) => {
+        e.preventDefault(); off();
+        const files = e.dataTransfer?.files;
+        if (files && files.length) uploadFiles(zone.getAttribute("data-drop"), files);
+      });
+    });
     bodyEl.querySelectorAll("[data-dl]").forEach(b => b.addEventListener("click", async () => {
       try { const r = await api(`/documents/file/${b.getAttribute("data-dl")}/url`); window.open(r.url, "_blank"); }
       catch (err) { alert(err?.message || "Couldn't open file"); }

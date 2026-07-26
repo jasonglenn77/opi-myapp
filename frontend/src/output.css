@@ -2426,6 +2426,11 @@ option {
   background-color: rgb(253 224 71 / var(--tw-bg-opacity, 1));
 }
 
+.bg-brand-50 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(244 247 245 / var(--tw-bg-opacity, 1));
+}
+
 .object-contain {
   -o-object-fit: contain;
      object-fit: contain;
