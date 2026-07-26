@@ -368,53 +368,78 @@ def _load_estimate(conn, estimate_id: int):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/estimates/{id}/pdf  — app-generated customer estimate PDF (step 7/9).
-# Client sends the aggregated, editable quote data (scope, lines, total) computed
-# by qm-rollup.js; server fills header defaults from the estimate, renders the PDF
-# (pure-Python xhtml2pdf), and — when save=true — files it into the opportunity's
-# "4 Quotes" folder. Preview/download otherwise.
+# Estimate PDF (step 7/9) — replicates OPI's QBO estimate, app-polished. Standard
+# blocks come from estimate_pdf_defaults (GET below); the priced line items come
+# from the client (computeSetBundles — single source of truth), so the PDF ties out
+# to the workbook. save=true files it into the opportunity's "4 Quotes" folder.
 # ---------------------------------------------------------------------------
+def _load_pdf_defaults(conn) -> dict:
+    rows = conn.execute(text("SELECT setting_key, setting_value FROM estimate_pdf_defaults")).all()
+    return {k: v for k, v in rows}
+
+
+@router.get("/pdf-defaults")
+def get_pdf_defaults(_user=Depends(get_current_user)):
+    """Standard boilerplate blocks the estimate-PDF UI prefills (company header,
+    Payment Terms, Stipulations, notes, sales rep, expiration window)."""
+    with engine.connect() as conn:
+        return _load_pdf_defaults(conn)
+
+
 class EstimatePdfLine(BaseModel):
     label: str = ""
     description: str = ""
-    amount: float = 0.0
+    qty: Optional[float] = None
+    rate: Optional[float] = None
+    amount: Optional[float] = None
 
 
 class EstimatePdfRequest(BaseModel):
-    scope: str = ""
-    notes: str = ""
     lines: List[EstimatePdfLine] = []
     total: float = 0.0
+    sales_rep: Optional[str] = None
+    footer_title: Optional[str] = None
+    preparer: Optional[str] = None
     quote_date: Optional[str] = None
-    project_name: Optional[str] = None
+    bill_to: Optional[List[str]] = None
     save: bool = False
 
 
 @router.post("/{estimate_id}/pdf")
 def estimate_pdf(estimate_id: int, req: EstimatePdfRequest, user=Depends(get_current_user)):
+    from datetime import datetime, timedelta
     with engine.connect() as conn:
         est = _load_estimate(conn, estimate_id)
+        dfl = _load_pdf_defaults(conn)
+    # Header date + expiration window (default 30 days).
+    try:
+        qdate = datetime.fromisoformat(req.quote_date) if req.quote_date else datetime.combine(date.today(), datetime.min.time())
+    except ValueError:
+        qdate = datetime.combine(date.today(), datetime.min.time())
+    try:
+        exp_days = int(dfl.get("expiration_days") or 30)
+    except (TypeError, ValueError):
+        exp_days = 30
     contact = " ".join(x for x in [est.get("contact_first"), est.get("contact_last")] if x).strip()
-    loc = ", ".join(x for x in [est.get("project_city"), est.get("project_state")] if x)
+    default_bill_to = [est.get("customer_display_name"), contact,
+                       ", ".join(x for x in [est.get("project_city"), est.get("project_state")] if x)]
     data = {
-        "company":      est.get("customer_display_name"),
-        "contact":      contact,
-        "location":     loc,
-        "quote_number": est.get("quote_number"),
-        "quote_date":   req.quote_date or date.today().isoformat(),
-        "project_name": req.project_name or est.get("quote_description"),
-        "estimator":    est.get("quoted_by"),
-        "revision_no":  est.get("revision_no"),
-        "scope":        req.scope,
-        "notes":        req.notes,
-        "lines":        [ln.model_dump() for ln in req.lines],
-        "total":        req.total,
+        "company": {"name": dfl.get("company_name"), "address": dfl.get("company_address"),
+                    "phone": dfl.get("company_phone"), "email": dfl.get("company_email")},
+        "estimate_no":     est.get("quote_number") or estimate_id,
+        "date":            qdate.strftime("%m/%d/%Y"),
+        "expiration_date": (qdate + timedelta(days=exp_days)).strftime("%m/%d/%Y"),
+        "sales_rep":       req.sales_rep if req.sales_rep is not None else dfl.get("sales_rep"),
+        "bill_to":         req.bill_to if req.bill_to is not None else [x for x in default_bill_to if x],
+        "footer_title":    req.footer_title if req.footer_title is not None else est.get("quote_description"),
+        "preparer":        req.preparer if req.preparer is not None else est.get("quoted_by"),
+        "lines":           [ln.model_dump() for ln in req.lines],
+        "total":           req.total,
     }
     pdf = render_estimate_pdf(data)
     qn = est.get("quote_number") or estimate_id
     rev = est.get("revision_no") or 1
     if req.save:
-        # File into the opportunity's "4 Quotes" folder (falls back to the estimate).
         from app.documents.routes import store_document_bytes
         ent_type = "opportunity" if est.get("opportunity_id") else "estimate"
         ent_id = est.get("opportunity_id") or estimate_id

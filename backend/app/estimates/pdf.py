@@ -1,134 +1,157 @@
 """
-App-generated customer-facing estimate PDF (Phase A, step 7).
+App-generated customer estimate PDF (Phase A, step 7/9).
 
-The customer PDF is deliberately AGGREGATED/totalized — a clean quote the estimator
-sends to the customer — NOT the granular QBO bundle lines (those are the office's
-per-line mirror, a separate tool). All figures are computed on the client by
-qm-rollup.js (the single source of truth); this module only renders the supplied
-data into a branded PDF, so the number on the page always matches the Review tab.
+Replicates OPI's QuickBooks estimate — the itemized customer quote — but
+app-polished. Standard blocks (company header, Payment Terms, Stipulations, notes)
+come from estimate_pdf_defaults (editable per quote); the priced line items come
+from the quoting metrics (computeSetBundles on the client, the single source of
+truth), so the PDF ties out to the workbook and the Review tab.
 
-Pure-Python rendering via xhtml2pdf (no system libraries), so the slim backend image
-needs no extra apt packages.
+Pure-Python rendering via xhtml2pdf (no system libraries).
 """
 from html import escape
 from io import BytesIO
 
 from xhtml2pdf import pisa
 
-BRAND = "#0f172a"      # ink-900 (matches the app shell)
-ACCENT = "#2563eb"     # blue-600
+MAROON = "#8a1b2c"
+MAROON_DK = "#6f1522"
+INK = "#1f2937"
+MUTED = "#6b7280"
 
 
 def _money(v):
     try:
-        return "$" + format(round(float(v)), ",")
+        return format(round(float(v), 2), ",.2f")
     except (TypeError, ValueError):
-        return "$0"
+        return "0.00"
 
 
-def _lines_html(lines):
-    """lines: list of {label, description, amount}. Aggregated quote lines."""
+def _qty(v):
+    try:
+        n = float(v)
+        return format(int(n), ",") if n == int(n) else format(n, ",g")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _multiline(s):
+    return escape(str(s or "")).replace("\n", "<br/>")
+
+
+def _line_rows(lines):
     rows = []
     for ln in lines or []:
-        label = escape(str(ln.get("label") or ""))
-        desc = escape(str(ln.get("description") or "")).replace("\n", "<br/>")
-        amount = _money(ln.get("amount"))
+        label = _multiline(ln.get("label"))
+        desc = _multiline(ln.get("description"))
+        qty = _qty(ln.get("qty"))
+        rate = _money(ln.get("rate")) if ln.get("rate") not in (None, "") else ""
+        amount = _money(ln.get("amount")) if ln.get("amount") not in (None, "") else ""
         rows.append(
             f'<tr>'
-            f'<td class="cell lbl">{label}</td>'
-            f'<td class="cell desc">{desc}</td>'
-            f'<td class="cell amt">{amount}</td>'
+            f'<td class="c-item">{label}</td>'
+            f'<td class="c-desc">{desc}</td>'
+            f'<td class="c-qty">{qty}</td>'
+            f'<td class="c-num">{rate}</td>'
+            f'<td class="c-num">{amount}</td>'
             f'</tr>'
         )
     if not rows:
-        rows.append('<tr><td class="cell" colspan="3">—</td></tr>')
+        rows.append('<tr><td class="c-item" colspan="5">—</td></tr>')
     return "\n".join(rows)
 
 
-def build_estimate_html(data: dict) -> str:
-    """data keys: company, contact, location, quote_number, quote_date, project_name,
-    estimator, scope, lines[], total, notes."""
-    company = escape(str(data.get("company") or "Customer"))
-    contact = escape(str(data.get("contact") or ""))
-    location = escape(str(data.get("location") or ""))
-    quote_number = escape(str(data.get("quote_number") or "—"))
-    quote_date = escape(str(data.get("quote_date") or ""))
-    project_name = escape(str(data.get("project_name") or ""))
-    estimator = escape(str(data.get("estimator") or ""))
-    scope = escape(str(data.get("scope") or "")).replace("\n", "<br/>")
-    notes = escape(str(data.get("notes") or "")).replace("\n", "<br/>")
-    total = _money(data.get("total"))
-    rev = data.get("revision_no")
-    rev_txt = f" &middot; Rev {escape(str(rev))}" if rev not in (None, "", 1) else ""
+def build_estimate_html(d: dict) -> str:
+    co = d.get("company") or {}
+    co_name = escape(str(co.get("name") or "On Point Installations, LLC"))
+    co_addr = _multiline(co.get("address"))
+    co_phone = escape(str(co.get("phone") or ""))
+    co_email = escape(str(co.get("email") or ""))
 
-    bill_to = "<br/>".join([x for x in [company, contact, location] if x])
+    estimate_no = escape(str(d.get("estimate_no") or "—"))
+    est_date = escape(str(d.get("date") or ""))
+    expiration = escape(str(d.get("expiration_date") or ""))
+    sales_rep = escape(str(d.get("sales_rep") or ""))
+    bill_to = "<br/>".join(escape(str(x)) for x in (d.get("bill_to") or []) if x)
+    footer_title = escape(str(d.get("footer_title") or ""))
+    preparer = escape(str(d.get("preparer") or ""))
+    total = _money(d.get("total"))
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/><style>
-@page {{ size: letter; margin: 1.5cm 1.6cm; }}
-body {{ font-family: Helvetica, Arial, sans-serif; color: #1f2937; font-size: 10pt; }}
-.header {{ background: {BRAND}; color: #ffffff; padding: 14px 18px; }}
-.brand {{ font-size: 18pt; font-weight: bold; letter-spacing: 0.5px; }}
-.brand small {{ font-size: 8pt; color: #cbd5e1; font-weight: normal; }}
-.doctype {{ font-size: 13pt; font-weight: bold; color: {ACCENT}; text-align: right; }}
-.meta {{ margin-top: 14px; }}
-.meta td {{ vertical-align: top; padding: 2px 0; font-size: 9.5pt; }}
-.label {{ color: #6b7280; font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.4px; }}
-.billto {{ font-size: 10pt; line-height: 1.4; }}
-.section-title {{ font-size: 8pt; text-transform: uppercase; letter-spacing: 0.5px;
-  color: #6b7280; font-weight: bold; margin: 16px 0 4px 0; border-bottom: 1px solid #e5e7eb; padding-bottom: 3px; }}
-.scope {{ font-size: 9.5pt; line-height: 1.45; color: #374151; }}
-table.lines {{ width: 100%; border-collapse: collapse; margin-top: 4px; }}
-table.lines th {{ background: #f3f4f6; color: #374151; font-size: 8pt; text-transform: uppercase;
-  letter-spacing: 0.4px; text-align: left; padding: 6px 8px; border-bottom: 2px solid #d1d5db; }}
-.cell {{ padding: 7px 8px; border-bottom: 1px solid #eceff3; font-size: 9.5pt; vertical-align: top; }}
-.lbl {{ font-weight: bold; color: #111827; width: 22%; }}
-.desc {{ color: #374151; }}
-.amt {{ text-align: right; white-space: nowrap; width: 18%; font-weight: bold; }}
-th.amt {{ text-align: right; }}
-.total-row td {{ padding: 9px 8px; font-size: 11pt; font-weight: bold; color: #111827;
-  border-top: 2px solid {BRAND}; }}
-.total-row .amt {{ color: {ACCENT}; }}
-.notes {{ font-size: 8.5pt; color: #6b7280; line-height: 1.4; margin-top: 14px; }}
-.foot {{ margin-top: 22px; font-size: 8pt; color: #9ca3af; text-align: center;
-  border-top: 1px solid #e5e7eb; padding-top: 8px; }}
+@page {{ size: letter; margin: 1.4cm 1.5cm; }}
+body {{ font-family: Helvetica, Arial, sans-serif; color: {INK}; font-size: 9.5pt; }}
+.co-name {{ font-size: 12pt; font-weight: bold; color: {INK}; }}
+.co-meta {{ font-size: 8.5pt; color: {MUTED}; line-height: 1.35; }}
+.wordmark {{ text-align: center; color: {MAROON}; font-weight: bold; }}
+.wm1 {{ font-size: 15pt; letter-spacing: 1px; }}
+.wm2 {{ font-size: 7pt; letter-spacing: 3px; color: {MUTED}; }}
+.bar {{ background: {MAROON}; color: #fff; font-weight: bold; padding: 7px 12px; font-size: 11pt; }}
+.bar small {{ font-weight: normal; font-size: 8.5pt; }}
+.barlabel {{ font-size: 8pt; }}
+.blocklabel {{ font-size: 7.5pt; font-weight: bold; letter-spacing: 0.5px; color: {INK}; text-transform: uppercase; }}
+.billto {{ font-size: 9.5pt; line-height: 1.4; margin-top: 2px; }}
+table.lines {{ width: 100%; border-collapse: collapse; margin-top: 14px; }}
+table.lines th {{ background: {MAROON}; color: #fff; font-size: 8pt; letter-spacing: 0.5px;
+  padding: 6px 8px; text-align: left; }}
+th.n {{ text-align: right; }}
+.c-item {{ padding: 7px 8px; border-bottom: 1px solid #e8ebef; font-weight: bold; font-size: 8.5pt;
+  color: {INK}; vertical-align: top; width: 13%; }}
+.c-desc {{ padding: 7px 8px; border-bottom: 1px solid #e8ebef; font-size: 9pt; color: #374151;
+  vertical-align: top; line-height: 1.4; }}
+.c-qty {{ padding: 7px 8px; border-bottom: 1px solid #e8ebef; text-align: right; vertical-align: top; width: 8%; }}
+.c-num {{ padding: 7px 8px; border-bottom: 1px solid #e8ebef; text-align: right; vertical-align: top;
+  white-space: nowrap; width: 13%; }}
+.foot-title {{ font-size: 9pt; color: #374151; margin-top: 16px; }}
+.totalbar {{ background: {MAROON}; color: #fff; font-weight: bold; font-size: 12pt; padding: 8px 14px; }}
+.totalbar .lbl {{ font-size: 9.5pt; font-weight: normal; }}
+.sign {{ margin-top: 34px; font-size: 9pt; color: {MUTED}; }}
 </style></head><body>
-<table width="100%"><tr>
-  <td class="header" width="65%"><div class="brand">OnPoint Installers<br/><small>Warehouse Rack &amp; Pallet Systems Installation</small></div></td>
-  <td class="header doctype" width="35%">ESTIMATE<br/><span style="font-size:9pt;color:#cbd5e1;font-weight:normal;">#{quote_number}{rev_txt}</span></td>
-</tr></table>
 
-<table width="100%" class="meta"><tr>
-  <td width="55%"><div class="label">Prepared For</div><div class="billto">{bill_to}</div></td>
-  <td width="45%">
-    <table width="100%">
-      <tr><td class="label">Date</td><td style="text-align:right;">{quote_date}</td></tr>
-      <tr><td class="label">Project</td><td style="text-align:right;">{project_name}</td></tr>
-      <tr><td class="label">Prepared By</td><td style="text-align:right;">{estimator}</td></tr>
+<table width="100%"><tr>
+  <td width="40%" valign="top"><div class="co-name">{co_name}</div>
+    <div class="co-meta">{co_addr}<br/>{co_phone}<br/>{co_email}</div></td>
+  <td width="30%" valign="middle"><div class="wordmark"><div class="wm1">ON POINT</div><div class="wm2">INSTALLATIONS</div></div></td>
+  <td width="30%" valign="top">
+    <table width="100%" cellspacing="0" cellpadding="0">
+      <tr><td class="bar">Estimate {estimate_no}</td></tr>
+      <tr><td style="height:4px;"></td></tr>
+      <tr><td class="bar"><span class="barlabel">DATE</span> <small>{est_date}</small></td></tr>
+      <tr><td style="height:4px;"></td></tr>
+      <tr><td class="bar"><span class="barlabel">EXPIRATION</span> <small>{expiration}</small></td></tr>
     </table>
   </td>
 </tr></table>
 
-{"<div class='section-title'>Scope of Work</div><div class='scope'>" + scope + "</div>" if scope.strip() else ""}
+<table width="100%" style="margin-top:16px;"><tr>
+  <td width="60%" valign="top"><div class="blocklabel">Address</div><div class="billto">{bill_to}</div></td>
+  <td width="40%" valign="top"><div class="blocklabel">Sales Rep</div><div class="billto">{sales_rep}</div></td>
+</tr></table>
 
-<div class="section-title">Estimate</div>
 <table class="lines">
-  <tr><th width="22%">Item</th><th>Description</th><th class="amt" width="18%">Amount</th></tr>
-  {_lines_html(data.get("lines"))}
-  <tr class="total-row"><td colspan="2" style="text-align:right;">Total</td><td class="amt">{total}</td></tr>
+  <tr><th width="13%">ITEM</th><th>DESCRIPTION</th><th class="n" width="8%">QTY</th><th class="n" width="13%">RATE</th><th class="n" width="13%">AMOUNT</th></tr>
+  {_line_rows(d.get("lines"))}
 </table>
 
-{"<div class='notes'>" + notes + "</div>" if notes.strip() else ""}
+<table width="100%"><tr>
+  <td width="55%" valign="top"><div class="foot-title">{footer_title}{("<br/>" + preparer) if preparer else ""}</div></td>
+  <td width="45%" valign="top"><table width="100%"><tr>
+    <td class="totalbar"><span class="lbl">TOTAL</span></td>
+    <td class="totalbar" style="text-align:right;">${total}</td>
+  </tr></table></td>
+</tr></table>
 
-<div class="foot">OnPoint Installers &middot; This estimate is valid for 30 days from the date above.</div>
+<table width="100%" class="sign"><tr>
+  <td width="50%">Accepted By ____________________________</td>
+  <td width="50%">Accepted Date ______________________</td>
+</tr></table>
+
 </body></html>"""
 
 
 def render_estimate_pdf(data: dict) -> bytes:
-    """Render the estimate data dict to PDF bytes."""
-    html = build_estimate_html(data)
     out = BytesIO()
-    result = pisa.CreatePDF(src=html, dest=out, encoding="utf-8")
+    result = pisa.CreatePDF(src=build_estimate_html(data), dest=out, encoding="utf-8")
     if result.err:
         raise RuntimeError("PDF generation failed")
     return out.getvalue()
