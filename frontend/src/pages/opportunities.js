@@ -133,14 +133,25 @@ export async function pipelinePage(routeFn) {
     sizeCard();   // chip heights settled → recompute the card height
   };
 
+  // The Quote cell = the quoting-metrics estimate. Priority: in-app estimate →
+  // the Google-Drive workbook (historical) → start/link. The QBO estimate (the old
+  // customer-facing PDF) is a small secondary reference, not the headline.
   const quoteCell = (o) => {
-    if (o.app_estimate_id)
-      return `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap" title="In-app quoting-metrics estimate">Open quote →</a>`;
-    if (o.qbo_estimate_id)
-      return `<a href="#/entity/estimate/${escapeHtml(o.qbo_estimate_id)}" class="font-semibold text-indigo-700 hover:underline whitespace-nowrap" title="Open the QuickBooks estimate (the sent quote)">QBO estimate →</a>`;
-    if (!o.customer_qbo_id)
-      return `<span class="text-black/25" title="Link a QuickBooks customer first">—</span>`;
-    return `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>`;
+    let primary;
+    if (o.app_estimate_id) {
+      primary = `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap" title="In-app quoting-metrics estimate">Open quote →</a>`;
+    } else if (o.workbook_url) {
+      primary = `<a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="font-semibold text-indigo-700 hover:underline whitespace-nowrap" title="Quoting-metrics workbook in Google Drive">Workbook ↗</a>
+        <button data-editlink="${o.id}" class="text-[10px] text-black/30 hover:text-black/60 ml-1" title="Edit workbook link">✎</button>`;
+    } else {
+      const start = o.customer_qbo_id ? `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>` : "";
+      const link = `<button data-editlink="${o.id}" class="text-[11px] text-black/40 hover:text-indigo-700 hover:underline whitespace-nowrap ${start ? "ml-2" : ""}" title="Link the Google-Drive quoting-metrics workbook">+ link workbook</button>`;
+      primary = start + link;
+    }
+    const qbo = o.qbo_estimate_id
+      ? `<div class="text-[10px] mt-0.5"><a href="#/entity/estimate/${escapeHtml(o.qbo_estimate_id)}" class="text-black/40 hover:text-indigo-700 hover:underline" title="Historical QuickBooks estimate (the old sent PDF)">QBO ↗</a></div>`
+      : "";
+    return primary + qbo;
   };
 
   // Expander caret in the Quote cell — present when this opportunity has an in-app
@@ -220,12 +231,6 @@ export async function pipelinePage(routeFn) {
       ? `<div class="text-[10px] text-black/45" title="Weighted value = contract × win probability (expected pipeline revenue)">${money(o.discounted_contract_value)} wtd</div>` : "";
     return `${money(o.contract_value)}${app}${wtd}`;
   };
-  // The RR "Link" column: an external Google-Drive link to the detailed
-  // quoting-metrics workbook (we don't import it). Click to open or set/change.
-  const linkCell = (o) => o.workbook_url
-    ? `<a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="text-indigo-700 font-semibold hover:underline" title="Open the quoting-metrics workbook in Google Drive">Metrics ↗</a>
-       <button data-editlink="${o.id}" class="text-[10px] text-black/30 hover:text-black/60 ml-1" title="Edit link">✎</button>`
-    : `<button data-editlink="${o.id}" class="text-[11px] text-black/35 hover:text-indigo-700 hover:underline" title="Paste the Google-Drive workbook link">+ link</button>`;
   const followupCell = (o) => {
     if (o.last_contact_date || o.follow_up_count)
       return `<button data-log="${o.id}" class="text-left group">
@@ -253,7 +258,6 @@ export async function pipelinePage(routeFn) {
     { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => valueCell(o) },
     { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
     { key: "target_end_date", label: "End", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_end_date) },
-    { key: "workbook_url", label: "Metrics", nosort: true, cls: "whitespace-nowrap", td: (o) => linkCell(o) },
     { key: "doc_count", label: "Docs", align: "center", td: (o) => `<button data-docs="${o.id}" class="inline-flex items-center gap-0.5 font-semibold ${o.doc_count ? "text-blue-700" : "text-black/40"} hover:underline" title="Attachments (RFQ, drawings, quote, PO)">📎${o.doc_count || 0}</button>` },
   ];
 
