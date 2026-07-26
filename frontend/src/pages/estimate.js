@@ -488,7 +488,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
         <div class="flex-1"></div>
         ${tabBtn(`${baseUrl}/review`, "Review", tab === "review")}
         ${tabBtn(`${baseUrl}/pdf`, "Estimate PDF", tab === "pdf")}
-        ${tabBtn(`${baseUrl}/send-qbo`, "Send to QBO", tab === "send-qbo")}
+        ${tabBtn(`${baseUrl}/send-qbo`, "QBO Lines", tab === "send-qbo")}
       </div>
     </div>`;
 
@@ -781,7 +781,7 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
   const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
   let msg = "";
 
-  async function preview(saveMode) {
+  async function callPdf(saveMode) {
     const payload = {
       lines: model.lines.map(l => ({ label: l.label, description: l.description, qty: num(l.qty), rate: num(l.rate), amount: num(l.amount) })),
       total: totalOf(), sales_rep: model.sales_rep, footer_title: model.footer_title,
@@ -793,10 +793,53 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
       method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() },
       body: JSON.stringify(payload),
     });
-    if (!resp.ok) { msg = "PDF failed: " + (await resp.text()).slice(0, 120); render(); return; }
-    if (saveMode) { const j = await resp.json(); msg = `Saved to “4 Quotes” (${j.filename})`; render(); return; }
-    const blob = await resp.blob();
-    window.open(URL.createObjectURL(blob), "_blank");
+    if (!resp.ok) throw new Error((await resp.text()).slice(0, 160));
+    if (saveMode) return resp.json();
+    window.open(URL.createObjectURL(await resp.blob()), "_blank");
+  }
+  const preview = () => callPdf(false).catch(e => { msg = "Preview failed: " + e.message; render(); });
+
+  // Pipeline sync metrics — same computation as the Review tab's "Update pipeline",
+  // but contract_value is the actual quoted PDF total (includes edited/material lines).
+  function computeSyncMetrics() {
+    const perSet = orderedSets.map(set => ({ set, rollup: computeSetRollup({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState }) }));
+    const sumOf = (k) => perSet.reduce((s, r) => s + (Number(r.rollup[k]) || 0), 0);
+    const pct = (v) => (Number(v ?? 0) || 0) / 100;
+    const markUp = (cost, p) => (p > 0 && p < 1 ? cost / (1 - p) : cost);
+    const price = markUp(sumOf("H38"), pct(estimateState.rack_install_profit_target))
+      + markUp(sumOf("H213"), pct(estimateState.wire_guidance_profit_target))
+      + markUp(sumOf("H187"), pct(estimateState.rental_rack_profit_target))
+      + markUp(sumOf("H226"), pct(estimateState.rental_wire_profit_target))
+      + sumOf("travel_costs_total") + sumOf("H248");
+    const profit = price - sumOf("grand_total");
+    return {
+      contract_value: totalOf(),
+      ohp_amount: profit,
+      ohp_pct: Math.round((price > 0 ? profit / price : 0) * 1000) / 10,
+      labor_days: perSet.reduce((s, r) => s + (Number(r.rollup.D23) || 0) + (Number(r.rollup.D24) || 0), 0),
+      travel_days: perSet.reduce((s, r) => s + (Number(r.rollup.D22) || 0), 0),
+    };
+  }
+
+  // Step 9 — one action: file the PDF into "4 Quotes", update the pipeline, lock the quote.
+  async function saveAndSend() {
+    if (!confirm("Save & Send this estimate?\n\nThis files the PDF into the “4 Quotes” folder, updates the pipeline row, and locks this quote (start a New revision or Unlock to edit later).")) return;
+    const btn = container.querySelector("[data-savesend]");
+    if (btn) { btn.setAttribute("disabled", "true"); btn.textContent = "Saving…"; }
+    try {
+      const j = await callPdf(true);                                   // 1) file the PDF
+      if (estimateRow?.opportunity_id) {                              // 2) update the pipeline
+        try { await api(`/opportunities/by-estimate/${estimateId}/sync-metrics`, { method: "POST", body: JSON.stringify(computeSyncMetrics()) }); } catch (_) {}
+      }
+      await api(`/estimates/${estimateId}/lock`, { method: "POST" }); // 3) lock
+      msg = `Saved ✓ filed to “4 Quotes” (${j.filename}), pipeline updated, quote locked.`;
+      render();
+      setTimeout(() => location.reload(), 1000);                      // reflect the locked read-only state
+    } catch (err) {
+      msg = "Save failed: " + (err?.message || err);
+      if (btn) { btn.removeAttribute("disabled"); btn.textContent = "Save & Send"; }
+      render();
+    }
   }
 
   function render() {
@@ -843,9 +886,14 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
             <div class="text-sm">Total <span data-total class="font-extrabold text-ink-900 tabular-nums">${money(totalOf())}</span></div>
           </div>
         </div>
-        <div class="flex items-center justify-end gap-2 px-1">
-          <button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
+        <div class="flex items-center justify-end gap-3 px-1">
+          ${estimateRow?.locked
+            ? `<span class="text-[11px] text-amber-700 font-semibold">🔒 Locked — unlock or start a new revision to edit</span>
+               <button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>`
+            : `<button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
+               <button data-savesend class="btn-primary text-sm font-semibold px-5 py-2">Save &amp; Send</button>`}
         </div>
+        <div class="text-[11px] text-black/45 px-1 text-right">Save &amp; Send files the PDF into “4 Quotes”, updates the pipeline, and locks the quote.</div>
       </div>`;
 
     container.querySelectorAll("[data-h]").forEach(el => el.addEventListener("input", () => { model[el.getAttribute("data-h")] = el.value; save(); }));
@@ -857,7 +905,8 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
     container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => { model.lines.splice(Number(b.getAttribute("data-del")), 1); save(); render(); }));
     container.querySelector("[data-add]")?.addEventListener("click", () => { model.lines.push({ label: "", description: "", qty: 1, rate: 0, amount: 0 }); save(); render(); });
     container.querySelector("[data-rebuild]")?.addEventListener("click", () => { if (confirm("Rebuild the line items + standard blocks from the current metrics? Your description edits on this quote will be replaced.")) { model = buildDefaultModel(); save(); render(); } });
-    container.querySelector("[data-preview]")?.addEventListener("click", () => preview(false));
+    container.querySelector("[data-preview]")?.addEventListener("click", () => preview());
+    container.querySelector("[data-savesend]")?.addEventListener("click", saveAndSend);
   }
 
   render();

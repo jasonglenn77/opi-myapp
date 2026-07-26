@@ -150,6 +150,18 @@ def unlock_estimate(estimate_id: int, _user=Depends(get_current_user)):
     return {"ok": True}
 
 
+@router.post("/{estimate_id}/lock")
+def lock_estimate(estimate_id: int, _user=Depends(get_current_user)):
+    """Lock the estimate read-only — used by the estimator's single 'Save & Send'
+    (step 9): once the quote is finalized + filed, it's locked until a new revision
+    or an explicit unlock."""
+    with engine.begin() as conn:
+        n = conn.execute(text("UPDATE estimates SET locked=1 WHERE id=:id"), {"id": estimate_id}).rowcount
+    if not n:
+        raise HTTPException(status_code=404, detail="Estimate not found")
+    return {"ok": True}
+
+
 # NOTE: path is /quote-revisions, NOT /revisions — /{id}/revisions is already the
 # Save-Revision snapshot history (a different feature), and FastAPI resolves
 # same-path routes in declaration order, so /revisions here would shadow it.
