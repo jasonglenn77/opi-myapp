@@ -134,24 +134,17 @@ export async function pipelinePage(routeFn) {
   };
 
   // The Quote cell = the quoting-metrics estimate. Priority: in-app estimate →
-  // the Google-Drive workbook (historical) → start/link. The QBO estimate (the old
-  // customer-facing PDF) is a small secondary reference, not the headline.
+  // the Google-Drive workbook (historical) → start/link. The quote PDF lives in the
+  // Docs "4 Quotes" folder, so there's no separate QBO-estimate pointer here.
   const quoteCell = (o) => {
-    let primary;
-    if (o.app_estimate_id) {
-      primary = `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap" title="In-app quoting-metrics estimate">Open quote →</a>`;
-    } else if (o.workbook_url) {
-      primary = `<a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="font-semibold text-indigo-700 hover:underline whitespace-nowrap" title="Quoting-metrics workbook in Google Drive">Workbook ↗</a>
+    if (o.app_estimate_id)
+      return `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap" title="In-app quoting-metrics estimate">Open quote →</a>`;
+    if (o.workbook_url)
+      return `<a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="font-semibold text-indigo-700 hover:underline whitespace-nowrap" title="Quoting-metrics workbook in Google Drive">Workbook ↗</a>
         <button data-editlink="${o.id}" class="text-[10px] text-black/30 hover:text-black/60 ml-1" title="Edit workbook link">✎</button>`;
-    } else {
-      const start = o.customer_qbo_id ? `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>` : "";
-      const link = `<button data-editlink="${o.id}" class="text-[11px] text-black/40 hover:text-indigo-700 hover:underline whitespace-nowrap ${start ? "ml-2" : ""}" title="Link the Google-Drive quoting-metrics workbook">+ link workbook</button>`;
-      primary = start + link;
-    }
-    const qbo = o.qbo_estimate_id
-      ? `<div class="text-[10px] mt-0.5"><a href="#/entity/estimate/${escapeHtml(o.qbo_estimate_id)}" class="text-black/40 hover:text-indigo-700 hover:underline" title="Historical QuickBooks estimate (the old sent PDF)">QBO ↗</a></div>`
-      : "";
-    return primary + qbo;
+    const start = o.customer_qbo_id ? `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>` : "";
+    const link = `<button data-editlink="${o.id}" class="text-[11px] text-black/40 hover:text-indigo-700 hover:underline whitespace-nowrap ${start ? "ml-2" : ""}" title="Link the Google-Drive quoting-metrics workbook">+ link workbook</button>`;
+    return start + link;
   };
 
   // Expander caret in the Quote cell — present when this opportunity has an in-app
