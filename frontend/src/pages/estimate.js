@@ -8,7 +8,7 @@
 
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
-import { api, hasCapability } from "../api.js";
+import { api, hasCapability, getToken } from "../api.js";
 import { mountBaseQuotingMetrics } from "./base-quoting-metrics.js";
 import { contactFormModal } from "./contacts.js";
 import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
@@ -70,7 +70,7 @@ function markChangedFields(root) {
 //   #/estimate/{id}/review              -> Review / Rollup tab
 //   #/base-quoting-metrics              -> legacy URL; redirected to the picker
 export async function estimatePage(routeFn) {
-  const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|send-qbo|project-rentals|option\/(\d+)))?\/?$/);
+  const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|pdf|send-qbo|project-rentals|option\/(\d+)))?\/?$/);
   // The standalone quoting-metrics list is retired — the pipeline is the single
   // front door for quotes. Only the workbook editor (#/estimate/{id}) lives here;
   // a bare #/estimate redirects to the pipeline.
@@ -487,6 +487,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
           </button>` : ""}
         <div class="flex-1"></div>
         ${tabBtn(`${baseUrl}/review`, "Review", tab === "review")}
+        ${tabBtn(`${baseUrl}/pdf`, "Estimate PDF", tab === "pdf")}
         ${tabBtn(`${baseUrl}/send-qbo`, "Send to QBO", tab === "send-qbo")}
       </div>
     </div>`;
@@ -651,6 +652,9 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   if (tab === "review") {
     return renderReviewTab(tabBody, estimateId, metricSets, estimate);
   }
+  if (tab === "pdf") {
+    return renderPdfTab(tabBody, estimateId, metricSets, estimate);
+  }
   if (tab === "send-qbo") {
     return renderSendToQboTab(tabBody, estimateId, metricSets, estimate);
   }
@@ -685,6 +689,178 @@ async function openRevisionsModal(estimateId) {
       </a>`).join("") || `<div class="text-black/40 py-2">No revisions.</div>`;
     body.querySelectorAll("[data-goto]").forEach(a => a.addEventListener("click", () => close()));
   } catch (e) { body.innerHTML = `<div class="text-red-600 py-2">Couldn't load revisions.</div>`; }
+}
+
+// ── Estimate PDF tab ─────────────────────────────────────────────────────────
+// The customer-facing quote (step 7). Priced line items come from computeSetBundles
+// (the same validated engine as Send-to-QBO / Review, so the PDF ties out to the
+// workbook); standard blocks (Payment Terms, Stipulations, Dumpster, notes) prefill
+// from estimate_pdf_defaults. The estimator edits the customized areas (scope/BOM,
+// bill-to, stipulations clause) and previews the PDF. The whole editable model is
+// saved per estimate on the device; "Rebuild from metrics" re-pulls amounts.
+async function renderPdfTab(container, estimateId, initialMetricSets, estimateRow) {
+  container.innerHTML = `<div class="card px-5 py-4 text-sm text-black/50">Loading…</div>`;
+  let lookups, allLines, dfl;
+  try {
+    [lookups, allLines, dfl] = await Promise.all([
+      api("/quoting/lookup-values"),
+      api(`/quoting/metric-lines?estimate_id=${estimateId}`),
+      api("/estimates/pdf-defaults").catch(() => ({})),
+    ]);
+  } catch (err) {
+    container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">Failed to load: ${escapeHtml(err?.message || String(err))}</div>`;
+    return;
+  }
+  let estimateState = {};
+  try { const raw = localStorage.getItem("opi_estimate_state_v1"); if (raw) estimateState = JSON.parse(raw) || {}; } catch {}
+
+  const linesBySet = new Map();
+  for (const l of allLines) { const s = l.metric_set_id; if (!linesBySet.has(s)) linesBySet.set(s, []); linesBySet.get(s).push(l); }
+  const orderedSets = [
+    ...(initialMetricSets || []).filter(s => s.kind === "base"),
+    ...(initialMetricSets || []).filter(s => s.kind === "option").sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
+    ...(initialMetricSets || []).filter(s => s.kind === "project_rentals"),
+  ].filter(s => Number(s.is_enabled) === 1);
+
+  const BUNDLE_ORDER = ["installation", "rentals", "wg_labor", "wg_additional", "mobilization", "remobilization", "downtime"];
+  const BUNDLE_ITEM = {
+    installation: "Installation (Labor)", rentals: "Rentals", wg_labor: "Wire Guidance (Labor)",
+    wg_additional: "Wire Guidance - Additional", mobilization: "Mobilization",
+    remobilization: "Remobilization", downtime: "Downtime",
+  };
+  const num = (v) => { const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : 0; };
+  const initials = (name) => (name || "").trim().split(/\s+/).map(w => w[0] || "").join("").toUpperCase().slice(0, 4) || "";
+
+  const defaultDesc = (label, loc, e) => {
+    if (label === "Installation (Labor)")
+      return `${e.quote_description || "Installation"}${loc ? " in " + loc : ""}\n\nScope of work (BOM):\n`;
+    if (label === "Rentals")
+      return `Forklift and Scissor Lift Rental\n\n${dfl.rentals_note || ""}`;
+    if (label === "Wire Guidance (Labor)")
+      return `Wire Guidance Installation${loc ? " in " + loc : ""}\n\n**Line driver to be provided by customer. Includes floor scrubber finish along wire guidance cut path.`;
+    return "";
+  };
+
+  function buildDefaultModel() {
+    const e = estimateRow || {};
+    const loc = [e.project_city, e.project_state].filter(Boolean).join(", ");
+    const contact = [e.contact_first, e.contact_last].filter(Boolean).join(" ");
+    const agg = new Map(); const order = [];
+    for (const set of orderedSets) {
+      const bundles = computeSetBundles({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState });
+      for (const bk of BUNDLE_ORDER) {
+        const b = bundles[bk]; if (!b) continue;
+        const total = (b.lines || []).reduce((s, [, v]) => s + (Number(v) || 0), 0);
+        if (total <= 0) continue;
+        const label = BUNDLE_ITEM[bk] || b.title;
+        if (!agg.has(label)) { agg.set(label, 0); order.push(label); }
+        agg.set(label, agg.get(label) + total);
+      }
+    }
+    const lines = order.map(label => ({
+      label, description: defaultDesc(label, loc, e), qty: 1, rate: agg.get(label), amount: agg.get(label),
+    }));
+    lines.push({ label: "Dumpster & Porta Potty Rental", description: dfl.dumpster_note || "", qty: 0, rate: 1000, amount: 0 });
+    lines.push({ label: "Payment Terms", description: dfl.payment_terms || "", qty: 1, rate: 0, amount: 0 });
+    lines.push({ label: "Stipulations", description: dfl.stipulations || "", qty: 1, rate: 0, amount: 0 });
+    return {
+      bill_to: [e.customer_display_name, contact, loc].filter(Boolean).join("\n"),
+      sales_rep: dfl.sales_rep || "", preparer: initials(e.quoted_by),
+      footer_title: `${e.quote_description || ""}${loc ? " in " + loc : ""}`.trim(),
+      quote_date: new Date().toISOString().slice(0, 10),
+      lines,
+    };
+  }
+
+  const MODEL_KEY = `opi_pdf_model_${estimateId}`;
+  let model;
+  try { model = JSON.parse(localStorage.getItem(MODEL_KEY) || "null"); } catch { model = null; }
+  if (!model || !Array.isArray(model.lines)) model = buildDefaultModel();
+  const save = () => localStorage.setItem(MODEL_KEY, JSON.stringify(model));
+  const totalOf = () => model.lines.reduce((s, l) => s + num(l.amount), 0);
+  const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
+  let msg = "";
+
+  async function preview(saveMode) {
+    const payload = {
+      lines: model.lines.map(l => ({ label: l.label, description: l.description, qty: num(l.qty), rate: num(l.rate), amount: num(l.amount) })),
+      total: totalOf(), sales_rep: model.sales_rep, footer_title: model.footer_title,
+      preparer: model.preparer, quote_date: model.quote_date,
+      bill_to: String(model.bill_to || "").split("\n").map(s => s.trim()).filter(Boolean),
+      save: !!saveMode,
+    };
+    const resp = await fetch(`/api/estimates/${estimateId}/pdf`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) { msg = "PDF failed: " + (await resp.text()).slice(0, 120); render(); return; }
+    if (saveMode) { const j = await resp.json(); msg = `Saved to “4 Quotes” (${j.filename})`; render(); return; }
+    const blob = await resp.blob();
+    window.open(URL.createObjectURL(blob), "_blank");
+  }
+
+  function render() {
+    const inp = (val, attrs) => `<input value="${escapeHtml(val ?? "")}" ${attrs} class="w-full text-sm rounded border border-black/15 px-2 py-1">`;
+    const headHtml = `
+      <div class="card px-4 py-3 grid sm:grid-cols-2 gap-3">
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Bill To (one per line)</div>
+          <textarea data-h="bill_to" rows="3" class="w-full text-sm rounded border border-black/15 px-2 py-1">${escapeHtml(model.bill_to || "")}</textarea></label>
+        <div class="grid grid-cols-2 gap-2 content-start">
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Sales Rep</div>${inp(model.sales_rep, 'data-h="sales_rep"')}</label>
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Prepared By (initials)</div>${inp(model.preparer, 'data-h="preparer"')}</label>
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Quote Date</div>${inp(model.quote_date, 'data-h="quote_date" type="date"')}</label>
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Footer Title</div>${inp(model.footer_title, 'data-h="footer_title"')}</label>
+        </div>
+      </div>`;
+
+    const rows = model.lines.map((l, i) => `
+      <tr class="border-t border-black/5 align-top">
+        <td class="px-2 py-2 w-40"><input value="${escapeHtml(l.label || "")}" data-l="${i}" data-f="label" class="w-full text-xs font-semibold rounded border border-black/10 px-1.5 py-1"></td>
+        <td class="px-2 py-2"><textarea data-l="${i}" data-f="description" rows="2" class="w-full text-xs rounded border border-black/10 px-1.5 py-1">${escapeHtml(l.description || "")}</textarea></td>
+        <td class="px-1 py-2 w-14"><input value="${escapeHtml(String(l.qty ?? ""))}" data-l="${i}" data-f="qty" inputmode="numeric" class="w-full text-xs text-right rounded border border-black/10 px-1 py-1"></td>
+        <td class="px-1 py-2 w-20"><input value="${escapeHtml(String(l.rate ?? ""))}" data-l="${i}" data-f="rate" inputmode="numeric" class="w-full text-xs text-right rounded border border-black/10 px-1 py-1"></td>
+        <td class="px-1 py-2 w-24"><input value="${escapeHtml(String(l.amount ?? ""))}" data-l="${i}" data-f="amount" inputmode="numeric" class="w-full text-xs text-right tabular-nums rounded border border-black/10 px-1 py-1"></td>
+        <td class="px-1 py-2 w-6 text-right"><button data-del="${i}" title="Remove line" class="text-black/30 hover:text-red-600 text-sm">×</button></td>
+      </tr>`).join("");
+
+    container.innerHTML = `
+      <div class="grid gap-3">
+        <div class="flex items-center justify-between flex-wrap gap-2 px-1">
+          <div class="text-[11px] text-black/50">Amounts come from the validated metrics. Edit the customized areas (scope/BOM, bill-to, stipulations); standard blocks prefill from app defaults. ${msg ? `<span class="text-emerald-700 font-semibold ml-2">${escapeHtml(msg)}</span>` : ""}</div>
+          <button data-rebuild class="text-[11px] font-semibold text-blue-600 hover:underline">↺ Rebuild from metrics</button>
+        </div>
+        ${headHtml}
+        <div class="card px-2 py-2 overflow-x-auto">
+          <table class="w-full" style="min-width:680px;">
+            <thead><tr class="text-left text-[10px] uppercase tracking-wide text-black/40">
+              <th class="px-2 py-1">Item</th><th class="px-2 py-1">Description</th>
+              <th class="px-1 py-1 text-right">Qty</th><th class="px-1 py-1 text-right">Rate</th>
+              <th class="px-1 py-1 text-right">Amount</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <div class="flex items-center justify-between px-2 pt-2 mt-1 border-t border-black/5">
+            <button data-add class="text-[11px] font-semibold text-blue-600 hover:underline">+ Add line</button>
+            <div class="text-sm">Total <span data-total class="font-extrabold text-ink-900 tabular-nums">${money(totalOf())}</span></div>
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 px-1">
+          <button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
+        </div>
+      </div>`;
+
+    container.querySelectorAll("[data-h]").forEach(el => el.addEventListener("input", () => { model[el.getAttribute("data-h")] = el.value; save(); }));
+    container.querySelectorAll("[data-l]").forEach(el => el.addEventListener("input", () => {
+      const i = Number(el.getAttribute("data-l")), f = el.getAttribute("data-f");
+      model.lines[i][f] = el.value; save();
+      if (f === "amount") { const t = container.querySelector("[data-total]"); if (t) t.textContent = money(totalOf()); }
+    }));
+    container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => { model.lines.splice(Number(b.getAttribute("data-del")), 1); save(); render(); }));
+    container.querySelector("[data-add]")?.addEventListener("click", () => { model.lines.push({ label: "", description: "", qty: 1, rate: 0, amount: 0 }); save(); render(); });
+    container.querySelector("[data-rebuild]")?.addEventListener("click", () => { if (confirm("Rebuild the line items + standard blocks from the current metrics? Your description edits on this quote will be replaced.")) { model = buildDefaultModel(); save(); render(); } });
+    container.querySelector("[data-preview]")?.addEventListener("click", () => preview(false));
+  }
+
+  render();
 }
 
 // ── Send to QBO tab ──────────────────────────────────────────────────────────
