@@ -2217,9 +2217,19 @@ option {
   background-color: rgb(29 78 216 / var(--tw-bg-opacity, 1));
 }
 
+.bg-brand-50 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(244 247 245 / var(--tw-bg-opacity, 1));
+}
+
 .bg-brand-500 {
   --tw-bg-opacity: 1;
   background-color: rgb(79 127 97 / var(--tw-bg-opacity, 1));
+}
+
+.bg-brand-600 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(62 101 78 / var(--tw-bg-opacity, 1));
 }
 
 .bg-emerald-100 {
@@ -2424,11 +2434,6 @@ option {
 .bg-yellow-300 {
   --tw-bg-opacity: 1;
   background-color: rgb(253 224 71 / var(--tw-bg-opacity, 1));
-}
-
-.bg-brand-50 {
-  --tw-bg-opacity: 1;
-  background-color: rgb(244 247 245 / var(--tw-bg-opacity, 1));
 }
 
 .object-contain {
@@ -3480,6 +3485,11 @@ option {
 
 .hover\:bg-blue-50\/60:hover {
   background-color: rgb(239 246 255 / 0.6);
+}
+
+.hover\:bg-brand-700:hover {
+  --tw-bg-opacity: 1;
+  background-color: rgb(50 82 65 / var(--tw-bg-opacity, 1));
 }
 
 .hover\:bg-emerald-100:hover {

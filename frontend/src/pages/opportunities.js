@@ -529,6 +529,13 @@ function openLinkProjectModal(opp, onDone, onCancel) {
         <div data-pmenu class="absolute z-20 mt-1 w-full bg-white border border-black/10 rounded-xl shadow-lg max-h-56 overflow-auto hidden"></div>
       </div>
       <div data-picked class="text-xs text-emerald-700 font-semibold mb-2 min-h-[1rem]"></div>
+      <div class="mb-3">
+        <div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Purchase Order <span class="normal-case font-normal text-black/30">— optional, files to “5 Purchase Orders”</span></div>
+        <div data-podrop class="border border-dashed border-black/20 rounded-xl px-3 py-3 text-center text-[11px] text-black/45 cursor-pointer hover:bg-black/[0.02]" style="transition:border-color .12s">
+          <span data-postatus>Drag the PO here, or click to upload</span>
+          <input type="file" multiple class="hidden" data-poinput>
+        </div>
+      </div>
       <div class="flex items-center justify-end gap-2">
         <span data-msg class="text-xs font-semibold mr-auto"></span>
         <button data-skip class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Won, link later</button>
@@ -558,6 +565,25 @@ function openLinkProjectModal(opp, onDone, onCancel) {
   };
   input.addEventListener("input", () => { picked = null; pickedEl.textContent = ""; clearTimeout(timer); timer = setTimeout(() => search(input.value.trim()), 180); });
   input.addEventListener("focus", () => search(input.value.trim()));
+
+  // Attach the PO to folder 5 as part of the won handoff (step 13).
+  const poDrop = overlay.querySelector("[data-podrop]");
+  const poInput = overlay.querySelector("[data-poinput]");
+  const poStatus = overlay.querySelector("[data-postatus]");
+  const uploadPO = async (files) => {
+    const arr = [...(files || [])]; if (!arr.length) return;
+    poStatus.textContent = "Uploading…";
+    try {
+      for (const f of arr) { const fd = new FormData(); fd.append("file", f); await api(`/documents/opportunity/${opp.id}?folder=5_purchase_orders`, { method: "POST", body: fd }); }
+      poStatus.textContent = `✓ ${arr.length} file${arr.length > 1 ? "s" : ""} attached to “5 Purchase Orders”`;
+      if (opp) opp.doc_count = (opp.doc_count || 0) + arr.length;
+    } catch (_) { poStatus.textContent = "Upload failed — try again"; }
+  };
+  poDrop.addEventListener("click", () => poInput.click());
+  poInput.addEventListener("change", () => uploadPO(poInput.files));
+  poDrop.addEventListener("dragover", (e) => { e.preventDefault(); poDrop.style.borderColor = "#4f7f61"; });
+  poDrop.addEventListener("dragleave", () => { poDrop.style.borderColor = ""; });
+  poDrop.addEventListener("drop", (e) => { e.preventDefault(); poDrop.style.borderColor = ""; uploadPO(e.dataTransfer?.files); });
   overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) { close(); onCancel && onCancel(); } });
   overlay.querySelector("[data-cancel]").addEventListener("click", () => { close(); onCancel && onCancel(); });
   overlay.querySelector("[data-skip]").addEventListener("click", async () => {

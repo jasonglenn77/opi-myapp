@@ -1262,16 +1262,9 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
               ${enabledCount} of ${perSet.length} set${perSet.length === 1 ? "" : "s"} enabled · ${revLine}
             </div>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="text-[11px] text-emerald-700" data-rev-saved-at></span>
-            <span class="text-[11px] font-semibold" data-sync-msg></span>
-            ${linkedOpp ? `<button type="button" data-sync-pipeline title="Push this quote's totals onto pipeline row ${escapeHtml(linkedOpp.quote_number || "#" + linkedOpp.id)}"
-                    class="rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-sm px-3 py-2 font-semibold hover:bg-blue-100">Update pipeline</button>` : ""}
-            ${rev > 0 ? `<button type="button" data-rev-history class="rounded-lg bg-slate-100 text-slate-700 text-sm px-3 py-2 font-semibold hover:bg-slate-200">History</button>` : ""}
-            <button type="button" data-save-revision
-                    class="btn-primary text-sm px-4 py-2">
-              Save Revision
-            </button>
+          <div class="flex items-center gap-3">
+            <span class="text-[11px] text-black/45">Finalize this quote on the</span>
+            <a href="#/estimate/${estimateId}/pdf" class="rounded-lg bg-brand-600 text-white text-sm px-4 py-2 font-semibold hover:bg-brand-700">Estimate PDF tab →</a>
           </div>
         </div>
       </div>`;
