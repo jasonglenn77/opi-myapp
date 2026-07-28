@@ -27,9 +27,12 @@ DECIDED_STATUSES = ("won", "lost", "declined")
 ALL_STATUSES = OPEN_STATUSES + DECIDED_STATUSES
 
 
-def _lifecycle_from_stage(pstat):
-    """Map the granular win-probability stage (estimate_pipeline_status lookup)
-    onto the lifecycle status. Matches the Rolling-Revenue import mapping."""
+def _terminal_from_stage(pstat):
+    """The lifecycle STAGE is action-driven (new→received, start quote→quoting,
+    save & send→sent). The win-probability STATUS only forces the stage when it is
+    TERMINAL — Won / Lost / Inactive. Intermediate 20-80% values leave the stage
+    untouched (that decoupling fixes the 'status accidentally moves the stage' bug).
+    Returns the terminal stage, or None when the status is not terminal."""
     p = (pstat or "").lower()
     if "won" in p or "red flag" in p:
         return "won"
@@ -37,7 +40,7 @@ def _lifecycle_from_stage(pstat):
         return "lost"
     if "inactive" in p:
         return "declined"
-    return "sent"   # 20/40/60/80% verbal — a quote exists, awaiting decision
+    return None
 
 
 def _require(user):
@@ -352,10 +355,13 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
                                {"p": fields["project_qbo_id"]}).scalar()
             if not okp:
                 raise HTTPException(status_code=400, detail="project_qbo_id is not a project")
-        # OPI manages RFQs by the granular win-probability stage (pipeline_status);
-        # setting it derives the lifecycle status (unless status is set explicitly).
+        # The win-probability status only advances the lifecycle STAGE when it's
+        # terminal (Won/Lost/Inactive); intermediate values leave the action-driven
+        # stage alone. Explicit status wins.
         if "pipeline_status" in fields and "status" not in fields:
-            fields["status"] = _lifecycle_from_stage(fields["pipeline_status"])
+            terminal = _terminal_from_stage(fields["pipeline_status"])
+            if terminal:
+                fields["status"] = terminal
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
                 "target_end_date", "estimator_user_id", "quote_number", "status",
                 "pipeline_status", "project_qbo_id", "notes", "app_estimate_id", "active",
@@ -602,14 +608,18 @@ def sync_metrics_from_estimate(app_estimate_id: int, body: SyncMetrics, user=Dep
     Marks the row metrics_source='app' so the UI can badge it."""
     _require(user)
     with engine.begin() as conn:
-        opp = conn.execute(text("SELECT id FROM opportunities WHERE app_estimate_id=:e ORDER BY id LIMIT 1"),
+        opp = conn.execute(text("SELECT id, status FROM opportunities WHERE app_estimate_id=:e ORDER BY id LIMIT 1"),
                            {"e": app_estimate_id}).mappings().first()
         if not opp:
             raise HTTPException(status_code=404, detail="No pipeline row is linked to this estimate.")
-        conn.execute(text("""
+        # Save & Send means the quote went out — advance the action-driven stage to
+        # 'sent' (but never regress a decided row).
+        advance = opp["status"] in ("received", "quoting")
+        extra = ", status = 'sent', sent_at = COALESCE(sent_at, NOW())" if advance else ""
+        conn.execute(text(f"""
             UPDATE opportunities SET
               contract_value = :cv, ohp_amount = :oa, ohp_pct = :op,
-              labor_days = :ld, travel_days = :td, metrics_source = 'app'
+              labor_days = :ld, travel_days = :td, metrics_source = 'app'{extra}
             WHERE id = :id
         """), {"cv": body.contract_value, "oa": body.ohp_amount, "op": body.ohp_pct,
                "ld": body.labor_days, "td": body.travel_days, "id": opp["id"]})
