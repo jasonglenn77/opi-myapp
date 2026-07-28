@@ -226,13 +226,25 @@ export async function pipelinePage(routeFn) {
       ? `<div class="text-[10px] text-black/45" title="Weighted value = contract × win probability (expected pipeline revenue)">${money(o.discounted_contract_value)} wtd</div>` : "";
     return `${money(o.contract_value)}${app}${wtd}`;
   };
+  // Stale = an OPEN opportunity gone quiet: last follow-up (or, if never contacted,
+  // the RFQ date) is more than 30 days old. Flags rows that need a follow-up.
+  const daysSince = (d) => (d ? Math.floor((Date.now() - new Date(String(d).slice(0, 10)).getTime()) / 86400000) : null);
+  const OPEN_STATUSES = new Set(["received", "quoting", "sent"]);
+  const isStale = (o) => {
+    if (!OPEN_STATUSES.has(o.status)) return false;
+    const ref = o.last_contact_date || o.rfq_received_date;
+    const n = daysSince(ref);
+    return n != null && n > 30;
+  };
   const followupCell = (o) => {
+    const stale = isStale(o);
+    const flag = stale ? `<div class="text-[9px] font-bold uppercase tracking-wide text-red-600">⏰ follow up</div>` : "";
     if (o.last_contact_date || o.follow_up_count)
       return `<button data-log="${o.id}" class="text-left group">
-        <div class="tabular-nums text-black/70 group-hover:underline">${ymd(o.last_contact_date)}</div>
-        <div class="text-[10px] text-black/40">${o.follow_up_count || 0}× ${escapeHtml(o.last_comm_type || "")}</div>
+        <div class="tabular-nums ${stale ? "text-red-600 font-semibold" : "text-black/70"} group-hover:underline">${ymd(o.last_contact_date)}</div>
+        <div class="text-[10px] text-black/40">${o.follow_up_count || 0}× ${escapeHtml(o.last_comm_type || "")}</div>${flag}
       </button>`;
-    return `<button data-log="${o.id}" class="text-[11px] text-blue-600 font-semibold hover:underline">+ log</button>`;
+    return `<button data-log="${o.id}" class="text-left"><span class="text-[11px] ${stale ? "text-red-600" : "text-blue-600"} font-semibold hover:underline">+ log</span>${flag}</button>`;
   };
   // Column order per OPI: stage, status, follow-up, quote, By, RFQ, quote#,
   // Customer, Contact, job, then the rest. Each sortable unless nosort.
@@ -246,7 +258,7 @@ export async function pipelinePage(routeFn) {
     { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
     { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}` },
     { key: "contact_name", label: "Contact", cls: "text-black/60", td: (o) => escapeHtml(dash(o.contact_name)) },
-    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
+    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.notes ? ` <span class="align-middle cursor-help text-black/30 hover:text-black/60" title="${escapeHtml(o.notes)}">🗒</span>` : ""}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
@@ -913,9 +925,10 @@ function newOpportunityModal({ estimators, onSaved }) {
             <button data-newcontact class="rounded-lg border border-black/15 px-2.5 py-1 text-xs font-semibold text-ink-900 hover:bg-black/5 whitespace-nowrap disabled:text-black/30" disabled>+ New</button>
           </div></label>
         <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Job / description</div><input data-f="title" class="input text-sm py-1.5 w-full" placeholder="e.g. Rack install — Odessa TX"></label>
-        <div class="grid grid-cols-2 gap-2">
+        <div class="grid grid-cols-3 gap-2">
           <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">RFQ received</div><input data-f="rfq_received_date" type="date" class="input text-sm py-1.5 w-full"></label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target start (optional)</div><input data-f="target_start_date" type="date" class="input text-sm py-1.5 w-full"></label>
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target start</div><input data-f="target_start_date" type="date" class="input text-sm py-1.5 w-full"></label>
+          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target end</div><input data-f="target_end_date" type="date" class="input text-sm py-1.5 w-full"></label>
         </div>
         <div class="grid grid-cols-2 gap-2">
           <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Source</div>
@@ -968,6 +981,7 @@ function newOpportunityModal({ estimators, onSaved }) {
       source: val("source").value || null,
       rfq_received_date: val("rfq_received_date").value || null,
       target_start_date: val("target_start_date").value || null,
+      target_end_date: val("target_end_date").value || null,
       estimator_user_id: val("estimator_user_id").value ? Number(val("estimator_user_id").value) : null,
     };
     try { await api(`/opportunities`, { method: "POST", body: JSON.stringify(payload) }); close(); onSaved && onSaved(); }

@@ -286,6 +286,7 @@ class OpportunityIn(BaseModel):
     source: Optional[str] = None
     rfq_received_date: Optional[str] = None
     target_start_date: Optional[str] = None
+    target_end_date: Optional[str] = None
     estimator_user_id: Optional[int] = None
     notes: Optional[str] = None
 
@@ -306,12 +307,12 @@ def create_opportunity(body: OpportunityIn, user=Depends(get_current_user)):
         res = conn.execute(text("""
             INSERT INTO opportunities
               (qbo_customer_id, contact_id, title, source, rfq_received_date, target_start_date,
-               estimator_user_id, status, received_at, notes, created_by_user_id)
-            VALUES (:cid,:contact,:title,:source,:rfq,:target,:est,'received',NOW(),:notes,:uid)
+               target_end_date, estimator_user_id, status, received_at, notes, created_by_user_id)
+            VALUES (:cid,:contact,:title,:source,:rfq,:target,:tend,:est,'received',NOW(),:notes,:uid)
         """), {"cid": cust["id"], "contact": body.contact_id, "title": body.title,
                "source": body.source, "rfq": body.rfq_received_date or None,
-               "target": body.target_start_date or None, "est": body.estimator_user_id,
-               "notes": body.notes, "uid": user.get("id")})
+               "target": body.target_start_date or None, "tend": body.target_end_date or None,
+               "est": body.estimator_user_id, "notes": body.notes, "uid": user.get("id")})
         row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": res.lastrowid}).mappings().first()
     return {"opportunity": _row(row)}
 
