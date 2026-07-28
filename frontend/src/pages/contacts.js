@@ -31,7 +31,7 @@ export function customerCombobox(host, { onPick, placeholder = "Search customerâ
   const close = () => menu.classList.add("hidden");
   const search = async (q) => {
     try {
-      const d = await api(`/contacts/customer-options?q=${encodeURIComponent(q)}&limit=40`);
+      const d = await api(`/contacts/customer-options?q=${encodeURIComponent(q)}&limit=200`);
       const list = d.customers || [];
       menu.innerHTML = list.length
         ? list.map(c => `<div class="px-3 py-1.5 text-sm text-ink-900 hover:bg-blue-50 cursor-pointer" data-qbo="${escapeHtml(c.qbo_id)}">${escapeHtml(c.name)}</div>`).join("")

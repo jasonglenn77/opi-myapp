@@ -140,8 +140,10 @@ export async function pipelinePage(routeFn) {
     if (o.app_estimate_id)
       return `<a href="#/estimate/${o.app_estimate_id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap" title="In-app quoting-metrics estimate">Open quote →</a>`;
     if (o.workbook_url)
-      return `<a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="font-semibold text-indigo-700 hover:underline whitespace-nowrap" title="Quoting-metrics workbook in Google Drive">Workbook ↗</a>
-        <button data-editlink="${o.id}" class="text-[10px] text-black/30 hover:text-black/60 ml-1" title="Edit workbook link">✎</button>`;
+      return `<div class="whitespace-nowrap"><a href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener" class="font-semibold text-indigo-700 hover:underline" title="Quoting-metrics workbook in Google Drive">Workbook ↗</a>
+        <button data-editlink="${o.id}" class="text-[10px] text-black/30 hover:text-black/60 ml-1" title="Edit workbook link">✎</button>
+        <button data-clearlink="${o.id}" class="text-[10px] text-black/30 hover:text-red-600 ml-0.5" title="Remove workbook link">✕</button></div>
+        ${o.customer_qbo_id ? `<button data-startq="${o.id}" class="text-[11px] font-semibold text-emerald-700 hover:underline" title="Build an in-app quote (e.g. a revision)">+ Start quote</button>` : ""}`;
     const start = o.customer_qbo_id ? `<button data-startq="${o.id}" class="font-semibold text-emerald-700 hover:underline whitespace-nowrap">Start quote</button>` : "";
     const link = `<button data-editlink="${o.id}" class="text-[11px] text-black/40 hover:text-indigo-700 hover:underline whitespace-nowrap ${start ? "ml-2" : ""}" title="Link the Google-Drive quoting-metrics workbook">+ link workbook</button>`;
     return start + link;
@@ -244,7 +246,7 @@ export async function pipelinePage(routeFn) {
     { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
     { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}` },
     { key: "contact_name", label: "Contact", cls: "text-black/60", td: (o) => escapeHtml(dash(o.contact_name)) },
-    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : ""}` },
+    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
@@ -340,8 +342,8 @@ export async function pipelinePage(routeFn) {
     filtersEl.innerHTML =
       pills.map(([k, label]) =>
         `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`).join("") +
-      `<select data-stage class="input text-xs py-1 px-2 max-w-[16rem]"><option value="">All stages</option>${stages.map(s => `<option value="${escapeHtml(s)}" ${stageFilter === s ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select>` +
-      `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ Unlinked</button>` +
+      `<select data-stage class="input text-xs py-1 px-2 max-w-[16rem]"><option value="">All statuses</option>${stages.map(s => `<option value="${escapeHtml(s)}" ${stageFilter === s ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select>` +
+      `<button data-unlinked class="rounded-full px-2.5 py-1 text-xs font-semibold border ${unlinkedOnly ? "bg-amber-500 text-white border-amber-500" : "border-amber-300 text-amber-700 hover:bg-amber-50"}" title="Rows with no matching QuickBooks customer">⚠ No customer</button>` +
       `<button data-showinactive class="rounded-full px-2.5 py-1 text-xs font-semibold border ${showInactive ? "bg-slate-600 text-white border-slate-600" : "border-black/15 text-black/50 hover:bg-black/5"}" title="Include archived (inactive) opportunities">Inactive</button>` +
       `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search…" class="input text-xs py-1 px-2 ml-auto w-52">` +
       `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>` +
@@ -488,6 +490,16 @@ export async function pipelinePage(routeFn) {
       try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ workbook_url: v }) }); opp.workbook_url = v; render(); }
       catch (err) { alert(err.message); }
     }));
+    listEl.querySelectorAll("[data-clearlink]").forEach(b => b.addEventListener("click", async () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-clearlink"));
+      if (!confirm("Remove the workbook link from this row?")) return;
+      try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ workbook_url: null }) }); opp.workbook_url = null; render(); }
+      catch (err) { alert(err.message); }
+    }));
+    listEl.querySelectorAll("[data-linkproj]").forEach(b => b.addEventListener("click", () => {
+      const opp = allRows.find(o => String(o.id) === b.getAttribute("data-linkproj"));
+      openLinkProjectModal(opp, () => { loadMetrics(); load(); }, () => render());
+    }));
     listEl.querySelectorAll("[data-linkcust]").forEach(b => b.addEventListener("click", () => {
       const opp = allRows.find(o => String(o.id) === b.getAttribute("data-linkcust"));
       linkCustomerModal(opp, (updated) => {
@@ -526,7 +538,7 @@ function openLinkProjectModal(opp, onDone, onCancel) {
       <div class="text-xs text-black/50 mb-3">Once the office creates the project in QuickBooks (named with the quote # prefix), link it here so the quote flows through to the project.</div>
       <div class="relative mb-1">
         <input data-psearch class="input text-sm py-1.5 w-full" placeholder="Search project…" value="${escapeHtml(opp.quote_number || opp.title || "")}" autocomplete="off">
-        <div data-pmenu class="absolute z-20 mt-1 w-full bg-white border border-black/10 rounded-xl shadow-lg max-h-56 overflow-auto hidden"></div>
+        <div data-pmenu class="absolute z-20 mt-1 w-full bg-white border border-black/10 rounded-xl shadow-lg max-h-44 overflow-auto hidden"></div>
       </div>
       <div data-picked class="text-xs text-emerald-700 font-semibold mb-2 min-h-[1rem]"></div>
       <div class="mb-3">
@@ -551,11 +563,12 @@ function openLinkProjectModal(opp, onDone, onCancel) {
   const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
   let timer = null;
   const search = async (q) => {
+    if (!q) { menu.classList.add("hidden"); return; }   // empty field → hide menu, don't cover the buttons
     try {
       const list = (await api(`/opportunities/project-options?q=${encodeURIComponent(q)}&limit=40`)).projects || [];
       menu.innerHTML = list.length
-        ? list.map(pj => `<div class="px-3 py-1.5 text-sm hover:bg-blue-50 cursor-pointer" data-pq="${escapeHtml(pj.qbo_id)}">${escapeHtml(pj.name)}</div>`).join("")
-        : `<div class="px-3 py-1.5 text-xs text-black/40">No projects</div>`;
+        ? list.map(pj => `<div class="px-3 py-1.5 text-sm text-ink-900 hover:bg-blue-50 cursor-pointer" data-pq="${escapeHtml(pj.qbo_id)}">${escapeHtml(pj.name)}</div>`).join("")
+        : `<div class="px-3 py-1.5 text-xs text-black/40">No matching projects</div>`;
       menu.classList.remove("hidden");
       menu.querySelectorAll("[data-pq]").forEach(el => el.addEventListener("mousedown", (e) => {
         e.preventDefault(); picked = { qbo_id: el.getAttribute("data-pq"), name: el.textContent };
@@ -565,6 +578,7 @@ function openLinkProjectModal(opp, onDone, onCancel) {
   };
   input.addEventListener("input", () => { picked = null; pickedEl.textContent = ""; clearTimeout(timer); timer = setTimeout(() => search(input.value.trim()), 180); });
   input.addEventListener("focus", () => search(input.value.trim()));
+  input.addEventListener("blur", () => setTimeout(() => menu.classList.add("hidden"), 150));   // dismiss on blur (after click registers)
 
   // Attach the PO to folder 5 as part of the won handoff (step 13).
   const poDrop = overlay.querySelector("[data-podrop]");
@@ -605,15 +619,10 @@ function startQuoteModal(opp, onDone) {
     <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
       <div class="text-base font-bold text-ink-900 mb-1">Start a quote</div>
       <div class="text-xs text-black/50 mb-4">${escapeHtml(opp.customer_name || "")}${opp.title ? " — " + escapeHtml(opp.title) : ""}</div>
-      <button data-create class="w-full text-left rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-4 py-3 mb-2">
-        <div class="text-sm font-bold text-emerald-800">Create a new estimate</div>
-        <div class="text-xs text-emerald-700/80">Prefills customer, contact, description, dates, quote # from this RFQ.</div>
+      <button data-create class="w-full text-left rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-4 py-3">
+        <div class="text-sm font-bold text-emerald-800">Create a new estimate →</div>
+        <div class="text-xs text-emerald-700/80">Prefills customer, contact, description, dates, and quote # from this RFQ.</div>
       </button>
-      <div class="rounded-xl border border-black/10 px-4 py-3">
-        <div class="text-sm font-bold text-ink-900 mb-1">Link an existing estimate</div>
-        <select data-existing class="input text-sm py-1.5 w-full mb-2"><option value="">Loading…</option></select>
-        <button data-link class="btn-primary text-xs px-3 py-1.5 disabled:opacity-40" disabled>Link selected</button>
-      </div>
       <div class="mt-4 flex items-center justify-end gap-2">
         <span data-msg class="text-xs font-semibold mr-auto"></span>
         <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
@@ -624,8 +633,6 @@ function startQuoteModal(opp, onDone) {
   overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
   overlay.querySelector("[data-cancel]").addEventListener("click", close);
   const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
-  const sel = overlay.querySelector("[data-existing]");
-  const linkBtn = overlay.querySelector("[data-link]");
 
   overlay.querySelector("[data-create]").addEventListener("click", async () => {
     setMsg("Creating…", true);
@@ -633,26 +640,6 @@ function startQuoteModal(opp, onDone) {
       const r = await api(`/opportunities/${opp.id}/start-quote`, { method: "POST" });
       close(); onDone && onDone();
       location.hash = `#/estimate/${r.estimate_id}`;
-    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
-  });
-
-  (async () => {
-    try {
-      const list = (await api(`/opportunities/${opp.id}/quote-options`)).estimates || [];
-      sel.innerHTML = list.length
-        ? `<option value="">— pick an estimate —</option>` + list.map(e =>
-            `<option value="${e.id}">#${e.id}${e.quote_number ? ` · ${escapeHtml(e.quote_number)}` : ""} — ${escapeHtml(e.quote_description || "untitled")} (${e.status})</option>`).join("")
-        : `<option value="">No existing estimates for this customer</option>`;
-    } catch (_) { sel.innerHTML = `<option value="">Couldn't load estimates</option>`; }
-  })();
-  sel.addEventListener("change", () => { linkBtn.disabled = !sel.value; });
-  linkBtn.addEventListener("click", async () => {
-    if (!sel.value) return;
-    setMsg("Linking…", true);
-    try {
-      await api(`/opportunities/${opp.id}/link-quote`, { method: "POST", body: JSON.stringify({ app_estimate_id: Number(sel.value) }) });
-      close(); onDone && onDone();
-      location.hash = `#/estimate/${sel.value}`;
     } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
   });
 }

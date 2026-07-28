@@ -1025,6 +1025,10 @@ option {
   margin-bottom: 1px;
 }
 
+.ml-0\.5 {
+  margin-left: 0.125rem;
+}
+
 .ml-1 {
   margin-left: 0.25rem;
 }
@@ -1230,6 +1234,10 @@ option {
 
 .h-px {
   height: 1px;
+}
+
+.max-h-44 {
+  max-height: 11rem;
 }
 
 .max-h-56 {
@@ -3650,10 +3658,6 @@ option {
 
 .disabled\:opacity-30:disabled {
   opacity: 0.3;
-}
-
-.disabled\:opacity-40:disabled {
-  opacity: 0.4;
 }
 
 .group:hover .group-hover\:underline {
