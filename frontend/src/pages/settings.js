@@ -32,7 +32,10 @@ const errDetail = (e) => { let d = e?.message || "Error"; try { const o = JSON.p
 const prettyCat = (c) => String(c || "").replace(/_/g, " ").replace(/\b\w/g, m => m.toUpperCase());
 
 export async function settingsPage(routeFn) {
-  let activeTab = "roles";
+  // Deep-linkable tabs: #/settings/lookups and #/settings/rates open directly (used
+  // by the Estimating nav group); #/settings opens Roles.
+  const hashTab = (location.hash.split("/")[2] || "").toLowerCase();
+  let activeTab = ["roles", "lookups", "rates"].includes(hashTab) ? hashTab : "roles";
 
   mount(`
     <div class="w-full pb-3">
@@ -62,7 +65,9 @@ export async function settingsPage(routeFn) {
   }
 
   renderTabs();
-  showRoles(routeFn);
+  if (activeTab === "lookups") showReference("lookup");
+  else if (activeTab === "rates") showReference("rates");
+  else showRoles(routeFn);
 }
 
 // ── Roles tab ────────────────────────────────────────────────────────────────

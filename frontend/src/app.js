@@ -137,7 +137,7 @@ async function route() {
     location.hash = "#/customers";
     return;
   }
-  if (hash === "#/settings") return settingsPage(route);
+  if (hash === "#/settings" || hash.startsWith("#/settings/")) return settingsPage(route);
   if (hash.startsWith("#/crew")) {
     const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);
     if (cm) return crewPortalPage(route, { childId: decodeURIComponent(cm[1]), projectId: cm[2] ? decodeURIComponent(cm[2]) : null });
