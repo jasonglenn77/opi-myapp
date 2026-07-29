@@ -159,19 +159,30 @@ export async function pipelinePage(routeFn) {
       ${n > 1 ? `<span class="text-[10px] font-bold">${n}</span>` : ""}
     </button>`;
   };
-  // One revision line inside the expanded sub-row.
+  // One revision line inside the expanded sub-row. The badge conveys the
+  // revision's state (current / locked / draft), so the raw lifecycle status is
+  // not repeated here — instead each revision shows its own Labor / Travel /
+  // OH&P (last synced on that revision's Save & Send), matching the main row.
   const revRow = (o, r) => {
     const badge = r.is_current
-      ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-emerald-100 text-emerald-700">current</span>`
-      : r.locked ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-slate-200 text-slate-600">🔒 locked</span>`
-      : `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-amber-100 text-amber-700">draft</span>`;
+      ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-emerald-100 text-emerald-700" title="The revision the pipeline currently uses">current</span>`
+      : r.locked ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-slate-200 text-slate-600" title="Sent/finalized — read-only unless unlocked">🔒 locked</span>`
+      : `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="Not yet sent — editable draft">draft</span>`;
+    const n = (v) => (v == null ? "—" : Number(v).toLocaleString());
+    const metrics = `<div class="text-black/45 tabular-nums shrink-0 whitespace-nowrap" title="Labor days · Travel days · OH&P% — this revision's last synced figures">
+        Labor ${n(r.labor_days)} · Travel ${n(r.travel_days)} · ${r.ohp_pct == null ? "OH&P —" : "OH&P " + Math.round(r.ohp_pct) + "%"}
+      </div>`;
+    const useBtn = r.is_current
+      ? ""
+      : `<button data-usecur="${r.id}" data-opp="${o.id}" class="font-semibold text-emerald-700 hover:underline shrink-0" title="Make this the revision the pipeline uses (its figures + Open quote)">Use this</button>`;
     return `<div class="flex items-center gap-3 py-1.5 text-xs">
-      <div class="font-bold text-ink-900 w-16 shrink-0">Rev ${r.revision_no}</div>
+      <div class="font-bold text-ink-900 w-14 shrink-0">Rev ${r.revision_no}</div>
       <div class="w-20 shrink-0">${badge}</div>
       <div class="text-black/55 flex-1 min-w-0 truncate">${escapeHtml(r.quote_description || "—")}</div>
-      <div class="text-black/40 w-16 shrink-0">${escapeHtml(r.status || "")}</div>
+      ${metrics}
       <div class="text-black/40 tabular-nums w-24 shrink-0">${r.created_at ? escapeHtml(r.created_at.slice(0, 10)) : ""}</div>
       <a href="#/estimate/${r.id}" class="font-semibold text-blue-700 hover:underline shrink-0">Open →</a>
+      ${useBtn}
       <div class="w-14 shrink-0 text-right">${r.locked ? `<button data-unlockrev="${r.id}" data-opp="${o.id}" class="font-semibold text-amber-700 hover:underline">Unlock</button>` : ""}</div>
     </div>`;
   };
@@ -380,7 +391,44 @@ export async function pipelinePage(routeFn) {
     if (document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute("data-search") != null) sb.focus();
   };
 
+  // ── View-state persistence ──────────────────────────────────────────────────
+  // Remember the pipeline's filters/sort/search/expanded rows + scroll so that
+  // opening a quote and clicking "← Back to pipeline" (or any re-nav) returns to
+  // the exact view the user left, not a fresh default. Session-scoped.
+  const VIEW_KEY = "opi_pipeline_view";
+  let mounting = true;         // suppress scroll clobber during the initial restore
+  let pendingScroll = 0;
+  const saveView = () => {
+    try {
+      const prev = JSON.parse(sessionStorage.getItem(VIEW_KEY) || "null") || {};
+      sessionStorage.setItem(VIEW_KEY, JSON.stringify({
+        statusFilter, stageFilter, searchQ, unlinkedOnly, showInactive,
+        sortKey, sortDir, page, colFilters, expanded: [...expanded],
+        // While mounting, keep the stored scroll (the list is still at 0).
+        scroll: mounting ? (prev.scroll || 0) : (listEl ? listEl.scrollTop : 0),
+      }));
+    } catch (_) {}
+  };
+  const restoreView = () => {
+    try {
+      const v = JSON.parse(sessionStorage.getItem(VIEW_KEY) || "null");
+      if (!v) return;
+      if (typeof v.statusFilter === "string") statusFilter = v.statusFilter;
+      if (typeof v.stageFilter  === "string") stageFilter  = v.stageFilter;
+      if (typeof v.searchQ      === "string") searchQ      = v.searchQ;
+      if (typeof v.unlinkedOnly === "boolean") unlinkedOnly = v.unlinkedOnly;
+      if (typeof v.showInactive === "boolean") showInactive = v.showInactive;
+      if (typeof v.sortKey      === "string") sortKey      = v.sortKey;
+      if (v.sortDir === "asc" || v.sortDir === "desc") sortDir = v.sortDir;
+      if (Number.isInteger(v.page)) page = v.page;
+      if (v.colFilters && typeof v.colFilters === "object") colFilters = v.colFilters;
+      if (Array.isArray(v.expanded)) v.expanded.forEach(id => expanded.add(Number(id)));
+      pendingScroll = Number(v.scroll) || 0;
+    } catch (_) {}
+  };
+
   const render = () => {
+    saveView();   // persist filters/sort/search/expanded (+ current scroll) on every change
     const rows = visible();
     const total = rows.length;
     const countEl = filtersEl.querySelector("[data-count]");
@@ -444,6 +492,21 @@ export async function pipelinePage(routeFn) {
       const oppId = Number(b.getAttribute("data-opp"));
       try { await api(`/estimates/${rid}/unlock`, { method: "POST" }); revCache.delete(oppId); await loadRevs(oppId); render(); }
       catch (err) { alert(err.message || "Failed to unlock"); }
+    }));
+    // "Use this" — point the pipeline row at a chosen revision (its figures + Open quote).
+    listEl.querySelectorAll("[data-usecur]").forEach(b => b.addEventListener("click", async () => {
+      const rid = Number(b.getAttribute("data-usecur"));
+      const oppId = Number(b.getAttribute("data-opp"));
+      if (!confirm("Use this revision for the pipeline? The row will show this revision's figures, and “Open quote” will open it.")) return;
+      try {
+        const d = await api(`/opportunities/${oppId}/set-current-revision`, {
+          method: "POST", body: JSON.stringify({ estimate_id: rid }),
+        });
+        const o = allRows.find(x => x.id === oppId);
+        if (o && d.opportunity) Object.assign(o, d.opportunity);   // refresh main-row figures + app_estimate_id
+        revCache.delete(oppId); await loadRevs(oppId);             // is_current moved
+        render();
+      } catch (err) { alert(err.message || "Failed to set current revision"); }
     }));
     pagerEl.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
       page = b.getAttribute("data-pg") === "next" ? page + 1 : Math.max(0, page - 1);
@@ -538,10 +601,25 @@ export async function pipelinePage(routeFn) {
   const load = async () => {
     try { const d = await api(`/opportunities?limit=5000`); allRows = d.opportunities || []; }
     catch (e) { listEl.innerHTML = `<div class="text-red-700 text-sm">Failed to load pipeline.</div>`; return; }
-    expanded.clear(); revCache.clear();   // stale after a reload
+    if (mounting) {
+      // First load of this page instance: restore the saved view + pre-load the
+      // revisions of any rows that were left expanded so they render populated.
+      restoreView();
+      await Promise.all([...expanded].map(id => revCache.has(id) ? null : loadRevs(id)));
+    } else {
+      expanded.clear(); revCache.clear();   // stale after a reload
+    }
     renderFilters(); render(); sizeCard();
+    if (mounting) {
+      if (pendingScroll) listEl.scrollTop = pendingScroll;
+      pendingScroll = 0;
+      mounting = false;
+    }
   };
 
+  // Persist scroll position as the user scrolls (debounced) so leaving mid-scroll is remembered.
+  let scrollSaveT = null;
+  listEl.addEventListener("scroll", () => { clearTimeout(scrollSaveT); scrollSaveT = setTimeout(saveView, 300); });
   listEl.addEventListener("scroll", closeFilterPortal);
   document.addEventListener("mousedown", (e) => {
     const p = document.getElementById("oppFilterPortal");

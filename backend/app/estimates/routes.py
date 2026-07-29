@@ -170,7 +170,8 @@ def lock_estimate(estimate_id: int, _user=Depends(get_current_user)):
 def list_quote_revisions(estimate_id: int, _user=Depends(get_current_user)):
     """All revisions of this quote (the estimates sharing its opportunity), newest
     first, so the estimate page + pipeline can show the revision history."""
-    cols = "id, revision_no, locked, status, created_at, quote_number, quote_description"
+    cols = ("id, revision_no, locked, status, created_at, quote_number, quote_description, "
+            "labor_days, travel_days, ohp_pct, contract_value")
     with engine.connect() as conn:
         opp = conn.execute(text("SELECT opportunity_id, app_estimate_id FROM estimates e "
                                 "LEFT JOIN opportunities o ON o.id = e.opportunity_id WHERE e.id=:id"),
@@ -187,11 +188,15 @@ def list_quote_revisions(estimate_id: int, _user=Depends(get_current_user)):
                                      "ORDER BY revision_no DESC, id DESC"),
                                 {"o": oid}).mappings().all()
             current = opp["app_estimate_id"]
+    def _num(v):
+        return float(v) if v is not None else None
     return {"current_estimate_id": current, "revisions": [{
         "id": r["id"], "revision_no": r["revision_no"], "locked": bool(r["locked"]),
         "status": r["status"], "quote_number": r["quote_number"],
         "quote_description": r["quote_description"], "is_current": r["id"] == current,
         "created_at": str(r["created_at"]) if r["created_at"] else None,
+        "labor_days": _num(r["labor_days"]), "travel_days": _num(r["travel_days"]),
+        "ohp_pct": _num(r["ohp_pct"]), "contract_value": _num(r["contract_value"]),
     } for r in rows]}
 
 

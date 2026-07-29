@@ -642,5 +642,49 @@ def sync_metrics_from_estimate(app_estimate_id: int, body: SyncMetrics, user=Dep
             WHERE id = :id
         """), {"cv": body.contract_value, "oa": body.ohp_amount, "op": body.ohp_pct,
                "ld": body.labor_days, "td": body.travel_days, "id": opp["id"]})
+        # Mirror the summary onto the estimate itself so each revision row can
+        # show its own last-synced Labor / Travel / OH&P / Value.
+        conn.execute(text("""
+            UPDATE estimates SET
+              contract_value = :cv, ohp_amount = :oa, ohp_pct = :op,
+              labor_days = :ld, travel_days = :td
+            WHERE id = :eid
+        """), {"cv": body.contract_value, "oa": body.ohp_amount, "op": body.ohp_pct,
+               "ld": body.labor_days, "td": body.travel_days, "eid": app_estimate_id})
         row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp["id"]}).mappings().first()
+    return {"opportunity": _row(row)}
+
+
+class SetCurrentRevision(BaseModel):
+    estimate_id: int
+
+
+@router.post("/{opp_id}/set-current-revision")
+def set_current_revision(opp_id: int, body: SetCurrentRevision, user=Depends(get_current_user)):
+    """Point the pipeline row at a specific revision (estimate) and copy that
+    revision's stored metrics onto the row — lets the user 'use' e.g. revision 2
+    of 5 instead of always the latest. The chosen revision belongs to this
+    opportunity; app_estimate_id drives which revision the row + Open quote use."""
+    _require(user)
+    with engine.begin() as conn:
+        est = conn.execute(text(
+            "SELECT id, opportunity_id, labor_days, travel_days, ohp_pct, ohp_amount, contract_value "
+            "FROM estimates WHERE id = :e"), {"e": body.estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Revision not found.")
+        opp = conn.execute(text("SELECT id FROM opportunities WHERE id = :id"),
+                           {"id": opp_id}).mappings().first()
+        if not opp:
+            raise HTTPException(status_code=404, detail="Opportunity not found.")
+        if est["opportunity_id"] != opp_id:
+            raise HTTPException(status_code=400, detail="That revision does not belong to this opportunity.")
+        conn.execute(text("""
+            UPDATE opportunities SET
+              app_estimate_id = :eid,
+              contract_value = :cv, ohp_amount = :oa, ohp_pct = :op,
+              labor_days = :ld, travel_days = :td, metrics_source = 'app'
+            WHERE id = :id
+        """), {"eid": est["id"], "cv": est["contract_value"], "oa": est["ohp_amount"],
+               "op": est["ohp_pct"], "ld": est["labor_days"], "td": est["travel_days"], "id": opp_id})
+        row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp_id}).mappings().first()
     return {"opportunity": _row(row)}
