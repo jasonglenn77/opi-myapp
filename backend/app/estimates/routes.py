@@ -68,6 +68,7 @@ _EST_COPY = [
     "rack_install_profit_target", "rental_rack_profit_target", "mobilization_profit_target", "estimate_type",
     "breaking_out_mobilization", "rent_wire_guidance_equipment", "crew_count", "crew_size",
     "wire_guidance_profit_target", "rental_wire_profit_target", "lodging_cost_per_day", "mgmt_travel_multiplier",
+    "price_adjustment",
 ]
 _SET_COPY = [
     "kind", "label", "sort_order", "is_enabled", "mobilizations", "estimate_type_override",
@@ -882,6 +883,8 @@ class EstimatePatch(BaseModel):
     rental_wire_profit_target:     Optional[float] = None
     lodging_cost_per_day:          Optional[float] = None
     mgmt_travel_multiplier:        Optional[float] = None
+    # Final Price — manual +/- nudge applied to Price to Customer (round-up / discount).
+    price_adjustment:              Optional[float] = None
 
 
 _PATCHABLE_FIELDS = set(EstimatePatch.model_fields.keys())

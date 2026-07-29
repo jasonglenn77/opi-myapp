@@ -1238,13 +1238,19 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
     const rr = pct(estimateState.rental_rack_profit_target);
     const rw = pct(estimateState.rental_wire_profit_target);
     const markUp = (cost, p) => (p > 0 && p < 1 ? cost / (1 - p) : cost);
-    const price =
+    const computed_price =
         markUp(cross.H38,  r)
       + markUp(cross.H213, w)
       + markUp(cross.H187, rr)
       + markUp(cross.H226, rw)
       + cross.travel_costs_total
       + cross.H248;
+    // Final manual price nudge (round-up / discount) — the estimate-level
+    // override estimators make in the workbook. NULL/blank = 0.
+    const rawAdj = estimateState.price_adjustment ?? estimateRow?.price_adjustment ?? 0;
+    const price_adjustment = Number(rawAdj);
+    const adj = Number.isFinite(price_adjustment) ? price_adjustment : 0;
+    const price            = computed_price + adj;
     const projected_cost   = cross.grand_total;
     const projected_profit = price - projected_cost;
     const margin           = price > 0 ? projected_profit / price : 0;
@@ -1252,6 +1258,8 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
     // estimate-level inputs), so pull from any rollup. Falls back to 0 when
     // no sets exist or the estimate inputs aren't filled in.
     const labor_per_day    = Number(perSet[0]?.rollup?.labor_cost_per_day ?? 0);
+    cross.computed_price       = computed_price;
+    cross.price_adjustment     = adj;
     cross.price_to_customer    = price;
     cross.projected_cost       = projected_cost;
     cross.projected_profit     = projected_profit;
@@ -1477,7 +1485,10 @@ async function renderReviewTab(container, estimateId, initialMetricSets, estimat
         <div class="pt-3 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-3">
           <div class="flex flex-col gap-3">
             ${readout("Price to Customer", fmtMoney(cross.price_to_customer), {
-              formula: "Σ section_cost / (1 − profit% per category) — pending workbook verification",
+              color: cross.price_adjustment ? "text-amber-700" : undefined,
+              formula: cross.price_adjustment
+                ? `computed ${fmtMoney(cross.computed_price)} ${cross.price_adjustment >= 0 ? "+" : "−"} ${fmtMoney(Math.abs(cross.price_adjustment))} adjustment (set on General Info)`
+                : "Σ section_cost / (1 − profit% per category)",
             })}
             ${readout("Projected Profit", fmtMoney(cross.projected_profit), {
               color: "text-emerald-700",
@@ -2713,6 +2724,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     wire_guidance_profit_target:   "",
     rental_wire_profit_target:     "",
     mobilization_profit_target:    "",    // pct points; feeds Mobilization OH&P bundle (S35)
+    price_adjustment:              "",    // final +/- nudge to Price to Customer (round-up / discount)
 
     // Self-contained derived values (rendered as inline chips, not stored)
     labor_cost_per_day:            "",   // (OOT or Local rate)/5 × crew_size value_num
@@ -2752,6 +2764,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     "crew_count", "crew_size",
     "wire_guidance_profit_target", "rental_wire_profit_target",
     "lodging_cost_per_day", "mgmt_travel_multiplier",
+    "price_adjustment",
     // revision_count + latest_revision_date are NOT patchable — they are
     // server-managed by the Save Revision button on the Review tab.
   ]);
@@ -3187,6 +3200,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
         mobilization_profit_target:   state.mobilization_profit_target,
         wire_guidance_profit_target:  state.wire_guidance_profit_target,
         rental_wire_profit_target:    state.rental_wire_profit_target,
+        price_adjustment:             state.price_adjustment,
       };
       localStorage.setItem(ESTIMATE_BRIDGE_KEY, JSON.stringify(subset));
     } catch (err) {
@@ -3259,6 +3273,9 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       ${giNumber("Wire Guidance %", "wire_guidance_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance labor. Typically 42%." })}
       ${giNumber("Rental Equipment — Wire %", "rental_wire_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance rental equipment (floor scrubber)." })}
       ${giNumber("Mobilization %", "mobilization_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Margin on the Mobilization bundle. Can be a small NEGATIVE value in the workbook (competitive travel pricing). Feeds S35/S9." })}
+
+      ${subHead("Final Price")}
+      ${giNumber("Price Adjustment (+/−)", "price_adjustment", { step: "1", suffix: "$", placeholder: "0", tip: "Manual nudge to the final Price to Customer, the same override estimators make in the workbook. Positive rounds UP (e.g. +2,404 to a clean number); negative DISCOUNTS to win the job (e.g. −950). The Review tab applies it and re-derives profit/margin. Leave blank for none." })}
     </div>`;
 
   const bodyHtml = `
@@ -3408,7 +3425,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       "lodging_cost_per_day", "mgmt_travel_multiplier",
       "rack_install_profit_target", "rental_rack_profit_target",
       "wire_guidance_profit_target", "rental_wire_profit_target",
-      "mobilization_profit_target",
+      "mobilization_profit_target", "price_adjustment",
     ],
   };
   const RESET_LABELS = {
