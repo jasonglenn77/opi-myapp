@@ -45,6 +45,27 @@ FOLDER_TREE = [
 
 VALID_TYPES = ("estimate", "job", "project", "opportunity")
 
+# The 5 estimate-stage folders (owned by the opportunity in the ownership+join
+# model). Everything else (6–9 + children) is project-stage, owned by the project.
+ESTIMATE_FOLDER_KEYS = {
+    "1_request_for_quote", "2_drawings_calcs", "3_bill_of_materials",
+    "4_quotes", "5_purchase_orders",
+}
+
+
+def _linked_project_qbo_id(conn, opp_id):
+    """The QBO project an opportunity is linked to (or None)."""
+    return conn.execute(
+        text("SELECT project_qbo_id FROM opportunities WHERE id = :i"),
+        {"i": opp_id}).scalar()
+
+
+def _linked_opportunity_id(conn, project_qbo_id):
+    """The opportunity linked to a QBO project (most recent, or None)."""
+    return conn.execute(
+        text("SELECT id FROM opportunities WHERE project_qbo_id = :p ORDER BY id DESC LIMIT 1"),
+        {"p": project_qbo_id}).scalar()
+
 
 def store_document_bytes(entity_type, entity_id, folder, filename, body,
                          content_type="application/octet-stream", user_id=None):
@@ -62,10 +83,13 @@ def store_document_bytes(entity_type, entity_id, folder, filename, body,
                "fn": filename, "ct": content_type, "sz": len(body), "u": user_id}).lastrowid
 
 
-def _gated_tree(entity_type: str):
-    """Estimates + opportunities: estimate-stage folders (RFQ, Drawings, BOM,
-    Quotes, POs). Jobs/projects: all folders."""
-    if entity_type in ("estimate", "opportunity"):
+def _gated_tree(entity_type: str, linked: bool = False):
+    """Which folders an entity shows. Estimates: the 5 estimate-stage folders.
+    Opportunities: 5 folders normally, but ALL 9 once linked to a project (it's a
+    project now). Jobs/projects: all 9."""
+    if entity_type == "estimate":
+        return [n for n in FOLDER_TREE if n.get("stage") == "estimate"]
+    if entity_type == "opportunity" and not linked:
         return [n for n in FOLDER_TREE if n.get("stage") == "estimate"]
     return FOLDER_TREE
 
@@ -135,13 +159,36 @@ def get_entity_documents(entity_type: str, entity_id: str, user=Depends(get_curr
         meta = _entity_meta(conn, entity_type, entity_id)
         if not meta:
             raise HTTPException(status_code=404, detail="Entity not found")
-        rows = conn.execute(text("""
+
+        # Ownership + join: an opportunity owns its estimate folders (1–5); a
+        # project owns the project folders (6–9). When linked, each view MERGES
+        # the counterpart's docs so the linked project shows the estimate docs
+        # and the linked opportunity shows the project docs — without ever moving
+        # them, so unlinking is non-destructive and the opp keeps its count.
+        sources = [(entity_type, entity_id)]
+        linked = False
+        if entity_type == "opportunity":
+            proj = _linked_project_qbo_id(conn, entity_id)
+            if proj:
+                linked = True
+                sources.append(("project", str(proj)))
+        elif entity_type in ("project", "job"):
+            opp = _linked_opportunity_id(conn, entity_id)
+            if opp is not None:
+                sources.append(("opportunity", str(opp)))
+
+        clauses = " OR ".join(f"(d.entity_type=:t{k} AND d.entity_id=:i{k})" for k in range(len(sources)))
+        params = {}
+        for k, (t, i) in enumerate(sources):
+            params[f"t{k}"] = t
+            params[f"i{k}"] = i
+        rows = conn.execute(text(f"""
             SELECT d.id, d.folder, d.original_filename, d.content_type, d.size_bytes, d.created_at,
                    TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS uploaded_by
             FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by_user_id
-            WHERE d.entity_type=:t AND d.entity_id=:i
+            WHERE {clauses}
             ORDER BY d.created_at DESC
-        """), {"t": entity_type, "i": entity_id}).mappings().all()
+        """), params).mappings().all()
     files_by_folder = {}
     for r in rows:
         files_by_folder.setdefault(r["folder"], []).append({
@@ -150,7 +197,7 @@ def get_entity_documents(entity_type: str, entity_id: str, user=Depends(get_curr
             "uploaded_by": (r["uploaded_by"] or "").strip() or None,
         })
     return {"entity": {"type": entity_type, "id": entity_id, **meta},
-            "tree": _gated_tree(entity_type), "files": files_by_folder}
+            "tree": _gated_tree(entity_type, linked=linked), "files": files_by_folder}
 
 
 @router.post("/{entity_type}/{entity_id}")
@@ -159,20 +206,41 @@ async def upload_document(entity_type: str, entity_id: str, folder: str = Query(
     _require(user)
     if entity_type not in VALID_TYPES:
         raise HTTPException(status_code=400, detail="Bad entity_type")
-    if folder not in _all_keys(_gated_tree(entity_type)):
-        raise HTTPException(status_code=400, detail="Unknown folder for this entity")
+
     body = await file.read()
     if len(body) > 100 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File exceeds 100 MB limit")
-    key = build_document_key(entity_type, entity_id, folder, file.filename or "file")
-    s3_client.put_object(Bucket=AWS_BUCKET, Key=key, Body=body,
-                         ContentType=file.content_type or "application/octet-stream")
+
     with engine.begin() as conn:
+        # Resolve the link so linked opportunities accept project folders, and
+        # route each upload to its owner: estimate folders (1–5) → the
+        # opportunity, project folders (6–9) → the project. Backfilling a project
+        # with no linked opportunity keeps estimate docs on the project.
+        is_estimate_folder = folder in ESTIMATE_FOLDER_KEYS
+        own_type, own_id, linked = entity_type, entity_id, False
+        if entity_type == "opportunity":
+            proj = _linked_project_qbo_id(conn, entity_id)
+            if proj:
+                linked = True
+                if not is_estimate_folder:
+                    own_type, own_id = "project", str(proj)
+        elif entity_type in ("project", "job"):
+            if is_estimate_folder:
+                opp = _linked_opportunity_id(conn, entity_id)
+                if opp is not None:
+                    own_type, own_id = "opportunity", str(opp)
+
+        if folder not in _all_keys(_gated_tree(entity_type, linked=linked)):
+            raise HTTPException(status_code=400, detail="Unknown folder for this entity")
+
+        key = build_document_key(own_type, own_id, folder, file.filename or "file")
+        s3_client.put_object(Bucket=AWS_BUCKET, Key=key, Body=body,
+                             ContentType=file.content_type or "application/octet-stream")
         conn.execute(text("""
             INSERT INTO documents (entity_type, entity_id, folder, s3_bucket, s3_key,
                 original_filename, content_type, size_bytes, uploaded_by_user_id)
             VALUES (:t,:i,:f,:b,:k,:fn,:ct,:sz,:u)
-        """), {"t": entity_type, "i": entity_id, "f": folder, "b": AWS_BUCKET, "k": key,
+        """), {"t": own_type, "i": own_id, "f": folder, "b": AWS_BUCKET, "k": key,
                "fn": file.filename, "ct": file.content_type, "sz": len(body), "u": user.get("id")})
     return {"ok": True}
 
