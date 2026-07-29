@@ -620,7 +620,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     return renderGeneralInfoTab(tabBody, estimate, estimateId, routeFn);
   }
   if (tab === "base") {
-    return renderBaseTab(tabBody, estimateId);
+    return renderBaseTab(tabBody, estimateId, !!estimate.locked);
   }
   if (tab === "option") {
     const optionSet = options.find(s => s.sort_order === optionN);
@@ -634,7 +634,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
         </div>`;
       return;
     }
-    return renderOptionTab(tabBody, estimateId, optionSet.id);
+    return renderOptionTab(tabBody, estimateId, optionSet.id, !!estimate.locked);
   }
   if (tab === "project-rentals") {
     if (!projectRentalsSet) {
@@ -647,7 +647,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
         </div>`;
       return;
     }
-    return renderOptionTab(tabBody, estimateId, projectRentalsSet.id);
+    return renderOptionTab(tabBody, estimateId, projectRentalsSet.id, !!estimate.locked);
   }
   if (tab === "review") {
     return renderReviewTab(tabBody, estimateId, metricSets, estimate);
@@ -1083,10 +1083,10 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
   render();
 }
 
-function renderBaseTab(container, estimateId) {
+function renderBaseTab(container, estimateId, locked = false) {
   // Mount the existing Base Quoting Metrics UI directly into the tab body
   // container. Cleanup returns a function we chain to hashchange.
-  mountBaseQuotingMetrics({ container, estimateId })
+  mountBaseQuotingMetrics({ container, estimateId, locked })
     .then(cleanup => {
       window.addEventListener("hashchange", cleanup, { once: true });
     })
@@ -1097,9 +1097,9 @@ function renderBaseTab(container, estimateId) {
     });
 }
 
-function renderOptionTab(container, estimateId, metricSetId) {
+function renderOptionTab(container, estimateId, metricSetId, locked = false) {
   // Same UI as renderBaseTab — just scoped to a specific (non-Base) metric set.
-  mountBaseQuotingMetrics({ container, estimateId, metricSetId })
+  mountBaseQuotingMetrics({ container, estimateId, metricSetId, locked })
     .then(cleanup => {
       window.addEventListener("hashchange", cleanup, { once: true });
     })
@@ -3167,6 +3167,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     try {
       const subset = {
         one_way_travel_hrs:           state.one_way_travel_hrs,
+        equipment_requirement:        state.equipment_requirement,
         crew_count:                   state.crew_count,
         crew_size:                    state.crew_size,
         lodging_cost_per_day:         state.lodging_cost_per_day,

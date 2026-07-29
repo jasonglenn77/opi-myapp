@@ -84,6 +84,7 @@ export async function mountBaseQuotingMetrics({
   container,
   estimateId = DEFAULT_ESTIMATE_ID,
   metricSetId = null,           // when set, scope to a specific (non-Base) set
+  locked = false,               // read-only (sent/locked estimate) — never auto-write
 }) {
   if (!container) return () => {};
   const ESTIMATE_ID = estimateId;
@@ -272,6 +273,28 @@ export async function mountBaseQuotingMetrics({
       </tr>`;
   }
 
+  // Badge shown under a smart (auto-derived) Other-Rentals row label. Grey
+  // "auto" pill when the app owns the value; amber "manual" pill + a one-click
+  // "reset to $X" when the estimator has overridden it.
+  function smartRowBadgeHtml(code, row) {
+    const kind = smartRowKind(code, row);
+    if (!kind) return "";
+    const suggest = row._autoSuggest;
+    const suggestTxt = (suggest == null) ? "—" : fmtMoney(suggest);
+    if (autoState(row) === "auto") {
+      return `<div class="mt-0.5 flex items-center gap-1">
+        <span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">auto</span>
+        <span class="text-[10px] text-black/40">= ${escapeHtml(kind === "env" ? "1.9% of lifts" : "workbook formula")}</span>
+      </div>`;
+    }
+    return `<div class="mt-0.5 flex items-center gap-1">
+      <span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">manual</span>
+      <button type="button" data-reset-auto
+              class="text-[10px] font-semibold text-blue-600 hover:text-blue-800 underline decoration-dotted"
+              title="Reset this line to the auto-calculated value">↺ reset to ${escapeHtml(suggestTxt)}</button>
+    </div>`;
+  }
+
   function lineRowHtmlOtherRental(code, row, idx) {
     const qty = row.qty != null && row.qty !== "" ? Number(row.qty) : null;
     const mobs = row.mobilizations != null && row.mobilizations !== "" ? Number(row.mobilizations) : null;
@@ -283,6 +306,7 @@ export async function mountBaseQuotingMetrics({
                  data-row-field="label"
                  value="${escapeHtml(row.label ?? "")}"
                  placeholder="Enter description"/>
+          <div data-smart-badge>${smartRowBadgeHtml(code, row)}</div>
         </td>
         <td class="py-1 px-2 w-20">
           <input type="number" step="any" min="0" class="input text-sm py-1.5 w-full text-right tabular-nums"
@@ -631,7 +655,8 @@ export async function mountBaseQuotingMetrics({
                               ? Number(row.mobilizations) : null,
       unit_price:           priceKinds && row.unit_price != null && row.unit_price !== ""
                               ? Number(row.unit_price) : null,
-      notes:                null,
+      // Smart Other-Rentals rows stash their auto/manual override state here.
+      notes:                row.notes ?? null,
     };
   }
 
@@ -943,6 +968,194 @@ export async function mountBaseQuotingMetrics({
     };
   }
 
+  // ── Auto-derived Other-Rentals (Environmental Fees + Liquid Propane) ─────────
+  // The BASE sheet computes these two "Other Rentals" line items by formula;
+  // the app historically left them as manual entry, which drifts from the
+  // workbook. We now auto-derive them (with a manual-override escape hatch),
+  // mirroring the live Google-Drive RELEASE-template formulas confirmed by the
+  // 2026-07 formula audit:
+  //   Environmental Fees  G203/G240 = 1.9% × (lift equipment ext-cost)
+  //   Liquid Propane rack H205       = 0 if Electric, else
+  //                                    MIN( crew × (scissor+forklift per crew)
+  //                                         × rackLaborDays × $40 ,
+  //                                         liftQty × periodRate )
+  //                       periodRate  day $40 / week $200 / month $500 (ref AB4:AC7),
+  //                                   chosen by roundup(rackLaborDays / crew).
+  //   Liquid Propane wire H242       = ceilHalf(WG_LF / 1500) × $40 when WG in scope.
+  // A row's `notes` carries the override state: "auto:<kind>" (keep in sync) vs
+  // "manual:<kind>" (user owns the value). Untouched seed rows adopt as auto.
+  const ceilHalf2 = (x) => Math.ceil(Number(x) * 2) / 2;
+  const round2    = (x) => Math.round((Number(x) + Number.EPSILON) * 100) / 100;
+  const SMART_RENTAL_SECTIONS = ["other_rentals_rack_install", "other_rentals_wire_guidance"];
+  const ENV_FEE_PCT            = 0.019;                    // G203 / G240
+  const PROPANE_RATE_BY_PERIOD = { day: 40, week: 200, month: 500 };  // reference AB4:AC7
+  const PROPANE_WG_RATE        = 40;                       // G242
+  const PROPANE_WG_LF_PER_UNIT = 1500;                     // F242 = ceiling(G29/1500, 0.5)
+
+  function smartRowKind(code, row) {
+    if (!SMART_RENTAL_SECTIONS.includes(code)) return null;
+    const lbl = String(row.label || "").toLowerCase();
+    if (lbl.includes("environmental")) return "env";
+    if (lbl.includes("propane"))       return "propane";
+    return null;
+  }
+  // "auto" = app keeps the value in sync; "manual" = user overrode it. A seed
+  // row with no marker and no value yet adopts as auto; one that already holds
+  // a hand-entered value is respected as manual.
+  function autoState(row) {
+    const n = String(row.notes || "");
+    if (n.startsWith("auto:"))   return "auto";
+    if (n.startsWith("manual:")) return "manual";
+    return (row.unit_price == null && row.ext_cost == null) ? "auto" : "manual";
+  }
+  function isElectric() {
+    return String(readEstimateBridge().equipment_requirement || "")
+      .toLowerCase().startsWith("electric");
+  }
+  function sumSectionExt(code) {
+    let s = 0;
+    for (const r of (sections[code]?.rows || [])) if (r.ext_cost != null) s += Number(r.ext_cost);
+    return s;
+  }
+  // Scissor + forklift qty in a base-rental section (workbook D192 + D196).
+  function sumLiftQty(code, needles) {
+    const sec = sections[code];
+    if (!sec) return 0;
+    let q = 0;
+    for (const r of sec.rows) {
+      if (r.qty == null || r.qty === "") continue;
+      const item = r.rental_rate_id ? sec.itemById.get(r.rental_rate_id) : null;
+      const et = String(item?.equipment_type || "").toLowerCase();
+      if (needles.some(t => et.includes(t))) q += Number(r.qty);
+    }
+    return q;
+  }
+  // Propane period rate from roundup(rackLaborDays / crew) → day/week/month (E25/G205).
+  function propanePeriodRate(rackLaborDays, crew) {
+    const g23 = crew > 0 ? Math.ceil(Number(rackLaborDays) / crew) : 0;
+    if (g23 < 1) return 0;
+    if (g23 === 1) return PROPANE_RATE_BY_PERIOD.day;
+    if (g23 < 8)   return PROPANE_RATE_BY_PERIOD.week;
+    return PROPANE_RATE_BY_PERIOD.month;
+  }
+  function computeAutoRentalSuggestions() {
+    const tc  = computeTravelCosts();               // rollup (D23 rack labor days, etc.)
+    const est = readEstimateBridge();
+    const crew = Number(est.crew_count ?? 0) || 0;
+    const electric = isElectric();
+
+    const envRack = round2(ENV_FEE_PCT * sumSectionExt("rentals_rack_install"));
+    const envWire = round2(ENV_FEE_PCT * sumSectionExt("rentals_wire_guidance"));
+
+    // Rack propane — MIN(labor-day cap, lift × period rate); 0 when electric.
+    let propRack = 0;
+    if (!electric) {
+      const rackLaborDays = Number(tc.D23 ?? 0) || 0;
+      const rate    = propanePeriodRate(rackLaborDays, crew);
+      const liftQty = sumLiftQty("rentals_rack_install", ["scissor", "forklift"]);
+      const liftTerm = liftQty * rate;
+      const scissor = Number(attrs.scissor_lifts_per_crew ?? 0) || 0;
+      const fork    = Number(attrs.forklifts_per_crew ?? 0) || 0;
+      const cap     = crew * (scissor + fork) * rackLaborDays * 40;
+      propRack = liftTerm > 0 ? round2(cap > 0 ? Math.min(cap, liftTerm) : liftTerm) : 0;
+    }
+
+    // Wire-guidance propane — footage-based, only when WG is in scope.
+    const wgLf = Number(attrs.wire_guidance_linear_footage ?? 0) || 0;
+    const propWire = wgLf > 0
+      ? round2(ceilHalf2(wgLf / PROPANE_WG_LF_PER_UNIT) * PROPANE_WG_RATE)
+      : 0;
+
+    return {
+      other_rentals_rack_install:  { env: envRack, propane: propRack },
+      other_rentals_wire_guidance: { env: envWire, propane: propWire },
+    };
+  }
+
+  // Sync in-memory rows to the suggested values (synchronous), then fire the
+  // DB writes without blocking the render path. Guarded against re-entrancy.
+  let _autoRefreshing = false;
+  function refreshAutoRentalRows() {
+    if (_autoRefreshing) return;
+    _autoRefreshing = true;
+    const toPersist = [];
+    try {
+      const sugg = computeAutoRentalSuggestions();
+      for (const code of SMART_RENTAL_SECTIONS) {
+        const sec = sections[code];
+        if (!sec) continue;
+        sec.rows.forEach((row, idx) => {
+          const kind = smartRowKind(code, row);
+          if (!kind) return;
+          const target = kind === "env" ? sugg[code].env : sugg[code].propane;
+          row._autoSuggest = target;                    // renderer reads this for the hint
+          if (locked) return;                            // read-only estimate — show, never write
+          if (autoState(row) !== "auto") return;
+          const cur = row.ext_cost == null ? null : Number(row.ext_cost);
+          // Don't write a 0 onto a still-pristine seed row — only when a real
+          // value applies, or when a previously-auto value must fall back to 0.
+          const pristineZero = target === 0 && row.ext_cost == null;
+          const needsWrite = !pristineZero &&
+            (cur !== target || Number(row.qty) !== 1 || Number(row.unit_price) !== target ||
+             !String(row.notes || "").startsWith("auto:"));
+          if (needsWrite) {
+            row.qty = 1; row.mobilizations = 1; row.unit_price = target; row.ext_cost = target;
+            row.notes = `auto:${kind}`;
+            toPersist.push([code, idx]);
+          }
+        });
+        renderTable(code);
+      }
+    } finally {
+      _autoRefreshing = false;
+    }
+    toPersist.forEach(([code, idx]) => persistAutoRow(code, idx));
+  }
+
+  // Persist a smart row WITHOUT the render-trio side effects persistRow has
+  // (refreshAutoRentalRows already re-rendered the table + the caller renders
+  // the summary cards). Carries the `notes` override marker.
+  async function persistAutoRow(code, idx) {
+    const row = sections[code].rows[idx];
+    if (!rowIsSaveable(code, row)) return;
+    try {
+      const payload = { ...buildPayload(code, row, idx), notes: row.notes ?? null };
+      const suggest = row._autoSuggest;
+      if (row.id == null) {
+        const created = await api("/quoting/metric-lines", {
+          method: "POST", body: JSON.stringify(payload),
+        });
+        sections[code].rows[idx] = { ...created, _saving: false, _autoSuggest: suggest };
+      } else {
+        const updated = await api(`/quoting/metric-lines/${row.id}`, {
+          method: "PUT", body: JSON.stringify(payload),
+        });
+        sections[code].rows[idx] = { ...updated, _saving: false, _autoSuggest: suggest };
+      }
+    } catch (err) {
+      console.error("Auto rental persist failed", code, idx, err);
+    }
+  }
+
+  // Swap just the auto/manual badge for one row without touching its inputs
+  // (so flipping to "manual" mid-keystroke doesn't steal caret focus).
+  function renderSmartBadge(code, idx) {
+    const root = document.querySelector(`[data-section-code="${code}"]`);
+    const holder = root?.querySelector(`tr[data-row-idx="${idx}"] [data-smart-badge]`);
+    if (holder) holder.innerHTML = smartRowBadgeHtml(code, sections[code].rows[idx]);
+  }
+
+  // Reset an overridden smart row back to auto-managed, then recompute.
+  async function resetSmartRowToAuto(code, idx) {
+    const row = sections[code].rows[idx];
+    const kind = smartRowKind(code, row);
+    if (!kind) return;
+    row.notes = `auto:${kind}`;
+    refreshAutoRentalRows();
+    renderCostSummary();
+    renderBundleOutput();
+  }
+
   // ── Cost Summary card ──────────────────────────────────────────────────────
   // Mirrors the workbook's "Cost Checker" (BASE sheet L4:N5) — a sanity-check
   // total across the 6 top-level sections that feed the project cost.
@@ -1196,6 +1409,12 @@ export async function mountBaseQuotingMetrics({
 
   container.innerHTML = bodyHtml;
 
+  // Populate the auto-derived Env-Fee / Propane rows on first paint (and adopt
+  // any untouched seed rows into auto-management).
+  refreshAutoRentalRows();
+  renderCostSummary();
+  renderBundleOutput();
+
   // ── input wiring ───────────────────────────────────────────────────────────
   function ctxFromEvent(e) {
     const host = e.target.closest("[data-section-host]");
@@ -1236,6 +1455,12 @@ export async function mountBaseQuotingMetrics({
       localComputeTotals(ctx.code, row);
       renderRowComputed(ctx.code, ctx.idx);
       persistRow(ctx.code, ctx.idx);
+      // Picking a lift rental changes the Env-Fee / Propane inputs.
+      if (ctx.code === "rentals_rack_install" || ctx.code === "rentals_wire_guidance") {
+        refreshAutoRentalRows();
+        renderCostSummary();
+        renderBundleOutput();
+      }
     }
   }
 
@@ -1247,6 +1472,12 @@ export async function mountBaseQuotingMetrics({
       const v = raw === "" ? null : Number(raw);
       attrs[attrField] = v;
       persistAttr(attrField, v);
+      // These per-crew / footage inputs feed the auto Env-Fee / Propane math.
+      if (["scissor_lifts_per_crew", "forklifts_per_crew", "wire_guidance_linear_footage"].includes(attrField)) {
+        refreshAutoRentalRows();
+        renderCostSummary();
+        renderBundleOutput();
+      }
       return;
     }
 
@@ -1268,9 +1499,23 @@ export async function mountBaseQuotingMetrics({
       return;
     }
 
+    // A hand edit to a smart row's value takes it off auto-management.
+    const smartKind = smartRowKind(ctx.code, row);
+    if (smartKind && field !== "label" && autoState(row) === "auto") {
+      row.notes = `manual:${smartKind}`;
+      renderSmartBadge(ctx.code, ctx.idx);
+    }
+
     localComputeTotals(ctx.code, row);
     renderRowComputed(ctx.code, ctx.idx);
     persistRow(ctx.code, ctx.idx);
+
+    // Editing base lift rentals changes the Env-Fee / Propane inputs.
+    if (ctx.code === "rentals_rack_install" || ctx.code === "rentals_wire_guidance") {
+      refreshAutoRentalRows();
+      renderCostSummary();
+      renderBundleOutput();
+    }
   }
 
   function onClick(e) {
@@ -1289,6 +1534,11 @@ export async function mountBaseQuotingMetrics({
     if (e.target.closest("[data-add-row]")) {
       const ctx = ctxFromEvent(e);
       if (ctx) addEmptyRow(ctx.code);
+      return;
+    }
+    if (e.target.closest("[data-reset-auto]")) {
+      const ctx = ctxFromEvent(e);
+      if (ctx && ctx.idx != null) resetSmartRowToAuto(ctx.code, ctx.idx);
       return;
     }
     if (e.target.closest("[data-row-delete]")) {
@@ -1355,6 +1605,7 @@ export async function mountBaseQuotingMetrics({
   // OTHER tabs, not the writer — that's by design.
   function onStorage(e) {
     if (e.key === ESTIMATE_BRIDGE_KEY) {
+      refreshAutoRentalRows();   // equipment (Electric/LP) + crew count feed propane
       renderTravelCosts();
       renderCostSummary();
       renderBundleOutput();
