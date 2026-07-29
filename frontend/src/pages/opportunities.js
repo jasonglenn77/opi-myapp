@@ -169,8 +169,10 @@ export async function pipelinePage(routeFn) {
       : r.locked ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-slate-200 text-slate-600" title="Sent/finalized — read-only unless unlocked">🔒 locked</span>`
       : `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="Not yet sent — editable draft">draft</span>`;
     const n = (v) => (v == null ? "—" : Number(v).toLocaleString());
-    const metrics = `<div class="text-black/45 tabular-nums shrink-0 whitespace-nowrap" title="Labor days · Travel days · OH&P% — this revision's last synced figures">
-        Labor ${n(r.labor_days)} · Travel ${n(r.travel_days)} · ${r.ohp_pct == null ? "OH&P —" : "OH&P " + Math.round(r.ohp_pct) + "%"}
+    const val = (v) => (v == null ? "—" : "$" + Math.round(Number(v)).toLocaleString());
+    // Figures live at the END of the row (after the actions), per OPI's preferred order.
+    const metrics = `<div class="text-black/45 tabular-nums shrink-0 whitespace-nowrap ml-auto" title="This revision's last-synced figures: Labor days · Travel days · OH&P% · Value">
+        Labor ${n(r.labor_days)} · Travel ${n(r.travel_days)} · ${r.ohp_pct == null ? "OH&P —" : "OH&P " + Math.round(r.ohp_pct) + "%"} · ${val(r.contract_value)}
       </div>`;
     const useBtn = r.is_current
       ? ""
@@ -179,11 +181,11 @@ export async function pipelinePage(routeFn) {
       <div class="font-bold text-ink-900 w-14 shrink-0">Rev ${r.revision_no}</div>
       <div class="w-20 shrink-0">${badge}</div>
       <div class="text-black/55 flex-1 min-w-0 truncate">${escapeHtml(r.quote_description || "—")}</div>
-      ${metrics}
       <div class="text-black/40 tabular-nums w-24 shrink-0">${r.created_at ? escapeHtml(r.created_at.slice(0, 10)) : ""}</div>
       <a href="#/estimate/${r.id}" class="font-semibold text-blue-700 hover:underline shrink-0">Open →</a>
       ${useBtn}
       <div class="w-14 shrink-0 text-right">${r.locked ? `<button data-unlockrev="${r.id}" data-opp="${o.id}" class="font-semibold text-amber-700 hover:underline">Unlock</button>` : ""}</div>
+      ${metrics}
     </div>`;
   };
   // The expanded sub-row (spans the whole table) listing this opportunity's revisions.
@@ -192,7 +194,7 @@ export async function pipelinePage(routeFn) {
     const revs = revCache.get(o.id);
     const inner = revs == null
       ? `<div class="text-xs text-black/40 py-2">Loading revisions…</div>`
-      : `<div class="pl-6 max-w-3xl">
+      : `<div class="pl-6 max-w-6xl">
            <div class="flex items-center justify-between mb-1">
              <div class="text-[10px] font-bold uppercase tracking-wide text-black/40">Revisions · Quote #${escapeHtml(o.quote_number || "—")}</div>
              <button data-newrev="${o.id}" class="text-[11px] font-semibold text-emerald-700 hover:underline">+ New revision</button>
@@ -273,7 +275,7 @@ export async function pipelinePage(routeFn) {
     { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
     { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}` },
     { key: "contact_name", label: "Contact", cls: "text-black/60", td: (o) => escapeHtml(dash(o.contact_name)) },
-    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.notes ? ` <span class="align-middle cursor-help text-black/30 hover:text-black/60" title="${escapeHtml(o.notes)}">🗒</span>` : ""}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a> <button data-linkproj="${o.id}" class="text-black/30 hover:text-black/60" title="Change or unlink project">✎</button></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
+    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.notes ? ` <span class="align-middle cursor-help text-black/30 hover:text-black/60" title="${escapeHtml(o.notes)}">🗒</span>` : ""}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" data-goproject="${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a> <button data-linkproj="${o.id}" class="text-black/30 hover:text-black/60" title="Change or unlink project">✎</button></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
@@ -468,6 +470,12 @@ export async function pipelinePage(routeFn) {
         </div></div>` : `<div class="pt-2 mt-1 border-t border-black/5 text-[11px] text-black/40">${total.toLocaleString()} rows</div>`;
     listEl.querySelectorAll("[data-sort]").forEach(th => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
     listEl.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", (e) => { e.stopPropagation(); openFilterPortal(b.getAttribute("data-filter"), b); }));
+    // Opening a linked project: remember to send "← Back to Pipeline" (with the
+    // pipeline's saved view already persisted) instead of the default Customers.
+    listEl.querySelectorAll("[data-goproject]").forEach(a => a.addEventListener("click", () => {
+      const pid = a.getAttribute("data-goproject");
+      try { sessionStorage.setItem("opi_entity_back", JSON.stringify({ entity: "project/" + pid, label: "Pipeline", hash: "#/pipeline" })); } catch (_) {}
+    }));
     // Revision expander: toggle the sub-row; lazy-load revisions on first open.
     listEl.querySelectorAll("[data-exp]").forEach(b => b.addEventListener("click", async () => {
       const id = Number(b.getAttribute("data-exp"));

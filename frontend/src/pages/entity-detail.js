@@ -31,11 +31,26 @@ function fmtBytes(bytes) {
 }
 function fmtDate(v) { return v ? String(v).slice(0, 10) : ""; }
 
+// Where "← Back" should return to. Defaults to Customers, but a page that
+// linked here (e.g. the Pipeline's project link) can set `opi_entity_back`
+// scoped to this exact entity so we send the user back where they came from,
+// preserving that page's remembered view.
+function resolveBackLink(entityType, entityId) {
+  try {
+    const b = JSON.parse(sessionStorage.getItem("opi_entity_back") || "null");
+    if (b && b.entity === `${entityType}/${entityId}` && b.hash && b.label) {
+      return { hash: b.hash, label: b.label };
+    }
+  } catch (_) {}
+  return { hash: "#/customers", label: "Customers" };
+}
+
 export async function entityDetailPage(routeFn, { entityType, entityId }) {
+  const back = resolveBackLink(entityType, entityId);
   let data;
   try { data = await api(`/documents/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`); }
   catch (e) {
-    mount(`<div class="w-full"><div class="card p-5 text-sm text-red-700">Failed to load documents: ${escapeHtml(e?.message || String(e))}</div><div class="mt-3"><a href="#/customers" class="text-sm font-semibold text-blue-600 hover:underline">← Back to Customers</a></div></div>`, routeFn);
+    mount(`<div class="w-full"><div class="card p-5 text-sm text-red-700">Failed to load documents: ${escapeHtml(e?.message || String(e))}</div><div class="mt-3"><a href="${back.hash}" class="text-sm font-semibold text-blue-600 hover:underline">← Back to ${escapeHtml(back.label)}</a></div></div>`, routeFn);
     return;
   }
   const entity = data.entity || {};
@@ -108,7 +123,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
   mount(`
     <div class="w-full">
       <div class="mb-3">
-        <a href="#/customers" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← Back to Customers</a>
+        <a href="${back.hash}" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← Back to ${escapeHtml(back.label)}</a>
       </div>
       <div class="card flex flex-col overflow-hidden" style="height: calc(100vh - 150px); min-height: 420px;">
         <div class="shrink-0 px-4 sm:px-5 pt-4 border-b border-black/10">
