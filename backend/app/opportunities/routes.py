@@ -393,6 +393,13 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
                 sets.append("decided_at = NULL")
         if sets:
             conn.execute(text(f"UPDATE opportunities SET {', '.join(sets)} WHERE id = :id"), params)
+        # When a project is newly linked, move the opportunity's pipeline documents
+        # (RFQ / drawings / BOM / quotes / PO in folders 1–5) onto the project so they
+        # show in the project's folders. Folder keys 1–5 are shared, so they land right.
+        if fields.get("project_qbo_id") and not cur["project_qbo_id"]:
+            conn.execute(text("UPDATE documents SET entity_type='project', entity_id=:pqid "
+                              "WHERE entity_type='opportunity' AND entity_id=:oppid"),
+                         {"pqid": fields["project_qbo_id"], "oppid": str(opp_id)})
         row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp_id}).mappings().first()
     return {"opportunity": _row(row)}
 
