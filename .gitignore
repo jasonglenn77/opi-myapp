@@ -43,3 +43,9 @@ Thumbs.db
 
 # Workbook reference files (local-only; may contain client data)
 references/
+
+# Google service-account keys — never commit (belt-and-suspenders; references/ already ignored)
+*service-account*.json
+*sheets-key*.json
+gcp-*.json
+formula_dump/
