@@ -2950,8 +2950,16 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   // surface self-contained derived values (e.g. Labor Cost/Day under Crew
   // Size). Chips use data-est-calc so the existing setCalcCell() helper
   // updates them on input change.
-  function giLabel(text) {
-    return `<div class="text-[11px] font-semibold text-black/60 leading-tight pt-1.5">${escapeHtml(text)}</div>`;
+  // Small "i" info bubble with a native tooltip — explains how a field feeds
+  // the calc. Accessible, zero-JS.
+  function infoTip(text) {
+    if (!text) return "";
+    return `<span class="inline-flex items-center justify-center w-3.5 h-3.5 ml-1 rounded-full bg-black/15 text-black/60 text-[9px] font-bold leading-none cursor-help align-middle select-none"
+                  title="${escapeHtml(text)}">i</span>`;
+  }
+
+  function giLabel(text, tip) {
+    return `<div class="text-[11px] font-semibold text-black/60 leading-tight pt-1.5">${escapeHtml(text)}${infoTip(tip)}</div>`;
   }
 
   // A single chip — { label, calcKey, initialHtml }. Rendered as a small
@@ -2984,7 +2992,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
              data-est-input="${key}"
              value="${escapeHtml(state[key] ?? "")}"
              placeholder="${escapeHtml(opts.placeholder || "")}"/>`;
-    return giLabel(label) + withChips(input, opts.chips);
+    return giLabel(label, opts.tip) + withChips(input, opts.chips);
   }
 
   function giNumber(label, key, opts = {}) {
@@ -3000,7 +3008,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
                value="${escapeHtml(String(state[key] ?? ""))}"/>
         ${suffix}
       </div>`;
-    return giLabel(label) + withChips(input, opts.chips);
+    return giLabel(label, opts.tip) + withChips(input, opts.chips);
   }
 
   function giSelect(label, key, options, opts = {}) {
@@ -3019,11 +3027,11 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
         ${placeholderOpt}
         ${options.map(renderOption).join("")}
       </select>`;
-    return giLabel(label) + withChips(input, opts.chips);
+    return giLabel(label, opts.tip) + withChips(input, opts.chips);
   }
 
   // Compound: Yes/No + tied percent input. Percent is in points (5 = 5%).
-  function giYesNoPct(label, keyYesNo, keyPct) {
+  function giYesNoPct(label, keyYesNo, keyPct, opts = {}) {
     const input = `
       <div class="flex items-center gap-2">
         <select class="input text-sm py-1.5 flex-1" data-est-input="${keyYesNo}">
@@ -3036,7 +3044,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
                value="${escapeHtml(String(state[keyPct] ?? ""))}"/>
         <span class="text-xs text-black/40">%</span>
       </div>`;
-    return giLabel(label) + input;
+    return giLabel(label, opts.tip) + input;
   }
 
   // Compound: Crew Count + Crew Size on the same line. Drives Labor Cost/Day.
@@ -3223,33 +3231,34 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       ${subHead("Travel & Crew")}
       ${giNumber("One-Way Travel (Houston/Dallas → Site)", "one_way_travel_hrs", {
         step: "0.5", suffix: "hrs", placeholder: "Enter hours",
+        tip: "One-way drive time. >1 hr flips the job to out-of-town (higher labor rate, lodging applies, Downtime target $3,500 vs $3,000) and sets the travel-day count. Local (≤1 hr) = no lodging/mgmt travel.",
         chips: [
           chip("Travel Days/Mob", "travel_days_per_crew_per_mob", travelDaysPerCrewPerMobHtml()),
           chip("Downtime Target", "downtime_day_price_target",   downtimePriceHtml()),
         ],
       })}
-      ${giSelect("Equipment Requirement", "equipment_requirement", EQUIPMENT_REQS, { placeholder: "Select Equipment" })}
-      ${giSelect("Rack Height", "rack_height", RACK_HEIGHTS, { placeholder: "Select Rack Height" })}
+      ${giSelect("Equipment Requirement", "equipment_requirement", EQUIPMENT_REQS, { placeholder: "Select Equipment", tip: "Electric vs LP (Liquid Propane). Electric forces Liquid Propane rental to $0 in the metrics; LP drives the propane charge by rental period." })}
+      ${giSelect("Rack Height", "rack_height", RACK_HEIGHTS, { placeholder: "Select Rack Height", tip: "Taller than 25' selects the taller-lift rental rates in the metrics." })}
       ${giCrew("Crew Count & Size", [
         chip("Labor Cost/Day", "labor_cost_per_day", laborCostPerDayHtml()),
       ])}
 
       ${subHead("Project Setup")}
-      ${giSelect("Estimate Type", "estimate_type", ESTIMATE_TYPES, { placeholder: "Select Type" })}
-      ${giSelect("Breaking Out Mobilization?", "breaking_out_mobilization", YES_NO, { placeholder: "Select" })}
+      ${giSelect("Estimate Type", "estimate_type", ESTIMATE_TYPES, { placeholder: "Select Type", tip: "Standard vs Aggressive daily production. Aggressive assumes higher output → fewer labor days → lower price. Each metric set can override this." })}
+      ${giSelect("Breaking Out Mobilization?", "breaking_out_mobilization", YES_NO, { placeholder: "Select", tip: 'Yes = mobilization/travel priced as its own line the customer sees. No = travel folded into the labor bundles (blended OH&P). Changes how S4/S16/S9 are built.' })}
       ${giSelect("Rent Wire Guidance Equipment?", "rent_wire_guidance_equipment", YES_NO, { placeholder: "Select" })}
-      ${giYesNoPct("Project Time Budget Adder?", "project_time_budget_adder", "project_time_budget_pct")}
+      ${giYesNoPct("Project Time Budget Adder?", "project_time_budget_adder", "project_time_budget_pct", { tip: "Yes + % adds a schedule buffer = %×labor days. It creates the Buffer bundle line (marked up at the rack profit target), NOT extra on-site labor." })}
 
       ${subHead("Operating Costs")}
       ${giCalc("Lodging Cost / Day", "lodging_cost_per_day")}
-      ${giNumber("Mgmt Travel Multiplier", "mgmt_travel_multiplier", { step: "0.00001", suffix: "%", placeholder: "Enter %" })}
+      ${giNumber("Mgmt Travel Multiplier", "mgmt_travel_multiplier", { step: "0.00001", suffix: "%", placeholder: "Enter %", tip: "Management travel/oversight as a % of (labor + materials + lodging + travel). Auto-zero for local jobs (labor $1,400/day). Feeds the Mgmt Travel bundle line." })}
 
       ${subHead("Profit Targets")}
-      ${giNumber("Rack Install %", "rack_install_profit_target", { step: "0.1", suffix: "%", placeholder: "%" })}
-      ${giNumber("Rental Equipment — Rack %", "rental_rack_profit_target", { step: "0.1", suffix: "%", placeholder: "%" })}
-      ${giNumber("Wire Guidance %", "wire_guidance_profit_target", { step: "0.1", suffix: "%", placeholder: "%" })}
-      ${giNumber("Rental Equipment — Wire %", "rental_wire_profit_target", { step: "0.1", suffix: "%", placeholder: "%" })}
-      ${giNumber("Mobilization %", "mobilization_profit_target", { step: "0.1", suffix: "%", placeholder: "%" })}
+      ${giNumber("Rack Install %", "rack_install_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target profit MARGIN on rack install labor. OH&P = cost/(1−margin) − cost. Typically 42%." })}
+      ${giNumber("Rental Equipment — Rack %", "rental_rack_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on rack rental equipment (lifts, propane, dumpster). Typically 25–30%." })}
+      ${giNumber("Wire Guidance %", "wire_guidance_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance labor. Typically 42%." })}
+      ${giNumber("Rental Equipment — Wire %", "rental_wire_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance rental equipment (floor scrubber)." })}
+      ${giNumber("Mobilization %", "mobilization_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Margin on the Mobilization bundle. Can be a small NEGATIVE value in the workbook (competitive travel pricing). Feeds S35/S9." })}
     </div>`;
 
   const bodyHtml = `

@@ -280,11 +280,14 @@ export async function mountBaseQuotingMetrics({
     const kind = smartRowKind(code, row);
     if (!kind) return "";
     const suggest = row._autoSuggest;
-    const suggestTxt = (suggest == null) ? "—" : fmtMoney(suggest);
+    const suggestTxt = (suggest == null || suggest.ext == null) ? "—" : fmtMoney(suggest.ext);
+    const autoDesc = kind === "env"     ? "1.9% of lift rentals"
+                   : kind === "hauling" ? "round-trips × mobs × $175"
+                   :                      "workbook formula (0 if electric)";
     if (autoState(row) === "auto") {
       return `<div class="mt-0.5 flex items-center gap-1">
         <span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">auto</span>
-        <span class="text-[10px] text-black/40">= ${escapeHtml(kind === "env" ? "1.9% of lifts" : "workbook formula")}</span>
+        <span class="text-[10px] text-black/40">= ${escapeHtml(autoDesc)}</span>
       </div>`;
     }
     return `<div class="mt-0.5 flex items-center gap-1">
@@ -795,8 +798,16 @@ export async function mountBaseQuotingMetrics({
              placeholder="${escapeHtml(placeholder)}"/>`;
   }
 
-  function attrLabel(text) {
-    return `<label class="text-[11px] font-semibold text-black/60">${escapeHtml(text)}</label>`;
+  // Small "i" info bubble with a native tooltip — accessible, zero-JS, no
+  // popover z-index headaches. Used to explain what each field/calc does.
+  function infoTip(text) {
+    if (!text) return "";
+    return `<span class="inline-flex items-center justify-center w-3.5 h-3.5 ml-1 rounded-full bg-black/15 text-black/60 text-[9px] font-bold leading-none cursor-help align-middle select-none"
+                  title="${escapeHtml(text)}">i</span>`;
+  }
+
+  function attrLabel(text, tip) {
+    return `<label class="text-[11px] font-semibold text-black/60">${escapeHtml(text)}${infoTip(tip)}</label>`;
   }
 
   function dayOverrideRow(dayType, label, hasAdder, hasBuffer) {
@@ -860,10 +871,12 @@ export async function mountBaseQuotingMetrics({
           <!-- Left column -->
           <div class="flex flex-col gap-3">
             <div class="grid grid-cols-[1fr_1fr] gap-x-3 gap-y-3 items-center">
-              ${attrLabel("Estimate Type Override")}
+              ${attrLabel("Estimate Type Override",
+                "Standard vs Aggressive daily production. Aggressive assumes higher output → fewer labor days → lower cost. Blank = inherit the Roll Up's estimate type.")}
               ${selectAttrHtml("estimate_type_override", ESTIMATE_TYPE_OPTS, { placeholder: estPlaceholder })}
 
-              ${attrLabel("Installation Environment")}
+              ${attrLabel("Installation Environment",
+                "Environment day-factor applied to labor days: Ambient ×1.0, Freezer 20–32° ×1.5, Blast Freezer −20–20° ×2.0. Colder = more days = higher cost.")}
               <div class="flex items-center gap-2">
                 ${selectAttrHtml("installation_environment", ENV_FACTOR_OPTS)}
                 <span class="text-[11px] text-black/40 whitespace-nowrap" data-env-factor>
@@ -871,10 +884,12 @@ export async function mountBaseQuotingMetrics({
                 </span>
               </div>
 
-              ${attrLabel("Wire Guidance Linear Footage")}
+              ${attrLabel("Wire Guidance Linear Footage",
+                "Total wire-guidance linear feet. Drives WG materials, scrubber/propane sizing, and WG additional-item quantities.")}
               ${numAttrHtml("wire_guidance_linear_footage", { step: "1", placeholder: "0" })}
 
-              ${attrLabel("Mobilizations Per Option")}
+              ${attrLabel("Mobilizations Per Option",
+                "Number of separate trips to site. Multiplies travel days, hauling trips, and the Mobilization / Remobilization bundles.")}
               ${numAttrHtml("mobilizations", { step: "0.5", placeholder: "0" })}
             </div>
           </div>
@@ -883,30 +898,34 @@ export async function mountBaseQuotingMetrics({
           <div class="flex flex-col gap-3">
             <div class="text-[11px] font-semibold uppercase tracking-wide text-black/40">Per-Crew Equipment</div>
             <div class="grid grid-cols-[1fr_1fr] gap-x-3 gap-y-3 items-center">
-              ${attrLabel("Scissor Lifts Per Crew")}
+              ${attrLabel("Scissor Lifts Per Crew",
+                "Scissor lifts assigned per crew. Feeds the Liquid Propane cap and the Hauling trip count.")}
               ${numAttrHtml("scissor_lifts_per_crew", { step: "1", placeholder: "0" })}
 
-              ${attrLabel("Forklifts Per Crew")}
+              ${attrLabel("Forklifts Per Crew",
+                "Forklifts assigned per crew. Feeds the Liquid Propane cap and the Hauling trip count.")}
               ${numAttrHtml("forklifts_per_crew", { step: "1", placeholder: "0" })}
 
-              ${attrLabel("Scrubbers Per Wire Scope")}
+              ${attrLabel("Scrubbers Per Wire Scope",
+                "Floor scrubbers per wire-guidance scope; feeds WG scrubber rental sizing.")}
               ${numAttrHtml("scrubbers_per_wire_scope", { step: "1", placeholder: "0" })}
 
-              ${attrLabel("Saws Per Wire Scope")}
+              ${attrLabel("Saws Per Wire Scope",
+                "Concrete saws per wire-guidance scope; feeds WG rental sizing.")}
               ${numAttrHtml("saws_per_wire_scope", { step: "1", placeholder: "0" })}
             </div>
           </div>
         </div>
 
         <div class="pt-5">
-          <div class="text-[11px] font-semibold uppercase tracking-wide text-black/40 pb-2">Day Type Override</div>
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-black/40 pb-2">Day Type Override${infoTip("Optional manual day-count overrides for simple quotes. Leave blank for detailed line-item quotes — the line items drive the day counts automatically.")}</div>
           <table class="w-full text-sm">
             <thead>
               <tr class="text-[11px] uppercase tracking-wide text-black/50 border-b border-black/10">
                 <th class="text-left  font-semibold py-2 px-2">Day Type</th>
-                <th class="text-left  font-semibold py-2 px-2 w-28">Labor Day Override</th>
-                <th class="text-left  font-semibold py-2 px-2 w-28">Project Time Adder</th>
-                <th class="text-left  font-semibold py-2 px-2 w-28">Buffer Day Counter</th>
+                <th class="text-left  font-semibold py-2 px-2 w-28">Labor Day Override${infoTip("RAW simple-quote day estimate (workbook K20). Replaces the line-item production days as the calc base; the environment factor + half-day rounding are then applied on top. Blank = use the line items.")}</th>
+                <th class="text-left  font-semibold py-2 px-2 w-28">Project Time Adder${infoTip("Extra days added on top of the base for schedule buffer. Creates the Buffer bundle line (marked up at the rack profit target) — it is NOT extra on-site labor cost.")}</th>
+                <th class="text-left  font-semibold py-2 px-2 w-28">Buffer Day Counter${infoTip("Computed buffer days = ceilHalf((base + adder) × env) − ceilHalf(base × env). Display only; set it via the Project Time Adder.")}</th>
               </tr>
             </thead>
             <tbody>
@@ -968,12 +987,11 @@ export async function mountBaseQuotingMetrics({
     };
   }
 
-  // ── Auto-derived Other-Rentals (Environmental Fees + Liquid Propane) ─────────
-  // The BASE sheet computes these two "Other Rentals" line items by formula;
-  // the app historically left them as manual entry, which drifts from the
-  // workbook. We now auto-derive them (with a manual-override escape hatch),
-  // mirroring the live Google-Drive RELEASE-template formulas confirmed by the
-  // 2026-07 formula audit:
+  // ── Auto-derived Other-Rentals (Environmental Fees / Propane / Hauling) ───────
+  // The BASE sheet computes these "Other Rentals" line items by formula; the app
+  // historically left them as manual entry, which drifts from the workbook. We
+  // now auto-derive them (with a manual-override escape hatch), mirroring the
+  // live Google-Drive RELEASE-template formulas confirmed by the 2026-07 audit:
   //   Environmental Fees  G203/G240 = 1.9% × (lift equipment ext-cost)
   //   Liquid Propane rack H205       = 0 if Electric, else
   //                                    MIN( crew × (scissor+forklift per crew)
@@ -982,8 +1000,14 @@ export async function mountBaseQuotingMetrics({
   //                       periodRate  day $40 / week $200 / month $500 (ref AB4:AC7),
   //                                   chosen by roundup(rackLaborDays / crew).
   //   Liquid Propane wire H242       = ceilHalf(WG_LF / 1500) × $40 when WG in scope.
-  // A row's `notes` carries the override state: "auto:<kind>" (keep in sync) vs
-  // "manual:<kind>" (user owns the value). Untouched seed rows adopt as auto.
+  //   Hauling rack  D204/H204        = roundup((scissor+forklift per crew)×crew / 3)
+  //                                    × 2 (round trip) trips × mobs × $175, when
+  //                                    rack lifts exist.
+  //   Hauling wire  D241/H241        = 2 trips × mobs × $175, when WG in scope.
+  // Each suggestion is a {qty, mobilizations, unit_price, ext} shape so Hauling
+  // reads naturally as "trips × mobs × $175" in the row. A row's `notes` carries
+  // the override state: "auto:<kind>" (keep in sync) vs "manual:<kind>" (user
+  // owns the value). Untouched seed rows adopt as auto.
   const ceilHalf2 = (x) => Math.ceil(Number(x) * 2) / 2;
   const round2    = (x) => Math.round((Number(x) + Number.EPSILON) * 100) / 100;
   const SMART_RENTAL_SECTIONS = ["other_rentals_rack_install", "other_rentals_wire_guidance"];
@@ -991,12 +1015,20 @@ export async function mountBaseQuotingMetrics({
   const PROPANE_RATE_BY_PERIOD = { day: 40, week: 200, month: 500 };  // reference AB4:AC7
   const PROPANE_WG_RATE        = 40;                       // G242
   const PROPANE_WG_LF_PER_UNIT = 1500;                     // F242 = ceiling(G29/1500, 0.5)
+  const HAUL_RATE              = 175;                      // G204 / G241
+
+  // A suggested value expressed in the other_rental row shape (qty × mobs × unit).
+  const suggestion = (qty, mobs, unit) => ({
+    qty, mobilizations: mobs, unit_price: unit,
+    ext: round2((Number(qty) || 0) * (Number(mobs) || 0) * (Number(unit) || 0)),
+  });
 
   function smartRowKind(code, row) {
     if (!SMART_RENTAL_SECTIONS.includes(code)) return null;
     const lbl = String(row.label || "").toLowerCase();
     if (lbl.includes("environmental")) return "env";
     if (lbl.includes("propane"))       return "propane";
+    if (lbl.includes("hauling"))       return "hauling";
     return null;
   }
   // "auto" = app keeps the value in sync; "manual" = user overrode it. A seed
@@ -1043,32 +1075,46 @@ export async function mountBaseQuotingMetrics({
     const est = readEstimateBridge();
     const crew = Number(est.crew_count ?? 0) || 0;
     const electric = isElectric();
+    const scissor = Number(attrs.scissor_lifts_per_crew ?? 0) || 0;
+    const fork    = Number(attrs.forklifts_per_crew ?? 0) || 0;
+    const mobs    = (Number(attrs.mobilizations ?? 0) || 0) > 0
+                      ? Number(attrs.mobilizations) : 1;    // E204/E241: min 1
+    const rackLiftExt = sumSectionExt("rentals_rack_install");
+    const wireLiftExt = sumSectionExt("rentals_wire_guidance");
+    const wgLf = Number(attrs.wire_guidance_linear_footage ?? 0) || 0;
+    const wgInScope = wgLf > 0 || wireLiftExt > 0;
 
-    const envRack = round2(ENV_FEE_PCT * sumSectionExt("rentals_rack_install"));
-    const envWire = round2(ENV_FEE_PCT * sumSectionExt("rentals_wire_guidance"));
+    // Environmental Fees — 1.9% of lift ext-cost, carried as unit_price.
+    const envRack = suggestion(1, 1, round2(ENV_FEE_PCT * rackLiftExt));
+    const envWire = suggestion(1, 1, round2(ENV_FEE_PCT * wireLiftExt));
 
     // Rack propane — MIN(labor-day cap, lift × period rate); 0 when electric.
-    let propRack = 0;
+    let propRackVal = 0;
     if (!electric) {
       const rackLaborDays = Number(tc.D23 ?? 0) || 0;
       const rate    = propanePeriodRate(rackLaborDays, crew);
       const liftQty = sumLiftQty("rentals_rack_install", ["scissor", "forklift"]);
       const liftTerm = liftQty * rate;
-      const scissor = Number(attrs.scissor_lifts_per_crew ?? 0) || 0;
-      const fork    = Number(attrs.forklifts_per_crew ?? 0) || 0;
       const cap     = crew * (scissor + fork) * rackLaborDays * 40;
-      propRack = liftTerm > 0 ? round2(cap > 0 ? Math.min(cap, liftTerm) : liftTerm) : 0;
+      propRackVal = liftTerm > 0 ? round2(cap > 0 ? Math.min(cap, liftTerm) : liftTerm) : 0;
     }
-
     // Wire-guidance propane — footage-based, only when WG is in scope.
-    const wgLf = Number(attrs.wire_guidance_linear_footage ?? 0) || 0;
-    const propWire = wgLf > 0
-      ? round2(ceilHalf2(wgLf / PROPANE_WG_LF_PER_UNIT) * PROPANE_WG_RATE)
-      : 0;
+    const propWireVal = wgLf > 0
+      ? round2(ceilHalf2(wgLf / PROPANE_WG_LF_PER_UNIT) * PROPANE_WG_RATE) : 0;
+
+    // Hauling — round-trip trips × mobilizations × $175, when equipment exists.
+    const rackTrips = rackLiftExt > 0
+      ? Math.ceil((scissor + fork) * crew / 3) * 2 : 0;
+    const haulRack = suggestion(rackTrips, mobs, HAUL_RATE);
+    const haulWire = suggestion(wgInScope ? 2 : 0, mobs, HAUL_RATE);
 
     return {
-      other_rentals_rack_install:  { env: envRack, propane: propRack },
-      other_rentals_wire_guidance: { env: envWire, propane: propWire },
+      other_rentals_rack_install:  {
+        env: envRack, propane: suggestion(1, 1, propRackVal), hauling: haulRack,
+      },
+      other_rentals_wire_guidance: {
+        env: envWire, propane: suggestion(1, 1, propWireVal), hauling: haulWire,
+      },
     };
   }
 
@@ -1087,19 +1133,23 @@ export async function mountBaseQuotingMetrics({
         sec.rows.forEach((row, idx) => {
           const kind = smartRowKind(code, row);
           if (!kind) return;
-          const target = kind === "env" ? sugg[code].env : sugg[code].propane;
+          const target = sugg[code][kind];               // {qty, mobilizations, unit_price, ext}
           row._autoSuggest = target;                    // renderer reads this for the hint
           if (locked) return;                            // read-only estimate — show, never write
           if (autoState(row) !== "auto") return;
           const cur = row.ext_cost == null ? null : Number(row.ext_cost);
           // Don't write a 0 onto a still-pristine seed row — only when a real
           // value applies, or when a previously-auto value must fall back to 0.
-          const pristineZero = target === 0 && row.ext_cost == null;
+          const pristineZero = target.ext === 0 && row.ext_cost == null;
           const needsWrite = !pristineZero &&
-            (cur !== target || Number(row.qty) !== 1 || Number(row.unit_price) !== target ||
+            (cur !== target.ext ||
+             Number(row.qty) !== target.qty ||
+             Number(row.mobilizations) !== target.mobilizations ||
+             Number(row.unit_price) !== target.unit_price ||
              !String(row.notes || "").startsWith("auto:"));
           if (needsWrite) {
-            row.qty = 1; row.mobilizations = 1; row.unit_price = target; row.ext_cost = target;
+            row.qty = target.qty; row.mobilizations = target.mobilizations;
+            row.unit_price = target.unit_price; row.ext_cost = target.ext;
             row.notes = `auto:${kind}`;
             toPersist.push([code, idx]);
           }
@@ -1163,30 +1213,30 @@ export async function mountBaseQuotingMetrics({
     const tc = computeTravelCosts();
     const row = (label, value, opts = {}) => `
       <div class="grid grid-cols-[1fr_auto] gap-x-3 py-1.5 ${opts.divider ? "border-t border-black/10 mt-1 pt-2" : ""}">
-        <span class="text-sm ${opts.bold ? "font-bold" : "text-black/70"}">${escapeHtml(label)}</span>
+        <span class="text-sm ${opts.bold ? "font-bold" : "text-black/70"}">${escapeHtml(label)}${infoTip(opts.tip)}</span>
         <span class="text-sm tabular-nums ${opts.bold ? "font-bold" : "font-semibold"}">${fmtMoney(value)}</span>
       </div>`;
     return `
-      <div class="text-[11px] italic text-black/40 pb-2">Cost checker · ${escapeHtml(tc.estimate_type)} estimate</div>
+      <div class="text-[11px] italic text-black/40 pb-2">Cost checker · ${escapeHtml(tc.estimate_type)} estimate${infoTip("Internal cost basis (before OH&P markup) across the 6 top-level sections. The customer price comes from the QuickBooks Bundle Output card, which adds OH&P.")}</div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-8">
         <div>
-          ${row("Travel Costs (H32)", tc.section_total)}
-          ${row("Rack Installation (H38)", tc.H38)}
+          ${row("Travel Costs (H32)", tc.section_total, { tip: "Lodging + Mgmt Travel + Travel-Day labor. Zero for local jobs (≤1 hr one-way)." })}
+          ${row("Rack Installation (H38)", tc.H38, { tip: "Materials + Contract Labor for the rack install." })}
           <div class="pl-6 text-xs">
             ${row("Materials (H39)", tc.H39)}
-            ${row("Contract Labor (H44)", tc.H44)}
+            ${row("Contract Labor (H44)", tc.H44, { tip: "Tab Labor Days (Rack) × labor cost/day. Tab Labor Days = ceilHalf((base + time-adder) × env)." })}
           </div>
-          ${row("Rentals - Rack Install (H187)", tc.H187)}
+          ${row("Rentals - Rack Install (H187)", tc.H187, { tip: "Lift rentals + Other Rentals (Environmental Fees, Hauling, Propane, Dumpster)." })}
         </div>
         <div>
-          ${row("Wire Guidance Labor (H213)", tc.H213)}
+          ${row("Wire Guidance Labor (H213)", tc.H213, { tip: "WG Materials + WG Contract Labor (Tab Labor Days (Wire) × labor cost/day)." })}
           <div class="pl-6 text-xs">
             ${row("Materials (H214)", tc.H214)}
             ${row("Contract Labor (H220)", tc.H220)}
           </div>
           ${row("Rentals - Wire Guidance (H226)", tc.H226)}
-          ${row("Wire Guidance Add'l Items (H248)", tc.H248)}
-          ${row("PROJECT COST TOTAL", tc.grand_total, { bold: true, divider: true })}
+          ${row("Wire Guidance Add'l Items (H248)", tc.H248, { tip: "Slurry Tank, Line Drivers, Magnets, RFID Tags." })}
+          ${row("PROJECT COST TOTAL", tc.grand_total, { bold: true, divider: true, tip: "Sum of the 6 sections — the internal cost basis, not the customer price." })}
         </div>
       </div>
     `;
@@ -1222,7 +1272,7 @@ export async function mountBaseQuotingMetrics({
     const renderBundle = (bundle) => {
       const subRow = ([label, value, opts = {}]) => `
         <div class="grid grid-cols-[1fr_auto] gap-x-3 py-0.5 pl-4">
-          <span class="text-xs ${opts.stub ? "text-black/30 italic" : "text-black/60"}">${escapeHtml(label)}${opts.stub ? " *" : ""}</span>
+          <span class="text-xs ${opts.stub ? "text-black/30 italic" : "text-black/60"}">${escapeHtml(label)}${opts.stub ? " *" : ""}${label === "OH&P" ? infoTip("Overhead & Profit markup = cost / (1 − target margin) − cost, to hit the section's profit-target %. Folded into the bundle total; not a separate customer-facing line on the PDF.") : ""}</span>
           <span class="text-xs tabular-nums ${opts.stub ? "text-black/30" : ""}">${fmtMoney(value)}</span>
         </div>`;
       const note = bundle.note
@@ -1472,8 +1522,9 @@ export async function mountBaseQuotingMetrics({
       const v = raw === "" ? null : Number(raw);
       attrs[attrField] = v;
       persistAttr(attrField, v);
-      // These per-crew / footage inputs feed the auto Env-Fee / Propane math.
-      if (["scissor_lifts_per_crew", "forklifts_per_crew", "wire_guidance_linear_footage"].includes(attrField)) {
+      // These per-crew / footage / mobilization inputs feed the auto
+      // Env-Fee / Propane / Hauling math.
+      if (["scissor_lifts_per_crew", "forklifts_per_crew", "wire_guidance_linear_footage", "mobilizations"].includes(attrField)) {
         refreshAutoRentalRows();
         renderCostSummary();
         renderBundleOutput();
