@@ -78,7 +78,7 @@ for i in range(8, len(rows)):
     # Align the RR status text to the estimate_pipeline_status lookup keys
     # (the Estimates page's status column), so the dropdown resolves it.
     if pstat == "20% Budgetary, Project Uncertain":
-        pstat = "20% Verbal - Budgetary, Project Uncertain"
+        pstat = "20% Budgetary, Project Uncertain"
     lc = lifecycle(pstat)
     stats[lc] = stats.get(lc, 0) + 1
     cols = {

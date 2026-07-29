@@ -33,7 +33,7 @@ const KPI_STYLES = {
 const EST_STATUS_COLORS = {
   "0% Lost":                                          "bg-red-100 text-red-700",
   "0% Inactive":                                      "bg-orange-100 text-orange-700",
-  "20% Verbal - Budgetary, Project Uncertain":        "bg-yellow-100 text-yellow-800",
+  "20% Budgetary, Project Uncertain":        "bg-yellow-100 text-yellow-800",
   "40% Competitive, Multiple Bidders":                "bg-sky-100 text-sky-800",
   "60% Project Confirmed, Customer Well-Positioned":  "bg-blue-700 text-white",
   "80% Verbal Approval, Very likely to Receive Order":"bg-purple-100 text-purple-800",
