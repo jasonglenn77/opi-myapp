@@ -1040,11 +1040,33 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
         </div>`;
     }).join("");
 
+    // Line descriptions the estimator wrote on the Estimate PDF tab — the office
+    // copies these into the QBO estimate lines. (Persisted per estimate on the device.)
+    let pdfModel = null;
+    try { pdfModel = JSON.parse(localStorage.getItem(`opi_pdf_model_${estimateId}`) || "null"); } catch (_) {}
+    const pdfPanel = (pdfModel && Array.isArray(pdfModel.lines) && pdfModel.lines.length)
+      ? `<div class="card px-4 py-3">
+           <div class="flex items-center justify-between mb-2">
+             <div class="text-sm font-extrabold text-ink-900">Line descriptions (from the Estimate PDF)</div>
+             <div class="text-[11px] text-black/40">Copy each into the matching QBO estimate line.</div>
+           </div>
+           <div class="divide-y divide-black/5">
+             ${pdfModel.lines.map((l, i) => `
+               <div class="py-2 flex items-start gap-2">
+                 <div class="w-36 shrink-0 text-xs font-bold text-ink-900">${escapeHtml(l.label || "—")}</div>
+                 <div class="flex-1 min-w-0 text-xs text-black/70" style="white-space:pre-wrap;">${escapeHtml(l.description || "")}</div>
+                 <button data-copydesc="${i}" class="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-black/10 hover:bg-black/5">${flash === "d:" + i ? "✓" : "copy"}</button>
+               </div>`).join("")}
+           </div>
+         </div>`
+      : `<div class="card px-4 py-3 text-xs text-black/50">No line descriptions yet — fill them in on the <b>Estimate PDF</b> tab and they'll show here to copy into QBO.</div>`;
+
     container.innerHTML = `<div class="grid gap-3">
       <div class="text-[11px] text-black/50 px-1">Amounts come from the validated bundle calc. Edit any cell to override the exact number you'll type into QBO (saved on this device); ↺ resets it.</div>
-      ${header}${setCards || `<div class="card px-5 py-4 text-sm text-black/50">No enabled metric sets.</div>`}
+      ${header}${pdfPanel}${setCards || `<div class="card px-5 py-4 text-sm text-black/50">No enabled metric sets.</div>`}
     </div>`;
 
+    container.querySelectorAll("[data-copydesc]").forEach(b => b.addEventListener("click", () => copy((pdfModel.lines[Number(b.getAttribute("data-copydesc"))] || {}).description || "", "d:" + b.getAttribute("data-copydesc"))));
     container.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => copy(b.getAttribute("data-copy"), b.getAttribute("data-tag"))));
     container.querySelectorAll("[data-copyblock]").forEach(b => b.addEventListener("click", () => copy(b.getAttribute("data-copyblock"), b.getAttribute("data-tag"))));
     container.querySelectorAll("[data-reset]").forEach(b => b.addEventListener("click", () => { delete overrides[b.getAttribute("data-reset")]; saveOvr(); render(); }));
