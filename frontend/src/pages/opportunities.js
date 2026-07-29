@@ -159,10 +159,21 @@ export async function pipelinePage(routeFn) {
       ${n > 1 ? `<span class="text-[10px] font-bold">${n}</span>` : ""}
     </button>`;
   };
+  // Shared column grid for the revision mini-table (header + rows) so everything
+  // lines up vertically regardless of which actions a row has: Rev · Status ·
+  // Description · Date · Open · Use this · Unlock · Labor · Travel · OH&P · Value.
+  const REV_GRID = "display:grid;align-items:center;column-gap:0.75rem;grid-template-columns:" +
+    "3.25rem 5.75rem minmax(0,1fr) 5.75rem 3rem 4.25rem 3.75rem 3.75rem 4rem 3.75rem 5.5rem;";
+  const revHeaderHtml = `
+    <div class="pb-1 mb-1 border-b border-black/10 text-[9px] font-bold uppercase tracking-wide text-black/35" style="${REV_GRID}">
+      <div>Rev</div><div>Status</div><div>Description</div><div>Date</div>
+      <div></div><div></div><div></div>
+      <div class="text-right">Labor</div><div class="text-right">Travel</div><div class="text-right">OH&P</div><div class="text-right">Value</div>
+    </div>`;
+
   // One revision line inside the expanded sub-row. The badge conveys the
-  // revision's state (current / locked / draft), so the raw lifecycle status is
-  // not repeated here — instead each revision shows its own Labor / Travel /
-  // OH&P (last synced on that revision's Save & Send), matching the main row.
+  // revision's state (current / locked / draft); each revision shows its own
+  // Labor / Travel / OH&P / Value (last synced on that revision's Save & Send).
   const revRow = (o, r) => {
     const badge = r.is_current
       ? `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-emerald-100 text-emerald-700" title="The revision the pipeline currently uses">current</span>`
@@ -170,22 +181,24 @@ export async function pipelinePage(routeFn) {
       : `<span class="text-[9px] font-bold uppercase rounded px-1 py-0.5 bg-amber-100 text-amber-700" title="Not yet sent — editable draft">draft</span>`;
     const n = (v) => (v == null ? "—" : Number(v).toLocaleString());
     const val = (v) => (v == null ? "—" : "$" + Math.round(Number(v)).toLocaleString());
-    // Figures live at the END of the row (after the actions), per OPI's preferred order.
-    const metrics = `<div class="text-black/45 tabular-nums shrink-0 whitespace-nowrap ml-auto" title="This revision's last-synced figures: Labor days · Travel days · OH&P% · Value">
-        Labor ${n(r.labor_days)} · Travel ${n(r.travel_days)} · ${r.ohp_pct == null ? "OH&P —" : "OH&P " + Math.round(r.ohp_pct) + "%"} · ${val(r.contract_value)}
-      </div>`;
     const useBtn = r.is_current
       ? ""
-      : `<button data-usecur="${r.id}" data-opp="${o.id}" class="font-semibold text-emerald-700 hover:underline shrink-0" title="Make this the revision the pipeline uses (its figures + Open quote)">Use this</button>`;
-    return `<div class="flex items-center gap-3 py-1.5 text-xs">
-      <div class="font-bold text-ink-900 w-14 shrink-0">Rev ${r.revision_no}</div>
-      <div class="w-20 shrink-0">${badge}</div>
-      <div class="text-black/55 flex-1 min-w-0 truncate">${escapeHtml(r.quote_description || "—")}</div>
-      <div class="text-black/40 tabular-nums w-24 shrink-0">${r.created_at ? escapeHtml(r.created_at.slice(0, 10)) : ""}</div>
-      <a href="#/estimate/${r.id}" class="font-semibold text-blue-700 hover:underline shrink-0">Open →</a>
-      ${useBtn}
-      <div class="w-14 shrink-0 text-right">${r.locked ? `<button data-unlockrev="${r.id}" data-opp="${o.id}" class="font-semibold text-amber-700 hover:underline">Unlock</button>` : ""}</div>
-      ${metrics}
+      : `<button data-usecur="${r.id}" data-opp="${o.id}" class="font-semibold text-emerald-700 hover:underline text-left" title="Make this the revision the pipeline uses (its figures + Open quote)">Use this</button>`;
+    const unlockBtn = r.locked
+      ? `<button data-unlockrev="${r.id}" data-opp="${o.id}" class="font-semibold text-amber-700 hover:underline text-left">Unlock</button>`
+      : "";
+    return `<div class="py-1.5 text-xs" style="${REV_GRID}">
+      <div class="font-bold text-ink-900">Rev ${r.revision_no}</div>
+      <div>${badge}</div>
+      <div class="text-black/55 min-w-0 truncate" title="${escapeHtml(r.quote_description || "")}">${escapeHtml(r.quote_description || "—")}</div>
+      <div class="text-black/40 tabular-nums">${r.created_at ? escapeHtml(r.created_at.slice(0, 10)) : "—"}</div>
+      <a href="#/estimate/${r.id}" class="font-semibold text-blue-700 hover:underline whitespace-nowrap">Open →</a>
+      <div>${useBtn}</div>
+      <div>${unlockBtn}</div>
+      <div class="text-black/60 tabular-nums text-right">${n(r.labor_days)}</div>
+      <div class="text-black/60 tabular-nums text-right">${n(r.travel_days)}</div>
+      <div class="text-black/60 tabular-nums text-right">${r.ohp_pct == null ? "—" : Math.round(r.ohp_pct) + "%"}</div>
+      <div class="text-black/70 tabular-nums text-right font-semibold">${val(r.contract_value)}</div>
     </div>`;
   };
   // The expanded sub-row (spans the whole table) listing this opportunity's revisions.
@@ -199,6 +212,7 @@ export async function pipelinePage(routeFn) {
              <div class="text-[10px] font-bold uppercase tracking-wide text-black/40">Revisions · Quote #${escapeHtml(o.quote_number || "—")}</div>
              <button data-newrev="${o.id}" class="text-[11px] font-semibold text-emerald-700 hover:underline">+ New revision</button>
            </div>
+           ${revs.length ? revHeaderHtml : ""}
            <div class="divide-y divide-black/5">${revs.map(r => revRow(o, r)).join("") || `<div class="text-xs text-black/40 py-2">No revisions.</div>`}</div>
          </div>`;
     return `<tr class="bg-slate-50/70 border-b border-black/5"><td colspan="${COLS.length + 1}" class="px-3 py-2">${inner}</td></tr>`;
