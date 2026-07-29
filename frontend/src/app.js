@@ -14,7 +14,7 @@ import { crewPortalPage } from "./pages/crew.js";
 import { customersPage } from "./pages/customers.js";
 import { contactsPage } from "./pages/contacts.js";
 import { pipelinePage } from "./pages/opportunities.js";
-import { settingsPage } from "./pages/settings.js";
+import { settingsPage, lookupValuesPage, rateTablesPage } from "./pages/settings.js";
 import { estimateTrackingPage } from "./pages/estimate-tracking.js";
 import { entityDetailPage } from "./pages/entity-detail.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
@@ -137,6 +137,8 @@ async function route() {
     location.hash = "#/customers";
     return;
   }
+  if (hash === "#/settings/lookups") return lookupValuesPage(route);
+  if (hash === "#/settings/rates") return rateTablesPage(route);
   if (hash === "#/settings" || hash.startsWith("#/settings/")) return settingsPage(route);
   if (hash.startsWith("#/crew")) {
     const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);

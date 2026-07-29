@@ -31,43 +31,55 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<"
 const errDetail = (e) => { let d = e?.message || "Error"; try { const o = JSON.parse(d); if (o && o.detail) d = o.detail; } catch (_) {} return d; };
 const prettyCat = (c) => String(c || "").replace(/_/g, " ").replace(/\b\w/g, m => m.toUpperCase());
 
+// Settings is now Roles only — Lookup Values + Rate Tables graduated to their
+// own standalone pages under the Estimating nav (see lookupValuesPage /
+// rateTablesPage below), so they no longer live as tabs here.
 export async function settingsPage(routeFn) {
-  // Deep-linkable tabs: #/settings/lookups and #/settings/rates open directly (used
-  // by the Estimating nav group); #/settings opens Roles.
-  const hashTab = (location.hash.split("/")[2] || "").toLowerCase();
-  let activeTab = ["roles", "lookups", "rates"].includes(hashTab) ? hashTab : "roles";
+  setShell({
+    title: "Settings",
+    subtitle: "Roles & permissions — control what each role can see and do across the app.",
+    bodyHtml: `<div class="w-full pb-3"><div id="setBody"></div></div>`,
+    showLogout: true, routeFn,
+  });
+  showRoles(routeFn);
+}
 
-  mount(`
-    <div class="w-full pb-3">
-      <div class="card p-0 overflow-hidden mb-3">
-        <div class="px-4 pt-4 pb-0">
-          <div class="text-lg font-extrabold">Settings</div>
-          <div class="text-xs text-black/50">Manage roles &amp; the reference data behind the app's dropdowns.</div>
-          <div id="setTabBar" class="flex gap-1 -mb-px mt-3 border-b border-black/10"></div>
+// Standalone reference-data pages. Both reuse showReference() but wrap it in the
+// Pipeline-style shell: a header (title + description) from setShell + a card
+// that flexes to fill the viewport with the content scrolling inside.
+export async function lookupValuesPage(routeFn) {
+  return referencePage(routeFn, "lookup", "Lookup Values",
+    "The reference lists behind the app's dropdowns — pipeline statuses, communication types, environment factors, crew sizes, and more.");
+}
+export async function rateTablesPage(routeFn) {
+  return referencePage(routeFn, "rates", "Rate Tables",
+    "Productivity rates (units per day) and equipment rental rates that drive the quoting-metrics calculations.");
+}
+
+async function referencePage(routeFn, mode, title, subtitle) {
+  setShell({
+    title, subtitle, showLogout: true, routeFn,
+    bodyHtml: `
+      <div class="w-full">
+        <div class="card p-3 sm:p-4 flex flex-col overflow-hidden" id="refCard" style="min-height:340px;">
+          <div id="setBody" class="flex-1 overflow-auto">
+            <div class="text-sm text-black/40 px-1 py-6">Loading…</div>
+          </div>
         </div>
-      </div>
-      <div id="setBody"></div>
-    </div>`, routeFn);
-
-  function renderTabs() {
-    const bar = document.getElementById("setTabBar");
-    if (!bar) return;
-    const btn = (k, l) => `<button type="button" data-stab="${k}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === k ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${l}</button>`;
-    bar.innerHTML = btn("roles", "Roles &amp; Permissions") + btn("lookups", "Lookup Values") + btn("rates", "Rate Tables");
-    bar.querySelectorAll("[data-stab]").forEach(b => b.addEventListener("click", () => {
-      const t = b.dataset.stab;
-      if (t === activeTab) return;
-      activeTab = t; renderTabs();
-      if (t === "lookups") showReference("lookup");
-      else if (t === "rates") showReference("rates");
-      else showRoles(routeFn);
-    }));
-  }
-
-  renderTabs();
-  if (activeTab === "lookups") showReference("lookup");
-  else if (activeTab === "rates") showReference("rates");
-  else showRoles(routeFn);
+      </div>`,
+  });
+  // Size the card to fill the space left in the viewport (same as the Pipeline
+  // table) so the page never gains its own vertical scrollbar.
+  const sizeCard = () => {
+    const c = document.getElementById("refCard");
+    if (!c) return;
+    const top = c.getBoundingClientRect().top;
+    c.style.height = Math.max(340, window.innerHeight - top - 30) + "px";
+  };
+  window.addEventListener("resize", sizeCard);
+  await showReference(mode);
+  sizeCard();
+  requestAnimationFrame(sizeCard);
 }
 
 // ── Roles tab ────────────────────────────────────────────────────────────────
@@ -431,11 +443,3 @@ async function showReference(mode) {
   renderPanel();
 }
 
-function mount(bodyHtml, routeFn) {
-  setShell({ title: "", subtitle: "", bodyHtml, showLogout: true, routeFn });
-  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
-  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
-    pageTitleBlock.style.display = "none";
-    window.addEventListener("hashchange", () => { if (pageTitleBlock) pageTitleBlock.style.display = ""; }, { once: true });
-  }
-}

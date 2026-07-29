@@ -182,24 +182,34 @@ export async function contactsPage(routeFn) {
 
   const body = `
     <div class="w-full">
-      <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-        <div><h1 class="text-xl font-extrabold text-ink-900">Contacts</h1>
-          <p class="text-xs text-black/50">People under each customer — used to file estimates at the contact level. Deactivate keeps history; Delete removes permanently.</p></div>
-        <button id="cAdd" class="btn-primary text-sm px-4 py-2">+ Add contact</button>
-      </div>
-      <div class="card p-3 sm:p-4">
-        <div class="flex items-center gap-2 mb-3 flex-wrap">
-          <input id="cSearch" class="input text-sm py-2 w-full sm:max-w-xs" placeholder="Search name, email, phone, or customer…">
+      <div class="card p-3 flex flex-col overflow-hidden" id="cCard" style="min-height:340px;">
+        <div class="flex items-center gap-2 mb-2 flex-wrap shrink-0">
+          <input id="cSearch" class="input text-sm py-1.5 w-full sm:max-w-xs" placeholder="Search name, email, phone, or customer…">
           <div id="cStatusFilter" class="flex items-center gap-1"></div>
-          <span id="cCount" class="text-xs text-black/40 ml-auto"></span>
+          <span id="cCount" class="text-xs text-black/40 whitespace-nowrap"></span>
+          <button id="cAdd" class="btn-primary text-xs px-3 py-1.5 ml-auto whitespace-nowrap">+ Add contact</button>
         </div>
-        <div id="cList" class="text-sm text-black/40 py-6">Loading…</div>
+        <div id="cList" class="flex-1 overflow-auto text-sm text-black/40">Loading…</div>
       </div>
     </div>`;
-  setShell({ title: "", subtitle: "", bodyHtml: body, showLogout: true, routeFn });
+  setShell({
+    title: "Contacts",
+    subtitle: "People under each customer — used to file estimates at the contact level. Deactivate keeps history; Delete removes permanently.",
+    bodyHtml: body, showLogout: true, routeFn,
+  });
 
   const listEl = document.getElementById("cList");
   const countEl = document.getElementById("cCount");
+
+  // Size the card to fill the viewport so the table scrolls inside it (matches
+  // the Pipeline page) rather than growing the page.
+  const sizeCard = () => {
+    const card = document.getElementById("cCard");
+    if (!card) return;
+    const top = card.getBoundingClientRect().top;
+    card.style.height = Math.max(340, window.innerHeight - top - 30) + "px";
+  };
+  window.addEventListener("resize", sizeCard);
 
   const sortVal = (c, key) => key === "active" ? (c.active ? 1 : 0) : (c[key] ?? "").toString().toLowerCase();
   const visible = () => {
@@ -236,10 +246,10 @@ export async function contactsPage(routeFn) {
     countEl.textContent = `${rows.length} contact${rows.length === 1 ? "" : "s"}`;
     if (!rows.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No contacts match.</div>`; return; }
     listEl.innerHTML = `
-      <div class="overflow-x-auto"><table class="w-full text-sm">
-        <thead><tr class="text-left text-black/45 border-b border-black/10">
-          ${COLS.map(c => `<th class="py-2 pr-3 font-bold cursor-pointer select-none hover:text-black/70" data-sort="${c.key}">${c.label}${arrow(c.key)}</th>`).join("")}
-          <th class="py-2 font-bold text-right">Actions</th></tr></thead>
+      <table class="w-full text-sm" style="min-width:720px;">
+        <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
+          ${COLS.map(c => `<th class="py-2 pr-3 font-bold cursor-pointer select-none hover:text-black/70 bg-white" data-sort="${c.key}">${c.label}${arrow(c.key)}</th>`).join("")}
+          <th class="py-2 font-bold text-right bg-white">Actions</th></tr></thead>
         <tbody>${rows.map(c => `
           <tr class="border-b border-black/5 hover:bg-black/[0.015] ${c.active ? "" : "opacity-60"}">
             ${COLS.map(col => `<td class="py-1.5 pr-3">${col.td(c)}</td>`).join("")}
@@ -248,7 +258,7 @@ export async function contactsPage(routeFn) {
               <button data-toggle="${c.id}" data-active="${c.active ? 1 : 0}" class="text-xs font-semibold hover:underline ml-2 ${c.active ? "text-amber-700" : "text-emerald-700"}">${c.active ? "Deactivate" : "Activate"}</button>
               <button data-del="${c.id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button></td>
           </tr>`).join("")}
-        </tbody></table></div>`;
+        </tbody></table>`;
     listEl.querySelectorAll("[data-sort]").forEach(th => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
     listEl.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => {
       const c = all.find(x => String(x.id) === b.getAttribute("data-edit"));
@@ -267,6 +277,7 @@ export async function contactsPage(routeFn) {
     try { all = (await api(`/contacts?limit=2000`)).contacts || []; }
     catch (e) { listEl.innerHTML = `<div class="text-red-700">Failed to load contacts.</div>`; return; }
     renderList();
+    sizeCard();
   };
 
   let t = null;
@@ -274,4 +285,5 @@ export async function contactsPage(routeFn) {
   document.getElementById("cAdd").addEventListener("click", () => contactFormModal({ customer: null, contact: null, onSaved: load }));
   renderStatusFilter();
   load();
+  requestAnimationFrame(sizeCard);   // after first paint, once layout settles
 }
