@@ -32,9 +32,13 @@ def _terminal_from_stage(pstat):
     save & send→sent). The win-probability STATUS only forces the stage when it is
     TERMINAL — Won / Lost / Inactive. Intermediate 20-80% values leave the stage
     untouched (that decoupling fixes the 'status accidentally moves the stage' bug).
-    Returns the terminal stage, or None when the status is not terminal."""
+    Returns the terminal stage, or None when the status is not terminal.
+    Note: "80% Red Flag" is NOT won — it's a high-probability-but-flagged status that
+    stays in play; only "100% Won" is terminal-won."""
     p = (pstat or "").lower()
-    if "won" in p or "red flag" in p:
+    if "red flag" in p:
+        return None
+    if "won" in p:
         return "won"
     if "lost" in p:
         return "lost"
@@ -356,13 +360,17 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
                                {"p": fields["project_qbo_id"]}).scalar()
             if not okp:
                 raise HTTPException(status_code=400, detail="project_qbo_id is not a project")
-        # The win-probability status only advances the lifecycle STAGE when it's
-        # terminal (Won/Lost/Inactive); intermediate values leave the action-driven
-        # stage alone. Explicit status wins.
+        # The win-probability status advances the lifecycle STAGE when it's terminal
+        # (Won/Lost/Inactive). An intermediate status on a row that was previously
+        # DECIDED reopens it — back to 'sent' (the quote is in play again). An
+        # intermediate status on an undecided row leaves the action-driven stage alone.
+        # Explicit status always wins.
         if "pipeline_status" in fields and "status" not in fields:
             terminal = _terminal_from_stage(fields["pipeline_status"])
             if terminal:
                 fields["status"] = terminal
+            elif cur["status"] in DECIDED_STATUSES:
+                fields["status"] = "sent"
         cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
                 "target_end_date", "estimator_user_id", "quote_number", "status",
                 "pipeline_status", "project_qbo_id", "notes", "app_estimate_id", "active",
@@ -380,6 +388,9 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
             stamp = _STATUS_STAMP.get(fields["status"])
             if stamp and not cur[stamp]:
                 sets.append(f"{stamp} = NOW()")
+            # reopening a decided row clears its decision timestamp
+            if fields["status"] not in DECIDED_STATUSES and cur["decided_at"]:
+                sets.append("decided_at = NULL")
         if sets:
             conn.execute(text(f"UPDATE opportunities SET {', '.join(sets)} WHERE id = :id"), params)
         row = conn.execute(text(_SELECT + " WHERE o.id = :id"), {"id": opp_id}).mappings().first()

@@ -199,10 +199,14 @@ export async function pipelinePage(routeFn) {
     catch (_) { revCache.set(oppId, []); }
   };
 
-  // Lifecycle stage (received/quoting/sent/won/lost) — derived from the OPI status.
+  // Lifecycle stage (received/quoting/sent/won/lost/declined). Normally set by
+  // actions (new→received, start quote→quoting, save & send→sent) or a terminal
+  // status; this dropdown lets a user manually override it when needed.
+  const STAGE_KEYS = Object.keys(STATUS_META);
   const stageBadge = (o) => {
     const m = STATUS_META[o.status] || { label: o.status, cls: "bg-black/10" };
-    return `<span class="text-[10px] font-bold uppercase tracking-wide rounded px-1.5 py-0.5 ${m.cls}" title="Lifecycle stage (derived from the OPI status)">${m.label}</span>`;
+    const opts = STAGE_KEYS.map(k => `<option value="${k}" ${k === o.status ? "selected" : ""}>${STATUS_META[k]?.label || k}</option>`).join("");
+    return `<select data-stageset="${o.id}" title="Lifecycle stage — set automatically by actions; change here to override manually" class="text-[10px] font-bold uppercase tracking-wide rounded px-1.5 py-0.5 border-0 cursor-pointer ${m.cls}">${opts}</select>`;
   };
   // OPI win-probability status (the 20/80% system) — editable, mirrors the
   // Estimates page's status column (same values + colors).
@@ -258,7 +262,7 @@ export async function pipelinePage(routeFn) {
     { key: "quote_number", label: "Quote #", cls: "tabular-nums font-semibold text-ink-900", td: (o) => escapeHtml(dash(o.quote_number)) },
     { key: "customer_name", label: "Customer", td: (o) => `<span class="font-semibold text-ink-900">${escapeHtml(dash(o.customer_name))}</span>${!o.customer_qbo_id && o.customer_name ? ` <button data-linkcust="${o.id}" class="align-middle text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Click to link this to a QuickBooks customer">unlinked</button>` : ""}` },
     { key: "contact_name", label: "Contact", cls: "text-black/60", td: (o) => escapeHtml(dash(o.contact_name)) },
-    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.notes ? ` <span class="align-middle cursor-help text-black/30 hover:text-black/60" title="${escapeHtml(o.notes)}">🗒</span>` : ""}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
+    { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.notes ? ` <span class="align-middle cursor-help text-black/30 hover:text-black/60" title="${escapeHtml(o.notes)}">🗒</span>` : ""}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a> <button data-linkproj="${o.id}" class="text-black/30 hover:text-black/60" title="Change or unlink project">✎</button></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
@@ -449,8 +453,9 @@ export async function pipelinePage(routeFn) {
       const id = sel.getAttribute("data-pstatus");
       const opp = allRows.find(o => String(o.id) === id);
       const pv = sel.value || null;
-      // "Won"/"Red Flag" → the won handoff (link the QBO project)
-      if (pv && (/won/i.test(pv) || /red flag/i.test(pv))) {
+      // Only "100% Won" is the won handoff (link the QBO project). "80% Red Flag" is
+      // NOT won — it's a flagged-but-in-play status, so no modal.
+      if (pv && /won/i.test(pv) && !/red flag/i.test(pv)) {
         try { await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ pipeline_status: pv }) }); if (opp) { opp.pipeline_status = pv; opp.status = "won"; } } catch (err) { alert(err.message); return; }
         openLinkProjectModal(opp, () => { loadMetrics(); load(); }, () => { loadMetrics(); render(); });
         return;
@@ -458,6 +463,15 @@ export async function pipelinePage(routeFn) {
       try {
         const r = await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ pipeline_status: pv }) });
         if (opp && r.opportunity) { opp.pipeline_status = r.opportunity.pipeline_status; opp.status = r.opportunity.status; }
+        loadMetrics(); render();
+      } catch (err) { alert(err.message); }
+    }));
+    listEl.querySelectorAll("[data-stageset]").forEach(sel => sel.addEventListener("change", async () => {
+      const id = sel.getAttribute("data-stageset");
+      const opp = allRows.find(o => String(o.id) === id);
+      try {
+        const r = await api(`/opportunities/${id}`, { method: "PATCH", body: JSON.stringify({ status: sel.value }) });
+        if (opp && r.opportunity) { opp.status = r.opportunity.status; }
         loadMetrics(); render();
       } catch (err) { alert(err.message); }
     }));
@@ -562,9 +576,9 @@ function openLinkProjectModal(opp, onDone, onCancel) {
       </div>
       <div class="flex items-center justify-end gap-2">
         <span data-msg class="text-xs font-semibold mr-auto"></span>
-        <button data-skip class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Won, link later</button>
+        ${opp.project_qbo_id ? `<button data-unlink class="rounded-lg border border-red-200 text-red-600 px-3 py-1.5 text-sm font-semibold hover:bg-red-50">Unlink project</button>` : `<button data-skip class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Won, link later</button>`}
         <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
-        <button data-save class="btn-primary text-sm px-4 py-1.5">Link &amp; mark won</button>
+        <button data-save class="btn-primary text-sm px-4 py-1.5">${opp.project_qbo_id ? "Change project" : "Link &amp; mark won"}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
@@ -612,12 +626,17 @@ function openLinkProjectModal(opp, onDone, onCancel) {
   poDrop.addEventListener("drop", (e) => { e.preventDefault(); poDrop.style.borderColor = ""; uploadPO(e.dataTransfer?.files); });
   overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) { close(); onCancel && onCancel(); } });
   overlay.querySelector("[data-cancel]").addEventListener("click", () => { close(); onCancel && onCancel(); });
-  overlay.querySelector("[data-skip]").addEventListener("click", async () => {
+  overlay.querySelector("[data-skip]")?.addEventListener("click", async () => {
     try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ status: "won" }) }); close(); onDone && onDone(); }
     catch (err) { setMsg(err.message, false); }
   });
+  overlay.querySelector("[data-unlink]")?.addEventListener("click", async () => {
+    if (!confirm("Unlink this project from the opportunity? The opportunity stays won.")) return;
+    try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ project_qbo_id: null }) }); close(); onDone && onDone(); }
+    catch (err) { setMsg(err.message, false); }
+  });
   overlay.querySelector("[data-save]").addEventListener("click", async () => {
-    if (!picked) return setMsg("Pick a project, or use “Won, link later”.", false);
+    if (!picked) return setMsg("Pick a project, or cancel.", false);
     try { await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify({ status: "won", project_qbo_id: picked.qbo_id }) }); close(); onDone && onDone(); }
     catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
   });
