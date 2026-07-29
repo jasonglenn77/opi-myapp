@@ -1465,10 +1465,6 @@ option {
   max-width: 42rem;
 }
 
-.max-w-3xl {
-  max-width: 48rem;
-}
-
 .max-w-4xl {
   max-width: 56rem;
 }
@@ -2155,6 +2151,10 @@ option {
   background-color: rgb(0 0 0 / 0.1);
 }
 
+.bg-black\/15 {
+  background-color: rgb(0 0 0 / 0.15);
+}
+
 .bg-black\/20 {
   background-color: rgb(0 0 0 / 0.2);
 }
@@ -2607,10 +2607,6 @@ option {
 .py-px {
   padding-top: 1px;
   padding-bottom: 1px;
-}
-
-.pb-0 {
-  padding-bottom: 0px;
 }
 
 .pb-0\.5 {
