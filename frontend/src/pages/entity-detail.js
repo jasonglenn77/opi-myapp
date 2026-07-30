@@ -9,6 +9,7 @@ import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
 import { mountPaymentsPanel } from "./payments.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
+import { mountAssignmentPanel } from "./assignment-panel.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -240,22 +241,43 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
 
   // ── overview tab (Projects-hub Phase 2: the project's operational snapshot) ──
   let _ovProj = null, _ovFin = null;   // cached across tab switches
+  async function ensureProjectData() {
+    if (_ovProj === null) {
+      const [pb, ff] = await Promise.all([
+        api("/projects/basic"),
+        api("/projects/financials").catch(() => ({ financials: [] })),
+      ]);
+      _ovProj = (pb.projects || []).find(p => String(p.project_qbo_id) === String(entityId)) || {};
+      _ovFin = (ff.financials || []).find(f => String(f.qbo_customer_id) === String(_ovProj.qbo_customer_id)) || {};
+    }
+    return _ovProj;
+  }
   async function showOverview() {
     const body = document.getElementById("tabBody");
     body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
     try {
-      if (_ovProj === null) {
-        const [pb, ff] = await Promise.all([
-          api("/projects/basic"),
-          api("/projects/financials").catch(() => ({ financials: [] })),
-        ]);
-        _ovProj = (pb.projects || []).find(p => String(p.project_qbo_id) === String(entityId)) || {};
-        _ovFin = (ff.financials || []).find(f => String(f.qbo_customer_id) === String(_ovProj.qbo_customer_id)) || {};
-      }
+      await ensureProjectData();
       body.innerHTML = overviewHtml(_ovProj, _ovFin);
       wireOverview();
     } catch (e) {
       body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load overview: ${escapeHtml(e?.message || String(e))}</div>`;
+    }
+  }
+  async function showAssignment() {
+    const body = document.getElementById("tabBody");
+    body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
+    try {
+      const proj = await ensureProjectData();
+      if (!proj || !proj.qbo_customer_id) {
+        body.innerHTML = `<div class="p-4 text-sm text-black/50">This project isn't linked to an assignable record yet.</div>`;
+        return;
+      }
+      body.innerHTML = "";
+      // On any assignment change, invalidate the overview cache so its
+      // operational status / PM / crew refresh when revisited.
+      mountAssignmentPanel(body, proj.qbo_customer_id, () => { _ovProj = null; });
+    } catch (e) {
+      body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load assignment: ${escapeHtml(e?.message || String(e))}</div>`;
     }
   }
   function overviewHtml(p, f) {
@@ -311,12 +333,13 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     const bar = document.getElementById("tabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("overview", "Overview") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("payments", "Payments");
+    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("payments", "Payments");
     bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => {
       const t = b.getAttribute("data-tab");
       if (t === activeTab) return;
       activeTab = t; renderTabs();
       if (t === "overview") showOverview();
+      else if (t === "assignment") showAssignment();
       else if (t === "kickoff") showKickoff();
       else if (t === "daily") showDaily();
       else if (t === "changeorders") showChangeOrders();
