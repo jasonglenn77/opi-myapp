@@ -10,6 +10,7 @@ import { mountDailyPanel } from "./daily.js";
 import { mountPaymentsPanel } from "./payments.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
+import { mountInvoicePanel } from "./invoices.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -227,10 +228,22 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     mountDailyPanel(body, entityId);
   }
 
-  function showPayments() {
+  function showBilling() {
     const body = document.getElementById("tabBody");
-    body.innerHTML = "";
-    mountPaymentsPanel(body, entityId);
+    const section = (title, id, note) => `
+      <section>
+        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10 mb-3">${title}</div>
+        <div id="${id}">${note || ""}</div>
+      </section>`;
+    body.innerHTML = `
+      <div class="p-4 sm:p-5 space-y-7 max-w-5xl">
+        ${section("Crew Payments", "billCrew")}
+        ${section("Customer Invoices", "billInvoices")}
+        ${section("Expenses", "billExpenses",
+          `<div class="text-sm text-black/45">Materials, rentals, lodging, propane, and travel scheduling — coming next; will feed the cashflow outflows.</div>`)}
+      </div>`;
+    mountPaymentsPanel(document.getElementById("billCrew"), entityId);
+    mountInvoicePanel(document.getElementById("billInvoices"), entityId);
   }
 
   function showChangeOrders() {
@@ -333,7 +346,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     const bar = document.getElementById("tabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("payments", "Payments");
+    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("billing", "Billing &amp; Schedule");
     bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => {
       const t = b.getAttribute("data-tab");
       if (t === activeTab) return;
@@ -343,7 +356,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
       else if (t === "kickoff") showKickoff();
       else if (t === "daily") showDaily();
       else if (t === "changeorders") showChangeOrders();
-      else if (t === "payments") showPayments();
+      else if (t === "billing") showBilling();
       else showDocuments();
     }));
   }
