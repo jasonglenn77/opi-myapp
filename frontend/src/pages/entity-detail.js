@@ -30,6 +30,22 @@ function fmtBytes(bytes) {
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 function fmtDate(v) { return v ? String(v).slice(0, 10) : ""; }
+const fmtMoney = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)).toLocaleString());
+const fmtPct = (n) => (n == null || n === "" ? "—" : Math.round(Number(n) * 100) + "%");
+
+// Operational status → label + pill (mirrors the Projects hub).
+const OP_STATUS = {
+  needs_assignment: { label: "Needs assignment", cls: "bg-amber-100 text-amber-800" },
+  assigned:         { label: "Assigned",         cls: "bg-slate-200 text-slate-700" },
+  scheduled:        { label: "Scheduled",        cls: "bg-sky-100 text-sky-800" },
+  in_progress:      { label: "In progress",      cls: "bg-indigo-100 text-indigo-800" },
+  complete:         { label: "Complete",         cls: "bg-emerald-100 text-emerald-800" },
+  canceled:         { label: "Canceled",         cls: "bg-black/10 text-black/50" },
+};
+const opStatusBadge = (s) => {
+  const m = OP_STATUS[s] || { label: s || "—", cls: "bg-black/10 text-black/50" };
+  return `<span class="text-[11px] font-semibold rounded px-2 py-0.5 ${m.cls}">${escapeHtml(m.label)}</span>`;
+};
 
 // Where "← Back" should return to. Defaults to Customers, but a page that
 // linked here (e.g. the Pipeline's project link) can set `opi_entity_back`
@@ -222,16 +238,86 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     mountChangeOrdersPanel(body, entityId);
   }
 
+  // ── overview tab (Projects-hub Phase 2: the project's operational snapshot) ──
+  let _ovProj = null, _ovFin = null;   // cached across tab switches
+  async function showOverview() {
+    const body = document.getElementById("tabBody");
+    body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
+    try {
+      if (_ovProj === null) {
+        const [pb, ff] = await Promise.all([
+          api("/projects/basic"),
+          api("/projects/financials").catch(() => ({ financials: [] })),
+        ]);
+        _ovProj = (pb.projects || []).find(p => String(p.project_qbo_id) === String(entityId)) || {};
+        _ovFin = (ff.financials || []).find(f => String(f.qbo_customer_id) === String(_ovProj.qbo_customer_id)) || {};
+      }
+      body.innerHTML = overviewHtml(_ovProj, _ovFin);
+      wireOverview();
+    } catch (e) {
+      body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load overview: ${escapeHtml(e?.message || String(e))}</div>`;
+    }
+  }
+  function overviewHtml(p, f) {
+    const fact = (label, val, opts = {}) => `
+      <div>
+        <div class="text-[10px] font-bold uppercase tracking-wide text-black/40">${escapeHtml(label)}</div>
+        <div class="text-sm font-semibold ${opts.color || "text-ink-900"} mt-0.5">${val}</div>
+      </div>`;
+    const dash = (s) => (s == null || s === "" ? "—" : escapeHtml(String(s)));
+    const value = f ? (Number(f.invoice_line_amt) || Number(f.estimate_line_amt) || 0) : null;
+    const quote = p.linked_quote_number
+      ? `<button data-view-quote="${escapeHtml(String(p.linked_quote_number))}" class="text-blue-700 hover:underline font-semibold">#${escapeHtml(String(p.linked_quote_number))} →</button>`
+      : `<span class="text-black/40">— not linked</span>`;
+    const link = (href, label) => `<a href="${href}" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">${label}</a>`;
+    return `
+      <div class="p-4 sm:p-5 max-w-4xl">
+        <div class="flex items-center gap-3 mb-4">
+          ${opStatusBadge(p.operational_status)}
+          <span class="text-xs text-black/45">Operational status (assignment lifecycle)</span>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-4">
+          ${fact("Start", dash(fmtDate(p.start_date)))}
+          ${fact("End", dash(fmtDate(p.end_date)))}
+          ${fact("Linked quote", quote)}
+          ${fact("Project Manager", dash(p.all_project_managers || p.primary_project_manager))}
+          ${fact("Work Crew", dash(p.all_work_crews || p.primary_work_crew))}
+          ${fact("Documents", `${p.file_count || 0} file${(p.file_count || 0) === 1 ? "" : "s"}`)}
+          ${fact("Contract / Value", fmtMoney(value))}
+          ${fact("Actual profit", fmtMoney(f?.actual_profit), { color: (Number(f?.actual_profit) || 0) >= 0 ? "text-emerald-700" : "text-red-600" })}
+          ${fact("Actual margin", fmtPct(f?.actual_profit_pct))}
+        </div>
+        <div class="mt-5 pt-4 border-t border-black/10 flex flex-wrap gap-2">
+          ${link("#/financials", "Financials →")}
+          ${link("#/schedule", "Schedule →")}
+        </div>
+      </div>`;
+  }
+  function wireOverview() {
+    const body = document.getElementById("tabBody");
+    body?.querySelector("[data-view-quote]")?.addEventListener("click", (e) => {
+      const q = e.currentTarget.getAttribute("data-view-quote");
+      // Focus the Pipeline on this quote (merge into its remembered view).
+      try {
+        const v = JSON.parse(sessionStorage.getItem("opi_pipeline_view") || "{}") || {};
+        v.searchQ = q; v.statusFilter = ""; v.page = 0;
+        sessionStorage.setItem("opi_pipeline_view", JSON.stringify(v));
+      } catch (_) {}
+      location.hash = "#/pipeline";
+    });
+  }
+
   function renderTabs() {
     const bar = document.getElementById("tabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("payments", "Payments");
+    bar.innerHTML = btn("overview", "Overview") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("payments", "Payments");
     bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => {
       const t = b.getAttribute("data-tab");
       if (t === activeTab) return;
       activeTab = t; renderTabs();
-      if (t === "kickoff") showKickoff();
+      if (t === "overview") showOverview();
+      else if (t === "kickoff") showKickoff();
       else if (t === "daily") showDaily();
       else if (t === "changeorders") showChangeOrders();
       else if (t === "payments") showPayments();
@@ -239,8 +325,14 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     }));
   }
 
-  if (isProject) renderTabs();
-  showDocuments();
+  // Projects land on Overview; other entity types keep the Documents view.
+  if (isProject) {
+    activeTab = "overview";
+    renderTabs();
+    showOverview();
+  } else {
+    showDocuments();
+  }
 }
 
 function mount(bodyHtml, routeFn) {
