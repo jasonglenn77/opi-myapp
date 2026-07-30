@@ -11,6 +11,7 @@ import { mountPaymentsPanel } from "./payments.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
 import { mountInvoicePanel } from "./invoices.js";
+import { mountExpensePanel } from "./expenses.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -239,11 +240,11 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
       <div class="p-4 sm:p-5 space-y-7 max-w-5xl">
         ${section("Crew Payments", "billCrew")}
         ${section("Customer Invoices", "billInvoices")}
-        ${section("Expenses", "billExpenses",
-          `<div class="text-sm text-black/45">Materials, rentals, lodging, propane, and travel scheduling — coming next; will feed the cashflow outflows.</div>`)}
+        ${section("Expenses", "billExpenses")}
       </div>`;
     mountPaymentsPanel(document.getElementById("billCrew"), entityId);
     mountInvoicePanel(document.getElementById("billInvoices"), entityId);
+    mountExpensePanel(document.getElementById("billExpenses"), entityId);
   }
 
   function showChangeOrders() {

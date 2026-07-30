@@ -42,6 +42,7 @@ from app.kickoff.routes import router as kickoff_router
 from app.daily.routes import router as daily_router
 from app.payments.routes import router as payments_router
 from app.invoices.routes import router as invoices_router
+from app.expenses.routes import router as expenses_router
 from app.offers.routes import router as offers_router
 from app.contacts.routes import router as contacts_router
 from app.opportunities.routes import router as opportunities_router
@@ -60,6 +61,7 @@ app.include_router(kickoff_router)
 app.include_router(daily_router)
 app.include_router(payments_router)
 app.include_router(invoices_router)
+app.include_router(expenses_router)
 app.include_router(offers_router)
 app.include_router(contacts_router)
 app.include_router(opportunities_router)
