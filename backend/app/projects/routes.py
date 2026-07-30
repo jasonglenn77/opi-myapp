@@ -82,6 +82,26 @@ def delete_schedule_item(schedule_item_id: int, user=Depends(get_current_user)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+def _operational_status(p):
+    """Project-grain operational status for the Projects hub — distinct from the
+    opportunity's estimating lifecycle. Stages: needs_assignment -> assigned ->
+    scheduled -> in_progress -> complete (+ canceled). Derived from the project's
+    schedule-item statuses (all_statuses) + whether a start date is set."""
+    if p.get("needs_assignment"):
+        return "needs_assignment"
+    statuses = {s.strip() for s in (p.get("all_statuses") or "").split(",") if s.strip()}
+    if "in_progress" in statuses:
+        return "in_progress"
+    active = statuses - {"canceled"}
+    if active and active <= {"completed"}:
+        return "complete"
+    if statuses and statuses <= {"canceled"}:
+        return "canceled"
+    if p.get("start_date"):
+        return "scheduled"
+    return "assigned"
+
+
 @router.get("/assignment/table")
 def assignment_table(user=Depends(get_current_user)):
     provision_master_rows_for_all_projects()
@@ -734,7 +754,14 @@ def projects_basic(user=Depends(get_current_user)):
         ELSE 0
       END                                            AS needs_assignment,
 
-      COALESCE(pf.file_count, 0)                     AS file_count
+      COALESCE(pf.file_count, 0)                     AS file_count,
+
+      -- The originating opportunity (the estimate this project was won from),
+      -- for the Projects hub's link back to the Pipeline. Blank until linked.
+      (SELECT o.quote_number FROM myapp.opportunities o
+         WHERE o.project_qbo_id = qc.qbo_id ORDER BY o.id DESC LIMIT 1) AS linked_quote_number,
+      (SELECT o.id FROM myapp.opportunities o
+         WHERE o.project_qbo_id = qc.qbo_id ORDER BY o.id DESC LIMIT 1) AS linked_opportunity_id
 
     FROM myapp.qbo_customers qc
     LEFT JOIN assignment_meta am ON am.qbo_customer_id = qc.id
@@ -754,6 +781,8 @@ def projects_basic(user=Depends(get_current_user)):
         rows = conn.execute(sql).mappings().all()
 
     visible = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    for p in visible:
+        p["operational_status"] = _operational_status(p)
     return {"projects": visible[:1000]}
 
 
