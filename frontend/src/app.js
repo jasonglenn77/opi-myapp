@@ -2,6 +2,7 @@ import { getToken, clearToken, fetchMe, getMe, hasCapability } from "./api.js";
 import { setShell, applyNavPermissions } from "./shell.js";
 import { loginPage } from "./pages/login.js";
 import { dashboardPage } from "./pages/dashboard.js";
+import { projectsHubPage } from "./pages/projects-hub.js";
 import { projectsPage } from "./pages/projects.js";
 import { schedulePage } from "./pages/schedule.js";
 import { assignmentPage } from "./pages/assignment.js";
@@ -125,7 +126,7 @@ async function route() {
   }
 
   if (hash === "#/login") return loginPage(route);
-  if (hash === "#/projects") return dashboardPage(route);
+  if (hash === "#/projects") return projectsHubPage(route);
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);
   if (hash === "#/customers") return customersPage(route);

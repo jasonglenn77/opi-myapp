@@ -99,7 +99,11 @@ def _operational_status(p):
         return "canceled"
     if p.get("start_date"):
         return "scheduled"
-    return "assigned"
+    # No dates yet: "assigned" only if a PM or crew is on it; otherwise it still
+    # needs attention.
+    if str(p.get("primary_project_manager") or "").strip() or str(p.get("primary_work_crew") or "").strip():
+        return "assigned"
+    return "needs_assignment"
 
 
 @router.get("/assignment/table")
