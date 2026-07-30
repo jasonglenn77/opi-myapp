@@ -46,6 +46,15 @@ export async function projectsHubPage(routeFn) {
   const listEl = document.getElementById("phList");
   const filtersEl = document.getElementById("phFilters");
 
+  // Opening a project from the hub should return "← Back to Projects" (not the
+  // default Customers). Scoped to the exact project via opi_entity_back.
+  listEl.addEventListener("click", (e) => {
+    const a = e.target.closest('a[href^="#/entity/project/"]');
+    if (!a) return;
+    const qid = decodeURIComponent(a.getAttribute("href").split("/").pop());
+    try { sessionStorage.setItem("opi_entity_back", JSON.stringify({ entity: "project/" + qid, label: "Projects", hash: "#/projects" })); } catch (_) {}
+  });
+
   const sizeCard = () => {
     const card = document.getElementById("phCard");
     if (!card) return;
