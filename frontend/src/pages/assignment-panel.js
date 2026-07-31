@@ -178,6 +178,21 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
     document.body.appendChild(pop);
     openPopup = pop;
     setTimeout(() => document.addEventListener("mousedown", onDocDown, true), 0);
+    // Mirror the standalone page: picking a "primary" auto-includes that row;
+    // unchecking a row that's primary clears the primary (no orphan primary).
+    pop.addEventListener("change", (e) => {
+      const rad = e.target.closest("[data-prim]");
+      if (rad && rad.checked) {
+        const cb = pop.querySelector(`[data-chk][data-id="${rad.getAttribute("data-id")}"]`);
+        if (cb && !cb.checked) cb.checked = true;
+        return;
+      }
+      const chk = e.target.closest("[data-chk]");
+      if (chk && !chk.checked) {
+        const r = pop.querySelector(`[data-prim][data-id="${chk.getAttribute("data-id")}"]`);
+        if (r && r.checked) r.checked = false;
+      }
+    });
     pop.querySelector("[data-cancel]").addEventListener("click", closePopup);
     pop.querySelector("[data-apply]").addEventListener("click", async () => {
       const ids = [...pop.querySelectorAll("[data-chk]:checked")].map((c) => Number(c.getAttribute("data-id")));
