@@ -617,7 +617,6 @@ export async function assignmentPage(routeFn) {
       <div id="assignCardHeader" class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10">
         <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-1.5">
           <div>
-            <div class="text-base font-extrabold">Assignments</div>
             <div class="text-xs text-black/50">Sort columns, filter from the funnel button, and edit directly in the row.</div>
           </div>
           <div class="flex items-center gap-2">
@@ -666,21 +665,12 @@ export async function assignmentPage(routeFn) {
   `;
 
   setShell({
-    title: "",
-    subtitle: "",
+    title: "Assignment",
+    subtitle: "Assign PMs, crews, dates, and status per schedule item across all projects.",
     bodyHtml,
     showLogout: true,
     routeFn,
   });
-
-  // Hide the empty page-title block; restore when navigating away
-  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
-  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
-    pageTitleBlock.style.display = "none";
-    window.addEventListener("hashchange", () => {
-      if (pageTitleBlock) pageTitleBlock.style.display = "";
-    }, { once: true });
-  }
 
   function inDateRange(isoValue, fromValue, toValue) {
     if (!fromValue && !toValue) return true;

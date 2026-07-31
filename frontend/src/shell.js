@@ -69,6 +69,36 @@ export function bindNavHandlers(routeFn) {
   });
 }
 
+// Collapsible nav groups (data-navtoggle / data-navchildren) — lets the sidebar
+// squeeze vertically. The group that contains the active route always expands;
+// otherwise the last user choice (default collapsed) is restored + persisted.
+export function bindNavCollapse() {
+  const KEY = (k) => "opi_navcol_" + k;
+  const apply = (box, toggle, collapsed) => {
+    box.classList.toggle("hidden", collapsed);
+    const chev = toggle?.querySelector("[data-navchevron]");
+    if (chev) chev.style.transform = collapsed ? "rotate(-90deg)" : "";
+  };
+  document.querySelectorAll("[data-navchildren]").forEach((box) => {
+    const key = box.getAttribute("data-navchildren");
+    const toggle = document.querySelector(`[data-navtoggle="${key}"]`);
+    const active = [...box.querySelectorAll("a[href]")].some((a) => a.getAttribute("href") === location.hash);
+    let collapsed;
+    if (active) collapsed = false;
+    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? true : saved === "1"; }
+    apply(box, toggle, collapsed);
+    if (toggle && !toggle.dataset.collbound) {
+      toggle.dataset.collbound = "1";
+      toggle.addEventListener("click", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const willCollapse = !box.classList.contains("hidden");
+        apply(box, toggle, willCollapse);
+        try { localStorage.setItem(KEY(key), willCollapse ? "1" : "0"); } catch (_) {}
+      });
+    }
+  });
+}
+
 export function bindGlobalHandlers(routeFn) {
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn && !logoutBtn.dataset.bound) {
@@ -274,6 +304,7 @@ export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout 
   bindSidebarHover();
   bindMobileNavDrawer();
   bindNavHandlers(routeFn);
+  bindNavCollapse();
 
   window.setTimeout(updateStickyOffsets, 0);
 
