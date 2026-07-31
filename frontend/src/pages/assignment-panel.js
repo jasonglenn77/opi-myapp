@@ -164,7 +164,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
           <input type="radio" name="prim" class="h-4 w-4" data-prim data-id="${x.id}" ${String(primaryId || "") === String(x.id) ? "checked" : ""}/></span>
       </label>`).join("") || `<div class="text-sm text-black/50">None found.</div>`;
     const pop = document.createElement("div");
-    pop.className = "fixed z-[200] w-[340px] max-w-[92vw] rounded-xl border border-black/10 bg-white p-3 shadow-xl text-sm";
+    pop.className = "fixed z-[200] w-[340px] max-w-[92vw] rounded-xl border border-black/10 bg-white text-ink-900 p-3 shadow-xl text-sm";
     const r = anchor.getBoundingClientRect();
     pop.style.left = Math.min(r.left, window.innerWidth - 356) + "px";
     pop.style.top = Math.min(r.bottom + 4, window.innerHeight - 320) + "px";

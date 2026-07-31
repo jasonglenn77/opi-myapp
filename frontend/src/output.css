@@ -576,6 +576,19 @@ option {
   background-color: #ffffff;
 }
 
+/* Systemic guard: the shell defaults every element to text-white (for the dark
+     chrome). Any OPAQUE white surface — cards, modals, and especially popups/menus
+     appended to <body> that sit outside a .card — must therefore carry dark text or
+     it renders white-on-white and vanishes. This forces a readable default on every
+     `bg-white` element. It lives in @layer base and uses a single-class attribute
+     selector (specificity 0,1,0), so any explicit `text-*` utility (utilities layer,
+     emitted later) still wins. Translucent `bg-white/NN` on dark backgrounds is left
+     alone on purpose — the `~=` match only hits the whole `bg-white` token. */
+
+[class~="bg-white"] {
+  color: #0b0f14;
+}
+
 .\!container {
   width: 100% !important;
 }
@@ -1352,6 +1365,10 @@ option {
   width: 10rem;
 }
 
+.w-44 {
+  width: 11rem;
+}
+
 .w-48 {
   width: 12rem;
 }
@@ -1457,6 +1474,10 @@ option {
   min-width: 980px;
 }
 
+.min-w-\[9rem\] {
+  min-width: 9rem;
+}
+
 .min-w-full {
   min-width: 100%;
 }
@@ -1507,6 +1528,10 @@ option {
 
 .max-w-\[420px\] {
   max-width: 420px;
+}
+
+.max-w-\[92vw\] {
+  max-width: 92vw;
 }
 
 .max-w-\[9rem\] {
@@ -1817,6 +1842,12 @@ option {
   --tw-space-y-reverse: 0;
   margin-top: calc(1rem * calc(1 - var(--tw-space-y-reverse)));
   margin-bottom: calc(1rem * var(--tw-space-y-reverse));
+}
+
+.space-y-7 > :not([hidden]) ~ :not([hidden]) {
+  --tw-space-y-reverse: 0;
+  margin-top: calc(1.75rem * calc(1 - var(--tw-space-y-reverse)));
+  margin-bottom: calc(1.75rem * var(--tw-space-y-reverse));
 }
 
 .divide-y > :not([hidden]) ~ :not([hidden]) {
@@ -3539,6 +3570,10 @@ option {
 .hover\:text-black:hover {
   --tw-text-opacity: 1;
   color: rgb(0 0 0 / var(--tw-text-opacity, 1));
+}
+
+.hover\:text-black\/50:hover {
+  color: rgb(0 0 0 / 0.5);
 }
 
 .hover\:text-black\/60:hover {
