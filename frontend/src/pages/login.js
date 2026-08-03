@@ -7,6 +7,15 @@ export function loginPage(routeFn, message = "") {
   const root = document.getElementById("authRoot");
   if (!root) return;
 
+  // Friendly note when we bounced here because the session token expired.
+  let expiredNote = "";
+  try {
+    if (sessionStorage.getItem("opi_session_expired")) {
+      sessionStorage.removeItem("opi_session_expired");
+      expiredNote = "Your session timed out. Please sign in again.";
+    }
+  } catch (_) {}
+
   root.innerHTML = `
     <div class="w-full max-w-md relative">
       <a
@@ -32,6 +41,7 @@ export function loginPage(routeFn, message = "") {
       <div class="card p-6">
         <div class="text-lg font-extrabold mb-1">Sign in</div>
         <div class="text-sm text-black/60 mb-5">Use your admin credentials to continue.</div>
+        ${expiredNote ? `<div class="mb-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm px-3 py-2">${expiredNote}</div>` : ""}
 
         <form id="loginForm" class="space-y-4">
           <div>

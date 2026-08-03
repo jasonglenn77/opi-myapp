@@ -181,7 +181,7 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
     fields = req.model_dump(exclude_unset=True)
     if not fields:
         return {"ok": True}
-    sets, params = [], {"id": mid}
+    sets, params = ["edited = 1"], {"id": mid}
     for k, v in fields.items():
         sets.append(f"{k} = :{k}")
         params[k] = (v if v != "" else None)

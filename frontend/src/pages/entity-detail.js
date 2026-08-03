@@ -7,11 +7,9 @@ import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
-import { mountPaymentsPanel } from "./payments.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
-import { mountInvoicePanel } from "./invoices.js";
-import { mountExpensePanel } from "./expenses.js";
+import { mountBillingPanel, prefetchBilling } from "./billing.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -231,20 +229,8 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
 
   function showBilling() {
     const body = document.getElementById("tabBody");
-    const section = (title, id, note) => `
-      <section>
-        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10 mb-3">${title}</div>
-        <div id="${id}">${note || ""}</div>
-      </section>`;
-    body.innerHTML = `
-      <div class="p-4 sm:p-5 space-y-7 max-w-5xl">
-        ${section("Crew Payments", "billCrew")}
-        ${section("Customer Invoices", "billInvoices")}
-        ${section("Expenses", "billExpenses")}
-      </div>`;
-    mountPaymentsPanel(document.getElementById("billCrew"), entityId);
-    mountInvoicePanel(document.getElementById("billInvoices"), entityId);
-    mountExpensePanel(document.getElementById("billExpenses"), entityId);
+    body.innerHTML = "";
+    mountBillingPanel(body, entityId);
   }
 
   function showChangeOrders() {
@@ -271,9 +257,11 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
     try {
       await ensureProjectData();
+      if (activeTab !== "overview") return; // user switched tabs while loading — don't clobber
       body.innerHTML = overviewHtml(_ovProj, _ovFin);
       wireOverview();
     } catch (e) {
+      if (activeTab !== "overview") return;
       body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load overview: ${escapeHtml(e?.message || String(e))}</div>`;
     }
   }
@@ -282,6 +270,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
     try {
       const proj = await ensureProjectData();
+      if (activeTab !== "assignment") return; // switched away while loading
       if (!proj || !proj.qbo_customer_id) {
         body.innerHTML = `<div class="p-4 text-sm text-black/50">This project isn't linked to an assignable record yet.</div>`;
         return;
@@ -367,6 +356,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     activeTab = "overview";
     renderTabs();
     showOverview();
+    prefetchBilling(entityId); // warm the Billing & Schedule bundle in the background
   } else {
     showDocuments();
   }

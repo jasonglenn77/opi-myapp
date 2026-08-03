@@ -154,7 +154,7 @@ def _converted_estimates_with_labor(conn, entity_id):
 def _load_schedules(conn, entity_id):
     """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
     scheds = conn.execute(text("""
-        SELECT s.id, s.estimate_qbo_id, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
+        SELECT s.id, s.estimate_qbo_id, s.estimate_doc_number, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
                TRIM(CONCAT(COALESCE(wc.name,''), CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (', pc.name, ')') ELSE '' END)) AS crew_name
         FROM project_payment_schedules s
         LEFT JOIN work_crews wc ON wc.id = s.crew_id LEFT JOIN work_crews pc ON pc.id = wc.parent_id
@@ -162,11 +162,12 @@ def _load_schedules(conn, entity_id):
     """), {"id": entity_id}).mappings().all()
     out = {}
     for sched in scheds:
-        inst = conn.execute(text("""SELECT id, seq, pay_date, amount, send_invoice_date, status, note
+        inst = conn.execute(text("""SELECT id, seq, pay_date, amount, send_invoice_date, status, note, edited
              FROM project_payment_installments WHERE schedule_id=:sid ORDER BY seq, id"""),
             {"sid": sched["id"]}).mappings().all()
         schedule = {
             "id": sched["id"], "estimate_qbo_id": sched["estimate_qbo_id"],
+            "estimate_doc_number": sched["estimate_doc_number"],
             "crew_id": sched["crew_id"], "crew_name": (sched["crew_name"] or "").strip() or None,
             "contract_labor": float(sched["contract_labor"] or 0),
             "start_date": str(sched["start_date"]) if sched["start_date"] else None,
@@ -178,7 +179,7 @@ def _load_schedules(conn, entity_id):
             "pay_date": str(r["pay_date"]) if r["pay_date"] else None,
             "amount": float(r["amount"] or 0),
             "send_invoice_date": str(r["send_invoice_date"]) if r["send_invoice_date"] else None,
-            "status": r["status"], "note": r["note"],
+            "status": r["status"], "note": r["note"], "edited": bool(r["edited"]),
         } for r in inst]
         out[sched["estimate_qbo_id"]] = (schedule, installments)
     return out
@@ -336,6 +337,7 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
         sets.append("note=:nt"); params["nt"] = body.note
     if not sets:
         return {"ok": True}
+    sets.append("edited=1")
     with engine.begin() as conn:
         n = conn.execute(text(f"UPDATE project_payment_installments SET {', '.join(sets)} WHERE id=:id"), params).rowcount
     if not n:

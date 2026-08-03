@@ -23,16 +23,34 @@ router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
 CATEGORIES = ["Materials", "Rentals", "Lodging", "Propane", "Travel", "Other"]
 
-# Estimate item_name -> expense category (Contract Labor is excluded — it's the
-# crew payment schedule; Buffer / OH&P aren't real outflows).
-ITEM_TO_CATEGORY = {
-    "Materials": "Materials",
-    "Rentals": "Rentals",
-    "Lodging": "Lodging",
-    "Propane": "Propane",
-    "Mgmt Travel": "Travel",
-    "Travel": "Travel",
-}
+# Estimate cost lines that are NOT real project expenses: Contract Labor is the
+# crew payment schedule; Buffer / OH&P are margin, not outflows.
+NON_EXPENSE_ITEMS = {"Contract Labor", "Contract Labor - Daily Rate Local", "Buffer", "OH&P"}
+
+# Keyword -> expense category. Any non-excluded cost line maps here by keyword,
+# defaulting to "Other" so nothing is silently dropped (Lifts, Scrubbers,
+# Dumpsters, permits, freight, etc. all get counted).
+_CATEGORY_KEYWORDS = [
+    ("lodging", "Lodging"),
+    ("travel", "Travel"),
+    ("propane", "Propane"),
+    ("lift", "Rentals"), ("scrubber", "Rentals"), ("saw", "Rentals"),
+    ("slurry", "Rentals"), ("dumpster", "Rentals"), ("rental", "Rentals"),
+    ("scissor", "Rentals"), ("forklift", "Rentals"), ("boom", "Rentals"),
+    ("material", "Materials"), ("freight", "Materials"), ("shipping", "Materials"),
+]
+
+
+def _expense_category(item_name: str) -> str | None:
+    """Map an estimate cost line-item to an expense category, or None if it's not
+    a real outflow (labor/buffer/OH&P)."""
+    if not item_name or item_name in NON_EXPENSE_ITEMS:
+        return None
+    low = item_name.lower()
+    for kw, cat in _CATEGORY_KEYWORDS:
+        if kw in low:
+            return cat
+    return "Other"
 
 
 def _require(user):
@@ -74,7 +92,7 @@ def _estimate_costs_by_category(conn, entity_id):
     """), {"e": entity_id}).mappings().all()
     by_cat = {}
     for r in rows:
-        cat = ITEM_TO_CATEGORY.get(r["item"])
+        cat = _expense_category(r["item"])
         if not cat:
             continue
         amt = float(r["cost"] or 0)
@@ -170,7 +188,7 @@ def patch_item(item_id: int, req: ItemPatch, user=Depends(get_current_user)):
     fields = req.model_dump(exclude_unset=True)
     if not fields:
         return {"ok": True}
-    sets, params = [], {"id": item_id}
+    sets, params = ["edited = 1"], {"id": item_id}
     for k, v in fields.items():
         sets.append(f"{k} = :{k}")
         params[k] = (v if v != "" else None)

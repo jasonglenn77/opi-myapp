@@ -81,6 +81,15 @@ export async function api(path, opts = {}) {
   const ct = res.headers.get("content-type") || "";
   const body = ct.includes("application/json") ? await res.json() : await res.text();
   if (!res.ok) {
+    // Token expired/invalid mid-session: instead of surfacing a cryptic
+    // "Invalid/expired token" to the user, clear it and bounce to login with a
+    // friendly note. Guarded on `token` so a failed *login* (no token yet)
+    // doesn't loop. Login page reads opi_session_expired to show the message.
+    if (res.status === 401 && token && !location.hash.startsWith("#/login")) {
+      clearToken();
+      try { sessionStorage.setItem("opi_session_expired", "1"); } catch (_) {}
+      location.hash = "#/login";
+    }
     const err = new Error(typeof body === "string" ? body : JSON.stringify(body));
     err.status = res.status;     // so callers can distinguish 401/403 from 500/503 etc.
     throw err;

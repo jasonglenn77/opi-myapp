@@ -90,13 +90,9 @@ export async function projectsHubPage(routeFn) {
     if (key === "file_count") return Number(p.file_count) || 0;
     return (p[key] ?? "").toString().toLowerCase();
   };
-  const visible = () => {
-    const q = search.toLowerCase();
-    let out = all.filter((p) => {
-      if (statusFilter !== "all" && p.operational_status !== statusFilter) return false;
-      if (q && !(`${p.project_name || ""} ${p.primary_project_manager || ""} ${p.primary_work_crew || ""} ${p.linked_quote_number || ""}`).toLowerCase().includes(q)) return false;
-      return true;
-    });
+  const searchKey = (p) => `${p.project_name || ""} ${p.primary_project_manager || ""} ${p.primary_work_crew || ""} ${p.linked_quote_number || ""}`.toLowerCase();
+  const sortedAll = () => {
+    const out = [...all];
     out.sort((a, b) => { const av = sortVal(a, sortKey), bv = sortVal(b, sortKey); return (av < bv ? -1 : av > bv ? 1 : 0) * (sortDir === "asc" ? 1 : -1); });
     return out;
   };
@@ -119,30 +115,48 @@ export async function projectsHubPage(routeFn) {
       }).join("") +
       `<input data-search value="${escapeHtml(search)}" placeholder="Search project, PM, crew, quote…" class="input text-xs py-1.5 w-full sm:max-w-xs ml-auto">` +
       `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>`;
-    filtersEl.querySelectorAll("[data-sf]").forEach((b) => b.addEventListener("click", () => { statusFilter = b.getAttribute("data-sf"); renderFilters(); renderList(); }));
+    filtersEl.querySelectorAll("[data-sf]").forEach((b) => b.addEventListener("click", () => { statusFilter = b.getAttribute("data-sf"); renderFilters(); applyFilter(); }));
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
-    sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { search = sb.value.trim(); renderList(); }, 150); });
+    sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { search = sb.value.trim(); applyFilter(); }, 60); });
     if (document.activeElement?.getAttribute?.("data-search") != null) sb.focus();
   };
 
-  const renderList = () => {
-    const rows = visible();
+  // Filtering only toggles row visibility (cheap) — it never rebuilds the table,
+  // so typing in the search box stays responsive even with hundreds of rows.
+  const applyFilter = () => {
+    const q = search.toLowerCase();
+    let shown = 0;
+    listEl.querySelectorAll("tbody tr").forEach((tr) => {
+      const ok = (statusFilter === "all" || tr.getAttribute("data-status") === statusFilter)
+        && (!q || (tr.getAttribute("data-key") || "").includes(q));
+      tr.hidden = !ok;
+      if (ok) shown++;
+    });
     const countEl = filtersEl.querySelector("[data-count]");
-    if (countEl) countEl.textContent = `${rows.length.toLocaleString()} of ${all.length.toLocaleString()}`;
-    if (!rows.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No projects match.</div>`; return; }
+    if (countEl) countEl.textContent = `${shown.toLocaleString()} of ${all.length.toLocaleString()}`;
+    const empty = listEl.querySelector("[data-empty]");
+    if (empty) empty.hidden = shown > 0;
+  };
+
+  // Full render — only on load, sort, or financials merge (not on keystroke).
+  const renderList = () => {
+    if (!all.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No projects found.</div>`; return; }
+    const rows = sortedAll();
     listEl.innerHTML = `
       <table class="w-full text-sm" style="min-width:900px;">
         <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
           ${COLS.map((c) => `<th class="py-2 pr-3 font-bold cursor-pointer select-none hover:text-black/70 bg-white whitespace-nowrap ${c.align === "right" ? "text-right" : c.align === "center" ? "text-center" : ""}" data-sort="${c.key}">${c.label}${arrow(c.key)}</th>`).join("")}
         </tr></thead>
         <tbody>${rows.map((p) => `
-          <tr class="border-b border-black/5 hover:bg-black/[0.02]">
+          <tr data-status="${escapeHtml(p.operational_status || "")}" data-key="${escapeHtml(searchKey(p))}" class="border-b border-black/5 hover:bg-black/[0.02]">
             ${COLS.map((c) => `<td class="py-1.5 pr-3 ${c.align === "right" ? "text-right" : c.align === "center" ? "text-center" : ""} ${c.cls || ""}">${c.td(p)}</td>`).join("")}
           </tr>`).join("")}
         </tbody>
-      </table>`;
+      </table>
+      <div data-empty hidden class="text-black/45 py-4">No projects match.</div>`;
     listEl.querySelectorAll("[data-sort]").forEach((th) => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
+    applyFilter();
   };
 
   // Load the project list first (fast); merge financials when they arrive.
