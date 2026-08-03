@@ -2259,6 +2259,10 @@ option {
   background-color: rgb(0 0 0 / 0.6);
 }
 
+.bg-black\/\[0\.012\] {
+  background-color: rgb(0 0 0 / 0.012);
+}
+
 .bg-black\/\[0\.015\] {
   background-color: rgb(0 0 0 / 0.015);
 }
@@ -3870,6 +3874,16 @@ option {
   opacity: 0.3;
 }
 
+.group\/act[open] .group-open\/act\:rotate-90 {
+  --tw-rotate: 90deg;
+  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
+}
+
+.group[open] .group-open\:rotate-90 {
+  --tw-rotate: 90deg;
+  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
+}
+
 .group:hover .group-hover\:underline {
   text-decoration-line: underline;
 }
@@ -4137,5 +4151,9 @@ option {
     padding-left: 2.5rem;
     padding-right: 2.5rem;
   }
+}
+
+.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker {
+  display: none;
 }
 

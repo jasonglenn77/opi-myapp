@@ -22,6 +22,7 @@ The existing /api/invoices, /api/payments, /api/expenses endpoints stay the
 source of truth for editing individual lines; this bundle composes them for the
 tab + auto-seeds. Gated by page.customers.
 """
+import json
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -238,17 +239,36 @@ def _qbo_crew_paid(conn, entity_id, vendor_ids):
     return float(amt or 0)
 
 
+def _estimate_docs(conn, entity_id):
+    """qbo estimate id -> doc_number for this project (to tag actuals by estimate)."""
+    return {str(r["qbo_id"]): r["doc_number"] for r in conn.execute(text(
+        "SELECT qbo_id, doc_number FROM qbo_transactions WHERE entity_type='Estimate' AND customer_qbo_id=:e"),
+        {"e": entity_id}).mappings().all()}
+
+
+def _linked_estimate_doc(raw_json, est_docs):
+    """Find the estimate a QBO doc was created from, via its LinkedTxn."""
+    try:
+        for l in (json.loads(raw_json or "{}").get("LinkedTxn") or []):
+            if l.get("TxnType") == "Estimate":
+                return est_docs.get(str(l.get("TxnId")))
+    except Exception:
+        pass
+    return None
+
+
 def _actual_invoices(conn, entity_id):
     """The real QBO invoices for this project — shown next to the planned
-    milestones so office staff can compare plan vs. actual."""
+    milestones so office staff can compare plan vs. actual, tagged by estimate #."""
+    est_docs = _estimate_docs(conn, entity_id)
     rows = conn.execute(text("""
         WITH latest AS (
-          SELECT qt.doc_number, qt.txn_date, qt.due_date, qt.total_amt, qt.balance_amt,
+          SELECT qt.doc_number, qt.txn_date, qt.due_date, qt.total_amt, qt.balance_amt, qt.raw_json,
                  ROW_NUMBER() OVER (PARTITION BY COALESCE(qt.doc_number, qt.qbo_id) ORDER BY qt.id DESC) AS rn
           FROM qbo_transactions qt
           WHERE qt.entity_type = 'Invoice' AND qt.customer_qbo_id = :e
         )
-        SELECT doc_number, txn_date, due_date, total_amt, balance_amt
+        SELECT doc_number, txn_date, due_date, total_amt, balance_amt, raw_json
         FROM latest WHERE rn = 1 ORDER BY txn_date, doc_number
     """), {"e": entity_id}).mappings().all()
     out = []
@@ -257,10 +277,36 @@ def _actual_invoices(conn, entity_id):
         bal = float(r["balance_amt"] or 0)
         out.append({
             "doc_number": r["doc_number"],
+            "estimate_doc": _linked_estimate_doc(r["raw_json"], est_docs),
             "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
             "due_date": str(r["due_date"]) if r["due_date"] else None,
             "amount": round(total, 2), "balance": round(bal, 2),
             "status": "Paid" if bal <= 0.01 else ("Partial" if bal < total else "Open"),
+        })
+    return out
+
+
+def _actual_expenses(conn, entity_id, crew_vendor_ids):
+    """Real QBO bills/purchases tagged to this project (excluding crew vendors) —
+    the actual per-line spend, shown next to the planned expense schedule."""
+    rows = conn.execute(text("""
+        SELECT t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number,
+               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name')) AS vendor,
+               ROUND(SUM(l.amount), 2) AS amt
+        FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
+        WHERE l.line_customer_qbo_id = :e AND t.entity_type IN ('Bill', 'Purchase')
+        GROUP BY t.id, t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number, vendor
+        ORDER BY t.txn_date
+    """), {"e": entity_id}).mappings().all()
+    excl = {str(v) for v in (crew_vendor_ids or []) if v}
+    out = []
+    for r in rows:
+        if str(r["vendor_qbo_id"]) in excl:
+            continue  # crew payment, not a material/rental expense
+        out.append({
+            "date": str(r["txn_date"]) if r["txn_date"] else None,
+            "vendor": r["vendor"] or "Unknown vendor", "amount": float(r["amt"] or 0),
+            "type": r["entity_type"], "doc": r["doc_number"],
         })
     return out
 
@@ -474,6 +520,7 @@ def _compose_expenses(conn, entity_id, crew_vendor_ids, books_closed):
         "over": over,
         "variance": round(spent - estimate_total, 2),
         "items": lines,
+        "actuals": _actual_expenses(conn, entity_id, crew_vendor_ids),
         "categories": CATEGORIES,
         "summary": {"committed": bar_committed, "allocated": bar_allocated, "over": over,
                     "total": estimate_total},
