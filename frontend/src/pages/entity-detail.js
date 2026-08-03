@@ -294,7 +294,6 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     const quote = p.linked_quote_number
       ? `<button data-view-quote="${escapeHtml(String(p.linked_quote_number))}" class="text-blue-700 hover:underline font-semibold">#${escapeHtml(String(p.linked_quote_number))} →</button>`
       : `<span class="text-black/40">— not linked</span>`;
-    const link = (href, label) => `<a href="${href}" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">${label}</a>`;
     return `
       <div class="p-4 sm:p-5 max-w-4xl">
         <div class="flex items-center gap-3 mb-4">
@@ -313,13 +312,59 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
           ${fact("Actual margin", fmtPct(f?.actual_profit_pct))}
         </div>
         <div class="mt-5 pt-4 border-t border-black/10 flex flex-wrap gap-2">
-          ${link("#/financials", "Financials →")}
-          ${link("#/schedule", "Schedule →")}
+          <button type="button" data-goto="financials" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">Financials →</button>
+          <button type="button" data-goto="billing" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">Schedule →</button>
         </div>
       </div>`;
   }
+  function financialsHtml(f) {
+    if (!f || !Object.keys(f).length) return `<div class="p-4 sm:p-5 text-sm text-black/50">No financial data for this project yet — it appears once QuickBooks has estimate/invoice/expense activity.</div>`;
+    const n = (v) => Number(v || 0);
+    const collected = n(f.invoice_line_amt) - n(f.invoice_balance_amt);
+    const costVar = n(f.expense_line_amt) - n(f.estimate_cost_amt);
+    const kpi = (label, val, opts = {}) => `
+      <div class="rounded-xl border border-black/10 bg-white px-4 py-3">
+        <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1">${label}</div>
+        <div class="text-lg font-bold tabular-nums ${opts.color || "text-ink-900"}">${val}</div>
+        ${opts.sub ? `<div class="text-[11px] text-black/40 mt-0.5">${opts.sub}</div>` : ""}
+      </div>`;
+    const sec = (title, cards) => `
+      <section><div class="text-xs font-extrabold uppercase tracking-wide text-black/50 mb-2">${title}</div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">${cards}</div></section>`;
+    return `
+      <div class="p-4 sm:p-5 max-w-4xl space-y-5">
+        ${sec("Revenue",
+          kpi("Contract (estimate)", fmtMoney(f.estimate_line_amt)) +
+          kpi("Invoiced", fmtMoney(f.invoice_line_amt)) +
+          kpi("Collected", fmtMoney(collected), { color: "text-emerald-700" }) +
+          kpi("Open A/R", fmtMoney(f.invoice_balance_amt)))}
+        ${sec("Cost",
+          kpi("Estimated cost", fmtMoney(f.estimate_cost_amt)) +
+          kpi("Actual expenses", fmtMoney(f.expense_line_amt)) +
+          kpi("Cost variance", fmtMoney(costVar), { color: costVar > 0 ? "text-red-600" : "text-emerald-700", sub: "actual − estimate" }))}
+        ${sec("Profit",
+          kpi("Projected profit", fmtMoney(f.projected_profit), { color: n(f.projected_profit) >= 0 ? "text-emerald-700" : "text-red-600", sub: "est. revenue − est. cost" }) +
+          kpi("Projected margin", fmtPct(f.projected_profit_pct)) +
+          kpi("Actual profit", fmtMoney(f.actual_profit), { color: n(f.actual_profit) >= 0 ? "text-emerald-700" : "text-red-600", sub: "invoiced − expenses" }) +
+          kpi("Actual margin", fmtPct(f.actual_profit_pct)))}
+        <div class="text-[11px] text-black/40 pt-1">From QuickBooks aggregates — the same figures as the Financials page, scoped to this project.</div>
+      </div>`;
+  }
+  async function showFinancials() {
+    const body = document.getElementById("tabBody");
+    body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
+    try {
+      await ensureProjectData();
+      if (activeTab !== "financials") return;
+      body.innerHTML = financialsHtml(_ovFin);
+    } catch (e) {
+      if (activeTab !== "financials") return;
+      body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load financials: ${escapeHtml(e?.message || String(e))}</div>`;
+    }
+  }
   function wireOverview() {
     const body = document.getElementById("tabBody");
+    body?.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => goTab(b.getAttribute("data-goto"))));
     body?.querySelector("[data-view-quote]")?.addEventListener("click", (e) => {
       const q = e.currentTarget.getAttribute("data-view-quote");
       // Focus the Pipeline on this quote (merge into its remembered view).
@@ -332,23 +377,25 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     });
   }
 
+  function goTab(t) {
+    if (t === activeTab) return;
+    activeTab = t; renderTabs();
+    if (t === "overview") showOverview();
+    else if (t === "assignment") showAssignment();
+    else if (t === "kickoff") showKickoff();
+    else if (t === "daily") showDaily();
+    else if (t === "changeorders") showChangeOrders();
+    else if (t === "billing") showBilling();
+    else if (t === "financials") showFinancials();
+    else showDocuments();
+  }
+
   function renderTabs() {
     const bar = document.getElementById("tabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("billing", "Billing &amp; Schedule");
-    bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => {
-      const t = b.getAttribute("data-tab");
-      if (t === activeTab) return;
-      activeTab = t; renderTabs();
-      if (t === "overview") showOverview();
-      else if (t === "assignment") showAssignment();
-      else if (t === "kickoff") showKickoff();
-      else if (t === "daily") showDaily();
-      else if (t === "changeorders") showChangeOrders();
-      else if (t === "billing") showBilling();
-      else showDocuments();
-    }));
+    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("billing", "Billing &amp; Schedule") + btn("financials", "Financials");
+    bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => goTab(b.getAttribute("data-tab"))));
   }
 
   // Projects land on Overview; other entity types keep the Documents view.
