@@ -48,6 +48,7 @@ from app.contacts.routes import router as contacts_router
 from app.opportunities.routes import router as opportunities_router
 from app.change_orders.routes import router as change_orders_router
 from app.billing.routes import router as billing_router
+from app.phases.routes import router as phases_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -68,6 +69,7 @@ app.include_router(contacts_router)
 app.include_router(opportunities_router)
 app.include_router(change_orders_router)
 app.include_router(billing_router)
+app.include_router(phases_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 

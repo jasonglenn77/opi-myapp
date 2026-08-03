@@ -16,6 +16,7 @@ from sqlalchemy import text
 from app.db import engine
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS
+from app.phases.routes import phases_payload
 
 router = APIRouter(prefix="/api/change-orders", tags=["change-orders"])
 
@@ -121,13 +122,18 @@ def _build(conn, project_qbo_id):
 @router.get("/project/{project_qbo_id}")
 def get_change_orders(project_qbo_id: str, user=Depends(get_current_user)):
     _require(user)
-    with engine.connect() as conn:
+    with engine.begin() as conn:  # begin(): phase auto-assign writes must commit
         if not _project_exists(conn, project_qbo_id):
             raise HTTPException(status_code=404, detail="Project not found")
         name = conn.execute(text("SELECT display_name FROM qbo_customers WHERE qbo_id=:id"),
                             {"id": project_qbo_id}).scalar()
         items, rollup = _build(conn, project_qbo_id)
-    return {"project": {"qbo_id": project_qbo_id, "name": name}, "items": items, "rollup": rollup}
+        # Phases group the ACCEPTED estimates into work windows (auto-suggested).
+        accepted_ids = [i["qbo_estimate_id"] for i in items
+                        if i["qbo_estimate_id"] and i["status"] == "approved"]
+        phases = phases_payload(conn, project_qbo_id, accepted_ids)
+    return {"project": {"qbo_id": project_qbo_id, "name": name},
+            "items": items, "rollup": rollup, **phases}
 
 
 @router.get("/project/{project_qbo_id}/estimate/{qbo_estimate_id}/lines")

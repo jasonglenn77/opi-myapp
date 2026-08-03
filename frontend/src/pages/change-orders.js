@@ -98,23 +98,132 @@ export async function mountChangeOrdersPanel(container, entityId) {
     </div>`;
   }
 
+  const phaseName = (p) => p.name || `Phase ${p.seq}`;
+
+  function phaseSelect(eid, currentPid) {
+    const phases = data.phases || [];
+    return `<select data-move="${escapeHtml(String(eid))}" class="input text-[11px] py-0.5 pl-1.5 pr-5 w-auto">
+      ${phases.map((p) => `<option value="${p.id}" ${p.id === currentPid ? "selected" : ""}>${escapeHtml(phaseName(p))}</option>`).join("")}
+      <option value="__new">＋ New phase…</option></select>`;
+  }
+
+  // one estimate row (+ its lazily-loaded line-items detail row).
+  function rowHtml(i, idx, opts = {}) {
+    const asg = (data.assignments || {})[String(i.qbo_estimate_id)];
+    const unconfirmed = opts.inPhase && asg && !asg.confirmed;
+    return `
+      <tr class="border-b border-black/5 hover:bg-black/[0.015] ${unconfirmed ? "bg-amber-50/60" : ""}">
+        <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : ""}${kindBadge(i)}</td>
+        <td class="py-1.5 pr-2 text-black/70">${i.doc_number ? `#${escapeHtml(i.doc_number)}<div class="text-[10px] text-black/40">${ymd(i.txn_date)}</div>` : `<span class="inline-flex rounded bg-black/10 text-black/50 px-1.5 py-0.5 text-[9px] font-bold">DRAFT</span>`}</td>
+        <td class="py-1.5 pr-2 text-black/70 max-w-[200px]"><div class="font-semibold text-ink-900 truncate">${escapeHtml(i.title || i.reason || "—")}</div>${i.scope ? `<div class="text-[10px] text-black/45 truncate">${escapeHtml(i.scope)}</div>` : ""}</td>
+        <td class="py-1.5 pr-2 text-right tabular-nums font-semibold">${money(i.amount)}</td>
+        <td class="py-1.5 pr-2 text-right tabular-nums text-black/60">${i.contract_labor ? money(i.contract_labor) : "—"}</td>
+        <td class="py-1.5 pr-2">${statusPill(i.status)}</td>
+        ${opts.inPhase ? `<td class="py-1.5 pr-2 whitespace-nowrap">${phaseSelect(i.qbo_estimate_id, asg ? asg.phase_id : null)}${unconfirmed ? `<button data-confirm="${escapeHtml(String(i.qbo_estimate_id))}" data-phase="${asg.phase_id}" class="ml-1 text-[10px] font-bold text-amber-700 hover:underline" title="Confirm this phase">⚑ confirm</button>` : ""}</td>` : ""}
+        <td class="py-1.5 text-right whitespace-nowrap"><button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button>${i.source === "draft" ? `<button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>` : ""}</td>
+      </tr>
+      ${i.qbo_estimate_id ? `<tr data-lines-row="${escapeHtml(String(i.qbo_estimate_id))}" hidden><td colspan="8" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}`;
+  }
+
+  function rowsTable(items, opts = {}) {
+    return `<div class="overflow-x-auto"><table class="w-full text-xs">
+      <thead><tr class="text-left text-black/45 border-b border-black/10">
+        <th class="py-2 pr-2 font-bold">Type</th><th class="py-2 pr-2 font-bold">Estimate</th>
+        <th class="py-2 pr-2 font-bold">Scope / reason</th><th class="py-2 pr-2 font-bold text-right">Amount</th>
+        <th class="py-2 pr-2 font-bold text-right">Labor</th><th class="py-2 pr-2 font-bold">Status</th>
+        ${opts.inPhase ? `<th class="py-2 pr-2 font-bold">Phase</th>` : ""}
+        <th class="py-2 font-bold text-right"></th></tr></thead>
+      <tbody>${items.map((i) => rowHtml(i, data.items.indexOf(i), opts)).join("")}</tbody></table></div>`;
+  }
+
+  function phasesHtml() {
+    const phases = data.phases || [];
+    const asg = data.assignments || {};
+    const accepted = data.items.filter((i) => i.qbo_estimate_id && i.status === "approved");
+    const other = data.items.filter((i) => !(i.qbo_estimate_id && i.status === "approved"));
+    if (!phases.length) return rowsTable(data.items);
+
+    const byPhase = {};
+    accepted.forEach((i) => { const pid = asg[String(i.qbo_estimate_id)]?.phase_id || phases[0].id; (byPhase[pid] ||= []).push(i); });
+
+    const phaseCards = phases.map((p) => {
+      const rows = byPhase[p.id] || [];
+      const sub = rows.reduce((s, i) => s + i.amount, 0);
+      return `<div class="rounded-xl border border-violet-200 bg-violet-50/40 p-3 mb-3">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+          <span class="inline-flex rounded-full bg-violet-600 text-white px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide">Phase ${p.seq}</span>
+          <input data-phase-name="${p.id}" value="${escapeHtml(p.name || "")}" placeholder="name (optional)" class="bg-transparent border border-transparent hover:border-black/15 focus:border-violet-400 rounded px-1.5 py-0.5 text-[12px] font-semibold w-40">
+          <span class="text-[11px] text-violet-700/70 tabular-nums ml-auto">${rows.length} estimate${rows.length === 1 ? "" : "s"} · ${money(sub)}</span>
+          ${phases.length > 1 ? `<button data-phase-del="${p.id}" class="text-[11px] text-black/30 hover:text-red-600" title="Delete phase (estimates fall back to Phase 1)">✕</button>` : ""}
+        </div>
+        ${rows.length ? rowsTable(rows, { inPhase: true }) : `<div class="text-[12px] text-black/40 py-2 px-1">No estimates in this phase.</div>`}
+      </div>`;
+    }).join("");
+
+    const otherCard = other.length ? `
+      <div class="rounded-xl border border-black/10 bg-black/[0.015] p-3 mb-3">
+        <div class="text-[11px] font-bold uppercase tracking-wide text-black/45 mb-2">Not scheduled — pending / declined / drafts</div>
+        ${rowsTable(other)}
+        <div class="text-[10px] text-black/40 mt-2">Only <b>accepted</b> estimates are grouped into phases &amp; drive schedules. These are tracked here until accepted.</div>
+      </div>` : "";
+
+    return phaseCards + otherCard;
+  }
+
   function render() {
     container.innerHTML = `<div class="p-4 sm:p-5">
       ${originatingQuoteHtml()}
       <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
         <div class="text-[11px] font-bold uppercase tracking-wide text-black/40">Contract value &amp; change orders</div>
-        <button id="coAdd" class="btn-primary text-xs px-3 py-1.5">+ Add change order</button>
+        <div class="flex gap-2">
+          <button id="phaseAdd" class="rounded-lg border border-violet-300 text-violet-700 px-3 py-1.5 text-xs font-semibold hover:bg-violet-50">+ New phase</button>
+          <button id="coAdd" class="btn-primary text-xs px-3 py-1.5">+ Add change order</button>
+        </div>
       </div>
       ${rollupHtml(data.rollup)}
-      ${tableHtml(data.items)}
-      <div class="text-[11px] text-black/40 mt-3">The office creates change orders as new estimates in QuickBooks; they appear here automatically once synced. Use “Add change order” to log one before it’s in QuickBooks, then link it later.</div>
+      ${phasesHtml()}
+      <div class="text-[11px] text-black/40 mt-3">Estimates group into <b>work phases</b>. New accepted estimates are auto-suggested into Phase 1 (⚑ = confirm or move). Only accepted estimates drive schedules; the roll-up above is the revised contract.</div>
     </div>`;
     wire();
   }
 
   const lineCache = {};
+  async function reloadData() { try { await load(); render(); } catch (e) { alert(e?.message || "Failed"); } }
+
   function wire() {
     document.getElementById("coAdd").addEventListener("click", () => openEditModal(null));
+    document.getElementById("phaseAdd")?.addEventListener("click", async () => {
+      try { await api(`/phases/project/${encodeURIComponent(entityId)}`, { method: "POST" }); reloadData(); }
+      catch (e) { alert(e?.message || "Could not add phase"); }
+    });
+    // move an estimate to a phase (or create a new one and move it there)
+    container.querySelectorAll("[data-move]").forEach(sel => sel.addEventListener("change", async () => {
+      const eid = sel.getAttribute("data-move");
+      let phaseId = sel.value;
+      try {
+        if (phaseId === "__new") {
+          const np = await api(`/phases/project/${encodeURIComponent(entityId)}`, { method: "POST" });
+          phaseId = np.id;
+        }
+        await api(`/phases/project/${encodeURIComponent(entityId)}/assign`, { method: "POST", body: JSON.stringify({ estimate_qbo_id: eid, phase_id: Number(phaseId) }) });
+        reloadData();
+      } catch (e) { alert(e?.message || "Move failed"); }
+    }));
+    container.querySelectorAll("[data-confirm]").forEach(btn => btn.addEventListener("click", async () => {
+      try {
+        await api(`/phases/project/${encodeURIComponent(entityId)}/assign`, { method: "POST", body: JSON.stringify({ estimate_qbo_id: btn.getAttribute("data-confirm"), phase_id: Number(btn.getAttribute("data-phase")) }) });
+        reloadData();
+      } catch (e) { alert(e?.message || "Confirm failed"); }
+    }));
+    container.querySelectorAll("[data-phase-name]").forEach(inp => inp.addEventListener("change", async () => {
+      try { await api(`/phases/${inp.getAttribute("data-phase-name")}`, { method: "PATCH", body: JSON.stringify({ name: inp.value.trim() || null }) }); }
+      catch (e) { alert(e?.message || "Rename failed"); }
+    }));
+    container.querySelectorAll("[data-phase-del]").forEach(btn => btn.addEventListener("click", async () => {
+      if (!confirm("Delete this phase? Its estimates fall back to Phase 1.")) return;
+      try { await api(`/phases/${btn.getAttribute("data-phase-del")}`, { method: "DELETE" }); reloadData(); }
+      catch (e) { alert(e?.message || "Delete failed"); }
+    }));
     container.querySelectorAll("[data-expand]").forEach(btn => btn.addEventListener("click", async () => {
       const eid = btn.getAttribute("data-expand");
       const row = container.querySelector(`[data-lines-row="${CSS.escape(eid)}"]`);
