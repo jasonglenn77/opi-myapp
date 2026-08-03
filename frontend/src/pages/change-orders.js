@@ -2,7 +2,7 @@
 // QBO estimates (original cost-basis + change orders) plus quick app-side drafts,
 // classifies/annotates them, and rolls up the revised contract value. Ties to the
 // Payments tab (same QBO estimates drive the crew payment schedules).
-import { api } from "../api.js";
+import { api, getToken } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
 
 const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString("en-US"));
@@ -191,7 +191,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
   async function reloadData() { try { await load(); render(); } catch (e) { alert(e?.message || "Failed"); } }
 
   function wire() {
-    document.getElementById("coAdd").addEventListener("click", () => openEditModal(null));
+    document.getElementById("coAdd").addEventListener("click", () => openAddCOModal());
     document.getElementById("phaseAdd")?.addEventListener("click", async () => {
       try { await api(`/phases/project/${encodeURIComponent(entityId)}`, { method: "POST" }); reloadData(); }
       catch (e) { alert(e?.message || "Could not add phase"); }
@@ -248,6 +248,98 @@ export async function mountChangeOrdersPanel(container, entityId) {
       try { data = await api(`/change-orders/${b.getAttribute("data-del")}`, { method: "DELETE" }); render(); }
       catch (err) { alert(err.message); }
     }));
+  }
+
+  // "+ Add change order" → choose how to create it (the new process).
+  function openAddCOModal() {
+    const overlay = document.createElement("div");
+    overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+    const card = (icon, title, desc, tag) => `<button data-choice="${tag}" class="text-left rounded-xl border border-black/12 hover:border-blue-400 hover:bg-blue-50/40 p-4 transition w-full">
+      <div class="text-xl mb-1">${icon}</div><div class="font-bold text-ink-900 text-sm">${title}</div>
+      <div class="text-[12px] text-black/55 mt-1 leading-snug">${desc}</div></button>`;
+    overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5">
+      <div class="text-base font-bold text-ink-900 mb-1">New change order</div>
+      <div class="text-[12px] text-black/50 mb-4">How do you want to create it?</div>
+      <div class="grid gap-3">
+        ${card("📝", "Fill out an estimate → PDF", "Enter the line items and generate an OPI-branded estimate PDF to send. The common path — no need to build it in QuickBooks first.", "form")}
+        ${card("🧮", "Build a full quote (quoting metrics)", "Open the quoting workspace to price it with the full calc engine. For a real re-estimate (rare for change orders).", "quote")}
+        ${card("📥", "Already created in QuickBooks", "Log it now to track it; it links to the QBO estimate automatically once synced.", "qbo")}
+      </div>
+      <div class="mt-4 flex justify-end"><button data-cancel class="${CANCEL}">Cancel</button></div></div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector("[data-cancel]").addEventListener("click", close);
+    overlay.querySelectorAll("[data-choice]").forEach(b => b.addEventListener("click", () => {
+      const c = b.getAttribute("data-choice"); close();
+      if (c === "form") openEstimateFormModal();
+      else if (c === "qbo") openEditModal(null);
+      else if (c === "quote") location.hash = "#/pipeline";
+    }));
+  }
+
+  // Editable change-order estimate form → OPI-branded PDF (or save as a draft).
+  function openEstimateFormModal() {
+    const overlay = document.createElement("div");
+    overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
+    let lines = [{ label: "", description: "", qty: 1, rate: 0 }];
+    const money2 = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const lineAmt = (l) => (Number(l.qty) || 0) * (Number(l.rate) || 0);
+    const total = () => lines.reduce((s, l) => s + lineAmt(l), 0);
+    const GRID = "grid grid-cols-[1.4fr_2fr_.6fr_.9fr_.9fr_auto] gap-1.5 items-center";
+    const rowHtml = (l, idx) => `<div class="${GRID}">
+      <input data-l="${idx}" data-k="label" value="${escapeHtml(l.label)}" placeholder="Item" class="input text-xs py-1">
+      <input data-l="${idx}" data-k="description" value="${escapeHtml(l.description)}" placeholder="Description" class="input text-xs py-1">
+      <input data-l="${idx}" data-k="qty" type="number" step="1" value="${l.qty}" class="input text-xs py-1 text-right">
+      <input data-l="${idx}" data-k="rate" type="number" step="1" value="${l.rate}" class="input text-xs py-1 text-right">
+      <div data-amt="${idx}" class="text-right tabular-nums text-xs font-semibold">${money2(lineAmt(l))}</div>
+      <button data-rm="${idx}" class="text-black/30 hover:text-red-600 text-sm">✕</button></div>`;
+    overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-5 max-h-[90vh] overflow-auto">
+      <div class="text-base font-bold text-ink-900 mb-3">Change order — estimate</div>
+      <label class="block mb-3"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Title</div><input data-title class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
+      <div class="${GRID} text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1"><div>Item</div><div>Description</div><div class="text-right">Qty</div><div class="text-right">Rate</div><div class="text-right">Amount</div><div></div></div>
+      <div data-lines class="space-y-1.5"></div>
+      <button data-addline class="text-xs font-semibold text-blue-600 hover:underline mt-2">+ Add line</button>
+      <div class="flex justify-end items-baseline gap-2 mt-3 pt-3 border-t border-black/10"><span class="text-xs text-black/50">Total</span><span data-total class="text-base font-extrabold tabular-nums">$0.00</span></div>
+      <div class="mt-4 flex items-center justify-end gap-2">
+        <span data-msg class="text-xs font-semibold mr-auto"></span>
+        <button data-cancel class="${CANCEL}">Cancel</button>
+        <button data-savedraft class="rounded-lg border border-black/15 px-3 py-1.5 text-sm font-semibold hover:bg-black/5">Save as draft</button>
+        <button data-pdf class="btn-primary text-sm px-4 py-1.5">Generate PDF →</button>
+      </div></div>`;
+    document.body.appendChild(overlay);
+    const linesEl = overlay.querySelector("[data-lines]");
+    const redraw = () => { linesEl.innerHTML = lines.map(rowHtml).join(""); };
+    const updTotal = () => { overlay.querySelector("[data-total]").textContent = money2(total()); };
+    redraw(); updTotal();
+    const close = () => overlay.remove();
+    const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector("[data-cancel]").addEventListener("click", close);
+    linesEl.addEventListener("input", (e) => {
+      const inp = e.target.closest("[data-l]"); if (!inp) return;
+      const i = Number(inp.getAttribute("data-l")), k = inp.getAttribute("data-k");
+      lines[i][k] = inp.type === "number" ? Number(inp.value) : inp.value;
+      if (k === "qty" || k === "rate") { overlay.querySelector(`[data-amt="${i}"]`).textContent = money2(lineAmt(lines[i])); updTotal(); }
+    });
+    linesEl.addEventListener("click", (e) => { const rm = e.target.closest("[data-rm]"); if (!rm) return; lines.splice(Number(rm.getAttribute("data-rm")), 1); if (!lines.length) lines = [{ label: "", description: "", qty: 1, rate: 0 }]; redraw(); updTotal(); });
+    overlay.querySelector("[data-addline]").addEventListener("click", () => { lines.push({ label: "", description: "", qty: 1, rate: 0 }); redraw(); });
+    const payload = () => ({ title: overlay.querySelector("[data-title]").value.trim() || null, total: total(),
+      lines: lines.filter(l => l.label || lineAmt(l)).map(l => ({ label: l.label, description: l.description, qty: Number(l.qty) || null, rate: Number(l.rate) || null, amount: lineAmt(l) })) });
+    overlay.querySelector("[data-pdf]").addEventListener("click", async () => {
+      setMsg("Generating…", true);
+      try {
+        const res = await fetch(`/api/change-orders/project/${encodeURIComponent(entityId)}/estimate-pdf`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() }, body: JSON.stringify(payload()) });
+        if (!res.ok) throw new Error("PDF failed");
+        window.open(URL.createObjectURL(await res.blob()), "_blank");
+        setMsg("PDF opened in a new tab.", true);
+      } catch (e) { setMsg("Could not generate PDF.", false); }
+    });
+    overlay.querySelector("[data-savedraft]").addEventListener("click", async () => {
+      const p = payload();
+      try { data = await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify({ kind: "change_order", title: p.title, amount: p.total, status: "draft" }) }); close(); render(); }
+      catch (e) { setMsg(e?.message || "Save failed", false); }
+    });
   }
 
   // item === null → add a new draft. Otherwise edit an existing item.

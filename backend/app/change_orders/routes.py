@@ -7,9 +7,10 @@ the revised contract value. Also supports a quick app-side DRAFT captured before
 it exists in QBO, linkable later by doc number. Ties to the per-estimate payment
 schedules (Payments tab) which key on the same QBO estimates. Gated page.customers.
 """
-from typing import Optional
+from typing import Optional, List
+from datetime import date as _date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -155,6 +156,56 @@ def estimate_lines(project_qbo_id: str, qbo_estimate_id: str, user=Depends(get_c
         "qty": num(r["qty"]), "unit_price": num(r["unit_price"]),
         "amount": float(r["amount"] or 0), "cost_amount": num(r["cost_amount"]),
     } for r in rows]}
+
+
+class COPdfLine(BaseModel):
+    label: str = ""
+    description: str = ""
+    qty: Optional[float] = None
+    rate: Optional[float] = None
+    amount: Optional[float] = None
+
+
+class COPdfReq(BaseModel):
+    title: Optional[str] = None
+    lines: List[COPdfLine] = []
+    total: float = 0.0
+
+
+@router.post("/project/{project_qbo_id}/estimate-pdf")
+def co_estimate_pdf(project_qbo_id: str, req: COPdfReq, user=Depends(get_current_user)):
+    """Generate an OPI-branded change-order estimate PDF from an editable form —
+    the app-native path for creating a change order (no need to build it in QBO
+    first). Reuses the estimate-PDF renderer + the company defaults."""
+    _require(user)
+    from app.estimates.pdf import render_estimate_pdf
+    with engine.connect() as conn:
+        proj = conn.execute(text("SELECT display_name FROM qbo_customers WHERE qbo_id=:e AND is_project=1"),
+                            {"e": project_qbo_id}).scalar()
+        if not proj:
+            raise HTTPException(status_code=404, detail="Project not found")
+        dfl = {k: v for k, v in conn.execute(text("SELECT setting_key, setting_value FROM estimate_pdf_defaults")).all()}
+    today = _date.today()
+    try:
+        exp_days = int(dfl.get("expiration_days") or 30)
+    except (TypeError, ValueError):
+        exp_days = 30
+    data = {
+        "company": {"name": dfl.get("company_name"), "address": dfl.get("company_address"),
+                    "phone": dfl.get("company_phone"), "email": dfl.get("company_email")},
+        "estimate_no":     "CO",
+        "date":            today.strftime("%m/%d/%Y"),
+        "expiration_date": (today + timedelta(days=exp_days)).strftime("%m/%d/%Y"),
+        "sales_rep":       dfl.get("sales_rep"),
+        "bill_to":         [proj, ("Change order — " + req.title) if req.title else "Change order"],
+        "footer_title":    req.title or "Change Order",
+        "preparer":        user.get("email"),
+        "lines":           [ln.model_dump() for ln in req.lines],
+        "total":           req.total,
+    }
+    pdf = render_estimate_pdf(data)
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="Change-Order-Estimate.pdf"'})
 
 
 _KINDS = ("original", "change_order")
