@@ -130,6 +130,27 @@ def get_change_orders(project_qbo_id: str, user=Depends(get_current_user)):
     return {"project": {"qbo_id": project_qbo_id, "name": name}, "items": items, "rollup": rollup}
 
 
+@router.get("/project/{project_qbo_id}/estimate/{qbo_estimate_id}/lines")
+def estimate_lines(project_qbo_id: str, qbo_estimate_id: str, user=Depends(get_current_user)):
+    """The QBO line items on one estimate — so each estimate in the Change Orders
+    tab can expand to show what's in it (item, qty, rate, customer amount, cost)."""
+    _require(user)
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT sl.item_name, sl.description, sl.qty, sl.unit_price, sl.amount, sl.cost_amount
+            FROM qbo_sales_transaction_lines sl
+            JOIN qbo_transactions t ON t.id = sl.transaction_id
+            WHERE t.entity_type = 'Estimate' AND t.qbo_id = :e AND sl.line_level = 'child'
+            ORDER BY sl.line_num, sl.id
+        """), {"e": qbo_estimate_id}).mappings().all()
+    num = lambda v: float(v) if v is not None else None
+    return {"lines": [{
+        "item": r["item_name"], "description": r["description"],
+        "qty": num(r["qty"]), "unit_price": num(r["unit_price"]),
+        "amount": float(r["amount"] or 0), "cost_amount": num(r["cost_amount"]),
+    } for r in rows]}
+
+
 _KINDS = ("original", "change_order")
 _STATUSES = ("draft", "sent", "approved", "rejected")
 

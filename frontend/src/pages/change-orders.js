@@ -41,6 +41,20 @@ export async function mountChangeOrdersPanel(container, entityId) {
     : `<span class="inline-flex rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 text-[10px] font-bold">CO #${i.co_number}</span>`;
   const statusPill = (s) => `<span class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS_CLS[s] || "bg-black/10"}">${(STATUSES.find(x => x[0] === s) || [s, s])[1]}</span>`;
 
+  function linesHtml(lines) {
+    if (!lines || !lines.length) return `<div class="text-[11px] text-black/40 py-1">No line items on this estimate.</div>`;
+    return `<table class="w-full text-[11px]">
+      <thead><tr class="text-left text-black/40"><th class="py-1 pr-3 font-bold">Item</th><th class="py-1 pr-3 font-bold">Description</th><th class="py-1 pr-3 font-bold text-right">Qty</th><th class="py-1 pr-3 font-bold text-right">Rate</th><th class="py-1 pr-3 font-bold text-right">Amount</th><th class="py-1 font-bold text-right">Cost</th></tr></thead>
+      <tbody>${lines.map(l => `<tr class="border-t border-black/5">
+        <td class="py-1 pr-3 font-semibold text-ink-900 whitespace-nowrap">${escapeHtml(l.item || "—")}</td>
+        <td class="py-1 pr-3 text-black/60 max-w-[300px] truncate">${escapeHtml(l.description || "")}</td>
+        <td class="py-1 pr-3 text-right tabular-nums">${l.qty != null ? l.qty : "—"}</td>
+        <td class="py-1 pr-3 text-right tabular-nums">${l.unit_price != null ? money(l.unit_price) : "—"}</td>
+        <td class="py-1 pr-3 text-right tabular-nums font-semibold">${money(l.amount)}</td>
+        <td class="py-1 text-right tabular-nums text-black/50">${l.cost_amount != null ? money(l.cost_amount) : "—"}</td>
+      </tr>`).join("")}</tbody></table>`;
+  }
+
   function tableHtml(items) {
     if (!items.length) return `<div class="text-sm text-black/45 py-4">No estimates tagged to this project yet.</div>`;
     return `<div class="overflow-x-auto"><table class="w-full text-xs">
@@ -51,14 +65,15 @@ export async function mountChangeOrdersPanel(container, entityId) {
         <th class="py-2 font-bold text-right"></th></tr></thead>
       <tbody>${items.map((i, idx) => `
         <tr class="border-b border-black/5 hover:bg-black/[0.015]">
-          <td class="py-1.5 pr-2">${kindBadge(i)}</td>
+          <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : ""}${kindBadge(i)}</td>
           <td class="py-1.5 pr-2 text-black/70">${i.doc_number ? `#${escapeHtml(i.doc_number)}<div class="text-[10px] text-black/40">${ymd(i.txn_date)}</div>` : `<span class="inline-flex rounded bg-black/10 text-black/50 px-1.5 py-0.5 text-[9px] font-bold">DRAFT</span>`}</td>
           <td class="py-1.5 pr-2 text-black/70 max-w-[240px]"><div class="font-semibold text-ink-900 truncate">${escapeHtml(i.title || i.reason || "—")}</div>${i.scope ? `<div class="text-[10px] text-black/45 truncate">${escapeHtml(i.scope)}</div>` : ""}</td>
           <td class="py-1.5 pr-2 text-right tabular-nums font-semibold">${money(i.amount)}</td>
           <td class="py-1.5 pr-2 text-right tabular-nums text-black/60">${i.contract_labor ? money(i.contract_labor) : "—"}</td>
           <td class="py-1.5 pr-2">${statusPill(i.status)}</td>
           <td class="py-1.5 text-right whitespace-nowrap"><button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button>${i.source === "draft" ? `<button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>` : ""}</td>
-        </tr>`).join("")}
+        </tr>
+        ${i.qbo_estimate_id ? `<tr data-lines-row="${escapeHtml(String(i.qbo_estimate_id))}" hidden><td colspan="7" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}`).join("")}
       </tbody></table></div>`;
   }
 
@@ -97,8 +112,26 @@ export async function mountChangeOrdersPanel(container, entityId) {
     wire();
   }
 
+  const lineCache = {};
   function wire() {
     document.getElementById("coAdd").addEventListener("click", () => openEditModal(null));
+    container.querySelectorAll("[data-expand]").forEach(btn => btn.addEventListener("click", async () => {
+      const eid = btn.getAttribute("data-expand");
+      const row = container.querySelector(`[data-lines-row="${CSS.escape(eid)}"]`);
+      const chev = btn.querySelector("[data-chev]");
+      if (!row) return;
+      const opening = row.hidden;
+      row.hidden = !opening;
+      if (chev) chev.style.transform = opening ? "rotate(90deg)" : "";
+      if (!opening) return;
+      const body = row.querySelector("[data-lines-body]");
+      if (lineCache[eid]) { body.innerHTML = lineCache[eid]; return; }
+      try {
+        const r = await api(`/change-orders/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eid)}/lines`);
+        lineCache[eid] = linesHtml(r.lines);
+        body.innerHTML = lineCache[eid];
+      } catch (e) { body.innerHTML = `<span class="text-red-600">Failed to load line items.</span>`; }
+    }));
     container.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () =>
       openEditModal(data.items[Number(b.getAttribute("data-edit"))])));
     container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {

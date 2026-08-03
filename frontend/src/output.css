@@ -1546,6 +1546,10 @@ option {
   max-width: 240px;
 }
 
+.max-w-\[300px\] {
+  max-width: 300px;
+}
+
 .max-w-\[320px\] {
   max-width: 320px;
 }
