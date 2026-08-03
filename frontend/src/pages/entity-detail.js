@@ -317,46 +317,125 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         </div>
       </div>`;
   }
-  function financialsHtml(f) {
-    if (!f || !Object.keys(f).length) return `<div class="p-4 sm:p-5 text-sm text-black/50">No financial data for this project yet — it appears once QuickBooks has estimate/invoice/expense activity.</div>`;
-    const n = (v) => Number(v || 0);
-    const collected = n(f.invoice_line_amt) - n(f.invoice_balance_amt);
-    const costVar = n(f.expense_line_amt) - n(f.estimate_cost_amt);
-    const kpi = (label, val, opts = {}) => `
-      <div class="rounded-xl border border-black/10 bg-white px-4 py-3">
-        <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1">${label}</div>
-        <div class="text-lg font-bold tabular-nums ${opts.color || "text-ink-900"}">${val}</div>
-        ${opts.sub ? `<div class="text-[11px] text-black/40 mt-0.5">${opts.sub}</div>` : ""}
-      </div>`;
-    const sec = (title, cards) => `
-      <section><div class="text-xs font-extrabold uppercase tracking-wide text-black/50 mb-2">${title}</div>
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">${cards}</div></section>`;
+  // Financial Breakdown by Item Type — Contract / Cost / Profit per item, with
+  // drill-down to the underlying transactions. Mirrors the Financials page modal.
+  const ITEM_ORDER = ["Contract Labor", "Materials", "Mgmt Travel", "Lodging", "Buffer", "Rentals", "Propane"];
+  function financialsBreakdownHtml(d, f) {
+    const est = d.estimate_line || {}, cost = d.estimate_cost || {}, inv = d.invoice_line || {}, exp = d.expense_line || {};
+    const names = d.items || [];
+    if (!names.length) return `<div class="p-4 sm:p-5 text-sm text-black/50">No item-type financial data for this project yet.</div>`;
+    const ordered = [...ITEM_ORDER.filter((i) => names.includes(i)), ...names.filter((i) => !ITEM_ORDER.includes(i))];
+    const N = (o, k) => Number(o[k] || 0);
+    const m = (v) => (Math.abs(v) < 0.5 ? "—" : "$" + Math.round(v).toLocaleString("en-US"));
+    const signed = (v, goodPositive = true) => {
+      if (Math.abs(v) < 0.5) return `<span class="text-black/25">—</span>`;
+      const good = goodPositive ? v >= 0 : v <= 0;
+      return `<span class="${good ? "text-emerald-700" : "text-red-600"} font-semibold">${v >= 0 ? "+" : "−"}$${Math.abs(Math.round(v)).toLocaleString("en-US")}</span>`;
+    };
+    const pctTxt = (v) => (v == null ? "" : ` <span class="text-[10px] text-black/40">(${v >= 0 ? "" : "-"}${Math.abs(v).toFixed(1)}%)</span>`);
+
+    // per-item + running totals
+    let tEst = 0, tInv = 0, tCost = 0, tExp = 0;
+    const rowsHtml = ordered.map((it) => {
+      const e = N(est, it), i = N(inv, it), c = N(cost, it), x = N(exp, it);
+      tEst += e; tInv += i; tCost += c; tExp += x;
+      const contractDiff = i - e, contractPct = e ? (contractDiff / e) * 100 : null;
+      const costDiff = c - x, costPct = c ? ((x - c) / c) * 100 : null;
+      const projP = e - c, projPct = e ? (projP / e) * 100 : null;
+      const actP = i - x, actPct = i ? (actP / i) * 100 : null;
+      const hasDetail = e || i || c || x;
+      return `
+        <tr class="border-b border-black/5 hover:bg-black/[0.015]">
+          <td class="py-1.5 pl-3 pr-2 whitespace-nowrap">${hasDetail ? `<button data-fin-item="${escapeHtml(it)}" class="text-black/25 hover:text-black/60 mr-1 align-middle"><svg data-fin-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : `<span class="inline-block w-4"></span>`}<span class="font-semibold text-ink-900">${escapeHtml(it)}</span></td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-slate-50">${m(e)}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-slate-50">${m(i)}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-slate-50">${signed(contractDiff)}${pctTxt(contractPct)}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-orange-50/60">${m(c)}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-orange-50/60">${m(x)}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-orange-50/60">${signed(costDiff)}${pctTxt(costPct)}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums bg-emerald-50/60">${signed(projP)}${pctTxt(projPct)}</td>
+          <td class="py-1.5 pr-3 px-2 text-right tabular-nums bg-emerald-50/60">${signed(actP)}${pctTxt(actPct)}</td>
+        </tr>
+        <tr data-fin-lines="${escapeHtml(it)}" hidden><td colspan="9" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-fin-lines-body class="text-[11px] text-black/50">Loading…</div></td></tr>`;
+    }).join("");
+
+    const tcDiff = tInv - tEst, tcostDiff = tCost - tExp, tproj = tEst - tCost, tact = tInv - tExp;
+    const th = (t, cls = "") => `<th class="py-1.5 px-2 text-right text-[10px] font-bold text-black/50 ${cls}">${t}</th>`;
     return `
-      <div class="p-4 sm:p-5 max-w-4xl space-y-5">
-        ${sec("Revenue",
-          kpi("Contract (estimate)", fmtMoney(f.estimate_line_amt)) +
-          kpi("Invoiced", fmtMoney(f.invoice_line_amt)) +
-          kpi("Collected", fmtMoney(collected), { color: "text-emerald-700" }) +
-          kpi("Open A/R", fmtMoney(f.invoice_balance_amt)))}
-        ${sec("Cost",
-          kpi("Estimated cost", fmtMoney(f.estimate_cost_amt)) +
-          kpi("Actual expenses", fmtMoney(f.expense_line_amt)) +
-          kpi("Cost variance", fmtMoney(costVar), { color: costVar > 0 ? "text-red-600" : "text-emerald-700", sub: "actual − estimate" }))}
-        ${sec("Profit",
-          kpi("Projected profit", fmtMoney(f.projected_profit), { color: n(f.projected_profit) >= 0 ? "text-emerald-700" : "text-red-600", sub: "est. revenue − est. cost" }) +
-          kpi("Projected margin", fmtPct(f.projected_profit_pct)) +
-          kpi("Actual profit", fmtMoney(f.actual_profit), { color: n(f.actual_profit) >= 0 ? "text-emerald-700" : "text-red-600", sub: "invoiced − expenses" }) +
-          kpi("Actual margin", fmtPct(f.actual_profit_pct)))}
-        <div class="text-[11px] text-black/40 pt-1">From QuickBooks aggregates — the same figures as the Financials page, scoped to this project.</div>
+      <div class="p-4 sm:p-5">
+        <div class="mb-3">
+          <div class="text-base font-extrabold text-ink-900">Financial Breakdown by Item Type</div>
+          <div class="text-xs text-black/50 mt-0.5">Estimate vs. invoice vs. actual cost, by line-item type. Click an item to drill into its transactions.</div>
+        </div>
+        <div class="card overflow-x-auto">
+          <table class="w-full text-[12px]" style="min-width:900px">
+            <thead>
+              <tr class="border-b border-black/10">
+                <th class="py-1.5 pl-3 text-left text-[10px] font-bold text-black/40">Item</th>
+                <th colspan="3" class="py-1.5 text-center text-[10px] font-extrabold uppercase tracking-wide text-slate-500 bg-slate-100">Contract</th>
+                <th colspan="3" class="py-1.5 text-center text-[10px] font-extrabold uppercase tracking-wide text-orange-700/70 bg-orange-100/70">Cost</th>
+                <th colspan="2" class="py-1.5 text-center text-[10px] font-extrabold uppercase tracking-wide text-emerald-700/80 bg-emerald-100/70">Profit</th>
+              </tr>
+              <tr class="border-b border-black/10">
+                <th></th>
+                ${th("Estimate", "bg-slate-50")}${th("Invoice", "bg-slate-50")}${th("Difference", "bg-slate-50")}
+                ${th("Est. Cost Basis", "bg-orange-50/60")}${th("Expense", "bg-orange-50/60")}${th("Difference", "bg-orange-50/60")}
+                ${th("Projected Profit", "bg-emerald-50/60")}${th("Actual Profit", "bg-emerald-50/60 pr-3")}
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+            <tfoot>
+              <tr class="border-t-2 border-black/15 font-bold">
+                <td class="py-2 pl-3 text-ink-900">Total</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-slate-100">${m(tEst)}</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-slate-100">${m(tInv)}</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-slate-100">${signed(tcDiff)}${pctTxt(tEst ? (tcDiff / tEst) * 100 : null)}</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-orange-100/70">${m(tCost)}</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-orange-100/70">${m(tExp)}</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-orange-100/70">${signed(tcostDiff)}${pctTxt(tCost ? ((tExp - tCost) / tCost) * 100 : null)}</td>
+                <td class="py-2 px-2 text-right tabular-nums bg-emerald-100/70">${signed(tproj)}${pctTxt(tEst ? (tproj / tEst) * 100 : null)}</td>
+                <td class="py-2 pr-3 px-2 text-right tabular-nums bg-emerald-100/70">${signed(tact)}${pctTxt(tInv ? (tact / tInv) * 100 : null)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div class="text-[11px] text-black/40 mt-3">Contract Difference = invoiced − estimated · Cost Difference = estimated cost − actual expense (green = under) · same figures as the Financials page, scoped to this project.</div>
       </div>`;
   }
+
+  function wireFinancials() {
+    const body = document.getElementById("tabBody");
+    const cache = {};
+    body?.querySelectorAll("[data-fin-item]").forEach((btn) => btn.addEventListener("click", async () => {
+      const it = btn.getAttribute("data-fin-item");
+      const row = body.querySelector(`[data-fin-lines="${CSS.escape(it)}"]`);
+      const chev = btn.querySelector("[data-fin-chev]");
+      if (!row) return;
+      const opening = row.hidden;
+      row.hidden = !opening;
+      if (chev) chev.style.transform = opening ? "rotate(90deg)" : "";
+      if (!opening) return;
+      const bodyEl = row.querySelector("[data-fin-lines-body]");
+      if (cache[it]) { bodyEl.innerHTML = cache[it]; return; }
+      try {
+        const r = await api("/projects/financials/by-item/lines", { method: "POST", body: JSON.stringify({ project_qbo_ids: [String(entityId)], item_name: it, kind: "expense" }) });
+        const lines = r.lines || [];
+        cache[it] = lines.length
+          ? `<table class="w-full text-[11px]"><thead><tr class="text-left text-black/40"><th class="py-1 pr-3 font-bold">Date</th><th class="py-1 pr-3 font-bold">Vendor / source</th><th class="py-1 pr-3 font-bold">Description</th><th class="py-1 text-right font-bold">Amount</th></tr></thead><tbody>${lines.map((l) => `<tr class="border-t border-black/5"><td class="py-1 pr-3 tabular-nums text-black/60">${escapeHtml(String(l.txn_date || l.date || "—").slice(0, 10))}</td><td class="py-1 pr-3">${escapeHtml(l.vendor || l.name || "—")}</td><td class="py-1 pr-3 text-black/55 max-w-[300px] truncate">${escapeHtml(l.description || "")}</td><td class="py-1 text-right tabular-nums font-semibold">$${Math.round(Number(l.amount || 0)).toLocaleString("en-US")}</td></tr>`).join("")}</tbody></table>`
+          : `<span class="text-black/40">No actual-expense transactions for ${escapeHtml(it)} yet.</span>`;
+        bodyEl.innerHTML = cache[it];
+      } catch (e) { bodyEl.innerHTML = `<span class="text-red-600">Failed to load detail.</span>`; }
+    }));
+  }
+
   async function showFinancials() {
     const body = document.getElementById("tabBody");
-    body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
+    body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading financials…</div>`;
     try {
-      await ensureProjectData();
+      const d = await api("/projects/financials/by-item", { method: "POST", body: JSON.stringify({ project_qbo_ids: [String(entityId)] }) });
       if (activeTab !== "financials") return;
-      body.innerHTML = financialsHtml(_ovFin);
+      body.innerHTML = financialsBreakdownHtml(d, _ovFin);
+      wireFinancials();
     } catch (e) {
       if (activeTab !== "financials") return;
       body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load financials: ${escapeHtml(e?.message || String(e))}</div>`;
