@@ -10,6 +10,7 @@ import { escapeHtml } from "../utils/html.js";
 
 const STATUS_OPTIONS = [
   { value: "needs_attention", label: "Needs attention" },
+  { value: "pending",         label: "Pending" },
   { value: "not_started",     label: "Not started" },
   { value: "in_progress",     label: "In progress" },
   { value: "completed",       label: "Completed" },

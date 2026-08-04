@@ -10,7 +10,7 @@ import { escapeHtml } from "../utils/html.js";
 // status from the dropdown. Truly unknown / empty statuses still fall
 // back to 'not_started' defensively.
 const USER_STATUSES = new Set([
-  "needs_attention", "not_started", "in_progress", "completed", "canceled",
+  "needs_attention", "pending", "not_started", "in_progress", "completed", "canceled",
 ]);
 
 export async function assignmentPage(routeFn) {
@@ -48,6 +48,7 @@ export async function assignmentPage(routeFn) {
 
   const STATUS_OPTIONS = [
     { value: "needs_attention", label: "Needs Attention" },
+    { value: "pending",         label: "Pending" },
     { value: "not_started",     label: "Not Started" },
     { value: "in_progress",     label: "In Progress" },
     { value: "completed",       label: "Completed" },
@@ -58,6 +59,10 @@ export async function assignmentPage(routeFn) {
     needs_assignment: {
       wrap: "bg-kpi-attention-bg border-kpi-attention-bd",
       label: "text-kpi-attention-text",
+    },
+    pending: {
+      wrap: "bg-amber-50 border-amber-200",
+      label: "text-amber-700",
     },
     not_started: {
       wrap: "bg-kpi-notStarted-bg border-kpi-notStarted-bd",
@@ -135,6 +140,7 @@ export async function assignmentPage(routeFn) {
   function statusLabel(v) {
     if (v == null || String(v).trim() === "") return "Needs Attention";
     if (v === "needs_attention") return "Needs Attention";
+    if (v === "pending") return "Pending";
     if (v === "not_started") return "Not Started";
     if (v === "in_progress") return "In Progress";
     if (v === "completed") return "Completed";
@@ -145,6 +151,7 @@ export async function assignmentPage(routeFn) {
   function statusBucket(v) {
     if (v == null || String(v).trim() === "") return "needs_assignment";
     if (v === "needs_attention") return "needs_assignment";
+    if (v === "pending") return "pending";
     if (v === "not_started") return "not_started";
     if (v === "in_progress") return "in_progress";
     if (v === "completed") return "completed";

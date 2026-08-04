@@ -13,7 +13,8 @@ const money = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)
 
 // Operational status → label + pill styling. Order drives the filter pills.
 const OP_STATUS = {
-  needs_assignment: { label: "Needs assignment", cls: "bg-amber-100 text-amber-800" },
+  needs_assignment: { label: "Needs assignment", cls: "bg-rose-100 text-rose-800" },
+  pending:          { label: "Pending",          cls: "bg-amber-100 text-amber-800" },
   assigned:         { label: "Assigned",         cls: "bg-slate-200 text-slate-700" },
   scheduled:        { label: "Scheduled",        cls: "bg-sky-100 text-sky-800" },
   in_progress:      { label: "In progress",      cls: "bg-indigo-100 text-indigo-800" },

@@ -5,7 +5,10 @@ from app.db import engine
 from datetime import datetime
 from typing import Any, Dict
 
-ALLOWED_STATUS = {"needs_attention", "not_started", "in_progress", "completed", "canceled"}
+ALLOWED_STATUS = {"needs_attention", "pending", "not_started", "in_progress", "completed", "canceled"}
+# 'pending' = the office has started on the project (e.g. a PM is assigned) but
+# it isn't fully set up yet (crew and/or dates still unknown). It sits between
+# 'needs_attention' (untouched) and a fully-scheduled state.
 # 'needs_attention' is the initial system-set value for a freshly-created
 # master row (see comment in ensure_project_row_for_qbo_customer), but it's
 # ALSO a valid user-pickable status: a row can stay in Needs Attention as

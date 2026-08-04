@@ -92,6 +92,10 @@ def _operational_status(p):
     statuses = {s.strip() for s in (p.get("all_statuses") or "").split(",") if s.strip()}
     if "in_progress" in statuses:
         return "in_progress"
+    # Office explicitly marked it pending (attention given, but crew/dates still
+    # unknown) — surfaces above the auto-derived assigned/needs_assignment states.
+    if "pending" in statuses:
+        return "pending"
     active = statuses - {"canceled"}
     if active and active <= {"completed"}:
         return "complete"
