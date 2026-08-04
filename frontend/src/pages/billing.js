@@ -241,6 +241,7 @@ function render(container, entityId, d) {
     return `<div class="px-4 py-2.5 border-b border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap">
       <span class="font-semibold text-black/55">Crew job offer:</span>
       <select data-offer-crew class="${EDIT_BASE} border-black/15">${crews.map((c) => `<option value="${c.id}">${escapeHtml((c.parent_name ? c.parent_name + " — " : "") + c.name)}</option>`).join("")}</select>
+      <button data-crew-browse class="text-[11.5px] font-semibold text-blue-600 hover:underline">Browse crews →</button>
       <span class="text-black/50">Labor</span>
       <input data-offer-labor type="number" value="${Math.round(offer.suggested_labor || crew.summary.total || 0)}" class="${EDIT_BASE} border-black/15 w-[7rem] text-right tabular-nums">
       <button data-offer-send class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer</button>
@@ -437,6 +438,14 @@ function render(container, entityId, d) {
   });
   root?.addEventListener("click", async (e) => {
     // crew job offer
+    const browse = e.target.closest("[data-crew-browse]");
+    if (browse) {
+      openCrewRoster(entityId, p.start_date, p.end_date, (id) => {
+        const sel = root.querySelector("[data-offer-crew]");
+        if (sel) sel.value = id;
+      });
+      return;
+    }
     const oSend = e.target.closest("[data-offer-send]");
     if (oSend) {
       const crewId = root.querySelector("[data-offer-crew]")?.value;
@@ -472,6 +481,51 @@ function render(container, entityId, d) {
       catch (err) { alert("Delete failed: " + (err?.message || "error")); }
     }
   });
+}
+
+// Crew-availability slide-over — pick a crew from an informed panel (availability
+// for the project dates + jobs done + $ paid, last 365 days), grouped by company.
+function openCrewRoster(entityId, start, end, onPick) {
+  const wrap = document.createElement("div");
+  wrap.className = "fixed inset-0 z-[100]";
+  wrap.innerHTML = `<div data-backdrop class="absolute inset-0 bg-black/30"></div>
+    <div class="absolute top-0 right-0 h-full w-full max-w-md bg-white shadow-xl overflow-y-auto">
+      <div class="sticky top-0 bg-white border-b border-black/10 px-4 py-3 flex items-center justify-between z-10">
+        <div><div class="text-sm font-bold text-ink-900">Work crews</div>
+          <div class="text-[11px] text-black/45">${start && end ? "availability " + shortDate(start) + "–" + shortDate(end) + " · " : ""}jobs &amp; $ paid, last 365 days</div></div>
+        <button data-close class="text-black/40 hover:text-black/70 text-lg leading-none">✕</button>
+      </div>
+      <div data-roster class="p-3 text-sm text-black/50">Loading…</div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.querySelector("[data-backdrop]").addEventListener("click", close);
+  wrap.querySelector("[data-close]").addEventListener("click", close);
+  (async () => {
+    let d;
+    try {
+      const q = start && end ? `&start=${start.slice(0, 10)}&end=${end.slice(0, 10)}` : "";
+      d = await api(`/offers/crew-roster?project_qbo_id=${encodeURIComponent(entityId)}${q}`);
+    } catch (e) { wrap.querySelector("[data-roster]").innerHTML = `<div class="text-red-600 p-2">Failed to load crews.</div>`; return; }
+    const byCo = {};
+    (d.crews || []).forEach((c) => { (byCo[c.company || "—"] ||= []).push(c); });
+    const badge = (a) => a === null ? "" : a
+      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">✓ free</span>`
+      : `<span class="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">⚠ busy</span>`;
+    wrap.querySelector("[data-roster]").innerHTML = Object.keys(byCo).sort().map((co) => {
+      const list = byCo[co];
+      return `<div class="mb-3">
+        <div class="flex justify-between items-baseline px-2 py-1.5 bg-black/[0.03] rounded-lg mb-1">
+          <span class="font-bold text-[13px] text-ink-900">${escapeHtml(co)}</span>
+          <span class="text-[11px] text-black/50 tabular-nums">${money(list[0]?.earned_365 || 0)} · 365d</span></div>
+        ${list.map((c) => `<button data-pick="${c.id}" data-name="${escapeHtml(c.name)}" class="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-blue-50">
+          <span class="flex-1 font-semibold text-[13px]">${escapeHtml(c.name)}</span>
+          <span class="text-[11px] text-black/45 tabular-nums">${c.jobs_365} job${c.jobs_365 === 1 ? "" : "s"}</span>${badge(c.available)}
+        </button>`).join("")}
+      </div>`;
+    }).join("") || `<div class="text-black/40 p-2">No crews found.</div>`;
+    wrap.querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => { onPick(b.getAttribute("data-pick"), b.getAttribute("data-name")); close(); }));
+  })();
 }
 
 // Build a compact weekly strip of upcoming unpaid cash (in green / out red).

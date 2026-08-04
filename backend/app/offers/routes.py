@@ -103,6 +103,67 @@ def list_for_project(entity_id: str, user=Depends(get_current_user)):
             "suggested_labor": labor, "suggested_scope": scope, "crews": crews}
 
 
+@router.get("/crew-roster")
+def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = None,
+                end: Optional[str] = None, user=Depends(get_current_user)):
+    """All work crews with their recent track record + availability for a date
+    range — so the office can pick a crew for an offer from an informed panel:
+    jobs done in the last 365 days, $ paid to them (365d), and whether they're
+    already scheduled during the project's window."""
+    _require_office(user)
+    from datetime import date, timedelta
+    from collections import defaultdict
+    cutoff = date.today() - timedelta(days=365)
+
+    def _d(s):
+        try:
+            return date.fromisoformat(str(s)[:10]) if s else None
+        except ValueError:
+            return None
+    ps, pe = _d(start), _d(end)
+
+    with engine.connect() as conn:
+        crews = conn.execute(text("""
+            SELECT wc.id, wc.name, pc.name AS company,
+                   COALESCE(wc.vendor_qbo_id, pc.vendor_qbo_id) AS vendor
+            FROM work_crews wc LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+            WHERE wc.parent_id IS NOT NULL AND (wc.is_active = 1 OR wc.is_active IS NULL)
+            ORDER BY pc.name, wc.name
+        """)).mappings().all()
+        earned = {str(r["v"]): float(r["amt"] or 0) for r in conn.execute(text("""
+            SELECT vendor_qbo_id AS v, ROUND(SUM(total_amt), 2) AS amt FROM qbo_transactions
+            WHERE entity_type = 'Bill' AND txn_date >= :c AND vendor_qbo_id IS NOT NULL
+            GROUP BY vendor_qbo_id
+        """), {"c": cutoff}).mappings().all()}
+        scheds = conn.execute(text("""
+            SELECT crew_id, entity_id, start_date, end_date
+            FROM project_payment_schedules WHERE crew_id IS NOT NULL
+        """)).mappings().all()
+
+    by_crew = defaultdict(list)
+    for s in scheds:
+        by_crew[s["crew_id"]].append(s)
+    out = []
+    for c in crews:
+        cs = by_crew.get(c["id"], [])
+        jobs_365 = len({s["entity_id"] for s in cs if s["end_date"] and s["end_date"] >= cutoff})
+        conflict = False
+        if ps and pe:
+            for s in cs:
+                if project_qbo_id and str(s["entity_id"]) == str(project_qbo_id):
+                    continue
+                if s["start_date"] and s["end_date"] and s["start_date"] <= pe and s["end_date"] >= ps:
+                    conflict = True
+                    break
+        out.append({
+            "id": c["id"], "name": c["name"], "company": c["company"],
+            "earned_365": round(earned.get(str(c["vendor"]), 0), 2),
+            "jobs_365": jobs_365,
+            "available": (not conflict) if (ps and pe) else None,
+        })
+    return {"crews": out, "has_dates": bool(ps and pe)}
+
+
 class OfferCreate(BaseModel):
     crew_id: int
     labor_amount: float
