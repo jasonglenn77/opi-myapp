@@ -33,7 +33,7 @@ from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS
 
 from app.invoices.routes import DEFAULT_TERMS, _project_ctx
-from app.expenses.routes import CATEGORIES, _estimate_costs_by_category
+from app.expenses.routes import CATEGORIES, _estimate_costs_by_category, _expense_category
 from app.payments.routes import (
     _project_meta, _crew_options, _crew_vendor, _qbo_payments,
     _even_split, _converted_estimates_with_labor, _load_schedules,
@@ -288,14 +288,19 @@ def _actual_invoices(conn, entity_id):
 
 def _actual_expenses(conn, entity_id, crew_vendor_ids):
     """Real QBO bills/purchases tagged to this project (excluding crew vendors) —
-    the actual per-line spend, shown next to the planned expense schedule."""
+    the actual per-line spend, categorized (by item / expense account) so the UI
+    can file each actual under its expense category."""
     rows = conn.execute(text("""
         SELECT t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number,
                JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name')) AS vendor,
+               COALESCE(
+                 JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')),
+                 SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1)
+               ) AS item_or_account,
                ROUND(SUM(l.amount), 2) AS amt
         FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
         WHERE l.line_customer_qbo_id = :e AND t.entity_type IN ('Bill', 'Purchase')
-        GROUP BY t.id, t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number, vendor
+        GROUP BY t.id, t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number, vendor, item_or_account
         ORDER BY t.txn_date
     """), {"e": entity_id}).mappings().all()
     excl = {str(v) for v in (crew_vendor_ids or []) if v}
@@ -303,10 +308,12 @@ def _actual_expenses(conn, entity_id, crew_vendor_ids):
     for r in rows:
         if str(r["vendor_qbo_id"]) in excl:
             continue  # crew payment, not a material/rental expense
+        cat = _expense_category(r["item_or_account"]) or "Other"
         out.append({
             "date": str(r["txn_date"]) if r["txn_date"] else None,
             "vendor": r["vendor"] or "Unknown vendor", "amount": float(r["amt"] or 0),
             "type": r["entity_type"], "doc": r["doc_number"],
+            "category": cat, "source_item": r["item_or_account"],
         })
     return out
 

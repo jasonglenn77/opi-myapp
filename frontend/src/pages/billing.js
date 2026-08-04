@@ -270,13 +270,22 @@ function render(container, entityId, d) {
     : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No invoices in QuickBooks yet — the schedule above is the plan.</div>`;
 
   const expActuals = (exp.actuals && exp.actuals.length)
-    ? actualsBlock("Actual expenses in QuickBooks", exp.actuals.length,
-        `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Vendor</th><th class="font-bold">Type</th><th class="font-bold">Date</th><th class="text-right font-bold">Amount</th></tr></thead>
-         <tbody>${exp.actuals.map((a) => `<tr class="border-t border-black/[0.05]">
-           <td class="py-1.5 font-semibold">${escapeHtml(a.vendor || "—")}</td>
-           <td class="py-1.5 text-black/60">${escapeHtml(a.type || "")}</td>
-           <td class="py-1.5 tabular-nums text-black/60">${shortDate(a.date)}</td>
-           <td class="py-1.5 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>`)
+    ? actualsBlock("Actual expenses in QuickBooks", exp.actuals.length, (() => {
+        const byCat = {};
+        exp.actuals.forEach((a) => { (byCat[a.category || "Other"] ||= []).push(a); });
+        return Object.keys(byCat).sort().map((cat) => {
+          const rows = byCat[cat];
+          const sub = rows.reduce((s, a) => s + a.amount, 0);
+          return `<div class="mb-2.5">
+            <div class="flex justify-between items-baseline text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(cat)}</span><span class="tabular-nums text-black/55">${money(sub)}</span></div>
+            <table class="w-full text-[12px]"><tbody>${rows.map((a) => `<tr class="border-b border-black/[0.04]">
+              <td class="py-1 pr-3 font-semibold">${escapeHtml(a.vendor || "—")}</td>
+              <td class="py-1 pr-3 text-black/50">${escapeHtml(a.source_item || a.type || "")}</td>
+              <td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td>
+              <td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>
+          </div>`;
+        }).join("");
+      })())
     : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No project expenses recorded in QuickBooks yet.</div>`;
 
   // ── banners ──
