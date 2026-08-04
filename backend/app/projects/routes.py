@@ -849,6 +849,184 @@ def projects_financials(user=Depends(get_current_user)):
     return {"financials": visible[:1000]}
 
 
+@router.get("/projects/attention")
+def projects_attention(user=Depends(get_current_user)):
+    """Per-project 'what needs attention' aggregates for the Projects hub flags —
+    keyed by project qbo_id. Cheap group-bys only (estimate status counts + the
+    latest crew-offer state/age); merged client-side alongside /projects/basic
+    and /projects/financials. Heavier detail is loaded lazily per row on expand
+    via /projects/{qbo_id}/card."""
+    est_sql = text("""
+        SELECT customer_qbo_id AS pid,
+               COUNT(*) AS total,
+               SUM(st = 'Pending') AS pending,
+               SUM(st IN ('Accepted','Converted')) AS accepted,
+               SUM(st IN ('Rejected','Closed')) AS declined
+        FROM (
+          SELECT customer_qbo_id,
+                 JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.TxnStatus')) AS st
+          FROM myapp.qbo_transactions
+          WHERE entity_type = 'Estimate' AND customer_qbo_id IS NOT NULL
+        ) e
+        GROUP BY customer_qbo_id
+    """)
+    offer_sql = text("""
+        SELECT pid, status, crew_name,
+               DATEDIFF(CURDATE(), COALESCE(sent_at, created_at)) AS age_days
+        FROM (
+          SELECT o.entity_id AS pid, o.status, o.sent_at, o.created_at,
+                 TRIM(CONCAT(COALESCE(wc.name,''),
+                   CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (', pc.name, ')') ELSE '' END)) AS crew_name,
+                 ROW_NUMBER() OVER (PARTITION BY o.entity_id
+                   ORDER BY o.created_at DESC, o.id DESC) AS rn
+          FROM myapp.work_offers o
+          LEFT JOIN myapp.work_crews wc ON wc.id = o.crew_id
+          LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
+        ) x
+        WHERE rn = 1
+    """)
+    with engine.connect() as conn:
+        est_rows = conn.execute(est_sql).mappings().all()
+        offer_rows = conn.execute(offer_sql).mappings().all()
+
+    out = {}
+    for r in est_rows:
+        out.setdefault(str(r["pid"]), {})["estimates"] = {
+            "total": int(r["total"] or 0), "pending": int(r["pending"] or 0),
+            "accepted": int(r["accepted"] or 0), "declined": int(r["declined"] or 0),
+        }
+    for r in offer_rows:
+        st = r["status"]
+        state = "accepted" if st == "accepted" else ("sent" if st == "sent" else st or "none")
+        out.setdefault(str(r["pid"]), {})["offer"] = {
+            "state": state, "age_days": int(r["age_days"]) if r["age_days"] is not None else None,
+            "crew_name": (r["crew_name"] or "").strip() or None,
+        }
+    return {"attention": out}
+
+
+# Best-effort mapping of QBO estimate line items → the owner's shared-cost
+# buckets. Structured phase-level shared costs come later (Slice 3); until then
+# we group the actual estimate lines by keyword so the card shows real numbers.
+_SHARED_BUCKETS = [
+    ("wire",      r"wire"),
+    ("travel",    r"travel|lodg|per diem|mobil|fuel|flight|airfare"),
+    ("overage",   r"overage|remobil|buffer|extra day"),
+    ("equipment", r"equip|lift|scrubber|floor saw|saw|dumpster|propane|rental|scissor|boom"),
+]
+
+
+@router.get("/projects/{qbo_id}/card")
+def project_card(qbo_id: str, user=Depends(get_current_user)):
+    """Lazy per-project detail for the Projects hub expandable row: all date
+    ranges, PMs, crews, notes, shared costs, estimates, the crew offer, and a
+    financial snapshot. Loaded on demand when the office opens a row."""
+    import re
+    with engine.connect() as conn:
+        if not conn.execute(text(
+            "SELECT 1 FROM myapp.qbo_customers WHERE qbo_id=:q AND is_project=1"),
+            {"q": qbo_id}).scalar():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # date ranges + notes (schedule items that carry a start date)
+        items = conn.execute(text("""
+            SELECT DATE_FORMAT(psi.start_date,'%Y-%m-%d') AS start_date,
+                   DATE_FORMAT(psi.end_date,'%Y-%m-%d')   AS end_date, psi.notes
+            FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id = psi.project_id
+            JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id
+            WHERE qc.qbo_id = :q
+            ORDER BY psi.start_date, psi.id
+        """), {"q": qbo_id}).mappings().all()
+        date_ranges = [{"start": r["start_date"], "end": r["end_date"]}
+                       for r in items if r["start_date"]]
+        notes = [r["notes"].strip() for r in items if (r["notes"] or "").strip()]
+
+        pms = [r[0] for r in conn.execute(text("""
+            SELECT DISTINCT TRIM(CONCAT(COALESCE(pm.first_name,''),' ',COALESCE(pm.last_name,'')))
+            FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id=psi.project_id
+            JOIN myapp.qbo_customers qc ON qc.id=p.qbo_customer_id
+            JOIN myapp.project_schedule_item_project_managers spm ON spm.schedule_item_id=psi.id AND spm.unassigned_at IS NULL
+            JOIN myapp.project_managers pm ON pm.id=spm.project_manager_id AND pm.is_active=1
+            WHERE qc.qbo_id=:q
+        """), {"q": qbo_id}).all() if (r[0] or "").strip()]
+        crews = [r[0] for r in conn.execute(text("""
+            SELECT DISTINCT wc.name
+            FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id=psi.project_id
+            JOIN myapp.qbo_customers qc ON qc.id=p.qbo_customer_id
+            JOIN myapp.project_schedule_item_work_crews swc ON swc.schedule_item_id=psi.id AND swc.unassigned_at IS NULL
+            JOIN myapp.work_crews wc ON wc.id=swc.work_crew_id AND wc.is_active=1 AND wc.parent_id IS NOT NULL
+            WHERE qc.qbo_id=:q
+        """), {"q": qbo_id}).all() if (r[0] or "").strip()]
+
+        # estimates (QBO) — doc, status, amount
+        est_rows = conn.execute(text("""
+            SELECT t.doc_number, t.total_amt,
+                   JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) AS st
+            FROM myapp.qbo_transactions t
+            WHERE t.entity_type='Estimate' AND t.customer_qbo_id=:q
+            ORDER BY t.txn_date DESC
+        """), {"q": qbo_id}).mappings().all()
+        est_state = {"Accepted": "accepted", "Converted": "accepted",
+                     "Rejected": "declined", "Closed": "declined", "Pending": "pending"}
+        estimates = [{"doc": r["doc_number"], "amount": float(r["total_amt"] or 0),
+                      "status": est_state.get(r["st"], (r["st"] or "").lower())} for r in est_rows]
+
+        # shared costs — best-effort bucketed from the estimate cost lines
+        line_rows = conn.execute(text("""
+            SELECT sl.item_name, COALESCE(sl.cost_amount, sl.amount) AS amt
+            FROM myapp.qbo_sales_transaction_lines sl
+            JOIN myapp.qbo_transactions t ON t.id = sl.transaction_id
+            WHERE t.entity_type='Estimate' AND sl.project_customer_qbo_id=:q
+              AND sl.item_name IS NOT NULL
+        """), {"q": qbo_id}).mappings().all()
+        shared = {k: 0.0 for k, _ in _SHARED_BUCKETS}
+        for lr in line_rows:
+            name = (lr["item_name"] or "").lower()
+            for bucket, pat in _SHARED_BUCKETS:
+                if re.search(pat, name):
+                    shared[bucket] = round(shared[bucket] + float(lr["amt"] or 0), 2)
+                    break
+        shared = {k: round(v, 2) for k, v in shared.items()}
+
+        # latest crew offer
+        o = conn.execute(text("""
+            SELECT o.status, o.labor_amount,
+                   DATEDIFF(CURDATE(), COALESCE(o.sent_at, o.created_at)) AS age_days,
+                   TRIM(CONCAT(COALESCE(wc.name,''),
+                     CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (',pc.name,')') ELSE '' END)) AS crew_name
+            FROM myapp.work_offers o
+            LEFT JOIN myapp.work_crews wc ON wc.id=o.crew_id
+            LEFT JOIN myapp.work_crews pc ON pc.id=wc.parent_id
+            WHERE o.entity_id=:q ORDER BY o.created_at DESC, o.id DESC LIMIT 1
+        """), {"q": qbo_id}).mappings().first()
+        offer = ({"state": ("accepted" if o["status"]=="accepted" else ("sent" if o["status"]=="sent" else o["status"])),
+                  "age_days": int(o["age_days"]) if o["age_days"] is not None else None,
+                  "labor": float(o["labor_amount"] or 0), "crew_name": (o["crew_name"] or "").strip() or None}
+                 if o else {"state": "none", "age_days": None, "labor": 0, "crew_name": None})
+
+        # financial snapshot
+        fin = conn.execute(text("""
+            SELECT estimate_line_amt, invoice_line_amt, expense_line_amt,
+                   balance_amt, actual_profit, actual_profit_pct,
+                   projected_profit, projected_profit_pct
+            FROM myapp.project_financial_summary pfs
+            JOIN myapp.qbo_customers qc ON qc.id=pfs.qbo_customer_id
+            WHERE qc.qbo_id=:q LIMIT 1
+        """), {"q": qbo_id}).mappings().first()
+        financial = {k: (float(v) if v is not None else None) for k, v in (fin or {}).items()}
+
+    return {
+        "qbo_id": qbo_id,
+        "date_ranges": date_ranges,
+        "pms": pms, "crews": crews, "notes": notes,
+        "shared": shared, "estimates": estimates,
+        "offer": offer, "financial": financial,
+    }
+
+
 @router.post("/projects/refresh-financials")
 def refresh_financials(_admin=Depends(require_admin)):
     """
