@@ -177,13 +177,9 @@ function render(container, entityId, d) {
       <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(m.status_label)}${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`).join("");
 
-  // crew grouped by estimate (change-orders show under their own sub-header)
-  const multiCrew = (crew.schedules || []).length > 1;
-  const crewRows = (crew.schedules || []).map((s) => {
-    const header = multiCrew ? `
-      <tr class="bg-black/[0.02]"><td colspan="4" class="py-1.5 px-4 text-[11px] font-bold text-black/50">
-        ${s.estimate_doc_number ? "Estimate #" + escapeHtml(s.estimate_doc_number) : "Estimate"}${s.crew_name ? " · " + escapeHtml(s.crew_name) : ""} · <span class="tabular-nums">${money(s.subtotal)}</span>
-      </td></tr>` : "";
+  // Per-estimate collapsible groups for the crew card (#4). Each estimate's
+  // bi-weekly schedule is its own <details> so multi-estimate projects stay tidy.
+  const crewGroupsHtml = (crew.schedules || []).map((s) => {
     const rows = s.installments.map((i) => `
       <tr class="border-b border-black/5">
         <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[i.tier]}${eInput("installment", i.id, "note", i.note || "Payment", "text", "font-semibold min-w-[7rem]")}</span></td>
@@ -191,8 +187,16 @@ function render(container, entityId, d) {
         <td class="py-1 px-2 text-right">${eInput("installment", i.id, "amount", Math.round(i.amount), "number", "ml-auto")}</td>
         <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(i.status_label)}${editedChip(i.edited)}${delBtn("installment", i.id)}</td>
       </tr>`).join("");
-    const addRow = `<tr><td colspan="4" class="px-4 py-1.5"><button data-add="installment" data-sid="${s.schedule_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">+ Add payment</button></td></tr>`;
-    return header + rows + addRow;
+    const label = (s.estimate_doc_number ? "Estimate #" + escapeHtml(s.estimate_doc_number) : "Estimate") + (s.crew_name ? " · " + escapeHtml(s.crew_name) : "");
+    return `<details open class="group/cg border-b border-black/[0.06]">
+      <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden bg-black/[0.015] hover:bg-black/[0.03]">
+        <svg class="w-3 h-3 text-black/30 transition-transform group-open/cg:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+        <span class="text-[12px] font-bold text-black/60">${label}</span>
+        <span class="ml-auto tabular-nums text-[12px] text-black/55">${money(s.subtotal)}</span>
+      </summary>
+      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-2 pl-4 pr-3 text-left font-bold">Payment</th><th class="py-2 px-2 text-left font-bold">Pay date</th><th class="py-2 px-2 text-right font-bold">Amount</th><th class="py-2 pl-2 pr-4 text-right font-bold">Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="px-4 py-1.5"><button data-add="installment" data-sid="${s.schedule_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">+ Add payment</button></div>
+    </details>`;
   }).join("");
 
   const expRows = exp.items.map((i) => `
@@ -238,6 +242,21 @@ function render(container, entityId, d) {
         <span><b>Offer sent</b> to ${escapeHtml(cur.crew_name || "crew")} · <span class="tabular-nums">${money(cur.labor_amount)}</span> — awaiting response</span>
         <button data-offer-withdraw="${cur.id}" class="ml-auto text-[11.5px] font-semibold text-blue-700 hover:underline">Withdraw</button></div>`;
     }
+    // Project already underway, no app offer record → infer the working crew from
+    // the real QBO bills and let the office backfill an accepted offer (#3).
+    if (offer.started && !offer.has_record && offer.working && offer.working.length) {
+      const chips = offer.working.map((w) => `<span class="tabular-nums font-semibold">${escapeHtml(w.vendor)} · ${money(w.amount)}</span>`).join(`<span class="text-emerald-700/40 mx-1">·</span>`);
+      return `<div class="px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-[12.5px] text-emerald-900">
+        <div class="flex items-center gap-2 flex-wrap">
+          <b>✓ Working crew</b> <span class="text-[10px] font-bold uppercase tracking-wide text-emerald-700/70">from QuickBooks</span>
+          ${chips}
+          ${offer.assigned_crew
+            ? `<button data-offer-backfill class="ml-auto text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1">Record as accepted</button>`
+            : `<span class="ml-auto text-[11px] text-emerald-700/70">Assign a crew to record the offer</span>`}
+        </div>
+        <div class="text-[11px] text-emerald-700/70 mt-1">This project was already underway — the offer was accepted before the app${offer.assigned_crew ? ". Recording it files it in the app's offer tracker as " + escapeHtml(offer.assigned_crew.crew_name || "the assigned crew") : ""}.</div>
+      </div>`;
+    }
     return `<div class="px-4 py-2.5 border-b border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap">
       <span class="font-semibold text-black/55">Crew job offer:</span>
       <select data-offer-crew class="${EDIT_BASE} border-black/15">${crews.map((c) => `<option value="${c.id}">${escapeHtml((c.parent_name ? c.parent_name + " — " : "") + c.name)}</option>`).join("")}</select>
@@ -258,6 +277,7 @@ function render(container, entityId, d) {
       <div class="px-4 pb-3 overflow-x-auto">${innerHtml}</div>
     </details>`;
 
+  const invActualTotal = (inv.actuals || []).reduce((s, a) => s + (a.amount || 0), 0);
   const invActuals = (inv.actuals && inv.actuals.length)
     ? actualsBlock("Actual invoices in QuickBooks", inv.actuals.length,
         `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Estimate</th><th class="font-bold">Date</th><th class="font-bold">Due</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
@@ -267,8 +287,59 @@ function render(container, entityId, d) {
            <td class="py-1.5 tabular-nums text-black/60">${shortDate(a.txn_date)}</td>
            <td class="py-1.5 tabular-nums text-black/60">${shortDate(a.due_date)}</td>
            <td class="py-1.5 text-right tabular-nums font-semibold">${money(a.amount)}</td>
-           <td class="py-1.5 text-right">${pill(a.status === "Paid" ? "Paid" : "Sent · A/R")}</td></tr>`).join("")}</tbody></table>`)
+           <td class="py-1.5 text-right">${pill(a.status === "Paid" ? "Paid" : "Sent · A/R")}</td></tr>`).join("")}</tbody>
+         <tfoot><tr class="border-t-2 border-black/15 font-bold text-ink-900">
+           <td class="py-1.5" colspan="4">Total invoiced <span class="font-normal text-black/45">vs. ${money(inv.summary.total)} estimate</span></td>
+           <td class="py-1.5 text-right tabular-nums">${money(invActualTotal)}</td>
+           <td class="py-1.5 text-right text-[11px] font-semibold ${invActualTotal - inv.summary.total >= 0 ? "text-emerald-700" : "text-black/45"}">${invActualTotal - inv.summary.total >= 0 ? "" : "−"}${money(Math.abs(invActualTotal - inv.summary.total))}</td>
+         </tr></tfoot></table>`)
     : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No invoices in QuickBooks yet — the schedule above is the plan.</div>`;
+
+  // Actual crew cash out of QuickBooks — the real Contract-Labor bills, any vendor
+  // (so a second/unregistered crew shows here too), grouped by the payee vendor.
+  const crewActualTotal = (crew.actuals || []).reduce((s, a) => s + (a.amount || 0), 0);
+  const crewActuals = (crew.actuals && crew.actuals.length)
+    ? actualsBlock("Actual crew bills in QuickBooks", crew.actuals.length, (() => {
+        const byV = {};
+        crew.actuals.forEach((a) => { (byV[a.vendor || "—"] ||= []).push(a); });
+        const body = Object.keys(byV).sort().map((v) => {
+          const rows = byV[v];
+          const sub = rows.reduce((s, a) => s + a.amount, 0);
+          return `<div class="mb-2.5">
+            <div class="flex justify-between items-baseline text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(v)}</span><span class="tabular-nums text-black/55">${money(sub)}</span></div>
+            <table class="w-full text-[12px]"><tbody>${rows.map((a) => `<tr class="border-b border-black/[0.04]">
+              <td class="py-1 pr-3 text-black/50">Contract Labor</td>
+              <td class="py-1 pr-3 tabular-nums text-black/60">${a.doc ? "#" + escapeHtml(a.doc) : ""}</td>
+              <td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td>
+              <td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>
+          </div>`;
+        }).join("");
+        return body + `<div class="flex justify-between items-baseline text-[12px] font-bold text-ink-900 border-t-2 border-black/15 pt-1.5">
+          <span>Total paid to crews <span class="font-normal text-black/45">vs. ${money(crewEst)} estimate</span></span>
+          <span class="tabular-nums">${money(crewActualTotal)}</span></div>`;
+      })())
+    : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No crew bills in QuickBooks yet — the schedule above is the plan.</div>`;
+
+  // Estimated-vs-actual by expense category (#6) — the side-by-side reconcile.
+  const estByCat = {};
+  (exp.by_category || []).forEach((c) => { estByCat[c.category] = c.estimated; });
+  const catCompare = (exp.by_category && exp.by_category.length) ? `
+    <div class="px-4 py-3 border-b border-black/[0.06] bg-black/[0.012]">
+      <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Estimated vs. actual by category</div>
+      <table class="w-full text-[12px]">
+        <thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Category</th><th class="text-right font-bold">Estimated</th><th class="text-right font-bold">Actual (QBO)</th><th class="text-right font-bold">Variance</th></tr></thead>
+        <tbody>${exp.by_category.map((c) => `<tr class="border-t border-black/[0.05]">
+          <td class="py-1 font-semibold">${escapeHtml(c.category)}</td>
+          <td class="py-1 text-right tabular-nums text-black/60">${money(c.estimated)}</td>
+          <td class="py-1 text-right tabular-nums font-semibold">${money(c.actual)}</td>
+          <td class="py-1 text-right tabular-nums font-semibold ${c.variance > 0.5 ? "text-red-600" : (c.variance < -0.5 ? "text-emerald-700" : "text-black/40")}">${c.variance > 0.5 ? "+" : ""}${money(c.variance)}</td></tr>`).join("")}</tbody>
+        <tfoot><tr class="border-t-2 border-black/15 font-bold text-ink-900">
+          <td class="py-1.5">Total</td>
+          <td class="py-1.5 text-right tabular-nums">${money(exp.estimate_total)}</td>
+          <td class="py-1.5 text-right tabular-nums">${money(exp.spent_qbo)}</td>
+          <td class="py-1.5 text-right tabular-nums ${exp.variance > 0.5 ? "text-red-600" : "text-emerald-700"}">${exp.variance > 0.5 ? "+" : ""}${money(exp.variance)}</td></tr></tfoot>
+      </table>
+    </div>` : "";
 
   const expActuals = (exp.actuals && exp.actuals.length)
     ? actualsBlock("Actual expenses in QuickBooks", exp.actuals.length, (() => {
@@ -277,8 +348,9 @@ function render(container, entityId, d) {
         return Object.keys(byCat).sort().map((cat) => {
           const rows = byCat[cat];
           const sub = rows.reduce((s, a) => s + a.amount, 0);
+          const est = estByCat[cat];
           return `<div class="mb-2.5">
-            <div class="flex justify-between items-baseline text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(cat)}</span><span class="tabular-nums text-black/55">${money(sub)}</span></div>
+            <div class="flex justify-between items-baseline text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(cat)}</span><span class="tabular-nums text-black/55">${est != null ? `<span class="font-normal text-black/40">${money(est)} est · </span>` : ""}${money(sub)}</span></div>
             <table class="w-full text-[12px]"><tbody>${rows.map((a) => `<tr class="border-b border-black/[0.04]">
               <td class="py-1 pr-3 font-semibold">${escapeHtml(a.vendor || "—")}</td>
               <td class="py-1 pr-3 text-black/50">${escapeHtml(a.source_item || a.type || "")}</td>
@@ -373,15 +445,24 @@ function render(container, entityId, d) {
         invRows, "Add a contract value on the estimate to generate invoices.",
         (inv.schedule_id ? addBtn("milestone", inv.schedule_id, "Add invoice milestone") : "") + invActuals)}
 
-      ${tableCard("Crew payments", (crew.crew_name || "Crew") + " · " + money(crew.summary.total),
-        th([{ t: "Payment" }, { t: "Pay date" }, { t: "Amount", r: 1 }, { t: "Status", r: 1 }]),
-        crewRows, "Add assignment dates to generate the bi-weekly schedule.", "",
-        offerBar + ((crew.schedules && crew.schedules.length) ? `<div class="px-4 py-1.5 border-b border-black/[0.06] text-[11.5px]"><button data-offer-script class="font-semibold text-blue-600 hover:underline">📋 Offer script</button><span class="text-black/40 ml-2">estimate amounts + payment schedule, ready to copy / email</span></div>` : ""))}
+      <!-- crew payments — offer bar, then each estimate collapsible, then QBO actuals -->
+      <details open class="group card overflow-hidden mb-4">
+        <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="text-sm font-bold text-ink-900">Crew payments</span>
+          <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">◆ Auto</span>
+          <span class="ml-auto tabular-nums text-[12px] text-black/55">${escapeHtml((crew.crew_name || "Crew") + " · " + money(crew.summary.total))}</span>
+        </summary>
+        ${offerBar}
+        ${(crew.schedules && crew.schedules.length) ? `<div class="px-4 py-1.5 border-b border-black/[0.06] text-[11.5px]"><button data-offer-script class="font-semibold text-blue-600 hover:underline">📋 Offer script</button><span class="text-black/40 ml-2">estimate amounts + payment schedule, ready to copy / email</span></div>` : ""}
+        ${crewGroupsHtml || `<div class="px-4 py-6 text-sm text-black/45">Add assignment dates to generate the bi-weekly schedule.</div>`}
+        ${crewActuals}
+      </details>
 
       ${tableCard("Project expenses", money(exp.summary.total) + " estimate",
         th([{ t: "Category" }, { t: "Description" }, { t: "Date" }, { t: "Amount", r: 1 }, { t: "Status", r: 1 }]),
         expRows, "No estimate cost lines to plan from.",
-        addBtn("item", null, "Add expense") + expActuals)}
+        addBtn("item", null, "Add expense") + expActuals, catCompare)}
 
       <!-- contribution -->
       ${contribHtml}
@@ -457,6 +538,14 @@ function render(container, entityId, d) {
       oSend.disabled = true;
       try { await api(`/offers/project/${encodeURIComponent(entityId)}`, { method: "POST", body: JSON.stringify({ crew_id: Number(crewId), labor_amount: Number(labor || 0) }) }); await reload(); }
       catch (err) { oSend.disabled = false; alert("Send failed: " + (err?.message || "error")); }
+      return;
+    }
+    const oBackfill = e.target.closest("[data-offer-backfill]");
+    if (oBackfill) {
+      if (!confirm("Record this project's crew as an accepted offer? Use this for projects that started before the app — it files the historical acceptance in the offer tracker.")) return;
+      oBackfill.disabled = true;
+      try { await api(`/offers/project/${encodeURIComponent(entityId)}/backfill`, { method: "POST" }); await reload(); }
+      catch (err) { oBackfill.disabled = false; alert("Record failed: " + (err?.message || "error")); }
       return;
     }
     const oWithdraw = e.target.closest("[data-offer-withdraw]");

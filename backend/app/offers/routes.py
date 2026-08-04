@@ -184,6 +184,38 @@ def send_offer(entity_id: str, body: OfferCreate, user=Depends(get_current_user)
     return {"ok": True, "id": res.lastrowid}
 
 
+@router.post("/project/{entity_id}/backfill")
+def backfill_accepted(entity_id: str, user=Depends(get_current_user)):
+    """Record an accepted offer for a project that was already underway before the
+    app existed (offer lived in Google Drive). Uses the crew already assigned on
+    the payment schedule and the estimate's labor amount — so the app's offer
+    tracker reflects the historical acceptance without re-sending anything."""
+    _require_office(user)
+    with engine.begin() as conn:
+        if not _project_exists(conn, entity_id):
+            raise HTTPException(status_code=404, detail="Project not found")
+        existing = conn.execute(text("SELECT COUNT(*) FROM work_offers WHERE entity_id=:e"),
+                                {"e": entity_id}).scalar()
+        if existing:
+            raise HTTPException(status_code=400, detail="This project already has offer records.")
+        crew_id = conn.execute(text(
+            """SELECT crew_id FROM project_payment_schedules
+               WHERE entity_id=:e AND crew_id IS NOT NULL ORDER BY id LIMIT 1"""),
+            {"e": entity_id}).scalar()
+        if not crew_id:
+            raise HTTPException(status_code=400,
+                                detail="Assign a crew on the Assignment page first, then record.")
+        labor, scope = _estimate_suggestions(conn, entity_id)
+        res = conn.execute(text("""
+            INSERT INTO work_offers
+              (entity_id, crew_id, labor_amount, scope, status, sent_at, responded_at,
+               response_note, created_by_user_id, responded_by_user_id)
+            VALUES (:e,:c,:amt,:sc,'accepted',NOW(),NOW(),
+               'Backfilled — offer accepted before the app (recorded from QuickBooks)',:u,:u)
+        """), {"e": entity_id, "c": crew_id, "amt": labor, "sc": (scope or None), "u": user.get("id")})
+    return {"ok": True, "id": res.lastrowid}
+
+
 class OfferResponse(BaseModel):
     status: str          # accepted | declined
     note: Optional[str] = None

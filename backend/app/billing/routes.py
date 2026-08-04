@@ -224,19 +224,25 @@ def _all_crew_vendor_ids(conn, entity_id):
     return ids
 
 
-def _qbo_crew_paid(conn, entity_id, vendor_ids):
-    """Actual crew cash = Bill lines tagged to this project from ANY of the crew
-    vendors (bi-weekly payroll bills split across projects)."""
-    if not vendor_ids:
-        return 0.0
-    amt = conn.execute(text("""
-        SELECT ROUND(SUM(l.amount), 2)
+def _crew_labor_bills(conn, entity_id):
+    """Actual crew cash = every 'Contract Labor' bill line tagged to this project,
+    from ANY vendor. This is the reliable signal (verified across projects): it
+    captures every crew that worked — even ones not registered in the app — and
+    excludes non-labor lines a crew vendor might also bill (e.g. materials).
+    Returns per-vendor/date rows; the total is what's been paid to crews."""
+    rows = conn.execute(text("""
+        SELECT t.txn_date, t.doc_number,
+               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name')) AS vendor,
+               ROUND(SUM(l.amount), 2) AS amt
         FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
         WHERE l.line_customer_qbo_id = :e AND t.entity_type = 'Bill'
-          AND t.vendor_qbo_id IN :vs
-    """).bindparams(bindparam("vs", expanding=True)),
-        {"e": entity_id, "vs": list(vendor_ids)}).scalar()
-    return float(amt or 0)
+          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+        GROUP BY t.id, t.txn_date, t.doc_number, vendor
+        ORDER BY t.txn_date
+    """), {"e": entity_id}).mappings().all()
+    return [{"date": str(r["txn_date"]) if r["txn_date"] else None,
+             "vendor": r["vendor"] or "Unknown vendor", "amount": float(r["amt"] or 0),
+             "doc": r["doc_number"]} for r in rows]
 
 
 def _estimate_docs(conn, entity_id):
@@ -286,10 +292,11 @@ def _actual_invoices(conn, entity_id):
     return out
 
 
-def _actual_expenses(conn, entity_id, crew_vendor_ids):
-    """Real QBO bills/purchases tagged to this project (excluding crew vendors) —
-    the actual per-line spend, categorized (by item / expense account) so the UI
-    can file each actual under its expense category."""
+def _actual_expenses(conn, entity_id):
+    """Real QBO bills/purchases tagged to this project — the actual per-line spend,
+    categorized by item / expense account. 'Contract Labor' lines (and margin
+    items) are skipped here because they're crew payments, not project expenses —
+    they belong to the crew section (any vendor, registered or not)."""
     rows = conn.execute(text("""
         SELECT t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number,
                JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name')) AS vendor,
@@ -303,12 +310,11 @@ def _actual_expenses(conn, entity_id, crew_vendor_ids):
         GROUP BY t.id, t.txn_date, t.entity_type, t.vendor_qbo_id, t.doc_number, vendor, item_or_account
         ORDER BY t.txn_date
     """), {"e": entity_id}).mappings().all()
-    excl = {str(v) for v in (crew_vendor_ids or []) if v}
     out = []
     for r in rows:
-        if str(r["vendor_qbo_id"]) in excl:
-            continue  # crew payment, not a material/rental expense
-        cat = _expense_category(r["item_or_account"]) or "Other"
+        cat = _expense_category(r["item_or_account"])
+        if cat is None:
+            continue  # Contract Labor / Buffer / OH&P — crew or margin, not an expense
         out.append({
             "date": str(r["txn_date"]) if r["txn_date"] else None,
             "vendor": r["vendor"] or "Unknown vendor", "amount": float(r["amt"] or 0),
@@ -418,7 +424,8 @@ def _compose_invoices(conn, entity_id, books_closed):
 
 def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
     sched_map = _load_schedules(conn, entity_id)
-    paid = _qbo_crew_paid(conn, entity_id, crew_vendor_ids)
+    labor_bills = _crew_labor_bills(conn, entity_id)   # all crews, item-based
+    paid = round(sum(b["amount"] for b in labor_bills), 2)
 
     # Sum installments that land on the same pay date across all of the project's
     # schedules (main estimate + change orders) — the cash view cares about total
@@ -474,6 +481,10 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
         total = estimate_total
         bar_paid = round(min(paid, total), 2)
         bar_sched = round(max(0.0, total - bar_paid), 2)
+    # crews actually paid in QBO (any vendor) — surfaces multi-crew reality
+    paid_by_vendor = {}
+    for b in labor_bills:
+        paid_by_vendor[b["vendor"]] = round(paid_by_vendor.get(b["vendor"], 0) + b["amount"], 2)
     return {
         "contract_labor": total,
         "estimate_total": estimate_total,
@@ -482,18 +493,23 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
         "crew_name": crew_name,
         "schedules": schedules,       # grouped by estimate, each editable
         "installments": flat_lines,   # flattened, for the contribution strip
+        "actuals": labor_bills,       # actual crew (Contract Labor) bills from QBO
+        "paid_by_vendor": paid_by_vendor,
         "vendor_available": bool(crew_vendor_ids),
         "summary": {"paid": bar_paid, "scheduled": bar_sched, "total": round(bar_paid + bar_sched, 2)},
     }
 
 
-def _compose_expenses(conn, entity_id, crew_vendor_ids, books_closed):
+def _compose_expenses(conn, entity_id, books_closed):
     items = conn.execute(text("""
         SELECT id, category, description, amount, expense_date, status, note, sort_order, edited
         FROM project_expense_items WHERE entity_id = :e ORDER BY sort_order, expense_date, id
     """), {"e": entity_id}).mappings().all()
     estimate_total = round(sum(float(i["amount"] or 0) for i in items), 2)
-    spent = _qbo_expense_spend(conn, entity_id, crew_vendor_ids)
+    actuals = _actual_expenses(conn, entity_id)
+    # Spend = the real (non-crew) QBO bills/purchases we actually list as actuals,
+    # so the bar and the drill-down always reconcile to the same number.
+    spent = round(sum(a["amount"] for a in actuals), 2)
 
     lines = []
     for i in items:
@@ -521,13 +537,30 @@ def _compose_expenses(conn, entity_id, crew_vendor_ids, books_closed):
     else:
         bar_committed = round(min(spent, estimate_total), 2)
         bar_allocated = round(max(0.0, estimate_total - spent), 2)
+
+    # Per-category estimated-vs-actual, so the UI can lay the two side by side.
+    # Estimated = the expense schedule rows; actual = the categorized QBO bills.
+    cat_est, cat_act = {}, {}
+    for i in items:
+        c = i["category"] or "Other"
+        cat_est[c] = round(cat_est.get(c, 0.0) + float(i["amount"] or 0), 2)
+    for a in actuals:
+        c = a["category"] or "Other"
+        cat_act[c] = round(cat_act.get(c, 0.0) + a["amount"], 2)
+    by_category = [
+        {"category": c, "estimated": round(cat_est.get(c, 0.0), 2),
+         "actual": round(cat_act.get(c, 0.0), 2),
+         "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2)}
+        for c in sorted(set(cat_est) | set(cat_act))
+    ]
     return {
         "estimate_total": estimate_total,
         "spent_qbo": round(spent, 2),
         "over": over,
         "variance": round(spent - estimate_total, 2),
         "items": lines,
-        "actuals": _actual_expenses(conn, entity_id, crew_vendor_ids),
+        "actuals": actuals,
+        "by_category": by_category,
         "categories": CATEGORIES,
         "summary": {"committed": bar_committed, "allocated": bar_allocated, "over": over,
                     "total": estimate_total},
@@ -649,7 +682,21 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         inv = _compose_invoices(conn, entity_id, books_closed)
         crew = _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed)
         crew["offer"] = _project_offer(conn, entity_id)
-        exp = _compose_expenses(conn, entity_id, crew_vendor_ids, books_closed)
+        # Already-started projects: the offer was accepted historically (in Google
+        # Drive), so there's no app offer record — infer the working crew from the
+        # real QBO bills so the office can one-click backfill an accepted offer.
+        offers_exist = conn.execute(text(
+            "SELECT COUNT(*) FROM work_offers WHERE entity_id=:e"), {"e": entity_id}).scalar()
+        assigned = next((s for s in crew.get("schedules", []) if s.get("crew_id")), None)
+        crew["offer"].update({
+            "has_record": bool(offers_exist),
+            "started": crew["paid_qbo"] > 0.5,
+            "working": [{"vendor": v, "amount": a} for v, a in
+                        sorted((crew.get("paid_by_vendor") or {}).items(), key=lambda kv: -kv[1])],
+            "assigned_crew": ({"crew_id": assigned["crew_id"], "crew_name": assigned["crew_name"]}
+                              if assigned else None),
+        })
+        exp = _compose_expenses(conn, entity_id, books_closed)
         crews = _crew_options(conn)
         drift = _drift_reasons(conn, entity_id, ctx, inv)
 
