@@ -375,7 +375,8 @@ function render(container, entityId, d) {
 
       ${tableCard("Crew payments", (crew.crew_name || "Crew") + " · " + money(crew.summary.total),
         th([{ t: "Payment" }, { t: "Pay date" }, { t: "Amount", r: 1 }, { t: "Status", r: 1 }]),
-        crewRows, "Add assignment dates to generate the bi-weekly schedule.", "", offerBar)}
+        crewRows, "Add assignment dates to generate the bi-weekly schedule.", "",
+        offerBar + ((crew.schedules && crew.schedules.length) ? `<div class="px-4 py-1.5 border-b border-black/[0.06] text-[11.5px]"><button data-offer-script class="font-semibold text-blue-600 hover:underline">📋 Offer script</button><span class="text-black/40 ml-2">estimate amounts + payment schedule, ready to copy / email</span></div>` : ""))}
 
       ${tableCard("Project expenses", money(exp.summary.total) + " estimate",
         th([{ t: "Category" }, { t: "Description" }, { t: "Date" }, { t: "Amount", r: 1 }, { t: "Status", r: 1 }]),
@@ -446,6 +447,8 @@ function render(container, entityId, d) {
       });
       return;
     }
+    const script = e.target.closest("[data-offer-script]");
+    if (script) { openOfferScriptModal(offerScript(crew, p.name)); return; }
     const oSend = e.target.closest("[data-offer-send]");
     if (oSend) {
       const crewId = root.querySelector("[data-offer-crew]")?.value;
@@ -480,6 +483,48 @@ function render(container, entityId, d) {
       try { await api(url, { method: "DELETE" }); await reload(); }
       catch (err) { alert("Delete failed: " + (err?.message || "error")); }
     }
+  });
+}
+
+// Scripted crew job offer — estimate amounts + total + payment schedule, ready
+// to copy/email. Built from the per-estimate schedules + summed installments.
+function offerScript(crew, projectName) {
+  const L = [];
+  L.push(`Job offer — ${projectName || "Project"}`);
+  if (crew.crew_name) L.push(`Crew: ${crew.crew_name}`);
+  L.push("");
+  L.push("Scope (contract labor by estimate):");
+  (crew.schedules || []).forEach((s) => {
+    const est = s.estimate_doc_number ? `Estimate #${s.estimate_doc_number}` : "Estimate";
+    L.push(`  ${est}: ${money(s.contract_labor || s.subtotal || 0)}`);
+  });
+  L.push(`Total labor: ${money(crew.summary.total)}`);
+  L.push("");
+  L.push("Payment schedule (bi-weekly, in arrears):");
+  const byDate = {};
+  (crew.installments || []).forEach((i) => { if (i.pay_date) byDate[i.pay_date] = (byDate[i.pay_date] || 0) + i.amount; });
+  Object.keys(byDate).sort().forEach((d) => L.push(`  ${shortDate(d)}: ${money(byDate[d])}`));
+  return L.join("\n");
+}
+
+function openOfferScriptModal(text) {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5">
+    <div class="text-base font-bold text-ink-900 mb-1">Crew job offer</div>
+    <div class="text-[12px] text-black/50 mb-3">Copy this to send the crew — edit first if you like.</div>
+    <textarea data-script class="w-full h-64 rounded-xl border border-black/15 p-3 text-[12.5px] tabular-nums" style="font-family:ui-monospace,Consolas,monospace">${escapeHtml(text)}</textarea>
+    <div class="mt-3 flex items-center justify-end gap-2"><span data-msg class="text-xs font-semibold text-emerald-700 mr-auto"></span>
+      <button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Close</button>
+      <button data-copy class="btn-primary text-sm px-4 py-1.5">Copy</button></div></div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+  overlay.querySelector("[data-copy]").addEventListener("click", async () => {
+    const ta = overlay.querySelector("[data-script]");
+    try { await navigator.clipboard.writeText(ta.value); } catch (_) { ta.select(); document.execCommand("copy"); }
+    overlay.querySelector("[data-msg]").textContent = "Copied to clipboard.";
   });
 }
 
