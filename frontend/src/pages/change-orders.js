@@ -9,6 +9,10 @@ const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString("en
 const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
 const REASONS = ["Scope change", "Added items", "Removed items", "Material / spec change",
   "Pricing correction", "Customer request", "Timeline change", "Other"];
+// OPI standard estimate line items (QBO-style dropdown for the estimate form).
+const CO_ITEMS = ["Contract Labor", "Materials", "Lifts", "Lodging", "Mgmt Travel", "Propane",
+  "Dumpsters", "Floor Scrubber", "Floor Saw", "Slurry Pan", "GC Licensing", "Permit Running",
+  "Shipping/Freight", "Buffer", "OH&P"];
 const STATUSES = [["draft", "Draft"], ["sent", "Sent"], ["approved", "Approved"], ["rejected", "Rejected"]];
 const STATUS_CLS = { draft: "bg-slate-100 text-slate-700", sent: "bg-blue-100 text-blue-800",
   approved: "bg-emerald-100 text-emerald-800", rejected: "bg-rose-100 text-rose-700" };
@@ -245,7 +249,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
       openEditModal(data.items[Number(b.getAttribute("data-edit"))])));
     container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Delete this draft change order?")) return;
-      try { data = await api(`/change-orders/${b.getAttribute("data-del")}`, { method: "DELETE" }); render(); }
+      try { await api(`/change-orders/${b.getAttribute("data-del")}`, { method: "DELETE" }); await reloadData(); }
       catch (err) { alert(err.message); }
     }));
   }
@@ -288,15 +292,19 @@ export async function mountChangeOrdersPanel(container, entityId) {
     const total = () => lines.reduce((s, l) => s + lineAmt(l), 0);
     const GRID = "grid grid-cols-[1.4fr_2fr_.6fr_.9fr_.9fr_auto] gap-1.5 items-center";
     const rowHtml = (l, idx) => `<div class="${GRID}">
-      <input data-l="${idx}" data-k="label" value="${escapeHtml(l.label)}" placeholder="Item" class="input text-xs py-1">
+      <input data-l="${idx}" data-k="label" value="${escapeHtml(l.label)}" placeholder="Item" list="coItemList" class="input text-xs py-1">
       <input data-l="${idx}" data-k="description" value="${escapeHtml(l.description)}" placeholder="Description" class="input text-xs py-1">
       <input data-l="${idx}" data-k="qty" type="number" step="1" value="${l.qty}" class="input text-xs py-1 text-right">
       <input data-l="${idx}" data-k="rate" type="number" step="1" value="${l.rate}" class="input text-xs py-1 text-right">
       <div data-amt="${idx}" class="text-right tabular-nums text-xs font-semibold">${money2(lineAmt(l))}</div>
       <button data-rm="${idx}" class="text-black/30 hover:text-red-600 text-sm">✕</button></div>`;
     overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-5 max-h-[90vh] overflow-auto">
+      <datalist id="coItemList">${CO_ITEMS.map((i) => `<option value="${escapeHtml(i)}">`).join("")}</datalist>
       <div class="text-base font-bold text-ink-900 mb-3">Change order — estimate</div>
-      <label class="block mb-3"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Title</div><input data-title class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Title</div><input data-title class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div><select data-reason class="input text-sm py-1.5 w-full"><option value="">—</option>${REASONS.map((r) => `<option>${r}</option>`).join("")}</select></label>
+      </div>
       <div class="${GRID} text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1"><div>Item</div><div>Description</div><div class="text-right">Qty</div><div class="text-right">Rate</div><div class="text-right">Amount</div><div></div></div>
       <div data-lines class="space-y-1.5"></div>
       <button data-addline class="text-xs font-semibold text-blue-600 hover:underline mt-2">+ Add line</button>
@@ -324,7 +332,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
     });
     linesEl.addEventListener("click", (e) => { const rm = e.target.closest("[data-rm]"); if (!rm) return; lines.splice(Number(rm.getAttribute("data-rm")), 1); if (!lines.length) lines = [{ label: "", description: "", qty: 1, rate: 0 }]; redraw(); updTotal(); });
     overlay.querySelector("[data-addline]").addEventListener("click", () => { lines.push({ label: "", description: "", qty: 1, rate: 0 }); redraw(); });
-    const payload = () => ({ title: overlay.querySelector("[data-title]").value.trim() || null, total: total(),
+    const payload = () => ({ title: overlay.querySelector("[data-title]").value.trim() || null, reason: overlay.querySelector("[data-reason]").value || null, total: total(),
       lines: lines.filter(l => l.label || lineAmt(l)).map(l => ({ label: l.label, description: l.description, qty: Number(l.qty) || null, rate: Number(l.rate) || null, amount: lineAmt(l) })) });
     overlay.querySelector("[data-pdf]").addEventListener("click", async () => {
       setMsg("Generating…", true);
@@ -337,7 +345,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
     });
     overlay.querySelector("[data-savedraft]").addEventListener("click", async () => {
       const p = payload();
-      try { data = await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify({ kind: "change_order", title: p.title, amount: p.total, status: "draft" }) }); close(); render(); }
+      try { await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify({ kind: "change_order", title: p.title, reason: p.reason, amount: p.total, status: "draft" }) }); close(); await reloadData(); }
       catch (e) { setMsg(e?.message || "Save failed", false); }
     });
   }
@@ -384,7 +392,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
     if (linkBtn) linkBtn.addEventListener("click", async () => {
       const doc = overlay.querySelector("[data-link]").value.trim();
       if (!doc) return;
-      try { data = await api(`/change-orders/${item.co_id}/link-qbo`, { method: "POST", body: JSON.stringify({ doc_number: doc }) }); close(); render(); }
+      try { await api(`/change-orders/${item.co_id}/link-qbo`, { method: "POST", body: JSON.stringify({ doc_number: doc }) }); close(); await reloadData(); }
       catch (err) { let d = err?.message || "Link failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
     });
 
@@ -398,15 +406,15 @@ export async function mountChangeOrdersPanel(container, entityId) {
         if (!item) {
           payload.amount = parseFloat(val("amount").value) || null;
           payload.contract_labor = parseFloat(val("contract_labor").value) || null;
-          data = await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify(payload) });
+          await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify(payload) });
         } else if (item.source === "draft") {
           payload.amount = parseFloat(val("amount").value) || null;
           payload.contract_labor = parseFloat(val("contract_labor").value) || null;
-          data = await api(`/change-orders/${item.co_id}`, { method: "PATCH", body: JSON.stringify(payload) });
+          await api(`/change-orders/${item.co_id}`, { method: "PATCH", body: JSON.stringify(payload) });
         } else {
-          data = await api(`/change-orders/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(item.qbo_estimate_id)}`, { method: "PUT", body: JSON.stringify(payload) });
+          await api(`/change-orders/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(item.qbo_estimate_id)}`, { method: "PUT", body: JSON.stringify(payload) });
         }
-        close(); render();
+        close(); await reloadData();
       } catch (err) { let d = err?.message || "Could not save"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
     });
   }
