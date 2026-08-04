@@ -84,13 +84,15 @@ def _build(conn, project_qbo_id):
             "amount": float(e["amount"] or 0), "contract_labor": float(e["contract_labor"] or 0),
             "qbo_status": e["qbo_status"],
         })
+    line_counts = {r[0]: r[1] for r in conn.execute(text(
+        "SELECT co_id, COUNT(*) FROM project_change_order_lines GROUP BY co_id")).all()}
     for o in drafts:
         items.append({
             "co_id": o["id"], "source": "draft", "qbo_estimate_id": None, "doc_number": None,
             "txn_date": None, "kind": o["kind"], "co_number": None,
             "title": o["title"], "reason": o["reason"], "scope": o["scope"], "status": o["status"],
             "amount": float(o["amount"] or 0), "contract_labor": float(o["contract_labor"] or 0),
-            "qbo_status": None,
+            "qbo_status": None, "has_lines": o["id"] in line_counts,
         })
 
     # CO # is a single display sequence across all change orders (QBO first by
@@ -208,6 +210,76 @@ def co_estimate_pdf(project_qbo_id: str, req: COPdfReq, user=Depends(get_current
                     headers={"Content-Disposition": 'inline; filename="Change-Order-Estimate.pdf"'})
 
 
+# ── change-order line items (persisted so an app CO is a first-class estimate) ──
+def _save_co_lines(conn, co_id, lines):
+    conn.execute(text("DELETE FROM project_change_order_lines WHERE co_id=:c"), {"c": co_id})
+    for idx, ln in enumerate(lines or [], 1):
+        conn.execute(text("""INSERT INTO project_change_order_lines
+              (co_id, seq, item, description, qty, rate, amount) VALUES (:c,:s,:i,:d,:q,:r,:a)"""),
+                     {"c": co_id, "s": idx, "i": (ln.label or None), "d": (ln.description or None),
+                      "q": ln.qty, "r": ln.rate, "a": ln.amount})
+
+
+def _co_lines(conn, co_id):
+    rows = conn.execute(text("""SELECT item, description, qty, rate, amount
+        FROM project_change_order_lines WHERE co_id=:c ORDER BY seq, id"""), {"c": co_id}).mappings().all()
+    n = lambda v: float(v) if v is not None else None
+    return [{"item": r["item"], "description": r["description"], "qty": n(r["qty"]),
+             "rate": n(r["rate"]), "amount": float(r["amount"] or 0)} for r in rows]
+
+
+@router.get("/co/{co_id}/lines")
+def get_co_lines(co_id: int, user=Depends(get_current_user)):
+    """Stored line items for an app-created change order (drives the chevron)."""
+    _require(user)
+    with engine.connect() as conn:
+        return {"lines": _co_lines(conn, co_id)}
+
+
+@router.post("/co/{co_id}/pdf")
+def co_pdf(co_id: int, save: bool = False, user=Depends(get_current_user)):
+    """Re-print an app-created change order's estimate PDF from its stored lines.
+    save=true files it into the project's '4 Quotes' documents folder."""
+    _require(user)
+    from app.estimates.pdf import render_estimate_pdf
+    with engine.connect() as conn:
+        co = conn.execute(text("SELECT project_qbo_id, title FROM project_change_orders WHERE id=:c"),
+                          {"c": co_id}).mappings().first()
+        if not co:
+            raise HTTPException(status_code=404, detail="Change order not found")
+        proj = conn.execute(text("SELECT display_name FROM qbo_customers WHERE qbo_id=:e"),
+                            {"e": co["project_qbo_id"]}).scalar()
+        dfl = {k: v for k, v in conn.execute(text("SELECT setting_key, setting_value FROM estimate_pdf_defaults")).all()}
+        lines = _co_lines(conn, co_id)
+    today = _date.today()
+    try:
+        exp_days = int(dfl.get("expiration_days") or 30)
+    except (TypeError, ValueError):
+        exp_days = 30
+    data = {
+        "company": {"name": dfl.get("company_name"), "address": dfl.get("company_address"),
+                    "phone": dfl.get("company_phone"), "email": dfl.get("company_email")},
+        "estimate_no": "CO", "date": today.strftime("%m/%d/%Y"),
+        "expiration_date": (today + timedelta(days=exp_days)).strftime("%m/%d/%Y"),
+        "sales_rep": dfl.get("sales_rep"),
+        "bill_to": [proj, ("Change order — " + co["title"]) if co["title"] else "Change order"],
+        "footer_title": co["title"] or "Change Order", "preparer": user.get("email"),
+        "lines": [{"label": l["item"] or "", "description": l["description"] or "",
+                   "qty": l["qty"], "rate": l["rate"], "amount": l["amount"]} for l in lines],
+        "total": round(sum(l["amount"] for l in lines), 2),
+    }
+    pdf = render_estimate_pdf(data)
+    if save:
+        from app.documents.routes import store_document_bytes
+        safe = "".join(c for c in (co["title"] or f"CO-{co_id}") if c.isalnum() or c in " -_")[:60].strip() or f"CO-{co_id}"
+        fname = f"ChangeOrder-{safe}.pdf"
+        doc_id = store_document_bytes("project", co["project_qbo_id"], "4_quotes", fname, pdf,
+                                      "application/pdf", user.get("id"))
+        return {"ok": True, "document_id": doc_id, "filename": fname}
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="Change-Order-Estimate.pdf"'})
+
+
 _KINDS = ("original", "change_order")
 _STATUSES = ("draft", "sent", "approved", "rejected")
 
@@ -273,6 +345,7 @@ class DraftCreate(BaseModel):
     amount: Optional[float] = None
     contract_labor: Optional[float] = None
     status: str = "draft"
+    lines: List[COPdfLine] = []
 
 
 @router.post("/project/{project_qbo_id}/draft")
@@ -286,15 +359,21 @@ def create_draft(project_qbo_id: str, body: DraftCreate, user=Depends(get_curren
             raise HTTPException(status_code=404, detail="Project not found")
         # co_number is a display sequence assigned at read time (see _build), so
         # we don't store one here.
+        amount = body.amount
+        if body.lines:
+            amount = round(sum(float(l.amount or 0) for l in body.lines), 2)
         res = conn.execute(text("""
             INSERT INTO project_change_orders
                 (project_qbo_id, kind, title, reason, scope, amount, contract_labor, status, created_by_user_id)
             VALUES (:p,:kind,:title,:reason,:scope,:amount,:labor,:status,:uid)
         """), {"p": project_qbo_id, "kind": body.kind, "title": body.title,
-               "reason": body.reason, "scope": body.scope, "amount": body.amount,
+               "reason": body.reason, "scope": body.scope, "amount": amount,
                "labor": body.contract_labor, "status": body.status, "uid": user.get("id")})
+        cid = res.lastrowid
+        if body.lines:
+            _save_co_lines(conn, cid, body.lines)
         items, rollup = _build(conn, project_qbo_id)
-    return {"ok": True, "co_id": res.lastrowid, "items": items, "rollup": rollup}
+    return {"ok": True, "co_id": cid, "items": items, "rollup": rollup}
 
 
 class DraftPatch(BaseModel):
@@ -306,6 +385,7 @@ class DraftPatch(BaseModel):
     amount: Optional[float] = None
     contract_labor: Optional[float] = None
     status: Optional[str] = None
+    lines: Optional[List[COPdfLine]] = None
 
 
 def _project_of(conn, co_id):
@@ -326,6 +406,12 @@ def patch_change_order(co_id: int, body: DraftPatch, user=Depends(get_current_us
         for k, v in fields.items():
             if k in cols:
                 sets.append(f"{k} = :{k}"); params[k] = v
+        # When line items are supplied, replace them and re-total the CO amount.
+        if body.lines is not None:
+            _save_co_lines(conn, co_id, body.lines)
+            params["amount"] = round(sum(float(l.amount or 0) for l in body.lines), 2)
+            if "amount = :amount" not in sets:
+                sets.append("amount = :amount")
         if sets:
             conn.execute(text(f"UPDATE project_change_orders SET {', '.join(sets)} WHERE id=:id"), params)
         items, rollup = _build(conn, pid)

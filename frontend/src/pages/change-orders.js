@@ -69,7 +69,9 @@ export async function mountChangeOrdersPanel(container, entityId) {
         <th class="py-2 font-bold text-right"></th></tr></thead>
       <tbody>${items.map((i, idx) => `
         <tr class="border-b border-black/5 hover:bg-black/[0.015]">
-          <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : ""}${kindBadge(i)}</td>
+          <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id
+          ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>`
+          : (i.has_lines ? `<button data-co-expand="${i.co_id}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : "")}${kindBadge(i)}</td>
           <td class="py-1.5 pr-2 text-black/70">${i.doc_number ? `#${escapeHtml(i.doc_number)}<div class="text-[10px] text-black/40">${ymd(i.txn_date)}</div>` : `<span class="inline-flex rounded bg-black/10 text-black/50 px-1.5 py-0.5 text-[9px] font-bold">DRAFT</span>`}</td>
           <td class="py-1.5 pr-2 text-black/70 max-w-[240px]"><div class="font-semibold text-ink-900 truncate">${escapeHtml(i.title || i.reason || "—")}</div>${i.scope ? `<div class="text-[10px] text-black/45 truncate">${escapeHtml(i.scope)}</div>` : ""}</td>
           <td class="py-1.5 pr-2 text-right tabular-nums font-semibold">${money(i.amount)}</td>
@@ -117,16 +119,21 @@ export async function mountChangeOrdersPanel(container, entityId) {
     const unconfirmed = opts.inPhase && asg && !asg.confirmed;
     return `
       <tr class="border-b border-black/5 hover:bg-black/[0.015] ${unconfirmed ? "bg-amber-50/60" : ""}">
-        <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : ""}${kindBadge(i)}</td>
+        <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id
+          ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>`
+          : (i.has_lines ? `<button data-co-expand="${i.co_id}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : "")}${kindBadge(i)}</td>
         <td class="py-1.5 pr-2 text-black/70">${i.doc_number ? `#${escapeHtml(i.doc_number)}<div class="text-[10px] text-black/40">${ymd(i.txn_date)}</div>` : `<span class="inline-flex rounded bg-black/10 text-black/50 px-1.5 py-0.5 text-[9px] font-bold">DRAFT</span>`}</td>
         <td class="py-1.5 pr-2 text-black/70 max-w-[200px]"><div class="font-semibold text-ink-900 truncate">${escapeHtml(i.title || i.reason || "—")}</div>${i.scope ? `<div class="text-[10px] text-black/45 truncate">${escapeHtml(i.scope)}</div>` : ""}</td>
         <td class="py-1.5 pr-2 text-right tabular-nums font-semibold">${money(i.amount)}</td>
         <td class="py-1.5 pr-2 text-right tabular-nums text-black/60">${i.contract_labor ? money(i.contract_labor) : "—"}</td>
         <td class="py-1.5 pr-2">${statusPill(i.status)}</td>
         ${opts.inPhase ? `<td class="py-1.5 pr-2 whitespace-nowrap">${phaseSelect(i.qbo_estimate_id, asg ? asg.phase_id : null)}${unconfirmed ? `<button data-confirm="${escapeHtml(String(i.qbo_estimate_id))}" data-phase="${asg.phase_id}" class="ml-1 text-[10px] font-bold text-amber-700 hover:underline" title="Confirm this phase">⚑ confirm</button>` : ""}</td>` : ""}
-        <td class="py-1.5 text-right whitespace-nowrap"><button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button>${i.source === "draft" ? `<button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>` : ""}</td>
+        <td class="py-1.5 text-right whitespace-nowrap">${i.source === "draft"
+          ? `${i.has_lines ? `<button data-co-pdf="${i.co_id}" class="text-xs text-emerald-700 font-semibold hover:underline mr-2" title="Generate PDF + file to 4 Quotes">PDF</button>` : ""}<button data-edit-draft="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button><button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>`
+          : `<button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button>`}</td>
       </tr>
-      ${i.qbo_estimate_id ? `<tr data-lines-row="${escapeHtml(String(i.qbo_estimate_id))}" hidden><td colspan="8" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}`;
+      ${i.qbo_estimate_id ? `<tr data-lines-row="${escapeHtml(String(i.qbo_estimate_id))}" hidden><td colspan="8" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}
+      ${(!i.qbo_estimate_id && i.has_lines) ? `<tr data-co-lines-row="${i.co_id}" hidden><td colspan="8" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-co-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}`;
   }
 
   function rowsTable(items, opts = {}) {
@@ -192,6 +199,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
   }
 
   const lineCache = {};
+  const coLineCache = {};
   async function reloadData() { try { await load(); render(); } catch (e) { alert(e?.message || "Failed"); } }
 
   function wire() {
@@ -247,6 +255,35 @@ export async function mountChangeOrdersPanel(container, entityId) {
     }));
     container.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () =>
       openEditModal(data.items[Number(b.getAttribute("data-edit"))])));
+    // draft change order: edit-as-estimate-form, expand stored lines, re-print PDF
+    container.querySelectorAll("[data-edit-draft]").forEach(b => b.addEventListener("click", () =>
+      openEstimateFormModal(data.items[Number(b.getAttribute("data-edit-draft"))])));
+    container.querySelectorAll("[data-co-expand]").forEach(btn => btn.addEventListener("click", async () => {
+      const cid = btn.getAttribute("data-co-expand");
+      const row = container.querySelector(`[data-co-lines-row="${CSS.escape(cid)}"]`);
+      const chev = btn.querySelector("[data-chev]");
+      if (!row) return;
+      const opening = row.hidden; row.hidden = !opening;
+      if (chev) chev.style.transform = opening ? "rotate(90deg)" : "";
+      if (!opening) return;
+      const body = row.querySelector("[data-co-lines-body]");
+      if (coLineCache[cid]) { body.innerHTML = coLineCache[cid]; return; }
+      try {
+        const r = await api(`/change-orders/co/${cid}/lines`);
+        coLineCache[cid] = linesHtml((r.lines || []).map(l => ({ item: l.item, description: l.description, qty: l.qty, unit_price: l.rate, amount: l.amount, cost_amount: null })));
+        body.innerHTML = coLineCache[cid];
+      } catch (e) { body.innerHTML = `<span class="text-red-600">Failed to load line items.</span>`; }
+    }));
+    container.querySelectorAll("[data-co-pdf]").forEach(btn => btn.addEventListener("click", async () => {
+      const cid = btn.getAttribute("data-co-pdf"); const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = "…";
+      try {
+        await api(`/change-orders/co/${cid}/pdf?save=true`, { method: "POST" });
+        const pres = await fetch(`/api/change-orders/co/${cid}/pdf`, { method: "POST", headers: { "Authorization": "Bearer " + getToken() } });
+        window.open(URL.createObjectURL(await pres.blob()), "_blank");
+      } catch (e) { alert("PDF failed"); }
+      btn.disabled = false; btn.textContent = orig;
+    }));
     container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("Delete this draft change order?")) return;
       try { await api(`/change-orders/${b.getAttribute("data-del")}`, { method: "DELETE" }); await reloadData(); }
@@ -282,11 +319,17 @@ export async function mountChangeOrdersPanel(container, entityId) {
     }));
   }
 
-  // Editable change-order estimate form → OPI-branded PDF (or save as a draft).
-  function openEstimateFormModal() {
+  // Editable change-order estimate form → OPI-branded PDF (persists line items).
+  async function openEstimateFormModal(item = null) {
+    let lines = [{ label: "", description: "", qty: 1, rate: 0 }];
+    if (item && item.co_id) {
+      try {
+        const r = await api(`/change-orders/co/${item.co_id}/lines`);
+        if (r.lines && r.lines.length) lines = r.lines.map(l => ({ label: l.item || "", description: l.description || "", qty: l.qty ?? 1, rate: l.rate ?? 0 }));
+      } catch (_) {}
+    }
     const overlay = document.createElement("div");
     overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
-    let lines = [{ label: "", description: "", qty: 1, rate: 0 }];
     const money2 = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const lineAmt = (l) => (Number(l.qty) || 0) * (Number(l.rate) || 0);
     const total = () => lines.reduce((s, l) => s + lineAmt(l), 0);
@@ -300,10 +343,10 @@ export async function mountChangeOrdersPanel(container, entityId) {
       <button data-rm="${idx}" class="text-black/30 hover:text-red-600 text-sm">✕</button></div>`;
     overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-5 max-h-[90vh] overflow-auto">
       <datalist id="coItemList">${CO_ITEMS.map((i) => `<option value="${escapeHtml(i)}">`).join("")}</datalist>
-      <div class="text-base font-bold text-ink-900 mb-3">Change order — estimate</div>
+      <div class="text-base font-bold text-ink-900 mb-3">${item ? "Edit change order" : "Change order — estimate"}</div>
       <div class="grid grid-cols-2 gap-3 mb-3">
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Title</div><input data-title class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div><select data-reason class="input text-sm py-1.5 w-full"><option value="">—</option>${REASONS.map((r) => `<option>${r}</option>`).join("")}</select></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Title</div><input data-title value="${escapeHtml(item?.title || "")}" class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div><select data-reason class="input text-sm py-1.5 w-full"><option value="">—</option>${REASONS.map((r) => `<option ${item?.reason === r ? "selected" : ""}>${r}</option>`).join("")}</select></label>
       </div>
       <div class="${GRID} text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1"><div>Item</div><div>Description</div><div class="text-right">Qty</div><div class="text-right">Rate</div><div class="text-right">Amount</div><div></div></div>
       <div data-lines class="space-y-1.5"></div>
@@ -312,8 +355,8 @@ export async function mountChangeOrdersPanel(container, entityId) {
       <div class="mt-4 flex items-center justify-end gap-2">
         <span data-msg class="text-xs font-semibold mr-auto"></span>
         <button data-cancel class="${CANCEL}">Cancel</button>
-        <button data-savedraft class="rounded-lg border border-black/15 px-3 py-1.5 text-sm font-semibold hover:bg-black/5">Save as draft</button>
-        <button data-pdf class="btn-primary text-sm px-4 py-1.5">Generate PDF →</button>
+        <button data-save class="rounded-lg border border-black/15 px-3 py-1.5 text-sm font-semibold hover:bg-black/5">Save</button>
+        <button data-savepdf class="btn-primary text-sm px-4 py-1.5">Save &amp; PDF →</button>
       </div></div>`;
     document.body.appendChild(overlay);
     const linesEl = overlay.querySelector("[data-lines]");
@@ -334,19 +377,30 @@ export async function mountChangeOrdersPanel(container, entityId) {
     overlay.querySelector("[data-addline]").addEventListener("click", () => { lines.push({ label: "", description: "", qty: 1, rate: 0 }); redraw(); });
     const payload = () => ({ title: overlay.querySelector("[data-title]").value.trim() || null, reason: overlay.querySelector("[data-reason]").value || null, total: total(),
       lines: lines.filter(l => l.label || lineAmt(l)).map(l => ({ label: l.label, description: l.description, qty: Number(l.qty) || null, rate: Number(l.rate) || null, amount: lineAmt(l) })) });
-    overlay.querySelector("[data-pdf]").addEventListener("click", async () => {
-      setMsg("Generating…", true);
-      try {
-        const res = await fetch(`/api/change-orders/project/${encodeURIComponent(entityId)}/estimate-pdf`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() }, body: JSON.stringify(payload()) });
-        if (!res.ok) throw new Error("PDF failed");
-        window.open(URL.createObjectURL(await res.blob()), "_blank");
-        setMsg("PDF opened in a new tab.", true);
-      } catch (e) { setMsg("Could not generate PDF.", false); }
-    });
-    overlay.querySelector("[data-savedraft]").addEventListener("click", async () => {
+    // Persist the CO with its line items (create or edit), return its co_id.
+    const persist = async () => {
       const p = payload();
-      try { await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify({ kind: "change_order", title: p.title, reason: p.reason, amount: p.total, status: "draft" }) }); close(); await reloadData(); }
+      if (item && item.co_id) {
+        await api(`/change-orders/${item.co_id}`, { method: "PATCH", body: JSON.stringify({ title: p.title, reason: p.reason, lines: p.lines }) });
+        return item.co_id;
+      }
+      const res = await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify({ kind: "change_order", title: p.title, reason: p.reason, status: "draft", lines: p.lines }) });
+      return res.co_id;
+    };
+    overlay.querySelector("[data-save]").addEventListener("click", async () => {
+      try { await persist(); close(); await reloadData(); }
       catch (e) { setMsg(e?.message || "Save failed", false); }
+    });
+    overlay.querySelector("[data-savepdf]").addEventListener("click", async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; setMsg("Saving…", true);
+      try {
+        const coId = await persist();
+        // file into the project's "4 Quotes" folder, then open it in a new tab
+        await api(`/change-orders/co/${coId}/pdf?save=true`, { method: "POST" });
+        const pres = await fetch(`/api/change-orders/co/${coId}/pdf`, { method: "POST", headers: { "Authorization": "Bearer " + getToken() } });
+        window.open(URL.createObjectURL(await pres.blob()), "_blank");
+        close(); await reloadData();
+      } catch (err) { btn.disabled = false; setMsg("Could not save / PDF.", false); }
     });
   }
 
