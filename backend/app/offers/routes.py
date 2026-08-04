@@ -135,9 +135,20 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
             WHERE entity_type = 'Bill' AND txn_date >= :c AND vendor_qbo_id IS NOT NULL
             GROUP BY vendor_qbo_id
         """), {"c": cutoff}).mappings().all()}
+        # Availability + track record come from the ASSIGNMENT bookings (the crew
+        # actually placed on a project's schedule items), NOT the billing payment
+        # schedules — those only exist for the few projects whose billing has been
+        # generated, so they'd read almost every crew as "free". A crew can be
+        # booked on several schedule items (interrupted installs), each its own
+        # date range.
         scheds = conn.execute(text("""
-            SELECT crew_id, entity_id, start_date, end_date
-            FROM project_payment_schedules WHERE crew_id IS NOT NULL
+            SELECT swc.work_crew_id AS crew_id, qc.qbo_id AS entity_id,
+                   psi.start_date, psi.end_date
+            FROM project_schedule_item_work_crews swc
+            JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
+            JOIN projects p ON p.id = psi.project_id
+            JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            WHERE swc.unassigned_at IS NULL AND psi.start_date IS NOT NULL
         """)).mappings().all()
 
     by_crew = defaultdict(list)
