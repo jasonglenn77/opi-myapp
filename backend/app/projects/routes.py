@@ -897,11 +897,25 @@ def projects_attention(user=Depends(get_current_user)):
         SELECT entity_id AS pid, SUM(done) AS done_today
         FROM myapp.project_daily_log WHERE log_date = CURDATE() GROUP BY entity_id
     """)
+    # on-site setup presence, best-effort from the estimate line items: does the
+    # job include wire guidance, travel, overage/remob, or rental equipment?
+    setup_sql = text("""
+        SELECT sl.project_customer_qbo_id AS pid,
+               MAX(sl.item_name REGEXP 'wire') AS wire,
+               MAX(sl.item_name REGEXP 'travel|lodg|mobil|per diem|fuel|flight|airfare') AS travel,
+               MAX(sl.item_name REGEXP 'overage|remobil|buffer|extra day') AS overage,
+               MAX(sl.item_name REGEXP 'equip|lift|scrubber|saw|dumpster|propane|rental|scissor|boom') AS equipment
+        FROM myapp.qbo_sales_transaction_lines sl
+        JOIN myapp.qbo_transactions t ON t.id = sl.transaction_id
+        WHERE t.entity_type='Estimate' AND sl.project_customer_qbo_id IS NOT NULL AND sl.item_name IS NOT NULL
+        GROUP BY sl.project_customer_qbo_id
+    """)
     with engine.connect() as conn:
         est_rows = conn.execute(est_sql).mappings().all()
         offer_rows = conn.execute(offer_sql).mappings().all()
         kickoff_rows = conn.execute(kickoff_sql).mappings().all()
         daily_rows = conn.execute(daily_sql).mappings().all()
+        setup_rows = conn.execute(setup_sql).mappings().all()
 
     out = {}
     for r in est_rows:
@@ -922,6 +936,11 @@ def projects_attention(user=Depends(get_current_user)):
         }
     for r in daily_rows:
         out.setdefault(str(r["pid"]), {})["daily"] = {"today_done": int(r["done_today"] or 0)}
+    for r in setup_rows:
+        out.setdefault(str(r["pid"]), {})["setup"] = {
+            "wire": bool(r["wire"]), "travel": bool(r["travel"]),
+            "overage": bool(r["overage"]), "equipment": bool(r["equipment"]),
+        }
     return {"attention": out, "kickoff_total": kickoff_total}
 
 
@@ -1056,14 +1075,60 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
                  "today_touched": int(drow["touched_today"] or 0) if drow else 0,
                  "last_date": str(drow["last_date"]) if drow and drow["last_date"] else None}
 
+        # next upcoming customer invoice + crew payment (only where a billing
+        # schedule has been generated; otherwise none). Cheap indexed lookups.
+        next_inv = conn.execute(text("""
+            SELECT DATE_FORMAT(m.invoice_date,'%Y-%m-%d') AS d, m.amount
+            FROM myapp.project_invoice_milestones m
+            JOIN myapp.project_invoice_schedules s ON s.id = m.schedule_id
+            WHERE s.entity_id=:q AND m.invoice_date >= CURDATE()
+            ORDER BY m.invoice_date LIMIT 1
+        """), {"q": qbo_id}).mappings().first()
+        next_pay = conn.execute(text("""
+            SELECT DATE_FORMAT(i.pay_date,'%Y-%m-%d') AS d, i.amount
+            FROM myapp.project_payment_installments i
+            JOIN myapp.project_payment_schedules s ON s.id = i.schedule_id
+            WHERE s.entity_id=:q AND i.pay_date >= CURDATE()
+            ORDER BY i.pay_date LIMIT 1
+        """), {"q": qbo_id}).mappings().first()
+        upcoming = {
+            "invoice": ({"date": next_inv["d"], "amount": float(next_inv["amount"] or 0)} if next_inv else None),
+            "payment": ({"date": next_pay["d"], "amount": float(next_pay["amount"] or 0)} if next_pay else None),
+        }
+
     return {
         "qbo_id": qbo_id,
         "date_ranges": date_ranges,
         "pms": pms, "crews": crews, "notes": notes,
         "shared": shared, "estimates": estimates,
         "offer": offer, "financial": financial,
-        "kickoff": kickoff, "daily": daily,
+        "kickoff": kickoff, "daily": daily, "upcoming": upcoming,
     }
+
+
+class ProjectStatusUpdate(BaseModel):
+    status: str
+
+
+@router.post("/projects/{qbo_id}/status")
+def set_project_status(qbo_id: str, body: ProjectStatusUpdate, user=Depends(get_current_user)):
+    """Set the operational status for a project from the Projects hub. Applies to
+    all of the project's schedule items so the derived project-grain status moves
+    as a unit (the Assignment page still edits per-schedule-item)."""
+    from app.projects.service import ALLOWED_STATUS
+    if body.status not in ALLOWED_STATUS:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    with engine.begin() as conn:
+        n = conn.execute(text("""
+            UPDATE myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id = psi.project_id
+            JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id
+            SET psi.status = :s
+            WHERE qc.qbo_id = :q
+        """), {"s": body.status, "q": qbo_id}).rowcount
+    if not n:
+        raise HTTPException(status_code=404, detail="Project has no schedule rows")
+    return {"ok": True, "updated": n}
 
 
 @router.post("/projects/refresh-financials")

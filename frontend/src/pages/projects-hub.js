@@ -42,6 +42,32 @@ const statusBadge = (s) => {
   return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold rounded-full px-2 py-0.5 whitespace-nowrap ${m.cls}">${escapeHtml(m.label)}</span>`;
 };
 
+// Stored (user-set) statuses, for the inline editor. These are what the status
+// endpoint accepts; the colored pill above shows the derived operational status.
+const STORED_STATUS = [
+  ["needs_attention", "Needs attention"], ["pending", "Pending"], ["not_started", "Not started"],
+  ["in_progress", "In progress"], ["completed", "Completed"], ["canceled", "Canceled"],
+];
+
+// Which project-workspace tab each detail card opens.
+const CARD_TAB = {
+  schedule: "assignment", team: "assignment", shared: "financials", estimates: "changeorders",
+  offer: "billing", financial: "financials", process: "kickoff", notes: "assignment", upcoming: "billing",
+};
+
+// Flag legend — icon + meaning, for the collapsible header legend.
+const FLAG_LEGEND = [
+  ["bad", "!", "Needs attention — nothing assigned"],
+  ["warn", "◔", "Pending — partially set up"],
+  ["warn", "✎", "Estimate(s) pending review"],
+  ["warn", "◷", "Crew offer awaiting response / no crew sourced"],
+  ["good", "✓", "Crew offer accepted"],
+  ["bad", "$", "Margin negative or below plan"],
+  ["warn", "▦", "No schedule dates set"],
+  ["mut", "⑂", "Multiple separate date ranges"],
+  ["mut", "☑", "Kick-off & process incomplete"],
+];
+
 // Flag severity → chip classes (row) and card left-accent (detail).
 const FLAG_CLS = {
   bad:  "bg-rose-50 text-rose-700 border-rose-200",
@@ -90,9 +116,18 @@ function deriveFlags(p, fin, att) {
       flags.push({ c: "warn", i: "$", card: "financial", t: `Margin ${((pp - ap) * 100).toFixed(1)} pts below plan` });
   }
 
-  const dcount = csvList(p.all_start_dates).length;
+  const starts = csvList(p.all_start_dates), crews = csvList(p.all_work_crews);
+  const settled = ["canceled", "complete"].includes(p.operational_status);
+  const dcount = starts.length;
   if (dcount > 1)
     flags.push({ c: "mut", i: "⑂", card: "schedule", t: `${dcount} separate date ranges` });
+  if (!dcount && !settled && p.operational_status !== "needs_assignment")
+    flags.push({ c: "warn", i: "▦", card: "schedule", t: "No schedule dates set" });
+
+  // No crew and no live offer — the crew still needs to be sourced.
+  const offerLive = offer && (offer.state === "accepted" || offer.state === "sent");
+  if (!settled && !crews.length && !offerLive)
+    flags.push({ c: "warn", i: "◷", card: "offer", t: "No crew assigned and no offer sent" });
 
   // kick-off & process — only surface once a project is active (scheduled or
   // in progress); a neutral flag, not an alarm. Daily-log status stays in the
@@ -162,8 +197,9 @@ export async function projectsHubPage(routeFn) {
   const HEADERS = [
     { key: "operational_status", label: "Status" },
     { key: "project_name", label: "Project" },
-    { key: null, label: "Schedule" },
+    { key: "start_date", label: "Schedule" },
     { key: null, label: "Team" },
+    { key: "project_create_dttm", label: "Created", align: "right" },
     { key: "value", label: "Value", align: "right" },
     { key: "profit", label: "Profit", align: "right" },
     { key: null, label: "Flags", align: "right" },
@@ -186,8 +222,15 @@ export async function projectsHubPage(routeFn) {
         return `<button data-sf="${k}" class="rounded-full px-2.5 py-1 text-xs font-semibold border ${statusFilter === k ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${escapeHtml(label)} <span class="opacity-60">${n}</span></button>`;
       }).join("") +
       `<input data-search value="${escapeHtml(search)}" placeholder="Search project, PM, crew, quote…" class="input text-xs py-1.5 w-full sm:max-w-xs ml-auto">` +
-      `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>`;
+      `<button data-legend-toggle class="rounded-full px-2.5 py-1 text-xs font-semibold border border-black/15 text-black/55 hover:bg-black/5" title="What do the flags mean?">Flags ⓘ</button>` +
+      `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>` +
+      `<div data-legend hidden class="w-full mt-1 rounded-lg border border-black/10 bg-black/[0.015] p-2.5 flex flex-wrap gap-x-4 gap-y-1.5">` +
+        FLAG_LEGEND.map(([c, i, t]) => `<span class="inline-flex items-center gap-1.5 text-[11.5px] text-black/60"><span class="inline-flex items-center justify-center w-[20px] h-[20px] rounded-md border text-[11px] ${FLAG_CLS[c]}">${i}</span>${escapeHtml(t)}</span>`).join("") +
+        `<span class="inline-flex items-center gap-1.5 text-[11.5px] text-black/45 w-full mt-0.5 pt-1.5 border-t border-black/[0.06]">Amber left-edge on a row = it has an open item. Setup letters under a schedule: <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">W</span>ire · <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">T</span>ravel · <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">O</span>verage · <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">E</span>quipment.</span>` +
+      `</div>`;
     filtersEl.querySelectorAll("[data-sf]").forEach((b) => b.addEventListener("click", () => { statusFilter = b.getAttribute("data-sf"); renderFilters(); applyFilter(); }));
+    const legendBtn = filtersEl.querySelector("[data-legend-toggle]"), legendEl = filtersEl.querySelector("[data-legend]");
+    legendBtn?.addEventListener("click", () => { legendEl.hidden = !legendEl.hidden; });
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
     sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { search = sb.value.trim(); applyFilter(); }, 60); });
@@ -238,6 +281,19 @@ export async function projectsHubPage(routeFn) {
     const chips = flags.map((f) => `<span class="ph-flag inline-flex items-center justify-center w-[22px] h-[22px] rounded-md border text-[12px] cursor-pointer ${FLAG_CLS[f.c]}" data-card="${f.card}" title="${escapeHtml(f.t)} — click to jump to the card">${f.i}</span>`).join("");
     return `<div class="flex gap-1 justify-end items-center flex-wrap">${chips}<span class="ph-caret text-black/35 text-[11px] ml-0.5">▸</span></div>`;
   };
+  // On-site setup presence (wire / travel / overage / equipment), from the estimate.
+  const setupChips = (p) => {
+    const s = (attById.get(String(p.project_qbo_id)) || {}).setup;
+    if (!s) return "";
+    const defs = [["wire", "W", "Wire guidance"], ["travel", "T", "Travel"], ["overage", "O", "Overage / remob"], ["equipment", "E", "Rental equipment"]];
+    return `<div class="mt-1 flex gap-0.5">${defs.map(([k, l, t]) => `<span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold ${s[k] ? "bg-indigo-100 text-indigo-700" : "bg-black/[0.04] text-black/25"}" title="${t}: ${s[k] ? "yes" : "no"}">${l}</span>`).join("")}</div>`;
+  };
+  // Inline status editor — a native select styled by the derived operational status.
+  const statusCell = (p) => {
+    const m = OP_STATUS[p.operational_status] || { cls: "bg-black/10 text-black/50" };
+    const opts = STORED_STATUS.map(([v, l]) => `<option value="${v}" ${p.project_status === v ? "selected" : ""}>${l}</option>`).join("");
+    return `<select class="ph-status text-[11px] font-bold rounded-md border border-black/10 pl-1.5 pr-1 py-0.5 cursor-pointer ${m.cls}" title="Set project status" data-qid="${escapeHtml(String(p.project_qbo_id))}">${opts}</select>`;
+  };
 
   const rowHtml = (p) => {
     const att = attById.get(String(p.project_qbo_id));
@@ -246,19 +302,20 @@ export async function projectsHubPage(routeFn) {
     return `
       <tr class="ph-row border-b border-black/5 hover:bg-black/[0.02] cursor-pointer ${open ? "open bg-black/[0.02]" : ""} ${hasAtt ? "ph-att" : ""}"
           data-qid="${escapeHtml(String(p.project_qbo_id))}" data-status="${escapeHtml(p.operational_status || "")}" data-key="${escapeHtml(searchKey(p))}">
-        <td class="py-2 pl-3 pr-3 align-top">${statusBadge(p.operational_status)}</td>
+        <td class="py-2 pl-3 pr-3 align-top">${statusCell(p)}</td>
         <td class="py-2 pr-3 align-top">
           <div class="font-semibold text-ink-900 leading-tight">${escapeHtml(dash(p.project_name))}</div>
           <div class="text-[11.5px] text-black/40 mt-0.5">Quote <span class="text-blue-700 font-semibold">${p.linked_quote_number ? "#" + escapeHtml(String(p.linked_quote_number)) : "—"}</span> · 📎 ${p.file_count || 0}</div>
         </td>
-        <td class="py-2 pr-3 align-top text-[12.5px]">${scheduleCell(p)}</td>
+        <td class="py-2 pr-3 align-top text-[12.5px]">${scheduleCell(p)}${setupChips(p)}</td>
         <td class="py-2 pr-3 align-top text-[12.5px]">${teamCell(p)}</td>
+        <td class="py-2 pr-3 align-top text-right text-[11.5px] tabular-nums text-black/50 whitespace-nowrap">${p.project_create_dttm ? escapeHtml(shortDate(p.project_create_dttm)) : "—"}</td>
         <td class="py-2 pr-3 align-top text-right tabular-nums font-semibold text-black/75">${money(finVal(p) || null)}</td>
         <td class="py-2 pr-3 align-top text-right">${profitCell(p)}</td>
         <td class="py-2 pr-3 align-top">${flagsCell(p)}</td>
       </tr>
       <tr class="ph-detail" data-qid="${escapeHtml(String(p.project_qbo_id))}" ${open ? "" : "hidden"}>
-        <td colspan="7" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
+        <td colspan="8" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
           <div class="ph-detail-body" data-qid="${escapeHtml(String(p.project_qbo_id))}">${open && cardCache.has(String(p.project_qbo_id)) ? detailHtml(p, cardCache.get(String(p.project_qbo_id))) : `<div class="text-black/40 text-xs py-4">Loading…</div>`}</div>
         </td>
       </tr>`;
@@ -266,11 +323,13 @@ export async function projectsHubPage(routeFn) {
 
   // ── expanded detail cards ──
   const box = (pid, key, title, srcTag, inner, flag) => {
-    const badge = srcTag ? `<span class="ml-auto text-[9px] font-bold tracking-wide px-1.5 py-px rounded ${srcTag === "NEW" ? "text-violet-700 bg-violet-50" : "text-emerald-700 bg-emerald-50"}">${srcTag}</span>` : "";
+    const badge = srcTag ? `<span class="text-[9px] font-bold tracking-wide px-1.5 py-px rounded ${srcTag === "NEW" ? "text-violet-700 bg-violet-50" : "text-emerald-700 bg-emerald-50"}">${srcTag}</span>` : "";
     const cf = flag ? `<span class="inline-flex items-center justify-center w-[18px] h-[18px] rounded text-[11px] border ${FLAG_CLS[flag.c]}" title="${escapeHtml(flag.t)}">${flag.i}</span>` : "";
     const acc = flag ? `border-l-2 ${ACCENT[flag.c]}` : "";
-    return `<div class="ph-card bg-white border border-black/10 rounded-lg p-3 ${acc}" data-card="${key}" id="phc-${pid}-${key}">
-      <div class="flex items-center gap-1.5 mb-2 text-[10px] font-bold uppercase tracking-wide text-black/40">${cf}<span>${title}</span>${badge}</div>${inner}</div>`;
+    const tab = CARD_TAB[key];
+    // The whole card opens the project workspace at the relevant tab.
+    return `<div class="ph-card bg-white border border-black/10 rounded-lg p-3 ${acc} ${tab ? "cursor-pointer hover:border-black/25 hover:shadow-sm transition" : ""}" data-card="${key}" ${tab ? `data-open-tab="${tab}"` : ""} id="phc-${pid}-${key}">
+      <div class="flex items-center gap-1.5 mb-2 text-[10px] font-bold uppercase tracking-wide text-black/40">${cf}<span>${title}</span>${badge}${tab ? `<span class="ml-auto text-black/30 text-[11px]">↗</span>` : ""}</div>${inner}</div>`;
   };
   const kv = (k, v) => `<div class="flex justify-between gap-3 py-0.5 text-[12.5px] border-b border-black/[0.05] last:border-0"><span class="text-black/55">${k}</span><span class="font-semibold text-ink-900 text-right">${v}</span></div>`;
 
@@ -284,8 +343,12 @@ export async function projectsHubPage(routeFn) {
       : `<div class="text-black/35 text-[12.5px]">No dates assigned yet</div>`;
     const team = kv("Project managers", c.pms.length ? c.pms.map(escapeHtml).join(", ") : "—")
                + kv("Work crews", c.crews.length ? c.crews.map(escapeHtml).join(", ") : "—");
-    const shared = kv("Wire", money(c.shared.wire)) + kv("Travel", money(c.shared.travel))
-                 + kv("Overage", money(c.shared.overage)) + kv("Equipment", money(c.shared.equipment));
+    // presence + estimated $ per on-site cost bucket
+    const sr = (label, amt) => kv(label, amt > 0
+      ? `<span class="text-emerald-600">✓</span> <span class="tabular-nums">${money(amt)}</span>`
+      : `<span class="text-black/30">—</span>`);
+    const shared = sr("Wire guidance", c.shared.wire) + sr("Travel", c.shared.travel)
+                 + sr("Overage", c.shared.overage) + sr("Equipment", c.shared.equipment);
     const estPill = (n, label, cls) => n ? `<span class="text-[11.5px] font-semibold px-2 py-0.5 rounded border ${cls}">${n} ${label}</span>` : "";
     const eb = c.estimates.reduce((m, e) => { m[e.status] = (m[e.status] || 0) + 1; return m; }, {});
     const ests = `<div class="flex flex-wrap gap-1.5 mb-2">
@@ -309,6 +372,13 @@ export async function projectsHubPage(routeFn) {
     const notes = c.notes && c.notes.length
       ? `<div class="text-[12.5px] text-black/55 italic leading-relaxed space-y-1">${c.notes.map((n) => `<div>“${escapeHtml(n)}”</div>`).join("")}</div>`
       : `<div class="text-black/35 text-[12.5px]">No notes</div>`;
+
+    const up = c.upcoming || {};
+    const upRow = (label, o) => kv(label, o
+      ? `<span class="tabular-nums font-semibold">${money(o.amount)}</span> <span class="text-black/40">· ${escapeHtml(shortDate(o.date))}</span>`
+      : `<span class="text-black/30">none scheduled</span>`);
+    const upcoming = upRow("Next invoice", up.invoice) + upRow("Next crew pay", up.payment)
+      + `<div class="text-[10.5px] text-black/35 mt-1">From the billing schedule (once generated)</div>`;
 
     const kk = c.kickoff || { done: 0, total: 13 };
     const kpct = kk.total ? Math.round((kk.done / kk.total) * 100) : 0;
@@ -339,6 +409,7 @@ export async function projectsHubPage(routeFn) {
         ${box(p.project_qbo_id, "shared", "Shared costs", "LIVE", shared, fb.shared)}
         ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
         ${box(p.project_qbo_id, "offer", "Crew offer", "LIVE", offerInner, fb.offer)}
+        ${box(p.project_qbo_id, "upcoming", "Upcoming", "LIVE", upcoming, fb.upcoming)}
         ${box(p.project_qbo_id, "financial", "Financials", "LIVE", financial, fb.financial)}
         ${box(p.project_qbo_id, "process", "Kick-off &amp; process", "LIVE", process, fb.process)}
         ${box(p.project_qbo_id, "notes", "Notes", "LIVE", notes, fb.notes)}
@@ -349,7 +420,7 @@ export async function projectsHubPage(routeFn) {
     if (!all.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No projects found.</div>`; return; }
     const rows = sortedAll();
     listEl.innerHTML = `
-      <table class="w-full text-sm" style="min-width:940px;">
+      <table class="w-full text-sm" style="min-width:1040px;">
         <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
           ${HEADERS.map((h) => `<th class="py-2 px-3 font-bold ${h.key ? "cursor-pointer select-none hover:text-black/70" : ""} bg-white whitespace-nowrap ${h.align === "right" ? "text-right" : ""}" ${h.key ? `data-sort="${h.key}"` : ""}>${h.label}${arrow(h.key)}</th>`).join("")}
         </tr></thead>
@@ -408,6 +479,17 @@ export async function projectsHubPage(routeFn) {
       if (tab) { try { sessionStorage.setItem("opi_entity_tab", tab); } catch (_) {} }
       return;
     }
+    // clicking a detail card opens the project workspace at that card's tab
+    const card = e.target.closest(".ph-card[data-open-tab]");
+    if (card) {
+      const detRow = card.closest("tr.ph-detail");
+      const qid = detRow && detRow.getAttribute("data-qid");
+      const tab = card.getAttribute("data-open-tab");
+      if (qid) { setBack(qid); try { sessionStorage.setItem("opi_entity_tab", tab); } catch (_) {} location.hash = `#/entity/project/${qid}`; }
+      return;
+    }
+    // interacting with the inline status editor must not toggle the row
+    if (e.target.closest(".ph-status")) return;
     const row = e.target.closest("tr.ph-row");
     if (!row) return;
     const qid = row.getAttribute("data-qid");
@@ -419,6 +501,24 @@ export async function projectsHubPage(routeFn) {
     }
     if (row.classList.contains("open")) collapse(row, qid);
     else expand(row, qid);
+  });
+
+  // inline status change → persist + refresh the list (operational status is
+  // recomputed server-side, and flags/pills depend on it).
+  listEl.addEventListener("change", async (e) => {
+    const sel = e.target.closest("select.ph-status");
+    if (!sel) return;
+    const qid = sel.getAttribute("data-qid"), status = sel.value;
+    sel.disabled = true;
+    try {
+      await api(`/projects/${encodeURIComponent(qid)}/status`, { method: "POST", body: JSON.stringify({ status }) });
+      const d = await api("/projects/basic");
+      all = d.projects || [];
+      renderList();
+    } catch (err) {
+      sel.disabled = false;
+      alert("Couldn't update status: " + (err?.message || "error"));
+    }
   });
 
   // Load the project list first (fast); merge financials + attention when ready.
