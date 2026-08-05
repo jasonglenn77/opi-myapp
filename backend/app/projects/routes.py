@@ -885,9 +885,23 @@ def projects_attention(user=Depends(get_current_user)):
         ) x
         WHERE rn = 1
     """)
+    # kick-off milestone progress + today's daily-log activity (both cheap
+    # group-bys). Totals come from the kickoff/daily modules so they stay in sync.
+    from app.kickoff.routes import MILESTONES
+    kickoff_total = len(MILESTONES)
+    kickoff_sql = text("""
+        SELECT entity_id AS pid, SUM(done) AS done, COUNT(*) AS touched
+        FROM myapp.project_milestones GROUP BY entity_id
+    """)
+    daily_sql = text("""
+        SELECT entity_id AS pid, SUM(done) AS done_today
+        FROM myapp.project_daily_log WHERE log_date = CURDATE() GROUP BY entity_id
+    """)
     with engine.connect() as conn:
         est_rows = conn.execute(est_sql).mappings().all()
         offer_rows = conn.execute(offer_sql).mappings().all()
+        kickoff_rows = conn.execute(kickoff_sql).mappings().all()
+        daily_rows = conn.execute(daily_sql).mappings().all()
 
     out = {}
     for r in est_rows:
@@ -902,7 +916,13 @@ def projects_attention(user=Depends(get_current_user)):
             "state": state, "age_days": int(r["age_days"]) if r["age_days"] is not None else None,
             "crew_name": (r["crew_name"] or "").strip() or None,
         }
-    return {"attention": out}
+    for r in kickoff_rows:
+        out.setdefault(str(r["pid"]), {})["kickoff"] = {
+            "done": int(r["done"] or 0), "total": kickoff_total,
+        }
+    for r in daily_rows:
+        out.setdefault(str(r["pid"]), {})["daily"] = {"today_done": int(r["done_today"] or 0)}
+    return {"attention": out, "kickoff_total": kickoff_total}
 
 
 # Best-effort mapping of QBO estimate line items → the owner's shared-cost
@@ -1018,12 +1038,31 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
         """), {"q": qbo_id}).mappings().first()
         financial = {k: (float(v) if v is not None else None) for k, v in (fin or {}).items()}
 
+        # kick-off & process progress (from the existing milestone system) + the
+        # next still-open milestone, and today's daily-log activity.
+        from app.kickoff.routes import MILESTONES
+        done_keys = {r[0] for r in conn.execute(text(
+            "SELECT milestone_key FROM myapp.project_milestones WHERE entity_id=:q AND done=1"),
+            {"q": qbo_id}).all()}
+        next_open = next((m["label"] for m in MILESTONES if m["key"] not in done_keys), None)
+        kickoff = {"done": len(done_keys & {m["key"] for m in MILESTONES}),
+                   "total": len(MILESTONES), "next": next_open}
+        drow = conn.execute(text("""
+            SELECT SUM(done) AS done_today, COUNT(*) AS touched_today,
+                   (SELECT MAX(log_date) FROM myapp.project_daily_log WHERE entity_id=:q) AS last_date
+            FROM myapp.project_daily_log WHERE entity_id=:q AND log_date=CURDATE()
+        """), {"q": qbo_id}).mappings().first()
+        daily = {"today_done": int(drow["done_today"] or 0) if drow else 0,
+                 "today_touched": int(drow["touched_today"] or 0) if drow else 0,
+                 "last_date": str(drow["last_date"]) if drow and drow["last_date"] else None}
+
     return {
         "qbo_id": qbo_id,
         "date_ranges": date_ranges,
         "pms": pms, "crews": crews, "notes": notes,
         "shared": shared, "estimates": estimates,
         "offer": offer, "financial": financial,
+        "kickoff": kickoff, "daily": daily,
     }
 
 

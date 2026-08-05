@@ -479,10 +479,16 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
 
   // Projects land on Overview; other entity types keep the Documents view.
   if (isProject) {
+    // A caller (e.g. the Projects hub's "Kick-off →" link) can request a
+    // specific opening tab via a one-shot sessionStorage hint.
+    let wantTab = null;
+    try { wantTab = sessionStorage.getItem("opi_entity_tab"); sessionStorage.removeItem("opi_entity_tab"); } catch (_) {}
+    const TABS = ["overview", "assignment", "documents", "kickoff", "daily", "changeorders", "billing", "financials"];
     activeTab = "overview";
     renderTabs();
     showOverview();
     prefetchBilling(entityId); // warm the Billing & Schedule bundle in the background
+    if (wantTab && TABS.includes(wantTab) && wantTab !== "overview") goTab(wantTab);
   } else {
     showDocuments();
   }

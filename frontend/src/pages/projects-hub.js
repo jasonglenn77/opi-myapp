@@ -49,7 +49,7 @@ const FLAG_CLS = {
   good: "bg-emerald-50 text-emerald-700 border-emerald-200",
   mut:  "bg-black/[0.03] text-black/45 border-black/10",
 };
-const ACCENT = { bad: "border-l-rose-400", warn: "border-l-amber-400", good: "border-l-emerald-400", mut: "border-l-black/20" };
+const ACCENT = { bad: "border-l-rose-400", warn: "border-l-amber-400", good: "border-l-emerald-400", mut: "border-l-slate-300" };
 
 function profitInfo(fin) {
   if (!fin) return { pct: null };
@@ -93,6 +93,16 @@ function deriveFlags(p, fin, att) {
   const dcount = csvList(p.all_start_dates).length;
   if (dcount > 1)
     flags.push({ c: "mut", i: "⑂", card: "schedule", t: `${dcount} separate date ranges` });
+
+  // kick-off & process — only surface once a project is active (scheduled or
+  // in progress); a neutral flag, not an alarm. Daily-log status stays in the
+  // card (its workflow is still being finalized), not the flag row.
+  const kick = att && att.kickoff;
+  if (["scheduled", "in_progress"].includes(p.operational_status)) {
+    const done = kick ? kick.done : 0, total = (kick && kick.total) || 13;
+    if (done < total)
+      flags.push({ c: "mut", i: "☑", card: "process", t: `Kick-off & process: ${done} of ${total} steps done` });
+  }
 
   return flags;
 }
@@ -300,6 +310,24 @@ export async function projectsHubPage(routeFn) {
       ? `<div class="text-[12.5px] text-black/55 italic leading-relaxed space-y-1">${c.notes.map((n) => `<div>“${escapeHtml(n)}”</div>`).join("")}</div>`
       : `<div class="text-black/35 text-[12.5px]">No notes</div>`;
 
+    const kk = c.kickoff || { done: 0, total: 13 };
+    const kpct = kk.total ? Math.round((kk.done / kk.total) * 100) : 0;
+    const dl = c.daily || {};
+    const dailyLine = dl.today_touched
+      ? `<span class="text-emerald-700 font-semibold">${dl.today_done}/${dl.today_touched} done today</span>`
+      : (dl.last_date ? `<span class="text-black/45">last log ${escapeHtml(shortDate(dl.last_date))}</span>` : `<span class="text-black/40">no log today</span>`);
+    const process = `
+      <div class="flex items-baseline justify-between mb-1"><span class="text-[12.5px] text-black/60">Kick-off &amp; process</span><span class="text-[12.5px] font-bold text-ink-900">${kk.done}/${kk.total}</span></div>
+      <div class="h-1.5 rounded bg-black/10 overflow-hidden mb-1.5"><div class="h-full ${kpct >= 100 ? "bg-emerald-500" : "bg-indigo-400"}" style="width:${kpct}%"></div></div>
+      ${kk.next ? `<div class="text-[11.5px] text-black/45 mb-1.5">Next: ${escapeHtml(kk.next)}</div>` : `<div class="text-[11.5px] text-emerald-700 mb-1.5">All steps complete</div>`}
+      <div class="flex items-center justify-between text-[12px] border-t border-black/[0.06] pt-1.5">
+        <span class="text-black/55">Daily log · ${dailyLine}</span>
+      </div>
+      <div class="flex gap-1.5 mt-2">
+        <a href="#/entity/project/${escapeHtml(String(p.project_qbo_id))}" data-tab="kickoff" class="ph-tablink text-[11px] font-semibold text-blue-700 border border-blue-200 bg-blue-50 rounded px-2 py-1 hover:bg-blue-100">Kick-off →</a>
+        <a href="#/entity/project/${escapeHtml(String(p.project_qbo_id))}" data-tab="daily" class="ph-tablink text-[11px] font-semibold text-blue-700 border border-blue-200 bg-blue-50 rounded px-2 py-1 hover:bg-blue-100">Daily log →</a>
+      </div>`;
+
     return `
       <div class="flex items-center gap-2 mb-2">
         <a href="#/entity/project/${escapeHtml(String(p.project_qbo_id))}" class="ph-open text-[12px] font-bold text-white bg-ink-900 hover:bg-black rounded-lg px-3 py-1.5">Open project workspace →</a>
@@ -312,6 +340,7 @@ export async function projectsHubPage(routeFn) {
         ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
         ${box(p.project_qbo_id, "offer", "Crew offer", "LIVE", offerInner, fb.offer)}
         ${box(p.project_qbo_id, "financial", "Financials", "LIVE", financial, fb.financial)}
+        ${box(p.project_qbo_id, "process", "Kick-off &amp; process", "LIVE", process, fb.process)}
         ${box(p.project_qbo_id, "notes", "Notes", "LIVE", notes, fb.notes)}
       </div>`;
   };
@@ -371,9 +400,14 @@ export async function projectsHubPage(routeFn) {
   };
 
   listEl.addEventListener("click", (e) => {
-    // keep the "Open project workspace" link behaving as navigation (+ back link)
-    const open = e.target.closest("a.ph-open, a[href^='#/entity/project/']");
-    if (open) { setBack(decodeURIComponent(open.getAttribute("href").split("/").pop())); return; }
+    // keep the "Open project workspace" / tab links behaving as navigation
+    const open = e.target.closest("a.ph-open, a.ph-tablink, a[href^='#/entity/project/']");
+    if (open) {
+      setBack(decodeURIComponent(open.getAttribute("href").split("/").pop()));
+      const tab = open.getAttribute("data-tab");
+      if (tab) { try { sessionStorage.setItem("opi_entity_tab", tab); } catch (_) {} }
+      return;
+    }
     const row = e.target.closest("tr.ph-row");
     if (!row) return;
     const qid = row.getAttribute("data-qid");
