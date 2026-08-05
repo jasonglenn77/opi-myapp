@@ -179,6 +179,170 @@ def _ensure_expense_items(conn, entity_id, ctx):
 
 
 # ---------------------------------------------------------------------------
+# Slice 2: billing organized by ESTIMATE
+#   Each accepted/converted estimate has a billing header (assigned crew +
+#   confirmed) and its own 35/35/30 invoice schedule. The project rolls them up.
+# ---------------------------------------------------------------------------
+_EST_STATUS = {"Accepted": "accepted", "Converted": "accepted",
+               "Pending": "pending", "Rejected": "declined", "Closed": "declined"}
+
+
+def _estimates_for_billing(conn, entity_id):
+    """Every estimate on the project with its value, Contract-Labor total, status,
+    and its billing header (assigned crew + confirmed), if any."""
+    rows = conn.execute(text("""
+        SELECT t.qbo_id, t.doc_number, t.txn_date, t.total_amt AS value,
+               ROUND(SUM(CASE WHEN sl.item_name='Contract Labor'
+                              THEN COALESCE(sl.cost_amount, sl.amount) ELSE 0 END), 2) AS labor,
+               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) AS txn_status
+        FROM qbo_transactions t
+        LEFT JOIN qbo_sales_transaction_lines sl ON sl.transaction_id = t.id
+        WHERE t.entity_type='Estimate' AND t.customer_qbo_id = :e
+        GROUP BY t.qbo_id, t.doc_number, t.txn_date, t.total_amt, txn_status
+        ORDER BY t.txn_date, t.doc_number
+    """), {"e": entity_id}).mappings().all()
+    hdrs = {str(r["estimate_qbo_id"]): r for r in conn.execute(text(
+        "SELECT estimate_qbo_id, crew_id, confirmed FROM project_estimate_billing WHERE entity_id=:e"),
+        {"e": entity_id}).mappings().all()}
+    out = []
+    for r in rows:
+        h = hdrs.get(str(r["qbo_id"]))
+        out.append({
+            "qbo_id": str(r["qbo_id"]), "doc_number": r["doc_number"],
+            "value": float(r["value"] or 0), "labor": float(r["labor"] or 0),
+            "status": _EST_STATUS.get(r["txn_status"], (r["txn_status"] or "").lower()),
+            "crew_id": (h["crew_id"] if h else None),
+            "confirmed": (bool(h["confirmed"]) if h else False),
+            "has_header": bool(h),
+        })
+    return out
+
+
+def _default_crew_for_project(conn, entity_id, meta):
+    """Crew to seed a new estimate's assignment: whatever crew is already on the
+    project's payment schedules, else the suggested crew from the assignment."""
+    c = conn.execute(text(
+        "SELECT crew_id FROM project_payment_schedules WHERE entity_id=:e AND crew_id IS NOT NULL ORDER BY id LIMIT 1"),
+        {"e": entity_id}).scalar()
+    return c or (meta or {}).get("suggested_crew_id")
+
+
+def _ensure_estimate_billing(conn, entity_id, default_crew_id):
+    """Create a billing header for any accepted estimate that lacks one. New ones
+    start unconfirmed (=needs review) and inherit the project's default crew."""
+    for e in _estimates_for_billing(conn, entity_id):
+        if e["status"] == "accepted" and not e["has_header"]:
+            conn.execute(text("""
+                INSERT INTO project_estimate_billing
+                  (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, confirmed)
+                VALUES (:e, :eq, :dn, :c, 0)
+            """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"], "c": default_crew_id})
+
+
+def _ensure_invoice_schedules(conn, entity_id, ctx):
+    """One 35/35/30 net-30 invoice schedule per accepted estimate (create-if-missing)."""
+    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+    date_for = {"po": start, "start": start, "end": end}
+    net_days = 30
+    for e in _estimates_for_billing(conn, entity_id):
+        if e["status"] != "accepted" or e["value"] <= 0:
+            continue
+        exists = conn.execute(text(
+            "SELECT id FROM project_invoice_schedules WHERE entity_id=:e AND estimate_qbo_id=:eq"),
+            {"e": entity_id, "eq": e["qbo_id"]}).scalar()
+        if exists:
+            continue
+        contract = e["value"]
+        terms = f"35% PO / 35% start / 30% end, net-{net_days}"
+        sid = conn.execute(text("""
+            INSERT INTO project_invoice_schedules
+              (entity_id, estimate_qbo_id, estimate_doc_number, contract_value, terms_note, net_days)
+            VALUES (:e, :eq, :dn, :c, :t, :n)
+        """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"],
+               "c": contract, "t": terms, "n": net_days}).lastrowid
+        n, acc = len(DEFAULT_TERMS), 0.0
+        for idx, (seq, label, pct, key) in enumerate(DEFAULT_TERMS):
+            amt = round(contract * pct / 100.0, 2) if idx < n - 1 else round(contract - acc, 2)
+            if idx < n - 1:
+                acc += amt
+            inv_d = date_for.get(key)
+            due_d = (inv_d + timedelta(days=net_days)) if inv_d else None
+            conn.execute(text("""
+                INSERT INTO project_invoice_milestones
+                  (schedule_id, seq, label, pct, invoice_date, due_date, amount, status, note)
+                VALUES (:s,:seq,:l,:p,:iv,:du,:a,'pending',NULL)
+            """), {"s": sid, "seq": seq, "l": label, "p": pct, "iv": inv_d, "du": due_d, "a": amt})
+
+
+def _compose_estimates(conn, entity_id):
+    """The per-estimate billing view: each accepted estimate with its invoice
+    schedule (tiered against QBO), plus the pending tray and a needs-review count.
+    Invoice milestones tier by a single project-wide burn-down (collected fills the
+    earliest invoice dates, then invoiced-A/R, then scheduled) since QBO invoices
+    aren't reliably tagged per estimate."""
+    ests = _estimates_for_billing(conn, entity_id)
+    invoiced, open_ar = _qbo_invoiced(conn, entity_id)
+    collected = round(invoiced - open_ar, 2)
+
+    # load per-estimate invoice schedules + milestones
+    scheds = {}
+    for s in conn.execute(text(
+        "SELECT id, estimate_qbo_id FROM project_invoice_schedules WHERE entity_id=:e AND estimate_qbo_id IS NOT NULL"),
+        {"e": entity_id}).mappings().all():
+        ms = conn.execute(text("""
+            SELECT id, seq, label, pct, invoice_date, due_date, amount, status, note, edited
+            FROM project_invoice_milestones WHERE schedule_id=:sid ORDER BY seq, id
+        """), {"sid": s["id"]}).mappings().all()
+        scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
+
+    # global burn-down across all milestones by invoice date
+    flat = []
+    for eq, (sid, ms) in scheds.items():
+        for m in ms:
+            flat.append(m)
+    flat.sort(key=lambda m: (str(m["invoice_date"] or "9999"), m["seq"] or 0))
+    tier_by, cum = {}, 0.0
+    for m in flat:
+        amt = float(m["amount"] or 0)
+        tier_by[m["id"]] = ("realized" if cum + amt <= collected + EPS
+                            else "committed" if cum + amt <= invoiced + EPS else "scheduled")
+        cum += amt
+
+    def _ms_out(m):
+        t = tier_by.get(m["id"], "scheduled")
+        return {
+            "id": m["id"], "seq": m["seq"], "label": m["label"], "pct": float(m["pct"] or 0),
+            "invoice_date": str(m["invoice_date"]) if m["invoice_date"] else None,
+            "due_date": str(m["due_date"]) if m["due_date"] else None,
+            "amount": float(m["amount"] or 0), "tier": t, "edited": bool(m["edited"]),
+            "status_label": {"realized": "Paid", "committed": "Sent · A/R"}.get(t, "To bill"),
+        }
+
+    accepted, pending, needs_review = [], [], 0
+    for e in ests:
+        if e["status"] == "pending":
+            pending.append({"qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"]})
+            continue
+        if e["status"] != "accepted":
+            continue
+        sid, ms = scheds.get(e["qbo_id"], (None, []))
+        milestones = [_ms_out(m) for m in ms]
+        if not e["confirmed"]:
+            needs_review += 1
+        accepted.append({
+            "qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"],
+            "labor": e["labor"], "confirmed": e["confirmed"], "crew_id": e["crew_id"],
+            "schedule_id": sid, "milestones": milestones,
+            "invoice_subtotal": round(sum(m["amount"] for m in milestones), 2),
+        })
+    return {
+        "accepted": accepted, "pending": pending, "needs_review": needs_review,
+        "invoiced_qbo": round(invoiced, 2), "collected": collected, "open_ar": round(open_ar, 2),
+        "contract_total": round(sum(a["value"] for a in accepted), 2),
+    }
+
+
+# ---------------------------------------------------------------------------
 # QBO burn-down
 # ---------------------------------------------------------------------------
 def _qbo_invoiced(conn, entity_id):
@@ -371,13 +535,18 @@ def _tier_by_burndown(amount, cum_before, paid, committed):
 # Compose
 # ---------------------------------------------------------------------------
 def _compose_invoices(conn, entity_id, books_closed):
-    sched = conn.execute(text(
-        "SELECT * FROM project_invoice_schedules WHERE entity_id = :e"), {"e": entity_id}).mappings().first()
-    ms = []
-    if sched:
-        ms = conn.execute(text(
-            "SELECT * FROM project_invoice_milestones WHERE schedule_id = :s ORDER BY seq, id"),
-            {"s": sched["id"]}).mappings().all()
+    """Project-level invoice roll-up — aggregates ALL per-estimate schedules into
+    the summary + flat milestone list the cash view uses. (Per-estimate breakdown
+    is in _compose_estimates.)"""
+    first = conn.execute(text(
+        "SELECT id FROM project_invoice_schedules WHERE entity_id = :e ORDER BY id LIMIT 1"),
+        {"e": entity_id}).scalar()
+    ms = conn.execute(text("""
+        SELECT m.* FROM project_invoice_milestones m
+        JOIN project_invoice_schedules s ON s.id = m.schedule_id
+        WHERE s.entity_id = :e
+        ORDER BY m.invoice_date, m.seq, m.id
+    """), {"e": entity_id}).mappings().all()
     estimate_total = round(sum(float(m["amount"] or 0) for m in ms), 2)
     invoiced, open_ar = _qbo_invoiced(conn, entity_id)
     paid = max(0.0, invoiced - open_ar)
@@ -410,7 +579,7 @@ def _compose_invoices(conn, entity_id, books_closed):
         bar_ar = round(max(0.0, min(invoiced, total) - bar_paid), 2)
         bar_sched = round(max(0.0, total - bar_paid - bar_ar), 2)
     return {
-        "schedule_id": sched["id"] if sched else None,
+        "schedule_id": first,
         "contract_value": total,
         "estimate_total": estimate_total,
         "invoiced_qbo": round(invoiced, 2),
@@ -585,15 +754,14 @@ def regenerate(entity_id: str, force: bool = False, user=Depends(get_current_use
             raise HTTPException(status_code=404, detail="Project not found")
         meta = _project_meta(conn, entity_id) or {}
 
-        # invoices — rebuild unless a milestone was hand-edited (or force)
-        sid = conn.execute(text("SELECT id FROM project_invoice_schedules WHERE entity_id=:e"),
-                           {"e": entity_id}).scalar()
-        if sid:
+        # invoices — per estimate schedule; rebuild each unless a milestone was hand-edited
+        for isid in conn.execute(text("SELECT id FROM project_invoice_schedules WHERE entity_id=:e"),
+                                 {"e": entity_id}).scalars().all():
             inv_edited = conn.execute(text(
-                "SELECT MAX(edited) FROM project_invoice_milestones WHERE schedule_id=:s"), {"s": sid}).scalar()
+                "SELECT MAX(edited) FROM project_invoice_milestones WHERE schedule_id=:s"), {"s": isid}).scalar()
             if force or not inv_edited:
-                conn.execute(text("DELETE FROM project_invoice_milestones WHERE schedule_id=:s"), {"s": sid})
-                conn.execute(text("DELETE FROM project_invoice_schedules WHERE id=:s"), {"s": sid})
+                conn.execute(text("DELETE FROM project_invoice_milestones WHERE schedule_id=:s"), {"s": isid})
+                conn.execute(text("DELETE FROM project_invoice_schedules WHERE id=:s"), {"s": isid})
 
         # crew — per estimate schedule; keep any that has an edited installment
         for cs in conn.execute(text("SELECT id FROM project_payment_schedules WHERE entity_id=:e"),
@@ -611,7 +779,8 @@ def regenerate(entity_id: str, force: bool = False, user=Depends(get_current_use
             conn.execute(text("DELETE FROM project_expense_items WHERE entity_id=:e"), {"e": entity_id})
 
         # re-create whatever is now missing (untouched-and-cleared, or brand-new estimate)
-        _ensure_invoice_schedule(conn, entity_id, ctx)
+        _ensure_estimate_billing(conn, entity_id, _default_crew_for_project(conn, entity_id, meta))
+        _ensure_invoice_schedules(conn, entity_id, ctx)
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
     return get_bundle(entity_id, user)
@@ -666,8 +835,9 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Project not found")
         meta = _project_meta(conn, entity_id) or {}
 
-        # auto-generate the three schedules the first time (create-if-missing)
-        _ensure_invoice_schedule(conn, entity_id, ctx)
+        # auto-generate schedules the first time (create-if-missing)
+        _ensure_estimate_billing(conn, entity_id, _default_crew_for_project(conn, entity_id, meta))
+        _ensure_invoice_schedules(conn, entity_id, ctx)   # per estimate (35/35/30)
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
 
@@ -697,6 +867,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
                               if assigned else None),
         })
         exp = _compose_expenses(conn, entity_id, books_closed)
+        estimates = _compose_estimates(conn, entity_id)
         crews = _crew_options(conn)
         drift = _drift_reasons(conn, entity_id, ctx, inv)
 
@@ -729,6 +900,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         "invoices": inv,
         "crew": crew,
         "expenses": exp,
+        "estimates": estimates,
         "kpis": kpis,
         "crews": crews,
     }
