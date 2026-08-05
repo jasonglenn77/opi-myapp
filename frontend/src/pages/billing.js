@@ -1,10 +1,9 @@
-// Billing & Schedule panel (Projects hub Phase 3a).
-// Renders a project's full cash picture from /api/billing/project/{id}: the
-// auto-generated invoice / crew / expense schedules, each burned down against
-// QuickBooks actuals and tiered (realized / committed / scheduled / estimated),
-// plus the anatomy KPIs + paid-vs-expected burn bars + a contribution strip.
-// Tables are inline-editable (dates, amounts, labels; add/remove rows); the crew
-// job-offer flow stays in an "advanced" disclosure until it's fully integrated.
+// Billing & Schedule panel — reorganized around the ESTIMATE (Slice 2).
+// From /api/billing/project/{id}: a project roll-up, then one invoice schedule
+// per estimate (35/35/30, needs-review until confirmed), crew payments grouped
+// into per-crew rollups (single lump per pay date; reassigning an estimate's
+// crew splits the rollup), a pending-estimate tray, and shared project expenses
+// (est-vs-actual by category + a weekly cash-out schedule).
 import { api } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
 
@@ -23,6 +22,7 @@ const PILL = {
   "Sent · A/R":  "text-ink-900 bg-black/[0.06] border border-black/15",
   "Bill · A/P":  "text-ink-900 bg-black/[0.06] border border-black/15",
   Scheduled:     "text-emerald-700 bg-transparent border border-emerald-300",
+  "To bill":     "text-emerald-700 bg-transparent border border-emerald-300",
   Allocated:     "text-black/45 bg-transparent border border-black/15",
 };
 function pill(label) {
@@ -105,286 +105,139 @@ export async function mountBillingPanel(container, entityId) {
 }
 
 function render(container, entityId, d) {
-  const p = d.project, inv = d.invoices, crew = d.crew, exp = d.expenses, k = d.kpis;
-  const [stLabel, stCls] = STATUS_PILL[p.operational_status] || STATUS_PILL.scheduled;
+  const p = d.project, k = d.kpis;
+  const est = d.estimates || { accepted: [], pending: [], needs_review: 0, contract_total: 0, collected: 0, open_ar: 0, invoiced_qbo: 0 };
+  const roll = d.crew_rollups || { rollups: [], total_labor: 0, total_paid: 0 };
+  const inv = d.invoices, crew = d.crew, exp = d.expenses;
+  const crews = d.crews || [];
+  const [stLabel, stCls] = STATUS_PILL[p.operational_status] || ["Scheduled", "text-blue-700 bg-blue-50 border-blue-200"];
+  const crewName = (id) => { const c = crews.find((x) => String(x.id) === String(id)); return c ? (c.parent_name ? c.parent_name + " — " : "") + c.name : null; };
+  const crewOpts = (sel) => `<option value="">Unassigned</option>` + crews.map((c) => `<option value="${c.id}" ${String(c.id) === String(sel) ? "selected" : ""}>${escapeHtml((c.parent_name ? c.parent_name + " — " : "") + c.name)}</option>`).join("");
+  const crewLeft = Math.max(0, roll.total_labor - roll.total_paid);
 
+  // ── roll-up KPIs + burn bars ──
   const kpi = (label, val, cls = "") =>
-    `<div class="px-4 py-3 bg-white">
-       <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1">${label}</div>
-       <div class="text-lg font-bold tabular-nums ${cls}">${money(val)}</div>
-     </div>`;
-
-  // ── burn bars ──
+    `<div class="px-4 py-3 bg-white"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1">${label}</div><div class="text-lg font-bold tabular-nums ${cls}">${money(val)}</div></div>`;
+  const burnRow = (label, sub, bar) =>
+    `<div class="mb-3"><div class="flex justify-between items-baseline text-[12px] mb-1"><span class="font-semibold text-ink-900">${escapeHtml(label)}</span><span class="text-black/50">${escapeHtml(sub)}</span></div>${bar}</div>`;
   const invBar = burnBar([
-    { v: inv.summary.paid, cls: SEG.realized, label: money(inv.summary.paid) + " paid", title: "Collected" },
-    { v: inv.summary.ar, cls: SEG.committed, label: money(inv.summary.ar) + " A/R", title: "Invoiced, unpaid" },
-    { v: inv.summary.scheduled, cls: SEG.scheduled, label: money(inv.summary.scheduled) + " to bill", title: "Not yet invoiced" },
+    { v: est.collected, cls: SEG.realized, label: money(est.collected) + " paid", title: "Collected" },
+    { v: Math.max(0, est.invoiced_qbo - est.collected), cls: SEG.committed, label: money(est.invoiced_qbo - est.collected) + " A/R", title: "Invoiced, unpaid" },
+    { v: Math.max(0, est.contract_total - est.invoiced_qbo), cls: SEG.scheduled, label: money(est.contract_total - est.invoiced_qbo) + " to bill", title: "Not yet invoiced" },
   ]);
-  // Crew bar always shows the estimate as the reference: paid + remaining
-  // (scheduled while open, or under/over vs estimate once closed).
-  const crewEst = crew.estimate_total || crew.summary.total || 0;
-  const crewPaid = crew.summary.paid;
-  const crewBar = burnBar(
-    p.books_closed
-      ? (crewPaid > crewEst + 0.5
-          ? [
-              { v: crewEst, cls: SEG.realized, label: money(crewEst) + " est. paid", title: "Paid up to the estimate" },
-              { v: crewPaid - crewEst, cls: "bg-red-600 text-white", label: money(crewPaid - crewEst) + " over", title: "Paid beyond the estimate" },
-            ]
-          : [
-              { v: crewPaid, cls: SEG.realized, label: money(crewPaid) + " paid", title: "Paid to crew" },
-              { v: Math.max(0, crewEst - crewPaid), cls: SEG.estimated, label: money(crewEst - crewPaid) + " under", title: "Came in under the estimate" },
-            ])
-      : [
-          { v: crewPaid, cls: SEG.realized, label: money(crewPaid) + " paid", title: "Paid to crew" },
-          { v: crew.summary.scheduled, cls: SEG.scheduled, label: money(crew.summary.scheduled) + " scheduled", title: "Remaining" },
-        ]);
-  const expOver = exp.summary.over || 0;
-  const expBar = expOver > 0
-    ? burnBar([
-        { v: Math.max(0, exp.summary.total - 0), cls: SEG.committed, label: money(exp.summary.total) + " est. spent", title: "Spent up to the estimate" },
-        { v: expOver, cls: "bg-red-600 text-white", label: money(expOver) + " over", title: "Spent beyond the estimate" },
-      ])
-    : burnBar([
-        { v: exp.summary.committed, cls: SEG.committed, label: money(exp.summary.committed) + " spent", title: "Spent to date (QBO)" },
-        { v: exp.summary.allocated, cls: SEG.estimated, label: money(exp.summary.allocated) + " allocated", title: "Estimated, not yet spent" },
-      ]);
+  const crewBar = burnBar([
+    { v: roll.total_paid, cls: SEG.realized, label: money(roll.total_paid) + " paid", title: "Paid to crews" },
+    { v: crewLeft, cls: SEG.scheduled, label: money(crewLeft) + " left", title: "Scheduled" },
+  ]);
 
-  // variance chip shown when the project is closed (estimate vs actual)
-  const varChip = (v) => {
-    if (!p.books_closed || !v) return "";
-    const over = v > 0;
-    return `<span class="ml-2 inline-flex items-center text-[10.5px] font-bold px-1.5 py-0.5 rounded ${over ? "text-red-700 bg-red-50 border border-red-200" : "text-emerald-700 bg-emerald-50 border border-emerald-200"}">${over ? "+" : "−"}${money(Math.abs(v))} vs est</span>`;
-  };
+  // ── banners ──
+  const reviewList = est.accepted.filter((a) => !a.confirmed);
+  const banner = est.needs_review > 0 ? `
+    <div class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center gap-3">
+      <span class="w-6 h-6 rounded-md bg-amber-500 text-white flex items-center justify-center font-extrabold shrink-0">!</span>
+      <div class="text-[13px] text-amber-900"><b>${est.needs_review} estimate${est.needs_review > 1 ? "s" : ""} need${est.needs_review > 1 ? "" : "s"} review</b> — confirm ${est.needs_review > 1 ? "their" : "its"} invoice schedule &amp; crew assignment (${reviewList.map((a) => "#" + escapeHtml(a.doc)).join(", ")}).</div>
+    </div>` : "";
+  const completePrompt = p.appears_complete ? `
+    <div class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 flex items-center gap-3">
+      <span class="w-6 h-6 rounded-md bg-emerald-600 text-white flex items-center justify-center font-extrabold shrink-0">✓</span>
+      <div class="text-[13px] text-emerald-900 flex-1"><b>This project looks complete</b> — every invoice is billed and paid. Review, then mark it complete to close the books.</div>
+      <button data-complete class="text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1.5 whitespace-nowrap">Mark complete</button>
+    </div>` : "";
+  const driftPrompt = (p.drift && p.drift.length) ? `
+    <div class="rounded-xl border border-blue-300 bg-blue-50 px-4 py-3 flex items-center gap-3">
+      <span class="w-6 h-6 rounded-md bg-blue-600 text-white flex items-center justify-center font-extrabold shrink-0">↻</span>
+      <div class="text-[13px] text-blue-900 flex-1"><b>Schedule is out of date.</b> ${p.drift.map(escapeHtml).join("; ")}. Refresh to rebuild the untouched schedules (your edits are kept).</div>
+      <button data-refresh class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1.5 whitespace-nowrap">↻ Refresh now</button>
+    </div>` : "";
+  const needsDates = !p.has_dates ? `
+    <div class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center gap-3">
+      <span class="w-6 h-6 rounded-md bg-amber-500 text-white flex items-center justify-center font-extrabold shrink-0">!</span>
+      <div class="text-[13px] text-amber-900"><b>No assignment dates yet.</b> Add a start/end on the <b>Assignment</b> tab and the crew &amp; invoice schedules will generate automatically.</div>
+    </div>` : "";
 
-  const burnRow = (name, sub, bar, variance) => `
-    <div class="mb-4 last:mb-0">
-      <div class="flex justify-between items-baseline mb-1.5">
-        <span class="text-[13px] font-bold text-ink-900">${escapeHtml(name)}${varChip(variance)}</span>
-        <span class="tabular-nums text-[12px] text-black/55">${escapeHtml(sub)}</span>
-      </div>
-      ${bar}
-    </div>`;
-
-  // ── schedule tables (inline-editable: dates, amounts, labels; status auto) ──
-  const invRows = inv.milestones.map((m) => `
+  // ── per-estimate invoice cards ──
+  const milestoneRow = (m) => `
     <tr class="border-b border-black/5">
       <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[m.tier]}${eInput("milestone", m.id, "label", m.label || "Milestone", "text", "font-semibold min-w-[8rem]")}</span></td>
-      <td class="py-1 px-2 tabular-nums text-black/50 whitespace-nowrap">${m.pct ? m.pct + "%" : "—"}</td>
+      <td class="py-1 px-2 tabular-nums text-black/50">${m.pct ? Math.round(m.pct) + "%" : "—"}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "invoice_date", m.invoice_date, "date")}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "due_date", m.due_date, "date")}</td>
       <td class="py-1 px-2 text-right">${eInput("milestone", m.id, "amount", Math.round(m.amount), "number", "ml-auto")}</td>
       <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(m.status_label)}${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
-    </tr>`).join("");
-
-  // Per-estimate collapsible groups for the crew card (#4). Each estimate's
-  // bi-weekly schedule is its own <details> so multi-estimate projects stay tidy.
-  const crewGroupsHtml = (crew.schedules || []).map((s) => {
-    const rows = s.installments.map((i) => `
-      <tr class="border-b border-black/5">
-        <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[i.tier]}${eInput("installment", i.id, "note", i.note || "Payment", "text", "font-semibold min-w-[7rem]")}</span></td>
-        <td class="py-1 px-2">${eInput("installment", i.id, "pay_date", i.pay_date, "date")}</td>
-        <td class="py-1 px-2 text-right">${eInput("installment", i.id, "amount", Math.round(i.amount), "number", "ml-auto")}</td>
-        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(i.status_label)}${editedChip(i.edited)}${delBtn("installment", i.id)}</td>
-      </tr>`).join("");
-    const label = (s.estimate_doc_number ? "Estimate #" + escapeHtml(s.estimate_doc_number) : "Estimate") + (s.crew_name ? " · " + escapeHtml(s.crew_name) : "");
-    return `<details open class="group/cg border-b border-black/[0.06]">
-      <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden bg-black/[0.015] hover:bg-black/[0.03]">
-        <svg class="w-3 h-3 text-black/30 transition-transform group-open/cg:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
-        <span class="text-[12px] font-bold text-black/60">${label}</span>
-        <span class="ml-auto tabular-nums text-[12px] text-black/55">${money(s.subtotal)}</span>
-      </summary>
-      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-2 pl-4 pr-3 text-left font-bold">Payment</th><th class="py-2 px-2 text-left font-bold">Pay date</th><th class="py-2 px-2 text-right font-bold">Amount</th><th class="py-2 pl-2 pr-4 text-right font-bold">Status</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="px-4 py-1.5"><button data-add="installment" data-sid="${s.schedule_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">+ Add payment</button></div>
-    </details>`;
-  }).join("");
-
-  const expRows = exp.items.map((i) => `
-    <tr class="border-b border-black/5">
-      <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[i.tier]}${eSelect("item", i.id, "category", i.category || "Other", exp.categories)}</span></td>
-      <td class="py-1 px-2">${eInput("item", i.id, "description", i.description || "", "text", "min-w-[9rem]")}</td>
-      <td class="py-1 px-2">${eInput("item", i.id, "expense_date", i.expense_date, "date")}</td>
-      <td class="py-1 px-2 text-right">${eInput("item", i.id, "amount", Math.round(i.amount), "number", "ml-auto")}</td>
-      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(i.status_label)}${editedChip(i.edited)}${delBtn("item", i.id)}</td>
-    </tr>`).join("");
-
-  const tableCard = (title, sub, headHtml, rowsHtml, emptyMsg, addHtml = "", preHtml = "") => `
-    <details open class="group card overflow-hidden mb-4">
-      <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+    </tr>`;
+  const estimateCard = (a) => {
+    const nr = !a.confirmed;
+    const cn = crewName(a.crew_id) || "Unassigned";
+    const statusPill = nr
+      ? `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">● Needs review</span>`
+      : `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Confirmed</span>`;
+    const reviewBar = nr ? `
+      <div class="flex items-center gap-2 flex-wrap bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12.5px] text-amber-900">
+        <span>Review the schedule &amp; crew, then confirm.</span>
+        <label class="ml-auto flex items-center gap-1">Crew <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select></label>
+        <button data-confirm-est data-eq="${a.qbo_id}" class="text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1">Confirm</button>
+      </div>` : "";
+    const rows = a.milestones.map(milestoneRow).join("");
+    return `<details open class="group card overflow-hidden mb-3 ${nr ? "border-amber-300" : ""}">
+      <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
         <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
-        <span class="text-sm font-bold text-ink-900">${escapeHtml(title)}</span>
-        <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">◆ Auto</span>
-        <span class="ml-auto tabular-nums text-[12px] text-black/55">${escapeHtml(sub)}</span>
+        <span class="text-sm font-bold text-ink-900">Estimate <span class="text-blue-700">#${escapeHtml(a.doc || "—")}</span></span>
+        ${statusPill}
+        <span class="text-[11px] text-black/45">→ ${escapeHtml(cn)}</span>
+        <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(a.value)}</span>
       </summary>
-      ${preHtml}
-      ${rowsHtml
-        ? `<div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">${headHtml}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`
-        : `<div class="px-4 py-6 text-sm text-black/45">${escapeHtml(emptyMsg || "Nothing scheduled.")}</div>`}
-      ${rowsHtml ? addHtml : ""}
+      ${reviewBar}
+      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
+        <th class="py-2 pl-4 pr-3 text-left">Milestone</th><th class="py-2 px-2 text-left">%</th><th class="py-2 px-2 text-left">Invoice</th><th class="py-2 px-2 text-left">Due</th><th class="py-2 px-2 text-right">Amount</th><th class="py-2 pl-2 pr-4 text-right">Status</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>
+      ${a.schedule_id ? addBtn("milestone", a.schedule_id, "Add invoice milestone") : ""}
     </details>`;
+  };
 
-  const th = (cols) => cols.map((c, i) => {
-    const pad = i === 0 ? "pl-4 pr-3" : i === cols.length - 1 ? "pl-2 pr-4" : "px-2";
-    return `<th class="py-2 ${pad} ${c.r ? "text-right" : "text-left"} font-bold">${c.t}</th>`;
-  }).join("");
-
-  // ── crew job-offer bar (surfaced in the crew section) ──
-  const crews = d.crews || [];
-  const offer = crew.offer || {};
-  const offerBar = (() => {
-    if (offer.accepted) {
-      return `<div class="px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-[12.5px] text-emerald-900 flex items-center gap-2">
-        <b>✓ Crew accepted</b> — ${escapeHtml(offer.accepted.crew_name || "crew")} · <span class="tabular-nums">${money(offer.accepted.labor_amount)}</span></div>`;
-    }
-    const cur = offer.current;
-    if (cur && cur.status === "sent") {
-      return `<div class="px-4 py-2.5 bg-blue-50 border-b border-blue-200 text-[12.5px] text-blue-900 flex items-center gap-3">
-        <span><b>Offer sent</b> to ${escapeHtml(cur.crew_name || "crew")} · <span class="tabular-nums">${money(cur.labor_amount)}</span> — awaiting response</span>
-        <button data-offer-withdraw="${cur.id}" class="ml-auto text-[11.5px] font-semibold text-blue-700 hover:underline">Withdraw</button></div>`;
-    }
-    // Project already underway, no app offer record → infer the working crew from
-    // the real QBO bills and let the office backfill an accepted offer (#3).
-    if (offer.started && !offer.has_record && offer.working && offer.working.length) {
-      const chips = offer.working.map((w) => `<span class="tabular-nums font-semibold">${escapeHtml(w.vendor)} · ${money(w.amount)}</span>`).join(`<span class="text-emerald-700/40 mx-1">·</span>`);
-      return `<div class="px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-[12.5px] text-emerald-900">
-        <div class="flex items-center gap-2 flex-wrap">
-          <b>✓ Working crew</b> <span class="text-[10px] font-bold uppercase tracking-wide text-emerald-700/70">from QuickBooks</span>
-          ${chips}
-          ${offer.assigned_crew
-            ? `<button data-offer-backfill class="ml-auto text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1">Record as accepted</button>`
-            : `<span class="ml-auto text-[11px] text-emerald-700/70">Assign a crew to record the offer</span>`}
-        </div>
-        <div class="text-[11px] text-emerald-700/70 mt-1">This project was already underway — the offer was accepted before the app${offer.assigned_crew ? ". Recording it files it in the app's offer tracker as " + escapeHtml(offer.assigned_crew.crew_name || "the assigned crew") : ""}.</div>
-      </div>`;
-    }
-    return `<div class="px-4 py-2.5 border-b border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap">
-      <span class="font-semibold text-black/55">Crew job offer:</span>
-      <select data-offer-crew class="${EDIT_BASE} border-black/15">${crews.map((c) => `<option value="${c.id}">${escapeHtml((c.parent_name ? c.parent_name + " — " : "") + c.name)}</option>`).join("")}</select>
-      <button data-crew-browse class="text-[11.5px] font-semibold text-blue-600 hover:underline">Browse crews →</button>
-      <span class="text-black/50">Labor</span>
-      <input data-offer-labor type="number" value="${Math.round(offer.suggested_labor || crew.summary.total || 0)}" class="${EDIT_BASE} border-black/15 w-[7rem] text-right tabular-nums">
-      <button data-offer-send class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer</button>
+  // ── crew rollup cards ──
+  const rollupCard = (g) => {
+    const cn = g.crew_name || "Unassigned";
+    const chips = g.estimates.map((e) => `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}</span>`).join("");
+    const insts = g.installments.map((i) => `
+      <tr class="border-b border-black/5">
+        <td class="py-1 pl-4 pr-3 tabular-nums text-black/60">${shortDate(i.pay_date)}</td>
+        <td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td>
+        <td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td>
+      </tr>`).join("");
+    const o = g.offer;
+    let offerLine;
+    if (o && o.status === "accepted")
+      offerLine = `<div class="px-4 py-2.5 bg-emerald-50 border-t border-emerald-200 text-[12.5px] text-emerald-900 flex items-center gap-2 flex-wrap"><b>✓ Offer accepted</b> — ${escapeHtml(cn)} · ${money(o.labor_amount)}<button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-black/45 hover:underline">Withdraw</button></div>`;
+    else if (o && o.status === "sent")
+      offerLine = `<div class="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-[12.5px] text-blue-900 flex items-center gap-2 flex-wrap"><b>Offer sent</b> to ${escapeHtml(cn)} — awaiting response<button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-blue-700 hover:underline">Withdraw</button></div>`;
+    else offerLine = g.crew_id
+      ? `<div class="px-4 py-2.5 border-t border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap"><span class="font-semibold text-black/55">Rollup offer:</span><span>${escapeHtml(cn)} · ${money(g.labor)}</span><button data-offer-send data-crew="${g.crew_id}" data-labor="${Math.round(g.labor)}" class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer</button><button data-offer-script data-crew="${g.crew_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button></div>`
+      : `<div class="px-4 py-2.5 border-t border-black/[0.06] text-[12px] text-amber-700 bg-amber-50">Assign these estimates to a crew (in their invoice cards above) to send an offer.</div>`;
+    return `<div class="card overflow-hidden mb-3">
+      <div class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] flex-wrap">
+        <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">Rollup</span>
+        <span class="text-sm font-bold text-ink-900">${escapeHtml(cn)}</span>
+        <span class="text-[11.5px] text-black/45">covers ${g.estimates.length} estimate${g.estimates.length > 1 ? "s" : ""}</span>
+        <span class="ml-auto tabular-nums text-[13px]"><b class="text-ink-900">${money(g.paid_qbo)}</b> <span class="text-black/45">paid / ${money(g.labor)}</span></span>
+      </div>
+      <div class="px-4 py-2 flex flex-wrap gap-1.5 border-b border-black/[0.05]">${chips}</div>
+      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-2 pl-4 pr-3 text-left">Pay date</th><th class="py-2 px-2 text-right">Amount (lump)</th><th class="py-2 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-3 text-black/40 text-[12px]">No installments — add assignment dates.</td></tr>`}</tbody></table></div>
+      ${offerLine}
     </div>`;
-  })();
+  };
 
-  // ── actuals from QuickBooks (plan vs. actual), collapsible ──
-  const actualsBlock = (title, count, innerHtml) => `
-    <details class="group/act border-t border-black/[0.06] bg-black/[0.012]">
-      <summary class="px-4 py-2.5 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wide text-black/40 hover:text-black/60">
-        <svg class="w-3 h-3 transition-transform group-open/act:rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
-        ${escapeHtml(title)} <span class="text-black/30">(${count})</span>
-      </summary>
-      <div class="px-4 pb-3 overflow-x-auto">${innerHtml}</div>
-    </details>`;
-
-  const invActualTotal = (inv.actuals || []).reduce((s, a) => s + (a.amount || 0), 0);
-  const invActuals = (inv.actuals && inv.actuals.length)
-    ? actualsBlock("Actual invoices in QuickBooks", inv.actuals.length,
-        `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Estimate</th><th class="font-bold">Date</th><th class="font-bold">Due</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
-         <tbody>${inv.actuals.map((a) => `<tr class="border-t border-black/[0.05]">
-           <td class="py-1.5 tabular-nums font-semibold">${escapeHtml(a.doc_number || "—")}</td>
-           <td class="py-1.5 tabular-nums text-black/60">${a.estimate_doc ? "#" + escapeHtml(a.estimate_doc) : "—"}</td>
-           <td class="py-1.5 tabular-nums text-black/60">${shortDate(a.txn_date)}</td>
-           <td class="py-1.5 tabular-nums text-black/60">${shortDate(a.due_date)}</td>
-           <td class="py-1.5 text-right tabular-nums font-semibold">${money(a.amount)}</td>
-           <td class="py-1.5 text-right">${pill(a.status === "Paid" ? "Paid" : "Sent · A/R")}</td></tr>`).join("")}</tbody>
-         <tfoot><tr class="border-t-2 border-black/15 font-bold text-ink-900">
-           <td class="py-1.5" colspan="4">Total invoiced <span class="font-normal text-black/45">vs. ${money(inv.summary.total)} estimate</span></td>
-           <td class="py-1.5 text-right tabular-nums">${money(invActualTotal)}</td>
-           <td class="py-1.5 text-right text-[11px] font-semibold ${invActualTotal - inv.summary.total >= 0 ? "text-emerald-700" : "text-black/45"}">${invActualTotal - inv.summary.total >= 0 ? "" : "−"}${money(Math.abs(invActualTotal - inv.summary.total))}</td>
-         </tr></tfoot></table>`)
-    : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No invoices in QuickBooks yet — the schedule above is the plan.</div>`;
-
-  // Actual crew cash out of QuickBooks — the real Contract-Labor bills, any vendor
-  // (so a second/unregistered crew shows here too), grouped by the payee vendor.
-  const crewActualTotal = (crew.actuals || []).reduce((s, a) => s + (a.amount || 0), 0);
-  const crewActuals = (crew.actuals && crew.actuals.length)
-    ? actualsBlock("Actual crew bills in QuickBooks", crew.actuals.length, (() => {
-        const byV = {};
-        crew.actuals.forEach((a) => { (byV[a.vendor || "—"] ||= []).push(a); });
-        const body = Object.keys(byV).sort().map((v) => {
-          const rows = byV[v];
-          const sub = rows.reduce((s, a) => s + a.amount, 0);
-          return `<div class="mb-2.5">
-            <div class="flex justify-between items-baseline text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(v)}</span><span class="tabular-nums text-black/55">${money(sub)}</span></div>
-            <table class="w-full text-[12px]"><tbody>${rows.map((a) => `<tr class="border-b border-black/[0.04]">
-              <td class="py-1 pr-3 text-black/50">Contract Labor</td>
-              <td class="py-1 pr-3 tabular-nums text-black/60">${a.doc ? "#" + escapeHtml(a.doc) : ""}</td>
-              <td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td>
-              <td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>
-          </div>`;
-        }).join("");
-        return body + `<div class="flex justify-between items-baseline text-[12px] font-bold text-ink-900 border-t-2 border-black/15 pt-1.5">
-          <span>Total paid to crews <span class="font-normal text-black/45">vs. ${money(crewEst)} estimate</span></span>
-          <span class="tabular-nums">${money(crewActualTotal)}</span></div>`;
-      })())
-    : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No crew bills in QuickBooks yet — the schedule above is the plan.</div>`;
-
-  // Estimated-vs-actual by expense category (#6) — the side-by-side reconcile.
-  const estByCat = {};
-  (exp.by_category || []).forEach((c) => { estByCat[c.category] = c.estimated; });
-  const catCompare = (exp.by_category && exp.by_category.length) ? `
-    <div class="px-4 py-3 border-b border-black/[0.06] bg-black/[0.012]">
-      <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Estimated vs. actual by category</div>
-      <table class="w-full text-[12px]">
-        <thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Category</th><th class="text-right font-bold">Estimated</th><th class="text-right font-bold">Actual (QBO)</th><th class="text-right font-bold">Variance</th></tr></thead>
-        <tbody>${exp.by_category.map((c) => `<tr class="border-t border-black/[0.05]">
-          <td class="py-1 font-semibold">${escapeHtml(c.category)}</td>
-          <td class="py-1 text-right tabular-nums text-black/60">${money(c.estimated)}</td>
-          <td class="py-1 text-right tabular-nums font-semibold">${money(c.actual)}</td>
-          <td class="py-1 text-right tabular-nums font-semibold ${c.variance > 0.5 ? "text-red-600" : (c.variance < -0.5 ? "text-emerald-700" : "text-black/40")}">${c.variance > 0.5 ? "+" : ""}${money(c.variance)}</td></tr>`).join("")}</tbody>
-        <tfoot><tr class="border-t-2 border-black/15 font-bold text-ink-900">
-          <td class="py-1.5">Total</td>
-          <td class="py-1.5 text-right tabular-nums">${money(exp.estimate_total)}</td>
-          <td class="py-1.5 text-right tabular-nums">${money(exp.spent_qbo)}</td>
-          <td class="py-1.5 text-right tabular-nums ${exp.variance > 0.5 ? "text-red-600" : "text-emerald-700"}">${exp.variance > 0.5 ? "+" : ""}${money(exp.variance)}</td></tr></tfoot>
-      </table>
+  // ── pending tray ──
+  const pendingTray = est.pending.length ? `
+    <div class="card p-4 border-dashed">
+      <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-2">Pending estimates — not yet billing</div>
+      ${est.pending.map((e) => `<div class="flex items-center gap-2 py-1 text-[12.5px] border-b border-black/[0.05] last:border-0"><span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Pending</span> Estimate <b class="text-blue-700">#${escapeHtml(e.doc || "—")}</b><span class="ml-auto tabular-nums">${money(e.value)}</span></div>`).join("")}
+      <div class="text-[11px] text-black/40 mt-1.5">Becomes its own billing section automatically when accepted/converted in QuickBooks.</div>
     </div>` : "";
 
-  const expActuals = (exp.actuals && exp.actuals.length)
-    ? actualsBlock("Actual expenses in QuickBooks", exp.actuals.length, (() => {
-        const byCat = {};
-        exp.actuals.forEach((a) => { (byCat[a.category || "Other"] ||= []).push(a); });
-        return Object.keys(byCat).sort().map((cat) => {
-          const rows = byCat[cat];
-          const sub = rows.reduce((s, a) => s + a.amount, 0);
-          const est = estByCat[cat];
-          return `<div class="mb-2.5">
-            <div class="flex justify-between items-baseline text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(cat)}</span><span class="tabular-nums text-black/55">${est != null ? `<span class="font-normal text-black/40">${money(est)} est · </span>` : ""}${money(sub)}</span></div>
-            <table class="w-full text-[12px]"><tbody>${rows.map((a) => `<tr class="border-b border-black/[0.04]">
-              <td class="py-1 pr-3 font-semibold">${escapeHtml(a.vendor || "—")}</td>
-              <td class="py-1 pr-3 text-black/50">${escapeHtml(a.source_item || a.type || "")}</td>
-              <td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td>
-              <td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>
-          </div>`;
-        }).join("");
-      })())
-    : `<div class="px-4 py-2.5 text-[12px] text-black/40 border-t border-black/[0.06]">No project expenses recorded in QuickBooks yet.</div>`;
+  // ── shared expenses ──
+  const catRows = (exp.by_category || []).map((c) => `<tr class="border-t border-black/[0.05]"><td class="py-1 font-semibold">${escapeHtml(c.category)}</td><td class="py-1 text-right tabular-nums text-black/60">${money(c.estimated)}</td><td class="py-1 text-right tabular-nums font-semibold">${money(c.actual)}</td><td class="py-1 text-right tabular-nums font-semibold ${c.variance > 0.5 ? "text-red-600" : (c.variance < -0.5 ? "text-emerald-700" : "text-black/40")}">${c.variance > 0.5 ? "+" : ""}${money(c.variance)}</td></tr>`).join("");
+  const weeklyRows = (exp.weekly || []).map((w) => `<tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60">Week of ${shortDate(w.week_of)}</td><td class="py-1 pr-4 text-right tabular-nums font-semibold">${money(w.amount)}</td></tr>`).join("");
 
-  // ── banners ──
-  const needsDates = !p.has_dates ? `
-    <div class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 mb-4 flex items-center gap-3">
-      <span class="w-6 h-6 rounded-md bg-amber-500 text-white flex items-center justify-center font-extrabold">!</span>
-      <div class="text-[13px] text-amber-900"><b>No assignment dates yet.</b> Add a start/end on the <b>Assignment</b> tab and the crew &amp; invoice schedules will generate automatically.</div>
-    </div>` : "";
-
-  // "Looks complete" review prompt — office confirms (never auto-closed).
-  const completePrompt = p.appears_complete ? `
-    <div class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 mb-4 flex items-center gap-3">
-      <span class="w-6 h-6 rounded-md bg-emerald-600 text-white flex items-center justify-center font-extrabold">✓</span>
-      <div class="text-[13px] text-emerald-900 flex-1"><b>This project looks complete</b> — every invoice is billed and paid. Review, then mark it complete to close the books.</div>
-      <button data-complete class="text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1.5 whitespace-nowrap">Mark complete</button>
-    </div>` : "";
-
-  // Drift — schedule fell out of sync with current dates/estimate.
-  const driftPrompt = (p.drift && p.drift.length) ? `
-    <div class="rounded-xl border border-blue-300 bg-blue-50 px-4 py-3 mb-4 flex items-center gap-3">
-      <span class="w-6 h-6 rounded-md bg-blue-600 text-white flex items-center justify-center font-extrabold">↻</span>
-      <div class="text-[13px] text-blue-900 flex-1"><b>Schedule is out of date.</b> ${p.drift.map(escapeHtml).join("; ")}. Refresh to rebuild the untouched schedules (your edits are kept).</div>
-      <button data-refresh class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1.5 whitespace-nowrap">↻ Refresh now</button>
-    </div>` : "";
-
-  // ── contribution strip (upcoming unpaid cash, by week) ──
   const contribHtml = buildContribution(inv, crew, exp);
 
   container.innerHTML = `
@@ -395,76 +248,68 @@ function render(container, entityId, d) {
         <div>
           <div class="text-[16px] font-bold text-ink-900">${escapeHtml(p.name || "Project")}</div>
           <div class="flex gap-4 flex-wrap text-[12.5px] text-black/60 mt-1">
-            <span>Contract <b class="tabular-nums text-ink-900">${money(p.contract_value)}</b></span>
+            <span>Contract <b class="tabular-nums text-ink-900">${money(est.contract_total)}</b></span>
             <span>Dates <b class="tabular-nums text-ink-900">${shortDate(p.start_date)} → ${shortDate(p.end_date)}</b></span>
             <span>Status <span class="inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-full border ${stCls}">${stLabel}</span></span>
+            ${p.books_closed ? `<span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-black/60 bg-black/[0.06] border border-black/15 px-2 py-0.5 rounded-full">🔒 Books closed</span>` : ""}
           </div>
         </div>
         <div class="ml-auto flex items-center gap-3 text-[11.5px] text-black/45">
-          <span class="inline-flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">◆ Auto-generated</span>
-          <span class="hidden sm:inline">from estimate + assignment dates</span>
-          <button data-refresh class="text-[11.5px] font-bold text-black/60 bg-white border border-black/20 rounded-lg px-3 py-1.5 hover:border-black/40 hover:text-ink-900 inline-flex items-center gap-1.5" title="Rebuild untouched schedules from the current estimate + dates, keeping your edits">↻ Refresh</button>
+          <button data-refresh class="text-[11.5px] font-bold text-black/60 bg-white border border-black/20 rounded-lg px-3 py-1.5 hover:border-black/40 hover:text-ink-900" title="Rebuild untouched schedules from the current estimates + dates, keeping your edits">↻ Refresh</button>
           <button data-rebuild class="text-[11px] text-black/40 hover:text-red-600 underline decoration-dotted" title="Discard all schedules and rebuild from scratch">rebuild all</button>
         </div>
       </div>
 
+      ${banner}
       ${completePrompt}
       ${driftPrompt}
       ${needsDates}
 
-      <!-- KPI strip -->
+      <!-- project roll-up -->
       <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
-        ${kpi("Contract", k.contract)}
-        ${kpi("Collected", k.collected, "text-emerald-700")}
-        ${kpi("Open A/R", k.open_ar)}
-        ${kpi("Unbilled", k.unbilled, "text-black/60")}
-        ${kpi("Crew left", k.crew_left, "text-black/60")}
-        ${kpi("Expenses left", k.expenses_left, "text-black/60")}
+        ${kpi("Contract", est.contract_total)}
+        ${kpi("Collected", est.collected, "text-emerald-700")}
+        ${kpi("Open A/R", est.open_ar)}
+        ${kpi("Crew paid", roll.total_paid, "text-black/60")}
+        ${kpi("Crew left", crewLeft, "text-black/60")}
+        ${kpi("Expenses", exp.estimate_total, "text-black/60")}
       </div>
-
-      <!-- cash summary burn bars -->
       <div class="card p-4 sm:p-5">
-        <div class="flex items-center gap-2 mb-3">
-          <span class="text-sm font-bold text-ink-900">Cash summary — paid vs. expected</span>
-          ${p.books_closed ? `<span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-black/60 bg-black/[0.06] border border-black/15 px-2 py-0.5 rounded-full" title="Project complete — figures reconciled to actual QuickBooks amounts, estimate shown as variance">🔒 Books closed · actuals</span>` : ""}
-        </div>
-        ${burnRow("Customer invoices", (p.books_closed ? money(inv.invoiced_qbo) + " invoiced" : money(inv.summary.total) + " · 35 / 35 / 30, net-30"), invBar, inv.variance)}
-        ${burnRow("Crew payments", money(crew.paid_qbo) + " paid / " + money(crewEst) + " est" + (crew.crew_name ? " · " + crew.crew_name : "") + " · bi-weekly", crewBar, crew.variance)}
-        ${burnRow("Project expenses", money(exp.summary.total) + " estimate" + (exp.spent_qbo ? " · " + money(exp.spent_qbo) + " spent (QBO)" : ""), expBar, exp.variance)}
+        <div class="text-sm font-bold text-ink-900 mb-3">Cash summary — paid vs. expected</div>
+        ${burnRow("Customer invoices", money(est.contract_total) + " · " + est.accepted.length + " estimate" + (est.accepted.length === 1 ? "" : "s"), invBar)}
+        ${burnRow("Crew payments", money(roll.total_labor) + " · " + roll.rollups.length + " rollup" + (roll.rollups.length === 1 ? "" : "s"), crewBar)}
         <div class="flex gap-4 flex-wrap mt-3 pt-3 border-t border-black/10 text-[11px] text-black/55">
-          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-700"></i>Realized (in bank)</span>
-          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-ink-900"></i>Committed (A/R, A/P)</span>
+          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-700"></i>Paid / collected</span>
+          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-ink-900"></i>Invoiced · A/R</span>
           <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-200"></i>Scheduled</span>
-          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm border border-black/20 [background-image:repeating-linear-gradient(135deg,transparent,transparent_3px,rgba(0,0,0,.12)_3px,rgba(0,0,0,.12)_4px)]"></i>Estimated</span>
         </div>
       </div>
 
-      <!-- schedules -->
-      ${tableCard("Customer invoices", money(inv.summary.total) + " · net-30",
-        th([{ t: "Milestone" }, { t: "%" }, { t: "Invoice" }, { t: "Due" }, { t: "Amount", r: 1 }, { t: "Status", r: 1 }]),
-        invRows, "Add a contract value on the estimate to generate invoices.",
-        (inv.schedule_id ? addBtn("milestone", inv.schedule_id, "Add invoice milestone") : "") + invActuals)}
+      <!-- customer invoices, per estimate -->
+      <div>
+        <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-2 mt-1">Customer invoices — one schedule per estimate</div>
+        ${est.accepted.map(estimateCard).join("") || `<div class="card p-6 text-sm text-black/45">No accepted estimates yet.</div>`}
+      </div>
 
-      <!-- crew payments — offer bar, then each estimate collapsible, then QBO actuals -->
-      <details open class="group card overflow-hidden mb-4">
-        <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
-          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
-          <span class="text-sm font-bold text-ink-900">Crew payments</span>
-          <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">◆ Auto</span>
-          <span class="ml-auto tabular-nums text-[12px] text-black/55">${escapeHtml((crew.crew_name || "Crew") + " · " + money(crew.summary.total))}</span>
-        </summary>
-        ${offerBar}
-        ${(crew.schedules && crew.schedules.length) ? `<div class="px-4 py-1.5 border-b border-black/[0.06] text-[11.5px]"><button data-offer-script class="font-semibold text-blue-600 hover:underline">📋 Offer script</button><span class="text-black/40 ml-2">estimate amounts + payment schedule, ready to copy / email</span></div>` : ""}
-        ${crewGroupsHtml || `<div class="px-4 py-6 text-sm text-black/45">Add assignment dates to generate the bi-weekly schedule.</div>`}
-        ${crewActuals}
-      </details>
+      <!-- crew rollups -->
+      <div>
+        <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-2">Crew assignments &amp; rollup payments</div>
+        ${roll.rollups.map(rollupCard).join("") || `<div class="card p-6 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
+      </div>
 
-      ${tableCard("Project expenses", money(exp.summary.total) + " estimate",
-        th([{ t: "Category" }, { t: "Description" }, { t: "Date" }, { t: "Amount", r: 1 }, { t: "Status", r: 1 }]),
-        expRows, "No estimate cost lines to plan from.",
-        addBtn("item", null, "Add expense") + expActuals, catCompare)}
+      ${pendingTray}
 
-      <!-- contribution -->
+      <!-- shared expenses -->
+      <div class="card overflow-hidden">
+        <div class="px-4 py-3 border-b border-black/10 bg-black/[0.02] flex items-center gap-2 flex-wrap">
+          <span class="text-sm font-bold text-ink-900">Project expenses</span>
+          <span class="text-[11.5px] text-black/45">shared across the project</span>
+          <span class="ml-auto tabular-nums text-[12px] text-black/55">${money(exp.estimate_total)} est · ${money(exp.spent_qbo)} actual</span>
+        </div>
+        ${catRows ? `<div class="px-4 py-3"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Estimated vs. actual by category</div><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Category</th><th class="text-right font-bold">Estimated</th><th class="text-right font-bold">Actual (QBO)</th><th class="text-right font-bold">Variance</th></tr></thead><tbody>${catRows}</tbody></table></div>` : `<div class="px-4 py-4 text-[12.5px] text-black/45">No estimate cost lines to plan from.</div>`}
+        ${weeklyRows ? `<details class="border-t border-black/[0.06] bg-black/[0.012]"><summary class="px-4 py-2.5 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden text-[10.5px] font-bold uppercase tracking-wide text-black/40 hover:text-black/60">Weekly cash-out schedule <span class="text-black/30">(total spread weekly)</span></summary><div class="px-4 pb-3 overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40"><th class="text-left pb-1 pl-4">Week</th><th class="text-right pb-1 pr-4">Amount</th></tr></thead><tbody>${weeklyRows}</tbody></table></div></details>` : ""}
+      </div>
+
       ${contribHtml}
     </div>`;
 
@@ -480,23 +325,17 @@ function render(container, entityId, d) {
     }
   };
 
-  // Refresh — edit-preserving (both the meta-bar button and the drift banner).
   container.querySelectorAll("[data-refresh]").forEach((b) =>
     b.addEventListener("click", (e) => post(`/billing/project/${encodeURIComponent(entityId)}/regenerate`, "↻ Refreshing…", e.currentTarget)));
-
-  // Rebuild all — discards edits (confirm).
   container.querySelector("[data-rebuild]")?.addEventListener("click", (e) => {
-    if (!confirm("Discard ALL schedules (including your edits) and rebuild from the estimate + assignment dates?")) return;
+    if (!confirm("Discard ALL schedules (including your edits) and rebuild from the estimates + assignment dates?")) return;
     post(`/billing/project/${encodeURIComponent(entityId)}/regenerate?force=true`, "rebuilding…", e.currentTarget);
   });
-
-  // Mark complete — office confirms the project is done.
   container.querySelector("[data-complete]")?.addEventListener("click", (e) => {
     if (!confirm("Mark this project complete? This closes the books — figures will reconcile to actual QuickBooks amounts.")) return;
     post(`/billing/project/${encodeURIComponent(entityId)}/mark-complete`, "Completing…", e.currentTarget);
   });
 
-  // ── inline editing: patch a field on change, then reload the bundle ──
   const reload = async () => {
     const y = window.scrollY;
     try {
@@ -506,7 +345,18 @@ function render(container, entityId, d) {
     } catch (_) {}
   };
   const root = container.firstElementChild; // replaced every render → no listener stacking
+
   root?.addEventListener("change", async (e) => {
+    // per-estimate crew reassignment (the rollup key / split)
+    const cr = e.target.closest("[data-assign-crew]");
+    if (cr) {
+      const eq = cr.getAttribute("data-eq");
+      cr.disabled = true;
+      try { await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/crew`, { method: "POST", body: JSON.stringify({ crew_id: cr.value ? Number(cr.value) : null }) }); await reload(); }
+      catch (err) { cr.disabled = false; alert("Reassign failed: " + (err?.message || "error")); }
+      return;
+    }
+    // inline field edits (invoice milestones / expense items)
     const el = e.target.closest("[data-edit]");
     if (!el) return;
     const kind = el.getAttribute("data-edit"), id = el.getAttribute("data-id"), field = el.getAttribute("data-field");
@@ -518,34 +368,28 @@ function render(container, entityId, d) {
     try { await api(url, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); await reload(); }
     catch (err) { el.disabled = false; alert("Save failed: " + (err?.message || "error")); }
   });
+
   root?.addEventListener("click", async (e) => {
-    // crew job offer
-    const browse = e.target.closest("[data-crew-browse]");
-    if (browse) {
-      openCrewRoster(entityId, p.start_date, p.end_date, (id) => {
-        const sel = root.querySelector("[data-offer-crew]");
-        if (sel) sel.value = id;
-      });
+    const confirmEst = e.target.closest("[data-confirm-est]");
+    if (confirmEst) {
+      const eq = confirmEst.getAttribute("data-eq");
+      post(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/confirm`, "Confirming…", confirmEst);
       return;
     }
     const script = e.target.closest("[data-offer-script]");
-    if (script) { openOfferScriptModal(offerScript(crew, p.name)); return; }
+    if (script) {
+      const cid = script.getAttribute("data-crew");
+      const g = roll.rollups.find((x) => String(x.crew_id) === String(cid));
+      if (g) openOfferScriptModal(rollupScript(g, p.name));
+      return;
+    }
     const oSend = e.target.closest("[data-offer-send]");
     if (oSend) {
-      const crewId = root.querySelector("[data-offer-crew]")?.value;
-      const labor = root.querySelector("[data-offer-labor]")?.value;
-      if (!crewId) { alert("Pick a crew"); return; }
+      const crewId = oSend.getAttribute("data-crew"), labor = oSend.getAttribute("data-labor");
+      if (!crewId) { alert("Assign a crew first"); return; }
       oSend.disabled = true;
       try { await api(`/offers/project/${encodeURIComponent(entityId)}`, { method: "POST", body: JSON.stringify({ crew_id: Number(crewId), labor_amount: Number(labor || 0) }) }); await reload(); }
       catch (err) { oSend.disabled = false; alert("Send failed: " + (err?.message || "error")); }
-      return;
-    }
-    const oBackfill = e.target.closest("[data-offer-backfill]");
-    if (oBackfill) {
-      if (!confirm("Record this project's crew as an accepted offer? Use this for projects that started before the app — it files the historical acceptance in the offer tracker.")) return;
-      oBackfill.disabled = true;
-      try { await api(`/offers/project/${encodeURIComponent(entityId)}/backfill`, { method: "POST" }); await reload(); }
-      catch (err) { oBackfill.disabled = false; alert("Record failed: " + (err?.message || "error")); }
       return;
     }
     const oWithdraw = e.target.closest("[data-offer-withdraw]");
@@ -575,24 +419,19 @@ function render(container, entityId, d) {
   });
 }
 
-// Scripted crew job offer — estimate amounts + total + payment schedule, ready
-// to copy/email. Built from the per-estimate schedules + summed installments.
-function offerScript(crew, projectName) {
+// Scripted rollup crew offer — estimates + labor + total + payment schedule,
+// ready to copy/email. Built from one crew rollup group.
+function rollupScript(g, projectName) {
   const L = [];
   L.push(`Job offer — ${projectName || "Project"}`);
-  if (crew.crew_name) L.push(`Crew: ${crew.crew_name}`);
+  if (g.crew_name) L.push(`Crew: ${g.crew_name}`);
   L.push("");
   L.push("Scope (contract labor by estimate):");
-  (crew.schedules || []).forEach((s) => {
-    const est = s.estimate_doc_number ? `Estimate #${s.estimate_doc_number}` : "Estimate";
-    L.push(`  ${est}: ${money(s.contract_labor || s.subtotal || 0)}`);
-  });
-  L.push(`Total labor: ${money(crew.summary.total)}`);
+  (g.estimates || []).forEach((e) => L.push(`  Estimate #${e.doc}: ${money(e.labor)}`));
+  L.push(`Total labor: ${money(g.labor)}`);
   L.push("");
   L.push("Payment schedule (bi-weekly, in arrears):");
-  const byDate = {};
-  (crew.installments || []).forEach((i) => { if (i.pay_date) byDate[i.pay_date] = (byDate[i.pay_date] || 0) + i.amount; });
-  Object.keys(byDate).sort().forEach((d) => L.push(`  ${shortDate(d)}: ${money(byDate[d])}`));
+  (g.installments || []).forEach((i) => L.push(`  ${shortDate(i.pay_date)}: ${money(i.amount)}`));
   return L.join("\n");
 }
 
