@@ -121,7 +121,7 @@ function deriveFlags(p, fin, att) {
   const dcount = starts.length;
   if (dcount > 1)
     flags.push({ c: "mut", i: "⑂", card: "schedule", t: `${dcount} separate date ranges` });
-  if (!dcount && !settled && p.operational_status !== "needs_assignment")
+  if (!dcount && !settled)
     flags.push({ c: "warn", i: "▦", card: "schedule", t: "No schedule dates set" });
 
   // No crew and no live offer — the crew still needs to be sourced.
@@ -224,13 +224,13 @@ export async function projectsHubPage(routeFn) {
       `<input data-search value="${escapeHtml(search)}" placeholder="Search project, PM, crew, quote…" class="input text-xs py-1.5 w-full sm:max-w-xs ml-auto">` +
       `<button data-legend-toggle class="rounded-full px-2.5 py-1 text-xs font-semibold border border-black/15 text-black/55 hover:bg-black/5" title="What do the flags mean?">Flags ⓘ</button>` +
       `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>` +
-      `<div data-legend hidden class="w-full mt-1 rounded-lg border border-black/10 bg-black/[0.015] p-2.5 flex flex-wrap gap-x-4 gap-y-1.5">` +
+      `<div data-legend style="display:none" class="w-full mt-1 rounded-lg border border-black/10 bg-black/[0.015] p-2.5 flex flex-wrap gap-x-4 gap-y-1.5">` +
         FLAG_LEGEND.map(([c, i, t]) => `<span class="inline-flex items-center gap-1.5 text-[11.5px] text-black/60"><span class="inline-flex items-center justify-center w-[20px] h-[20px] rounded-md border text-[11px] ${FLAG_CLS[c]}">${i}</span>${escapeHtml(t)}</span>`).join("") +
         `<span class="inline-flex items-center gap-1.5 text-[11.5px] text-black/45 w-full mt-0.5 pt-1.5 border-t border-black/[0.06]">Amber left-edge on a row = it has an open item. Setup letters under a schedule: <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">W</span>ire · <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">T</span>ravel · <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">O</span>verage · <span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold bg-indigo-100 text-indigo-700">E</span>quipment.</span>` +
       `</div>`;
     filtersEl.querySelectorAll("[data-sf]").forEach((b) => b.addEventListener("click", () => { statusFilter = b.getAttribute("data-sf"); renderFilters(); applyFilter(); }));
     const legendBtn = filtersEl.querySelector("[data-legend-toggle]"), legendEl = filtersEl.querySelector("[data-legend]");
-    legendBtn?.addEventListener("click", () => { legendEl.hidden = !legendEl.hidden; });
+    legendBtn?.addEventListener("click", () => { legendEl.style.display = legendEl.style.display === "none" ? "flex" : "none"; });
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
     sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { search = sb.value.trim(); applyFilter(); }, 60); });
