@@ -24,8 +24,11 @@ tab + auto-seeds. Gated by page.customers.
 """
 import json
 from datetime import date, timedelta
+from math import ceil
 
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text, bindparam
 
 from app.db import engine
@@ -58,6 +61,21 @@ def _pd(s):
         return date.fromisoformat(str(s)[:10])
     except ValueError:
         return None
+
+
+def _weekly_split(total, start, end):
+    """Total estimated expenses spread evenly across the weeks in the project
+    window (last week carries the rounding). The expense cash-out schedule."""
+    if not start or not end or end < start or total <= 0:
+        return []
+    days = (end - start).days
+    num = max(1, ceil(days / 7)) if days > 0 else 1
+    base = round(total / num, 2)
+    out = []
+    for i in range(1, num + 1):
+        amt = base if i < num else round(total - base * (num - 1), 2)
+        out.append({"seq": i, "week_of": str(start + timedelta(days=7 * (i - 1))), "amount": amt})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -133,22 +151,27 @@ def _ensure_crew_schedules(conn, entity_id, ctx, meta):
     start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
     if not start or not end or end < start:
         return  # no timeline -> can't place bi-weekly installments
-    crew_id = meta.get("suggested_crew_id")
-    for e in _converted_estimates_with_labor(conn, entity_id):
+    default_crew = _default_crew_for_project(conn, entity_id, meta)
+    # crew per estimate comes from the estimate's billing header (rollup key); the
+    # per-estimate schedules are grouped by crew in the rollup view.
+    for e in _estimates_for_billing(conn, entity_id):
+        if e["status"] != "accepted" or e["labor"] <= 0:
+            continue
+        crew_id = e["crew_id"] or default_crew
         exists = conn.execute(text(
             "SELECT id FROM project_payment_schedules WHERE entity_id=:e AND estimate_qbo_id=:eq"),
             {"e": entity_id, "eq": e["qbo_id"]}).scalar()
         if exists:
             continue
         lead = 7
-        rows = _even_split(float(e["contract_labor"] or 0), start, end, lead)
+        rows = _even_split(float(e["labor"] or 0), start, end, lead)
         sid = conn.execute(text("""
             INSERT INTO project_payment_schedules
               (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, contract_labor,
                start_date, end_date, invoice_lead_days)
             VALUES (:e,:eq,:dn,:c,:cl,:s,:en,:l)
         """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"], "c": crew_id,
-               "cl": e["contract_labor"], "s": start, "en": end, "l": lead}).lastrowid
+               "cl": e["labor"], "s": start, "en": end, "l": lead}).lastrowid
         for r in rows:
             conn.execute(text("""
                 INSERT INTO project_payment_installments
@@ -669,6 +692,63 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
     }
 
 
+def _compose_crew_rollups(conn, entity_id, books_closed):
+    """Crew payments grouped into rollups by assigned crew: the per-estimate
+    schedules for one crew are summed into a single lump per pay date, tiered
+    against that crew's actual QBO Contract-Labor bills. Reassigning an estimate
+    to another crew simply moves it to a different rollup group (the 3-and-1 case)."""
+    from app.payments.routes import _crew_vendor
+    sched_map = _load_schedules(conn, entity_id)
+    paid_by_vid = {str(r["v"]): float(r["amt"] or 0) for r in conn.execute(text("""
+        SELECT t.vendor_qbo_id AS v, ROUND(SUM(l.amount), 2) AS amt
+        FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
+        WHERE l.line_customer_qbo_id = :e AND t.entity_type = 'Bill'
+          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+          AND t.vendor_qbo_id IS NOT NULL
+        GROUP BY t.vendor_qbo_id
+    """), {"e": entity_id}).mappings().all()}
+    offers = _offer_rows(conn, "o.entity_id = :e", {"e": entity_id})
+
+    groups = {}
+    for eq, (s, insts) in sched_map.items():
+        if not s:
+            continue
+        cid = s.get("crew_id")
+        g = groups.setdefault(cid, {"crew_id": cid, "crew_name": s.get("crew_name"),
+                                    "estimates": [], "labor": 0.0, "by_date": {}})
+        g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
+                               "labor": round(float(s.get("contract_labor") or 0), 2)})
+        g["labor"] = round(g["labor"] + float(s.get("contract_labor") or 0), 2)
+        for i in insts:
+            d = i.get("pay_date")
+            if d:
+                g["by_date"][d] = round(g["by_date"].get(d, 0.0) + float(i["amount"] or 0), 2)
+
+    out = []
+    for cid, g in groups.items():
+        vid = _crew_vendor(conn, cid) if cid else None
+        paid = paid_by_vid.get(str(vid), 0.0) if vid else 0.0
+        installments, cum = [], 0.0
+        for idx, d in enumerate(sorted(g["by_date"].keys())):
+            amt = g["by_date"][d]
+            tier = "realized" if (books_closed or cum + amt <= paid + EPS) else "scheduled"
+            cum += amt
+            installments.append({"seq": idx + 1, "pay_date": d, "amount": amt, "tier": tier,
+                                 "status_label": "Paid" if tier == "realized" else "Scheduled"})
+        crew_offer = next((o for o in offers if o["crew_id"] == cid and o["status"] in ("accepted", "sent")), None)
+        out.append({
+            "crew_id": cid, "crew_name": g["crew_name"],
+            "estimates": sorted(g["estimates"], key=lambda x: x["doc"] or ""),
+            "labor": g["labor"], "paid_qbo": round(paid, 2),
+            "remaining": round(max(0.0, g["labor"] - paid), 2),
+            "installments": installments, "offer": crew_offer,
+        })
+    out.sort(key=lambda x: -x["labor"])
+    return {"rollups": out,
+            "total_labor": round(sum(g["labor"] for g in out), 2),
+            "total_paid": round(sum(g["paid_qbo"] for g in out), 2)}
+
+
 def _compose_expenses(conn, entity_id, books_closed):
     items = conn.execute(text("""
         SELECT id, category, description, amount, expense_date, status, note, sort_order, edited
@@ -805,6 +885,46 @@ def mark_complete(entity_id: str, user=Depends(get_current_user)):
     return get_bundle(entity_id, user)
 
 
+@router.post("/project/{entity_id}/estimate/{estimate_qbo_id}/confirm")
+def confirm_estimate(entity_id: str, estimate_qbo_id: str, user=Depends(get_current_user)):
+    """Office reviewed a (newly-converted) estimate's invoice schedule + crew
+    assignment and confirms it — clears the 'needs review' state."""
+    _require(user)
+    with engine.begin() as conn:
+        n = conn.execute(text("""
+            UPDATE project_estimate_billing SET confirmed=1, confirmed_at=NOW(), confirmed_by_user_id=:u
+            WHERE entity_id=:e AND estimate_qbo_id=:eq
+        """), {"u": user.get("id"), "e": entity_id, "eq": estimate_qbo_id}).rowcount
+    if not n:
+        raise HTTPException(status_code=404, detail="Estimate billing header not found")
+    return get_bundle(entity_id, user)
+
+
+class EstimateCrewAssign(BaseModel):
+    crew_id: Optional[int] = None
+
+
+@router.post("/project/{entity_id}/estimate/{estimate_qbo_id}/crew")
+def assign_estimate_crew(entity_id: str, estimate_qbo_id: str, body: EstimateCrewAssign,
+                         user=Depends(get_current_user)):
+    """Assign an estimate to a work crew — the rollup key. Updates the billing
+    header and the estimate's payment schedule so it regroups into that crew's
+    rollup (this is how the 3-and-1 split is created)."""
+    _require(user)
+    with engine.begin() as conn:
+        n = conn.execute(text("""
+            UPDATE project_estimate_billing SET crew_id=:c
+            WHERE entity_id=:e AND estimate_qbo_id=:eq
+        """), {"c": body.crew_id, "e": entity_id, "eq": estimate_qbo_id}).rowcount
+        if not n:
+            raise HTTPException(status_code=404, detail="Estimate billing header not found")
+        conn.execute(text("""
+            UPDATE project_payment_schedules SET crew_id=:c
+            WHERE entity_id=:e AND estimate_qbo_id=:eq
+        """), {"c": body.crew_id, "e": entity_id, "eq": estimate_qbo_id})
+    return get_bundle(entity_id, user)
+
+
 def _drift_reasons(conn, entity_id, ctx, inv):
     """Has the schedule fallen out of sync with the current dates / estimate?
     Only flags UNEDITED schedules (edited ones are intentionally preserved)."""
@@ -867,7 +987,10 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
                               if assigned else None),
         })
         exp = _compose_expenses(conn, entity_id, books_closed)
+        exp["weekly"] = _weekly_split(exp["estimate_total"],
+                                      _pd(ctx.get("start_date")), _pd(ctx.get("end_date")))
         estimates = _compose_estimates(conn, entity_id)
+        crew_rollups = _compose_crew_rollups(conn, entity_id, books_closed)
         crews = _crew_options(conn)
         drift = _drift_reasons(conn, entity_id, ctx, inv)
 
@@ -901,6 +1024,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         "crew": crew,
         "expenses": exp,
         "estimates": estimates,
+        "crew_rollups": crew_rollups,
         "kpis": kpis,
         "crews": crews,
     }
