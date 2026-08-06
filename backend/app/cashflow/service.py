@@ -150,6 +150,35 @@ def get_bank_balance() -> dict:
     }
 
 
+def get_credit_cards() -> dict:
+    """QBO Credit Card accounts + balances. PARKED / informational only — these
+    are NOT folded into the forecast yet (pending how the owners pay the cards).
+    In QBO a Credit Card balance is a liability: a negative balance = amount owed,
+    a positive balance = a credit/overpayment on the card. We surface `owed` as the
+    positive amount owed so the panel reads naturally."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT name, current_balance
+                FROM qbo_accounts
+                WHERE account_type = 'Credit Card' AND (active = 1 OR active IS NULL)
+                ORDER BY current_balance ASC
+            """)).mappings().all()
+    except Exception:
+        return {"available": False, "total_owed": 0.0, "accounts": []}
+    accounts = []
+    for r in rows:
+        bal = float(r["current_balance"] or 0)
+        accounts.append({
+            "name": r["name"],
+            "balance": round(bal, 2),          # QBO signed balance (negative = owed)
+            "owed": round(-bal, 2),            # positive = owed on the card
+            "credit_balance": bal > 0,         # unusual: a credit/overpayment sits on the card
+        })
+    total_owed = round(sum(a["owed"] for a in accounts), 2)
+    return {"available": len(accounts) > 0, "total_owed": total_owed, "accounts": accounts}
+
+
 def set_excluded_categories(categories: list) -> dict:
     """Replace the exclusion set with the supplied categories."""
     ensure_cashflow_tables()
@@ -168,8 +197,8 @@ def _next_weekday(d: date, weekday: int) -> date:
     return d + timedelta(days=(weekday - d.weekday()) % 7)
 
 
-def _zeros():
-    return [0.0] * WEEKS
+def _zeros(n: int = WEEKS):
+    return [0.0] * n
 
 
 def generate_forecast(start_date: date | None = None,
@@ -245,7 +274,7 @@ def generate_forecast(start_date: date | None = None,
     outflow_beyond = round(outflow_committed[0]["beyond"], 2)
 
     # ---- rolling balance ----
-    opening, surplus, ending = _zeros(), _zeros(), _zeros()
+    opening, surplus, ending = _zeros(weeks), _zeros(weeks), _zeros(weeks)
     bal = float(opening_balance)
     for i in range(weeks):
         opening[i] = round(bal, 2)
@@ -316,7 +345,7 @@ def generate_actuals(start_date: date | None = None,
     pur_totals = _column_sums(purchases, weeks)
     outflow_totals = [round(bp_totals[i] + pur_totals[i], 2) for i in range(weeks)]
 
-    opening, surplus, ending = _zeros(), _zeros(), _zeros()
+    opening, surplus, ending = _zeros(weeks), _zeros(weeks), _zeros(weeks)
     bal = float(opening_balance)
     for i in range(weeks):
         opening[i] = round(bal, 2)

@@ -33,6 +33,13 @@ def opening_balance(_user=Depends(require_capability("page.cashflow"))):
     return service.get_bank_balance()
 
 
+@router.get("/credit-cards")
+def credit_cards(_user=Depends(require_capability("page.cashflow"))):
+    """QBO Credit Card accounts + balances. Informational/parked — not folded
+    into the forecast yet (pending how the owners schedule card payoffs)."""
+    return service.get_credit_cards()
+
+
 @router.get("/forecast")
 def forecast(
     start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to the coming Friday)"),
