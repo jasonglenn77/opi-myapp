@@ -118,11 +118,16 @@ function deriveFlags(p, fin, att) {
   if (!dcount && !settled)
     flags.push({ c: "warn", i: "▦", card: "schedule", t: "No schedule dates set" });
 
-  // No crew and no live offer — the crew still needs to be sourced. Points at the
-  // Team card (where the missing crew shows) so that card highlights.
+  // No crew and no live offer — the crew still needs to be sourced. Highlights
+  // the Crew offer card (where you'd send the offer).
   const offerLive = offer && (offer.state === "accepted" || offer.state === "sent");
   if (!settled && !crews.length && !offerLive)
-    flags.push({ c: "warn", i: "◷", card: "team", t: "No crew assigned and no offer sent" });
+    flags.push({ c: "warn", i: "◷", card: "offer", t: "No crew assigned and no offer sent" });
+
+  // Overdue A/R — a sent invoice past its due date.
+  const aro = att && att.ar_overdue;
+  if (aro && aro.days > 0)
+    flags.push({ c: "bad", i: "◵", card: "upcoming", t: `Invoice ${aro.days}d overdue · ${money(aro.total)} A/R` });
 
   // kick-off & process — only surface once a project is active (scheduled or
   // in progress); a neutral flag, not an alarm. Daily-log status stays in the
@@ -361,8 +366,14 @@ export async function projectsHubPage(routeFn) {
     const dates = (c.date_ranges && c.date_ranges.length)
       ? `<div class="flex flex-wrap gap-1.5">${c.date_ranges.map((d) => `<span class="text-[11.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">${escapeHtml(rangeShort(d.start, d.end))}</span>`).join("")}</div>`
       : `<div class="text-black/35 text-[12.5px]">No dates assigned yet</div>`;
+    const cp = c.crew_paid || { total: 0, vendors: 0 };
+    const crewsVal = c.crews.length
+      ? c.crews.map(escapeHtml).join(", ")
+      : (cp.total > 0
+          ? `<span class="text-amber-700">None assigned</span> <span class="text-black/45 text-[11px]">· ${cp.vendors} paid in QBO (${money(cp.total)})</span>`
+          : "—");
     const team = kv("Project managers", c.pms.length ? c.pms.map(escapeHtml).join(", ") : "—")
-               + kv("Work crews", c.crews.length ? c.crews.map(escapeHtml).join(", ") : "—");
+               + kv("Work crews", crewsVal);
     // Expenses by category — estimated vs spent, with what's left to spend + totals.
     const ec = c.expense_categories || [];
     const eTot = ec.reduce((a, x) => { a.est += x.estimated; a.act += x.actual; a.rem += x.remaining; return a; }, { est: 0, act: 0, rem: 0 });
@@ -380,7 +391,9 @@ export async function projectsHubPage(routeFn) {
       ${c.estimates.slice(0, 8).map((e) => `<div class="flex justify-between items-baseline text-[12px] py-0.5 border-b border-black/[0.05] last:border-0"><span class="text-black/55">#${escapeHtml(String(e.doc || "—"))} <span class="text-black/35">· ${escapeHtml(e.status)}${e.status === "pending" && e.date ? " · sent " + escapeHtml(shortDate(e.date)) : ""}</span></span><span class="tabular-nums font-semibold">${money(e.amount)}</span></div>`).join("")}`;
     const o = c.offer;
     const offerInner = o.state === "none"
-      ? kv("Crew offer", `<span class="text-black/40">Not sent</span>`)
+      ? (cp.total > 0
+          ? kv("Crew offer", `<span class="text-black/45">n/a — crews already paid</span>`) + kv("Paid", `${money(cp.total)} · ${cp.vendors} crew${cp.vendors === 1 ? "" : "s"}`)
+          : kv("Crew offer", `<span class="text-black/40">Not sent</span>`))
       : kv("Crew offer", `<span class="${o.state === "accepted" ? "text-emerald-700" : "text-amber-700"}">${escapeHtml(o.state)}</span>`)
         + (o.crew_name ? kv("Crew", escapeHtml(o.crew_name)) : "")
         + (o.age_days != null ? kv("Age", `${o.age_days} day${o.age_days === 1 ? "" : "s"} ago`) : "")
@@ -444,9 +457,9 @@ export async function projectsHubPage(routeFn) {
       <div class="grid gap-2.5" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
         ${box(p.project_qbo_id, "schedule", "Schedule — all ranges", "LIVE", dates, fb.schedule)}
         ${box(p.project_qbo_id, "team", "Team", "LIVE", team, fb.team)}
-        ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
         ${box(p.project_qbo_id, "offer", "Crew offer", "LIVE", offerInner, fb.offer)}
         ${box(p.project_qbo_id, "upcoming", "Upcoming", "LIVE", upcoming, fb.upcoming)}
+        ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
         ${box(p.project_qbo_id, "financial", "Financials", "LIVE", financial, fb.financial)}
         ${box(p.project_qbo_id, "expenses", "Expenses by category", "LIVE", expensesByCat, fb.expenses)}
         ${box(p.project_qbo_id, "process", "Kick-off &amp; process", "LIVE", process, fb.process)}

@@ -118,7 +118,10 @@ function render(container, entityId, d) {
   // Crew "paid" = ALL actual Contract-Labor bills (any vendor, incl. crews not
   // registered/assigned in the app) — not just the assigned rollups.
   const crewPaid = crew.paid_qbo != null ? crew.paid_qbo : roll.total_paid;
-  const crewLeft = Math.max(0, roll.total_labor - crewPaid);
+  // Total contract labor = the estimates' Contract Labor (works even before the
+  // bi-weekly schedules are generated, e.g. a project with no dates yet).
+  const crewLaborEst = est.accepted.reduce((s, a) => s + (a.labor || 0), 0) || roll.total_labor;
+  const crewLeft = Math.max(0, crewLaborEst - crewPaid);
 
   // ── roll-up KPIs + burn bars ──
   const kpi = (label, val, cls = "") =>
@@ -131,9 +134,9 @@ function render(container, entityId, d) {
     { v: Math.max(0, est.contract_total - est.invoiced_qbo), cls: SEG.scheduled, label: money(est.contract_total - est.invoiced_qbo) + " to bill", title: "Not yet invoiced" },
   ]);
   const crewBar = burnBar([
-    { v: Math.min(crewPaid, roll.total_labor), cls: SEG.realized, label: money(Math.min(crewPaid, roll.total_labor)) + " paid", title: "Paid to crews (all bills)" },
+    { v: Math.min(crewPaid, crewLaborEst), cls: SEG.realized, label: money(Math.min(crewPaid, crewLaborEst)) + " paid", title: "Paid to crews (all bills)" },
     { v: crewLeft, cls: SEG.scheduled, label: money(crewLeft) + " left", title: "Scheduled" },
-    { v: Math.max(0, crewPaid - roll.total_labor), cls: "bg-red-600 text-white", label: money(Math.max(0, crewPaid - roll.total_labor)) + " over", title: "Paid beyond the estimate" },
+    { v: Math.max(0, crewPaid - crewLaborEst), cls: "bg-red-600 text-white", label: money(Math.max(0, crewPaid - crewLaborEst)) + " over", title: "Paid beyond the estimate" },
   ]);
   const expSpent = exp.spent_qbo || 0, expEst = exp.estimate_total || 0;
   const expBar = burnBar([
@@ -298,7 +301,11 @@ function render(container, entityId, d) {
         </span>
       </summary>
       <div class="bg-black/[0.012]">
-        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-6">Weekly cash-out — remaining</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${weekly || `<tr><td colspan="2" class="px-6 py-2 text-black/40 text-[12px]">Nothing left to schedule (fully spent, or needs dates).</td></tr>`}</tbody></table></div>
+        <div class="flex items-center gap-2 px-6 pt-2 text-[11px]">
+          <span class="text-black/45">Cash-out: <b class="text-black/70">${c.mode === "lump_end" ? "one-time at project end" : "weekly (remaining)"}</b></span>
+          <button data-exp-mode data-cat="${escapeHtml(c.category)}" data-mode="${c.mode === "lump_end" ? "weekly" : "lump_end"}" class="text-blue-600 font-semibold hover:underline">→ switch to ${c.mode === "lump_end" ? "weekly" : "one-time at end"}</button>
+        </div>
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-6">${c.mode === "lump_end" ? "Payment (at end)" : "Weekly cash-out — remaining"}</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${weekly || `<tr><td colspan="2" class="px-6 py-2 text-black/40 text-[12px]">Nothing left to schedule (fully spent, or needs dates).</td></tr>`}</tbody></table></div>
         ${actuals}
       </div>
     </details>`;
@@ -351,7 +358,7 @@ function render(container, entityId, d) {
       <div class="card p-4 sm:p-5">
         <div class="text-sm font-bold text-ink-900 mb-3">Cash summary — paid vs. expected</div>
         ${burnRow("Customer invoices", money(est.contract_total) + " · " + est.accepted.length + " estimate" + (est.accepted.length === 1 ? "" : "s"), invBar)}
-        ${burnRow("Crew payments", money(roll.total_labor) + " · " + roll.rollups.length + " rollup" + (roll.rollups.length === 1 ? "" : "s"), crewBar)}
+        ${burnRow("Crew payments", money(crewLaborEst) + " · " + roll.rollups.length + " rollup" + (roll.rollups.length === 1 ? "" : "s"), crewBar)}
         ${burnRow("Project expenses", money(exp.estimate_total) + " estimate", expBar)}
         <div class="flex gap-4 flex-wrap mt-3 pt-3 border-t border-black/10 text-[11px] text-black/55">
           <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-700"></i>Paid / collected</span>
@@ -379,7 +386,7 @@ function render(container, entityId, d) {
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Crew payments</span>
           <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">rollup by crew · bi-weekly</span>
-          <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(roll.total_labor)} labor</span>
+          <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(crewLaborEst)} labor</span>
         </summary>
         <div class="p-3">
           ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
@@ -482,6 +489,14 @@ function render(container, entityId, d) {
       oAccept.disabled = true;
       try { await api(`/offers/${oAccept.getAttribute("data-offer-accept")}/respond`, { method: "POST", body: JSON.stringify({ status: "accepted" }) }); await reload(); }
       catch (err) { oAccept.disabled = false; alert("Failed: " + (err?.message || "error")); }
+      return;
+    }
+    const expMode = e.target.closest("[data-exp-mode]");
+    if (expMode) {
+      const cat = expMode.getAttribute("data-cat"), mode = expMode.getAttribute("data-mode");
+      expMode.disabled = true;
+      try { await api(`/billing/project/${encodeURIComponent(entityId)}/expense-category/${encodeURIComponent(cat)}/mode`, { method: "POST", body: JSON.stringify({ mode }) }); await reload(); }
+      catch (err) { expMode.disabled = false; alert("Failed: " + (err?.message || "error")); }
       return;
     }
     const script = e.target.closest("[data-offer-script]");

@@ -928,6 +928,19 @@ def projects_attention(user=Depends(get_current_user)):
         SELECT entity_id AS pid, SUM(done) AS done_today
         FROM myapp.project_daily_log WHERE log_date = CURDATE() GROUP BY entity_id
     """)
+    # overdue A/R per project: any latest-version invoice with an open balance
+    # past its due date.
+    ar_sql = text("""
+        SELECT customer_qbo_id AS pid, MAX(DATEDIFF(CURDATE(), due_date)) AS overdue_days,
+               ROUND(SUM(balance_amt),2) AS ar_total
+        FROM (
+          SELECT qt.customer_qbo_id, qt.balance_amt, qt.due_date,
+                 ROW_NUMBER() OVER (PARTITION BY COALESCE(qt.doc_number,qt.qbo_id) ORDER BY qt.id DESC) rn
+          FROM myapp.qbo_transactions qt WHERE qt.entity_type='Invoice' AND qt.customer_qbo_id IS NOT NULL
+        ) x
+        WHERE rn=1 AND balance_amt > 0.01 AND due_date < CURDATE()
+        GROUP BY customer_qbo_id
+    """)
     # on-site setup from the ASSIGNMENT page (project_schedule_items): wire
     # guidance, travel/overage days, and equipment type — the office's own values.
     setup_sql = text("""
@@ -947,6 +960,7 @@ def projects_attention(user=Depends(get_current_user)):
         kickoff_rows = conn.execute(kickoff_sql).mappings().all()
         daily_rows = conn.execute(daily_sql).mappings().all()
         setup_rows = conn.execute(setup_sql).mappings().all()
+        ar_rows = conn.execute(ar_sql).mappings().all()
 
     out = {}
     for r in est_rows:
@@ -973,6 +987,10 @@ def projects_attention(user=Depends(get_current_user)):
             "travel_days": int(r["travel_days"] or 0),
             "overage_days": int(r["overage_days"] or 0),
             "equipment": (r["equipment"] or "").strip() or None,
+        }
+    for r in ar_rows:
+        out.setdefault(str(r["pid"]), {})["ar_overdue"] = {
+            "days": int(r["overdue_days"] or 0), "total": round(float(r["ar_total"] or 0), 2),
         }
     return {"attention": out, "kickoff_total": kickoff_total}
 
@@ -1159,28 +1177,41 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             FROM latest WHERE rn=1 AND balance_amt > 0.01
         """), {"q": qbo_id}).mappings().first()
 
-        # Upcoming customer invoices still to be sent (scheduled, not yet invoiced).
-        inv_up = conn.execute(text("""
-            SELECT COALESCE(SUM(m.amount),0) AS total, DATE_FORMAT(MIN(m.invoice_date),'%Y-%m-%d') AS next_date
+        # Upcoming customer invoices still to be sent = contract not yet invoiced
+        # (so an early-billed deposit drops out), with the next scheduled date.
+        contract = float(financial.get("estimate_line_amt") or 0)
+        invoiced = float(financial.get("invoice_line_amt") or 0)
+        inv_to_send = round(max(0.0, contract - invoiced), 2)
+        next_inv_date = conn.execute(text("""
+            SELECT DATE_FORMAT(MIN(m.invoice_date),'%Y-%m-%d')
             FROM myapp.project_invoice_milestones m JOIN myapp.project_invoice_schedules s ON s.id=m.schedule_id
             WHERE s.entity_id=:q AND m.invoice_date >= CURDATE()
-        """), {"q": qbo_id}).mappings().first()
-        # Crew payments still scheduled to be sent (total).
-        crew_up = conn.execute(text("""
-            SELECT COALESCE(SUM(i.amount),0) AS total
-            FROM myapp.project_payment_installments i JOIN myapp.project_payment_schedules s ON s.id=i.schedule_id
-            WHERE s.entity_id=:q AND i.pay_date >= CURDATE()
         """), {"q": qbo_id}).scalar()
+        # Crew payments still owed = estimate contract labor minus what's been paid.
+        crew_est = conn.execute(text("""
+            SELECT COALESCE(ROUND(SUM(COALESCE(sl.cost_amount, sl.amount)),2),0)
+            FROM myapp.qbo_sales_transaction_lines sl JOIN myapp.qbo_transactions t ON t.id=sl.transaction_id
+            WHERE t.entity_type='Estimate' AND sl.item_name='Contract Labor' AND sl.project_customer_qbo_id=:q
+              AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Accepted','Converted')
+        """), {"q": qbo_id}).scalar()
+        crew_paid = conn.execute(text("""
+            SELECT COALESCE(ROUND(SUM(l.amount),2),0), COUNT(DISTINCT t.vendor_qbo_id)
+            FROM myapp.qbo_transaction_lines l JOIN myapp.qbo_transactions t ON t.id=l.transaction_id
+            WHERE l.line_customer_qbo_id=:q AND t.entity_type='Bill'
+              AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name'))='Contract Labor'
+        """), {"q": qbo_id}).first()
+        crew_paid_total, crew_vendor_count = float(crew_paid[0] or 0), int(crew_paid[1] or 0)
         exp_remaining = round(max(0.0, sum(est_by_cat.values()) - sum(act_by_cat.values())), 2)
 
         upcoming = {
             "complete": bool(complete),
             "ar": {"total": round(float(ar["total"] or 0), 2), "count": int(ar["cnt"] or 0),
                    "next_due": ar["next_due"], "overdue_days": int(ar["overdue_days"]) if ar["overdue_days"] is not None else None},
-            "invoices": {"total": round(float(inv_up["total"] or 0), 2), "next_date": inv_up["next_date"]},
-            "crew": {"total": round(float(crew_up or 0), 2)},
+            "invoices": {"total": inv_to_send, "next_date": next_inv_date},
+            "crew": {"total": round(max(0.0, float(crew_est or 0) - crew_paid_total), 2)},
             "expenses": {"total": exp_remaining},
         }
+        crew_paid_info = {"total": crew_paid_total, "vendors": crew_vendor_count}
 
     financial["expense_estimated"] = round(sum(est_by_cat.values()), 2)
     financial["expense_actual"] = round(sum(act_by_cat.values()), 2)
@@ -1190,7 +1221,7 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
         "pms": pms, "crews": crews, "notes": notes,
         "site_setup": site_setup, "expense_categories": expense_categories,
         "estimates": estimates,
-        "offer": offer, "financial": financial,
+        "offer": offer, "financial": financial, "crew_paid": crew_paid_info,
         "kickoff": kickoff, "daily": daily, "upcoming": upcoming,
     }
 

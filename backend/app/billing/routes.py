@@ -811,6 +811,18 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
         c = a["category"] or "Other"
         cat_act[c] = round(cat_act.get(c, 0.0) + a["amount"], 2)
         cat_acts.setdefault(c, []).append(a)
+    # per-category schedule mode override (weekly spread | lump at project end)
+    modes = {r["category"]: r["mode"] for r in conn.execute(text(
+        "SELECT category, mode FROM project_expense_category_schedule WHERE entity_id=:e"),
+        {"e": entity_id}).mappings().all()}
+
+    def _cat_weekly(cat, est, act):
+        remaining = round(max(0.0, est - act), 2)
+        if remaining <= 0:
+            return []
+        if modes.get(cat) == "lump_end" and end:
+            return [{"seq": 1, "week_of": str(end), "amount": remaining}]
+        return _weekly_remaining_split(est, act, start, end)
     # Each category line carries its own weekly cash-out schedule (that category's
     # estimated total spread evenly across the project weeks) + its actual bills,
     # so the UI can show estimated-vs-actual, then the weekly plan, then a drill-in.
@@ -819,7 +831,8 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
          "actual": round(cat_act.get(c, 0.0), 2),
          "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2),
          "remaining": round(max(0.0, cat_est.get(c, 0.0) - cat_act.get(c, 0.0)), 2),
-         "weekly": _weekly_remaining_split(cat_est.get(c, 0.0), cat_act.get(c, 0.0), start, end),
+         "mode": modes.get(c, "weekly"),
+         "weekly": _cat_weekly(c, cat_est.get(c, 0.0), cat_act.get(c, 0.0)),
          "actuals": cat_acts.get(c, [])}
         for c in sorted(set(cat_est) | set(cat_act))
     ]
@@ -918,6 +931,27 @@ def confirm_estimate(entity_id: str, estimate_qbo_id: str, user=Depends(get_curr
         """), {"u": user.get("id"), "e": entity_id, "eq": estimate_qbo_id}).rowcount
     if not n:
         raise HTTPException(status_code=404, detail="Estimate billing header not found")
+    return get_bundle(entity_id, user)
+
+
+class ExpenseCatMode(BaseModel):
+    mode: str  # weekly | lump_end
+
+
+@router.post("/project/{entity_id}/expense-category/{category}/mode")
+def set_expense_category_mode(entity_id: str, category: str, body: ExpenseCatMode,
+                              user=Depends(get_current_user)):
+    """Switch a project-expense category's cash-out schedule between the auto
+    weekly spread and a single lump at the project end date."""
+    _require(user)
+    if body.mode not in ("weekly", "lump_end"):
+        raise HTTPException(status_code=400, detail="mode must be weekly or lump_end")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO project_expense_category_schedule (entity_id, category, mode)
+            VALUES (:e, :c, :m)
+            ON DUPLICATE KEY UPDATE mode = :m
+        """), {"e": entity_id, "c": category, "m": body.mode})
     return get_bundle(entity_id, user)
 
 
