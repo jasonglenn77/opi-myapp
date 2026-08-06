@@ -51,8 +51,8 @@ const STORED_STATUS = [
 
 // Which project-workspace tab each detail card opens.
 const CARD_TAB = {
-  schedule: "assignment", team: "assignment", shared: "financials", estimates: "changeorders",
-  offer: "billing", financial: "financials", process: "kickoff", notes: "assignment", upcoming: "billing",
+  schedule: "assignment", team: "assignment", estimates: "changeorders", expenses: "billing",
+  site: "billing", offer: "billing", financial: "financials", process: "kickoff", notes: "assignment", upcoming: "billing",
 };
 
 // Flag legend — icon + meaning, for the collapsible header legend.
@@ -343,12 +343,15 @@ export async function projectsHubPage(routeFn) {
       : `<div class="text-black/35 text-[12.5px]">No dates assigned yet</div>`;
     const team = kv("Project managers", c.pms.length ? c.pms.map(escapeHtml).join(", ") : "—")
                + kv("Work crews", c.crews.length ? c.crews.map(escapeHtml).join(", ") : "—");
-    // presence + estimated $ per on-site cost bucket
-    const sr = (label, amt) => kv(label, amt > 0
-      ? `<span class="text-emerald-600">✓</span> <span class="tabular-nums">${money(amt)}</span>`
-      : `<span class="text-black/30">—</span>`);
-    const shared = sr("Wire guidance", c.shared.wire) + sr("Travel", c.shared.travel)
-                 + sr("Overage", c.shared.overage) + sr("Equipment", c.shared.equipment);
+    // Site setup — travel/overage day counts + equipment types quoted (from the estimate)
+    const ss = c.site_setup || { travel_days: 0, overage_days: 0, equipment_types: [] };
+    const siteSetup = kv("Travel days", ss.travel_days || "—") + kv("Overage days", ss.overage_days || "—")
+      + `<div class="pt-1"><div class="text-[11px] text-black/45 mb-1">Equipment</div>${ss.equipment_types.length ? `<div class="flex flex-wrap gap-1">${ss.equipment_types.map((t) => `<span class="text-[10.5px] font-semibold px-1.5 py-0.5 rounded bg-black/[0.03] border border-black/10 text-black/60">${escapeHtml(t)}</span>`).join("")}</div>` : `<span class="text-black/30 text-[12px]">—</span>`}</div>`;
+    // Expenses by category — estimated vs spent, with what's left to spend
+    const ec = c.expense_categories || [];
+    const overCats = ec.filter((x) => x.remaining < -0.5).length;
+    const expensesByCat = ec.length ? `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Category</th><th class="text-right font-bold">Est</th><th class="text-right font-bold">Spent</th><th class="text-right font-bold">Left</th></tr></thead>
+      <tbody>${ec.map((x) => { const over = x.remaining < -0.5; return `<tr class="border-t border-black/[0.05]"><td class="py-1 font-semibold">${escapeHtml(x.category)}</td><td class="py-1 text-right tabular-nums text-black/55">${money(x.estimated)}</td><td class="py-1 text-right tabular-nums font-semibold ${over ? "text-red-600" : ""}">${money(x.actual)}</td><td class="py-1 text-right tabular-nums font-semibold ${over ? "text-red-600" : "text-emerald-700"}">${over ? "−" + money(-x.remaining) : money(x.remaining)}</td></tr>`; }).join("")}</tbody></table>` : `<div class="text-black/35 text-[12.5px]">No expense lines.</div>`;
     const estPill = (n, label, cls) => n ? `<span class="text-[11.5px] font-semibold px-2 py-0.5 rounded border ${cls}">${n} ${label}</span>` : "";
     const eb = c.estimates.reduce((m, e) => { m[e.status] = (m[e.status] || 0) + 1; return m; }, {});
     const ests = `<div class="flex flex-wrap gap-1.5 mb-2">
@@ -356,7 +359,7 @@ export async function projectsHubPage(routeFn) {
         ${estPill(eb.pending, "pending", "bg-amber-50 text-amber-700 border-amber-200")}
         ${estPill(eb.accepted, "accepted", "bg-emerald-50 text-emerald-700 border-emerald-200")}
         ${estPill(eb.declined, "declined", "bg-black/[0.03] text-black/45 border-black/10")}</div>
-      ${c.estimates.slice(0, 6).map((e) => `<div class="flex justify-between text-[12px] py-0.5 border-b border-black/[0.05] last:border-0"><span class="text-black/55">#${escapeHtml(String(e.doc || "—"))} <span class="text-black/35">· ${escapeHtml(e.status)}</span></span><span class="tabular-nums font-semibold">${money(e.amount)}</span></div>`).join("")}`;
+      ${c.estimates.slice(0, 8).map((e) => `<div class="flex justify-between items-baseline text-[12px] py-0.5 border-b border-black/[0.05] last:border-0"><span class="text-black/55">#${escapeHtml(String(e.doc || "—"))} <span class="text-black/35">· ${escapeHtml(e.status)}${e.status === "pending" && e.date ? " · sent " + escapeHtml(shortDate(e.date)) : ""}</span></span><span class="tabular-nums font-semibold">${money(e.amount)}</span></div>`).join("")}`;
     const o = c.offer;
     const offerInner = o.state === "none"
       ? kv("Crew offer", `<span class="text-black/40">Not sent</span>`)
@@ -366,8 +369,12 @@ export async function projectsHubPage(routeFn) {
         + (o.labor ? kv("Labor", money(o.labor)) : "");
     const f = c.financial || {};
     const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
+    const expOver = f.expense_actual != null && f.expense_estimated != null && f.expense_actual > f.expense_estimated + 0.5;
+    const expLine = f.expense_estimated != null
+      ? `<span class="${expOver ? "text-red-600 font-bold" : ""}">${money(f.expense_actual)} <span class="font-normal text-black/40">/ ${money(f.expense_estimated)} est${expOver ? " ⚑" : ""}</span></span>`
+      : money(f.expense_line_amt);
     const financial = kv("Estimate", money(f.estimate_line_amt)) + kv("Invoiced", money(f.invoice_line_amt))
-                    + kv("Expenses", money(f.expense_line_amt)) + kv("Open A/R", money(f.balance_amt))
+                    + kv("Expenses", expLine) + kv("Open A/R", money(f.balance_amt))
                     + kv("Profit", `${money(f.actual_profit != null ? f.actual_profit : f.projected_profit)} · ${pct(f.actual_profit_pct != null ? f.actual_profit_pct : f.projected_profit_pct)}`);
     const notes = c.notes && c.notes.length
       ? `<div class="text-[12.5px] text-black/55 italic leading-relaxed space-y-1">${c.notes.map((n) => `<div>“${escapeHtml(n)}”</div>`).join("")}</div>`
@@ -406,8 +413,9 @@ export async function projectsHubPage(routeFn) {
       <div class="grid gap-2.5" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
         ${box(p.project_qbo_id, "schedule", "Schedule — all ranges", "LIVE", dates, fb.schedule)}
         ${box(p.project_qbo_id, "team", "Team", "LIVE", team, fb.team)}
-        ${box(p.project_qbo_id, "shared", "Shared costs", "LIVE", shared, fb.shared)}
         ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
+        ${box(p.project_qbo_id, "expenses", "Expenses by category", "LIVE", expensesByCat, fb.expenses)}
+        ${box(p.project_qbo_id, "site", "Site setup", "LIVE", siteSetup, fb.site)}
         ${box(p.project_qbo_id, "offer", "Crew offer", "LIVE", offerInner, fb.offer)}
         ${box(p.project_qbo_id, "upcoming", "Upcoming", "LIVE", upcoming, fb.upcoming)}
         ${box(p.project_qbo_id, "financial", "Financials", "LIVE", financial, fb.financial)}

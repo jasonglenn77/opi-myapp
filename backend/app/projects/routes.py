@@ -1000,9 +1000,9 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             WHERE qc.qbo_id=:q
         """), {"q": qbo_id}).all() if (r[0] or "").strip()]
 
-        # estimates (QBO) — doc, status, amount
+        # estimates (QBO) — doc, status, amount, sent date
         est_rows = conn.execute(text("""
-            SELECT t.doc_number, t.total_amt,
+            SELECT t.doc_number, t.total_amt, DATE_FORMAT(t.txn_date,'%Y-%m-%d') AS d,
                    JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) AS st
             FROM myapp.qbo_transactions t
             WHERE t.entity_type='Estimate' AND t.customer_qbo_id=:q
@@ -1011,24 +1011,60 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
         est_state = {"Accepted": "accepted", "Converted": "accepted",
                      "Rejected": "declined", "Closed": "declined", "Pending": "pending"}
         estimates = [{"doc": r["doc_number"], "amount": float(r["total_amt"] or 0),
-                      "status": est_state.get(r["st"], (r["st"] or "").lower())} for r in est_rows]
+                      "date": r["d"], "status": est_state.get(r["st"], (r["st"] or "").lower())} for r in est_rows]
 
-        # shared costs — best-effort bucketed from the estimate cost lines
+        # on-site setup from the estimate lines: travel/overage day counts (parsed
+        # from item names) + the equipment types quoted. Best-effort until phase
+        # shared costs are structured.
         line_rows = conn.execute(text("""
-            SELECT sl.item_name, COALESCE(sl.cost_amount, sl.amount) AS amt
+            SELECT sl.item_name
             FROM myapp.qbo_sales_transaction_lines sl
             JOIN myapp.qbo_transactions t ON t.id = sl.transaction_id
             WHERE t.entity_type='Estimate' AND sl.project_customer_qbo_id=:q
               AND sl.item_name IS NOT NULL
         """), {"q": qbo_id}).mappings().all()
-        shared = {k: 0.0 for k, _ in _SHARED_BUCKETS}
+        travel_days = overage_days = 0
+        equipment_types = []
         for lr in line_rows:
-            name = (lr["item_name"] or "").lower()
-            for bucket, pat in _SHARED_BUCKETS:
-                if re.search(pat, name):
-                    shared[bucket] = round(shared[bucket] + float(lr["amt"] or 0), 2)
-                    break
-        shared = {k: round(v, 2) for k, v in shared.items()}
+            name = (lr["item_name"] or "")
+            low = name.lower()
+            md = re.search(r"(\d+)\s*day", low)
+            n = int(md.group(1)) if md else 0
+            if re.search(r"travel|mobil|lodg|per diem", low):
+                travel_days += n
+            if re.search(r"overage|remobil|extra day", low):
+                overage_days += n
+            if re.search(r"equip|lift|scrubber|saw|dumpster|rental|scissor|boom|floor", low):
+                et = (name.split(":")[-1] if ":" in name else name).strip()
+                if et and et.lower() not in [x.lower() for x in equipment_types]:
+                    equipment_types.append(et)
+        site_setup = {"travel_days": travel_days, "overage_days": overage_days,
+                      "equipment_types": equipment_types[:10]}
+
+        # expenses by category — estimated (from estimate cost lines) vs actual
+        # (QBO bills/purchases), with what's left to spend. Contract Labor / margin
+        # items are excluded (they're crew / margin, not expenses).
+        from app.expenses.routes import _estimate_costs_by_category, _expense_category
+        est_by_cat = _estimate_costs_by_category(conn, qbo_id) or {}
+        act_by_cat = {}
+        for r in conn.execute(text("""
+            SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')),
+                     SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.AccountBasedExpenseLineDetail.AccountRef.name')),':',1)) AS item,
+                   ROUND(SUM(l.amount),2) AS amt
+            FROM myapp.qbo_transaction_lines l JOIN myapp.qbo_transactions t ON t.id=l.transaction_id
+            WHERE l.line_customer_qbo_id=:q AND t.entity_type IN ('Bill','Purchase')
+            GROUP BY item
+        """), {"q": qbo_id}).mappings().all():
+            cat = _expense_category(r["item"])
+            if cat is None:
+                continue
+            act_by_cat[cat] = round(act_by_cat.get(cat, 0.0) + float(r["amt"] or 0), 2)
+        expense_categories = [
+            {"category": c, "estimated": round(est_by_cat.get(c, 0.0), 2),
+             "actual": round(act_by_cat.get(c, 0.0), 2),
+             "remaining": round(est_by_cat.get(c, 0.0) - act_by_cat.get(c, 0.0), 2)}
+            for c in sorted(set(est_by_cat) | set(act_by_cat))
+        ]
 
         # latest crew offer
         o = conn.execute(text("""
@@ -1096,11 +1132,14 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             "payment": ({"date": next_pay["d"], "amount": float(next_pay["amount"] or 0)} if next_pay else None),
         }
 
+    financial["expense_estimated"] = round(sum(est_by_cat.values()), 2)
+    financial["expense_actual"] = round(sum(act_by_cat.values()), 2)
     return {
         "qbo_id": qbo_id,
         "date_ranges": date_ranges,
         "pms": pms, "crews": crews, "notes": notes,
-        "shared": shared, "estimates": estimates,
+        "site_setup": site_setup, "expense_categories": expense_categories,
+        "estimates": estimates,
         "offer": offer, "financial": financial,
         "kickoff": kickoff, "daily": daily, "upcoming": upcoming,
     }
