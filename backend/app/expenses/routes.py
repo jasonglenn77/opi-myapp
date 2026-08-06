@@ -203,3 +203,46 @@ def delete_item(item_id: int, user=Depends(get_current_user)):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM project_expense_items WHERE id = :id"), {"id": item_id})
     return {"ok": True}
+
+
+# ── editable weekly expense schedule (per category) ─────────────────────────
+class ExpInstPatch(BaseModel):
+    week_of: Optional[str] = None
+    amount: Optional[float] = None
+
+
+@router.patch("/expense-installment/{inst_id}")
+def patch_expense_installment(inst_id: int, req: ExpInstPatch, user=Depends(get_current_user)):
+    _require(user)
+    fields = req.model_dump(exclude_unset=True)
+    if not fields:
+        return {"ok": True}
+    sets, params = ["edited = 1"], {"id": inst_id}
+    for k, v in fields.items():
+        sets.append(f"{k} = :{k}")
+        params[k] = (v if v != "" else None)
+    with engine.begin() as conn:
+        conn.execute(text(f"UPDATE project_expense_installments SET {', '.join(sets)} WHERE id = :id"), params)
+    return {"ok": True}
+
+
+@router.post("/project/{entity_id}/category/{category}/installment")
+def add_expense_installment(entity_id: str, category: str, user=Depends(get_current_user)):
+    _require(user)
+    with engine.begin() as conn:
+        seq = conn.execute(text(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
+            {"e": entity_id, "c": category}).scalar()
+        conn.execute(text("""
+            INSERT INTO project_expense_installments (entity_id, category, seq, week_of, amount, edited)
+            VALUES (:e, :c, :s, NULL, 0, 1)
+        """), {"e": entity_id, "c": category, "s": seq})
+    return {"ok": True}
+
+
+@router.delete("/expense-installment/{inst_id}")
+def delete_expense_installment(inst_id: int, user=Depends(get_current_user)):
+    _require(user)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM project_expense_installments WHERE id = :id"), {"id": inst_id})
+    return {"ok": True}

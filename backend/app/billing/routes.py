@@ -196,6 +196,27 @@ def _ensure_expense_items(conn, entity_id, ctx):
                "dt": start, "so": so})
 
 
+def _ensure_expense_installments(conn, entity_id, ctx):
+    """One editable WEEKLY cash-out schedule per expense category (create-if-
+    missing): the category's estimated total spread evenly across the project
+    weeks. The office can then edit amounts/dates, add or delete rows."""
+    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+    if not start or not end or end < start:
+        return
+    for cat, est in (_estimate_costs_by_category(conn, entity_id) or {}).items():
+        if float(est or 0) <= 0:
+            continue
+        if conn.execute(text(
+            "SELECT COUNT(*) FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
+            {"e": entity_id, "c": cat}).scalar():
+            continue
+        for r in _weekly_split(float(est), start, end):
+            conn.execute(text("""
+                INSERT INTO project_expense_installments (entity_id, category, seq, week_of, amount)
+                VALUES (:e, :c, :s, :w, :a)
+            """), {"e": entity_id, "c": cat, "s": r["seq"], "w": r["week_of"], "a": r["amount"]})
+
+
 # ---------------------------------------------------------------------------
 # Slice 2: billing organized by ESTIMATE
 #   Each accepted/converted estimate has a billing header (assigned crew +
@@ -812,27 +833,33 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
         cat_act[c] = round(cat_act.get(c, 0.0) + a["amount"], 2)
         cat_acts.setdefault(c, []).append(a)
     # per-category schedule mode override (weekly spread | lump at project end)
-    modes = {r["category"]: r["mode"] for r in conn.execute(text(
-        "SELECT category, mode FROM project_expense_category_schedule WHERE entity_id=:e"),
-        {"e": entity_id}).mappings().all()}
+    # Stored, editable weekly schedule per category (like invoices / crew). Each
+    # category's actual bills tier off it (earliest weeks fill first → Paid), so
+    # only the still-scheduled rows count toward the cash-flow forecast.
+    inst_by_cat = {}
+    for r in conn.execute(text("""
+        SELECT id, category, seq, week_of, amount, edited
+        FROM project_expense_installments WHERE entity_id=:e ORDER BY category, seq, id
+    """), {"e": entity_id}).mappings().all():
+        inst_by_cat.setdefault(r["category"], []).append(r)
 
-    def _cat_weekly(cat, est, act):
-        remaining = round(max(0.0, est - act), 2)
-        if remaining <= 0:
-            return []
-        if modes.get(cat) == "lump_end" and end:
-            return [{"seq": 1, "week_of": str(end), "amount": remaining}]
-        return _weekly_remaining_split(est, act, start, end)
-    # Each category line carries its own weekly cash-out schedule (that category's
-    # estimated total spread evenly across the project weeks) + its actual bills,
-    # so the UI can show estimated-vs-actual, then the weekly plan, then a drill-in.
+    def _cat_weekly(cat, actual):
+        out, cum = [], 0.0
+        for r in inst_by_cat.get(cat, []):
+            amt = float(r["amount"] or 0)
+            tier = "realized" if (books_closed or cum + amt <= actual + EPS) else "scheduled"
+            cum += amt
+            out.append({"id": r["id"], "seq": r["seq"],
+                        "week_of": str(r["week_of"]) if r["week_of"] else None,
+                        "amount": amt, "tier": tier, "edited": bool(r["edited"]),
+                        "status_label": "Paid" if tier == "realized" else "Scheduled"})
+        return out
     by_category = [
         {"category": c, "estimated": round(cat_est.get(c, 0.0), 2),
          "actual": round(cat_act.get(c, 0.0), 2),
          "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2),
          "remaining": round(max(0.0, cat_est.get(c, 0.0) - cat_act.get(c, 0.0)), 2),
-         "mode": modes.get(c, "weekly"),
-         "weekly": _cat_weekly(c, cat_est.get(c, 0.0), cat_act.get(c, 0.0)),
+         "weekly": _cat_weekly(c, cat_act.get(c, 0.0)),
          "actuals": cat_acts.get(c, [])}
         for c in sorted(set(cat_est) | set(cat_act))
     ]
@@ -891,12 +918,23 @@ def regenerate(entity_id: str, force: bool = False, user=Depends(get_current_use
             "SELECT MAX(edited) FROM project_expense_items WHERE entity_id=:e"), {"e": entity_id}).scalar()
         if force or not exp_edited:
             conn.execute(text("DELETE FROM project_expense_items WHERE entity_id=:e"), {"e": entity_id})
+        # expense weekly schedule — rebuild per category unless that category has an edited row
+        for cat in conn.execute(text(
+            "SELECT DISTINCT category FROM project_expense_installments WHERE entity_id=:e"),
+            {"e": entity_id}).scalars().all():
+            cat_edited = conn.execute(text(
+                "SELECT MAX(edited) FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
+                {"e": entity_id, "c": cat}).scalar()
+            if force or not cat_edited:
+                conn.execute(text("DELETE FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
+                             {"e": entity_id, "c": cat})
 
         # re-create whatever is now missing (untouched-and-cleared, or brand-new estimate)
         _ensure_estimate_billing(conn, entity_id, _default_crew_for_project(conn, entity_id, meta))
         _ensure_invoice_schedules(conn, entity_id, ctx)
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
+        _ensure_expense_installments(conn, entity_id, ctx)
     return get_bundle(entity_id, user)
 
 
@@ -931,27 +969,6 @@ def confirm_estimate(entity_id: str, estimate_qbo_id: str, user=Depends(get_curr
         """), {"u": user.get("id"), "e": entity_id, "eq": estimate_qbo_id}).rowcount
     if not n:
         raise HTTPException(status_code=404, detail="Estimate billing header not found")
-    return get_bundle(entity_id, user)
-
-
-class ExpenseCatMode(BaseModel):
-    mode: str  # weekly | lump_end
-
-
-@router.post("/project/{entity_id}/expense-category/{category}/mode")
-def set_expense_category_mode(entity_id: str, category: str, body: ExpenseCatMode,
-                              user=Depends(get_current_user)):
-    """Switch a project-expense category's cash-out schedule between the auto
-    weekly spread and a single lump at the project end date."""
-    _require(user)
-    if body.mode not in ("weekly", "lump_end"):
-        raise HTTPException(status_code=400, detail="mode must be weekly or lump_end")
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO project_expense_category_schedule (entity_id, category, mode)
-            VALUES (:e, :c, :m)
-            ON DUPLICATE KEY UPDATE mode = :m
-        """), {"e": entity_id, "c": category, "m": body.mode})
     return get_bundle(entity_id, user)
 
 
@@ -1015,6 +1032,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         _ensure_invoice_schedules(conn, entity_id, ctx)   # per estimate (35/35/30)
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
+        _ensure_expense_installments(conn, entity_id, ctx)
 
         # Status = the project's final assignment-row status (same as the hub).
         # Books close ONLY when the office marks the project completed — not when

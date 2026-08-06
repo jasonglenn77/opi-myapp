@@ -283,10 +283,17 @@ function render(container, entityId, d) {
     }).join("") + `<div class="flex justify-between text-[12px] font-bold border-t-2 border-black/15 pt-1.5"><span>Total paid to crews</span><span class="tabular-nums">${money(crewActualsTotal)}</span></div>`;
   })(), crewActualsOpen) : "";
 
-  // ── EXPENSES section: per-category (est-vs-actual header, weekly + actuals inside) ──
+  // ── EXPENSES section: per-category (est-vs-actual header; editable weekly
+  //    schedule + actuals inside). Weekly rows edit like invoices/crew. ──
+  const expenseComplete = p.books_closed;
   const expenseCat = (c) => {
     const over = c.variance > 0.5;
-    const weekly = (c.weekly || []).map((w) => `<tr class="border-b border-black/5"><td class="py-1 pl-6 pr-3 tabular-nums text-black/55">Week of ${shortDate(w.week_of)}</td><td class="py-1 pr-4 text-right tabular-nums font-semibold">${money(w.amount)}</td></tr>`).join("");
+    const weekly = (c.weekly || []).map((w) => `
+      <tr class="border-b border-black/5">
+        <td class="py-1 pl-6 pr-2"><span class="flex items-center gap-2">${DOT[w.tier]}${expenseComplete ? `<span class="tabular-nums text-black/60">${shortDate(w.week_of)}</span>` : eInput("expinst", w.id, "week_of", w.week_of, "date")}</span></td>
+        <td class="py-1 px-2 text-right">${expenseComplete ? `<span class="tabular-nums font-semibold">${money(w.amount)}</span>` : eInput("expinst", w.id, "amount", Math.round(w.amount), "number", "ml-auto")}</td>
+        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${editedChip(w.edited)}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
+      </tr>`).join("");
     const acts = c.actuals || [];
     const actuals = acts.length ? actualsBlock("Actual expenses in QuickBooks", acts.length,
       `<table class="w-full text-[12px]"><tbody>${acts.map((a) => `<tr class="border-b border-black/[0.04]"><td class="py-1 pr-3 font-semibold">${escapeHtml(a.vendor || "—")}</td><td class="py-1 pr-3 text-black/50">${escapeHtml(a.source_item || "")}</td><td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td><td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>`) : "";
@@ -301,11 +308,8 @@ function render(container, entityId, d) {
         </span>
       </summary>
       <div class="bg-black/[0.012]">
-        <div class="flex items-center gap-2 px-6 pt-2 text-[11px]">
-          <span class="text-black/45">Cash-out: <b class="text-black/70">${c.mode === "lump_end" ? "one-time at project end" : "weekly (remaining)"}</b></span>
-          <button data-exp-mode data-cat="${escapeHtml(c.category)}" data-mode="${c.mode === "lump_end" ? "weekly" : "lump_end"}" class="text-blue-600 font-semibold hover:underline">→ switch to ${c.mode === "lump_end" ? "weekly" : "one-time at end"}</button>
-        </div>
-        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-6">${c.mode === "lump_end" ? "Payment (at end)" : "Weekly cash-out — remaining"}</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${weekly || `<tr><td colspan="2" class="px-6 py-2 text-black/40 text-[12px]">Nothing left to schedule (fully spent, or needs dates).</td></tr>`}</tbody></table></div>
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left">Weekly cash-out</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="3" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
+        ${expenseComplete ? "" : addBtn("expinst", c.category, "Add expense payment")}
         ${actuals}
       </div>
     </details>`;
@@ -459,7 +463,7 @@ function render(container, entityId, d) {
     const kind = el.getAttribute("data-edit"), id = el.getAttribute("data-id"), field = el.getAttribute("data-field");
     let val = el.value;
     if (el.type === "number") val = val === "" ? null : Number(val);
-    const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}` }[kind];
+    const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}` }[kind];
     if (!url) return;
     el.disabled = true;
     try { await api(url, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); await reload(); }
@@ -491,14 +495,6 @@ function render(container, entityId, d) {
       catch (err) { oAccept.disabled = false; alert("Failed: " + (err?.message || "error")); }
       return;
     }
-    const expMode = e.target.closest("[data-exp-mode]");
-    if (expMode) {
-      const cat = expMode.getAttribute("data-cat"), mode = expMode.getAttribute("data-mode");
-      expMode.disabled = true;
-      try { await api(`/billing/project/${encodeURIComponent(entityId)}/expense-category/${encodeURIComponent(cat)}/mode`, { method: "POST", body: JSON.stringify({ mode }) }); await reload(); }
-      catch (err) { expMode.disabled = false; alert("Failed: " + (err?.message || "error")); }
-      return;
-    }
     const script = e.target.closest("[data-offer-script]");
     if (script) {
       const cid = script.getAttribute("data-crew");
@@ -526,7 +522,7 @@ function render(container, entityId, d) {
     const del = e.target.closest("[data-del]");
     if (add) {
       const kind = add.getAttribute("data-add"), sid = add.getAttribute("data-sid");
-      const url = { milestone: `/invoices/schedule/${sid}/milestone`, installment: `/payments/schedule/${sid}/installment`, item: `/expenses/project/${encodeURIComponent(entityId)}/item` }[kind];
+      const url = { milestone: `/invoices/schedule/${sid}/milestone`, installment: `/payments/schedule/${sid}/installment`, item: `/expenses/project/${encodeURIComponent(entityId)}/item`, expinst: `/expenses/project/${encodeURIComponent(entityId)}/category/${encodeURIComponent(sid)}/installment` }[kind];
       if (!url) return;
       add.disabled = true;
       try { await api(url, { method: "POST", body: JSON.stringify({}) }); await reload(); }
@@ -534,7 +530,7 @@ function render(container, entityId, d) {
     } else if (del) {
       if (!confirm("Remove this row?")) return;
       const kind = del.getAttribute("data-del"), id = del.getAttribute("data-id");
-      const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}` }[kind];
+      const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}` }[kind];
       if (!url) return;
       try { await api(url, { method: "DELETE" }); await reload(); }
       catch (err) { alert("Delete failed: " + (err?.message || "error")); }
