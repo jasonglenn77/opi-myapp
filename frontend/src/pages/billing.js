@@ -298,7 +298,7 @@ function render(container, entityId, d) {
         </span>
       </summary>
       <div class="bg-black/[0.012]">
-        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-6">Weekly schedule</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${weekly || `<tr><td colspan="2" class="px-6 py-2 text-black/40 text-[12px]">No weekly schedule (needs dates + estimate).</td></tr>`}</tbody></table></div>
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-6">Weekly cash-out — remaining</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${weekly || `<tr><td colspan="2" class="px-6 py-2 text-black/40 text-[12px]">Nothing left to schedule (fully spent, or needs dates).</td></tr>`}</tbody></table></div>
         ${actuals}
       </div>
     </details>`;

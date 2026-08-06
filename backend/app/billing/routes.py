@@ -78,6 +78,26 @@ def _weekly_split(total, start, end):
     return out
 
 
+def _weekly_remaining_split(estimated, paid, start, end):
+    """Forward-looking weekly cash-out: only what's LEFT to pay (estimated minus
+    what's already been paid), spread across the weeks that haven't happened yet
+    (from today, or the project start if it hasn't started). Keeps the cash-flow
+    forecast accurate as bills come in — paid amounts drop out of the schedule."""
+    remaining = round(max(0.0, float(estimated or 0) - float(paid or 0)), 2)
+    if remaining <= 0 or not start or not end or end < start:
+        return []
+    today = date.today()
+    span_start = start if today < start else (end if today > end else today)
+    days = (end - span_start).days
+    num = max(1, ceil(days / 7)) if days > 0 else 1
+    base = round(remaining / num, 2)
+    out = []
+    for i in range(1, num + 1):
+        amt = base if i < num else round(remaining - base * (num - 1), 2)
+        out.append({"seq": i, "week_of": str(span_start + timedelta(days=7 * (i - 1))), "amount": amt})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Project context: name, dates, contract value, books-closed
 # ---------------------------------------------------------------------------
@@ -799,7 +819,7 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
          "actual": round(cat_act.get(c, 0.0), 2),
          "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2),
          "remaining": round(max(0.0, cat_est.get(c, 0.0) - cat_act.get(c, 0.0)), 2),
-         "weekly": _weekly_split(round(cat_est.get(c, 0.0), 2), start, end),
+         "weekly": _weekly_remaining_split(cat_est.get(c, 0.0), cat_act.get(c, 0.0), start, end),
          "actuals": cat_acts.get(c, [])}
         for c in sorted(set(cat_est) | set(cat_act))
     ]
