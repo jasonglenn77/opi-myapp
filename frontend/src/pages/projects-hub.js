@@ -152,8 +152,14 @@ export async function projectsHubPage(routeFn) {
 
   // Restore the table's state (open rows / filter / sort / scroll) so returning
   // from a project workspace lands you exactly where you left off.
+  // One-shot: restore only when returning straight from a project workspace
+  // (which just saved the state). Any other navigation to Projects starts fresh
+  // — default filter "All", nothing expanded.
   let restore = null;
-  try { restore = JSON.parse(sessionStorage.getItem("opi_hub_state") || "null"); } catch (_) {}
+  try {
+    restore = JSON.parse(sessionStorage.getItem("opi_hub_state") || "null");
+    sessionStorage.removeItem("opi_hub_state");
+  } catch (_) {}
   if (restore) {
     statusFilter = restore.statusFilter || "all"; search = restore.search || "";
     sortKey = restore.sortKey || sortKey; sortDir = restore.sortDir || sortDir;
@@ -223,6 +229,7 @@ export async function projectsHubPage(routeFn) {
     { key: "project_create_dttm", label: "Created", align: "right" },
     { key: "value", label: "Value", align: "right" },
     { key: "profit", label: "Profit", align: "right" },
+    { key: null, label: "Outstanding" },
     { key: null, label: "Flags", align: "right" },
   ];
   const arrow = (k) => (sortKey !== k ? "" : sortDir === "asc" ? " ▲" : " ▼");
@@ -290,6 +297,23 @@ export async function projectsHubPage(routeFn) {
     const cr = crews.length ? `${escapeHtml(crews[0])}${chip(crews.length)}` : `<span class="text-black/35">No crew</span>`;
     return `<div class="leading-tight"><div class="text-ink-900">${pm}</div><div class="text-black/55 text-[12px]">${cr}</div></div>`;
   };
+  // Outstanding cash: invoices still to bill, A/R (sent + overdue days), crew
+  // payments due, and estimated expenses left to spend. Only non-zero rows show.
+  const outstandingCell = (p) => {
+    const f = finById.get(p.qbo_customer_id);
+    const att = attById.get(String(p.project_qbo_id)) || {};
+    const os = att.outstanding || {}, aro = att.ar_overdue;
+    const toBill = f ? Math.max(0, (Number(f.estimate_line_amt) || 0) - (Number(f.invoice_line_amt) || 0)) : 0;
+    const ar = f ? Number(f.balance_amt) || 0 : 0;
+    const crewDue = os.crew_due || 0, expLeft = os.exp_to_spend || 0;
+    const line = (label, val, extra = "") => `<div><span class="text-black/40">${label}</span> <b class="tabular-nums text-ink-900">${money(val)}</b>${extra}</div>`;
+    const rows = [];
+    if (toBill > 0.5) rows.push(line("Bill", toBill));
+    if (ar > 0.5) rows.push(line("A/R", ar, aro && aro.days > 0 ? ` <span class="text-red-600 font-semibold">${aro.days}d</span>` : ""));
+    if (crewDue > 0.5) rows.push(line("Crew", crewDue));
+    if (expLeft > 0.5) rows.push(line("Exp", expLeft));
+    return rows.length ? `<div class="text-[11px] leading-snug">${rows.join("")}</div>` : `<span class="text-black/25">—</span>`;
+  };
   const profitCell = (p) => {
     const pi = profitInfo(finById.get(p.qbo_customer_id));
     if (pi.pct == null) return `<span class="text-black/30">—</span>`;
@@ -337,10 +361,11 @@ export async function projectsHubPage(routeFn) {
         <td class="py-2 pr-3 align-top text-right text-[11.5px] tabular-nums text-black/50 whitespace-nowrap">${p.project_create_dttm ? escapeHtml(shortDate(p.project_create_dttm)) : "—"}</td>
         <td class="py-2 pr-3 align-top text-right tabular-nums font-semibold text-black/75">${money(finVal(p) || null)}</td>
         <td class="py-2 pr-3 align-top text-right">${profitCell(p)}</td>
+        <td class="py-2 pr-3 align-top">${outstandingCell(p)}</td>
         <td class="py-2 pr-3 align-top">${flagsCell(p)}</td>
       </tr>
       <tr class="ph-detail" data-qid="${escapeHtml(String(p.project_qbo_id))}" ${open ? "" : "hidden"}>
-        <td colspan="8" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
+        <td colspan="9" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
           <div class="ph-detail-body" data-qid="${escapeHtml(String(p.project_qbo_id))}">${open && cardCache.has(String(p.project_qbo_id)) ? detailHtml(p, cardCache.get(String(p.project_qbo_id))) : `<div class="text-black/40 text-xs py-4">Loading…</div>`}</div>
         </td>
       </tr>`;
@@ -366,14 +391,16 @@ export async function projectsHubPage(routeFn) {
     const dates = (c.date_ranges && c.date_ranges.length)
       ? `<div class="flex flex-wrap gap-1.5">${c.date_ranges.map((d) => `<span class="text-[11.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">${escapeHtml(rangeShort(d.start, d.end))}</span>`).join("")}</div>`
       : `<div class="text-black/35 text-[12.5px]">No dates assigned yet</div>`;
-    const cp = c.crew_paid || { total: 0, vendors: 0 };
+    const cp = c.crew_paid || { total: 0, vendors: 0, crews: [] };
+    const paidList = (cp.crews || []).map((x) => `${escapeHtml(x.name)} <span class="text-black/40">${money(x.amount)}</span>`).join(", ");
     const crewsVal = c.crews.length
       ? c.crews.map(escapeHtml).join(", ")
       : (cp.total > 0
-          ? `<span class="text-amber-700">None assigned</span> <span class="text-black/45 text-[11px]">· ${cp.vendors} paid in QBO (${money(cp.total)})</span>`
+          ? `<span class="text-amber-700">None assigned</span>`
           : "—");
     const team = kv("Project managers", c.pms.length ? c.pms.map(escapeHtml).join(", ") : "—")
-               + kv("Work crews", crewsVal);
+               + kv("Work crews", crewsVal)
+               + (cp.total > 0 ? kv("Paid (QBO)", `<span class="text-[11.5px]">${paidList}</span>`) : "");
     // Expenses by category — estimated vs spent, with what's left to spend + totals.
     const ec = c.expense_categories || [];
     const eTot = ec.reduce((a, x) => { a.est += x.estimated; a.act += x.actual; a.rem += x.remaining; return a; }, { est: 0, act: 0, rem: 0 });
@@ -392,7 +419,7 @@ export async function projectsHubPage(routeFn) {
     const o = c.offer;
     const offerInner = o.state === "none"
       ? (cp.total > 0
-          ? kv("Crew offer", `<span class="text-black/45">n/a — crews already paid</span>`) + kv("Paid", `${money(cp.total)} · ${cp.vendors} crew${cp.vendors === 1 ? "" : "s"}`)
+          ? kv("Crew offer", `<span class="text-black/45">n/a — crews already paid</span>`) + kv("Paid", `<span class="text-[11.5px]">${paidList}</span>`)
           : kv("Crew offer", `<span class="text-black/40">Not sent</span>`))
       : kv("Crew offer", `<span class="${o.state === "accepted" ? "text-emerald-700" : "text-amber-700"}">${escapeHtml(o.state)}</span>`)
         + (o.crew_name ? kv("Crew", escapeHtml(o.crew_name)) : "")
@@ -458,9 +485,9 @@ export async function projectsHubPage(routeFn) {
         ${box(p.project_qbo_id, "schedule", "Schedule — all ranges", "LIVE", dates, fb.schedule)}
         ${box(p.project_qbo_id, "team", "Team", "LIVE", team, fb.team)}
         ${box(p.project_qbo_id, "offer", "Crew offer", "LIVE", offerInner, fb.offer)}
-        ${box(p.project_qbo_id, "upcoming", "Upcoming", "LIVE", upcoming, fb.upcoming)}
         ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
         ${box(p.project_qbo_id, "financial", "Financials", "LIVE", financial, fb.financial)}
+        ${box(p.project_qbo_id, "upcoming", "Upcoming", "LIVE", upcoming, fb.upcoming)}
         ${box(p.project_qbo_id, "expenses", "Expenses by category", "LIVE", expensesByCat, fb.expenses)}
         ${box(p.project_qbo_id, "process", "Kick-off &amp; process", "LIVE", process, fb.process)}
         ${box(p.project_qbo_id, "notes", "Notes", "LIVE", notes, fb.notes)}
@@ -471,7 +498,7 @@ export async function projectsHubPage(routeFn) {
     if (!all.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No projects found.</div>`; return; }
     const rows = sortedAll();
     listEl.innerHTML = `
-      <table class="w-full text-sm" style="min-width:1040px;">
+      <table class="w-full text-sm" style="min-width:1180px;">
         <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
           ${HEADERS.map((h) => `<th class="py-2 px-3 font-bold ${h.key ? "cursor-pointer select-none hover:text-black/70" : ""} bg-white whitespace-nowrap ${h.align === "right" ? "text-right" : ""}" ${h.key ? `data-sort="${h.key}"` : ""}>${h.label}${arrow(h.key)}</th>`).join("")}
         </tr></thead>

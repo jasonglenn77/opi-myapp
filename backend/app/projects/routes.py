@@ -961,6 +961,36 @@ def projects_attention(user=Depends(get_current_user)):
         daily_rows = conn.execute(daily_sql).mappings().all()
         setup_rows = conn.execute(setup_sql).mappings().all()
         ar_rows = conn.execute(ar_sql).mappings().all()
+        # crew labor + expenses estimated (from latest-version accepted estimates)
+        est_out_rows = conn.execute(text("""
+            WITH latest AS (
+              SELECT t.id, t.customer_qbo_id,
+                     ROW_NUMBER() OVER (PARTITION BY t.customer_qbo_id,
+                       COALESCE(t.doc_number, CONCAT('__nd__', t.qbo_id)) ORDER BY t.id DESC) AS rn
+              FROM myapp.qbo_transactions t
+              WHERE t.entity_type='Estimate'
+                AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Accepted','Converted','Closed')
+            )
+            SELECT le.customer_qbo_id AS pid,
+                   ROUND(SUM(CASE WHEN sl.item_name='Contract Labor' THEN COALESCE(sl.cost_amount,0) ELSE 0 END),2) AS crew_est,
+                   ROUND(SUM(CASE WHEN sl.item_name NOT IN ('Contract Labor','Contract Labor - Daily Rate Local','Buffer','OH&P')
+                                  THEN COALESCE(sl.cost_amount,0) ELSE 0 END),2) AS exp_est
+            FROM latest le
+            JOIN myapp.qbo_sales_transaction_lines sl ON sl.transaction_id=le.id AND sl.line_level='child'
+            WHERE le.rn=1 GROUP BY le.customer_qbo_id
+        """)).mappings().all()
+        # crew labor + expenses actually paid (QBO bills / purchases)
+        act_out_rows = conn.execute(text("""
+            SELECT l.line_customer_qbo_id AS pid,
+                   ROUND(SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name'))='Contract Labor'
+                                  THEN l.amount ELSE 0 END),2) AS crew_paid,
+                   ROUND(SUM(CASE WHEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')),'')
+                                  NOT IN ('Contract Labor','Contract Labor - Daily Rate Local','Buffer','OH&P')
+                                  THEN l.amount ELSE 0 END),2) AS exp_act
+            FROM myapp.qbo_transaction_lines l JOIN myapp.qbo_transactions t ON t.id=l.transaction_id
+            WHERE t.entity_type IN ('Bill','Purchase') AND l.line_customer_qbo_id IS NOT NULL
+            GROUP BY l.line_customer_qbo_id
+        """)).mappings().all()
 
     out = {}
     for r in est_rows:
@@ -991,6 +1021,15 @@ def projects_attention(user=Depends(get_current_user)):
     for r in ar_rows:
         out.setdefault(str(r["pid"]), {})["ar_overdue"] = {
             "days": int(r["overdue_days"] or 0), "total": round(float(r["ar_total"] or 0), 2),
+        }
+    est_out = {str(r["pid"]): r for r in est_out_rows}
+    act_out = {str(r["pid"]): r for r in act_out_rows}
+    for pid in set(est_out) | set(act_out):
+        e, a = est_out.get(pid), act_out.get(pid)
+        crew_due = max(0.0, float((e or {}).get("crew_est") or 0) - float((a or {}).get("crew_paid") or 0))
+        exp_left = max(0.0, float((e or {}).get("exp_est") or 0) - float((a or {}).get("exp_act") or 0))
+        out.setdefault(pid, {})["outstanding"] = {
+            "crew_due": round(crew_due, 2), "exp_to_spend": round(exp_left, 2),
         }
     return {"attention": out, "kickoff_total": kickoff_total}
 
@@ -1194,13 +1233,17 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             WHERE t.entity_type='Estimate' AND sl.item_name='Contract Labor' AND sl.project_customer_qbo_id=:q
               AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Accepted','Converted')
         """), {"q": qbo_id}).scalar()
-        crew_paid = conn.execute(text("""
-            SELECT COALESCE(ROUND(SUM(l.amount),2),0), COUNT(DISTINCT t.vendor_qbo_id)
+        crew_paid_rows = conn.execute(text("""
+            SELECT JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.VendorRef.name')) AS vendor,
+                   ROUND(SUM(l.amount),2) AS amt
             FROM myapp.qbo_transaction_lines l JOIN myapp.qbo_transactions t ON t.id=l.transaction_id
             WHERE l.line_customer_qbo_id=:q AND t.entity_type='Bill'
               AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name'))='Contract Labor'
-        """), {"q": qbo_id}).first()
-        crew_paid_total, crew_vendor_count = float(crew_paid[0] or 0), int(crew_paid[1] or 0)
+            GROUP BY vendor ORDER BY amt DESC
+        """), {"q": qbo_id}).mappings().all()
+        crew_paid_total = round(sum(float(r["amt"] or 0) for r in crew_paid_rows), 2)
+        crew_vendor_count = len(crew_paid_rows)
+        crew_paid_vendors = [{"name": (r["vendor"] or "—"), "amount": float(r["amt"] or 0)} for r in crew_paid_rows]
         exp_remaining = round(max(0.0, sum(est_by_cat.values()) - sum(act_by_cat.values())), 2)
 
         upcoming = {
@@ -1211,7 +1254,8 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             "crew": {"total": round(max(0.0, float(crew_est or 0) - crew_paid_total), 2)},
             "expenses": {"total": exp_remaining},
         }
-        crew_paid_info = {"total": crew_paid_total, "vendors": crew_vendor_count}
+        crew_paid_info = {"total": crew_paid_total, "vendors": crew_vendor_count,
+                          "crews": crew_paid_vendors}
 
     financial["expense_estimated"] = round(sum(est_by_cat.values()), 2)
     financial["expense_actual"] = round(sum(act_by_cat.values()), 2)
