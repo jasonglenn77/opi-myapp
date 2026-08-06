@@ -1168,7 +1168,7 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
         # financial snapshot
         fin = conn.execute(text("""
             SELECT estimate_line_amt, invoice_line_amt, expense_line_amt,
-                   balance_amt, actual_profit, actual_profit_pct,
+                   balance_amt, open_invoice_total_amt, actual_profit, actual_profit_pct,
                    projected_profit, projected_profit_pct
             FROM myapp.project_financial_summary pfs
             JOIN myapp.qbo_customers qc ON qc.id=pfs.qbo_customer_id

@@ -348,7 +348,9 @@ def _compose_estimates(conn, entity_id):
         """), {"sid": s["id"]}).mappings().all()
         scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
 
-    # global burn-down across all milestones by invoice date
+    # global burn-down across all milestones by invoice date — PARTIAL: the
+    # QBO invoiced/collected totals fill the milestone stack, splitting the
+    # boundary milestone (e.g. $6k invoiced vs 3.5/3.5/3 → line 2 is part-sent).
     flat = []
     for eq, (sid, ms) in scheds.items():
         for m in ms:
@@ -357,18 +359,31 @@ def _compose_estimates(conn, entity_id):
     tier_by, cum = {}, 0.0
     for m in flat:
         amt = float(m["amount"] or 0)
-        tier_by[m["id"]] = ("realized" if cum + amt <= collected + EPS
-                            else "committed" if cum + amt <= invoiced + EPS else "scheduled")
+        covered = min(amt, max(0.0, invoiced - cum))   # invoiced (sent) portion
+        paid = min(amt, max(0.0, collected - cum))     # collected (paid) portion
         cum += amt
+        if paid >= amt - EPS:
+            tier, label = "realized", "Paid"
+        elif covered >= amt - EPS:
+            tier, label = "committed", "Sent · A/R"
+        elif covered > EPS:
+            tier, label = "partial", f"Partial · ${round(covered):,} sent"
+        else:
+            tier, label = "scheduled", "To bill"
+        tier_by[m["id"]] = {"tier": tier, "label": label,
+                            "covered": round(covered, 2), "paid": round(paid, 2),
+                            "remaining": round(amt - covered, 2)}
 
     def _ms_out(m):
-        t = tier_by.get(m["id"], "scheduled")
+        t = tier_by.get(m["id"], {"tier": "scheduled", "label": "To bill",
+                                  "covered": 0.0, "paid": 0.0, "remaining": float(m["amount"] or 0)})
         return {
             "id": m["id"], "seq": m["seq"], "label": m["label"], "pct": float(m["pct"] or 0),
             "invoice_date": str(m["invoice_date"]) if m["invoice_date"] else None,
             "due_date": str(m["due_date"]) if m["due_date"] else None,
-            "amount": float(m["amount"] or 0), "tier": t, "edited": bool(m["edited"]),
-            "status_label": {"realized": "Paid", "committed": "Sent · A/R"}.get(t, "To bill"),
+            "amount": float(m["amount"] or 0), "tier": t["tier"], "edited": bool(m["edited"]),
+            "covered": t["covered"], "paid": t["paid"], "remaining": t["remaining"],
+            "status_label": t["label"],
         }
 
     accepted, pending, needs_review = [], [], 0
@@ -778,6 +793,17 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
             "installments": installments, "offer": crew_offer,
         })
     out.sort(key=lambda x: -x["labor"])
+    # Reconcile with actual crew cash: any Contract-Labor bill whose vendor didn't
+    # match an assigned crew (e.g. the estimate has no crew assigned, or was paid
+    # to a different vendor) still belongs to this project. Attribute the unmatched
+    # remainder to the largest rollup so the rollup's "paid" reflects reality.
+    total_actual = round(sum(paid_by_vid.values()), 2)
+    matched = round(sum(g["paid_qbo"] for g in out), 2)
+    unmatched = round(total_actual - matched, 2)
+    if unmatched > EPS and out:
+        g = out[0]  # largest labor
+        g["paid_qbo"] = round(g["paid_qbo"] + unmatched, 2)
+        g["remaining"] = round(max(0.0, g["labor"] - g["paid_qbo"]), 2)
     return {"rollups": out,
             "total_labor": round(sum(g["labor"] for g in out), 2),
             "total_paid": round(sum(g["paid_qbo"] for g in out), 2)}

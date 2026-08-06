@@ -14,6 +14,7 @@ const money2 = (n) => (n == null || n === "" ? "—" : "$" + Number(n).toLocaleS
 const DOT = {
   realized:  '<span class="inline-block w-2.5 h-2.5 rounded-full bg-ink-900 align-middle"></span>',
   committed: '<span class="inline-block w-2.5 h-2.5 rounded-full bg-ink-900 align-middle"></span>',
+  partial:   '<span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-500 align-middle"></span>',
   scheduled: '<span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 align-middle"></span>',
   estimated: '<span class="inline-block w-2.5 h-2.5 rounded-full border-[1.5px] border-black/40 align-middle"></span>',
 };
@@ -26,7 +27,8 @@ const PILL = {
   Allocated:     "text-black/45 bg-transparent border border-black/15",
 };
 function pill(label) {
-  return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${PILL[label] || PILL.Allocated}">${escapeHtml(label)}</span>`;
+  const cls = PILL[label] || (String(label).startsWith("Partial") ? "text-amber-700 bg-amber-50 border border-amber-200" : PILL.Allocated);
+  return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${cls}">${escapeHtml(label)}</span>`;
 }
 const editedChip = (e) => e ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
 
@@ -622,8 +624,16 @@ function openCrewRoster(entityId, start, end, onPick) {
 
 // Build a compact weekly strip of upcoming unpaid cash (in green / out red).
 function buildContribution(inv, crew, exp) {
-  const inflow = inv.milestones.filter((m) => m.tier !== "realized" && m.due_date)
-    .map((m) => ({ date: m.due_date.slice(0, 10), amt: m.amount }));
+  // Invoice cash in: the already-sent-but-unpaid (A/R) portion lands on the
+  // invoice's DUE date; the not-yet-billed portion lands on its planned invoice
+  // date. Partial milestones contribute to both.
+  const inflow = [];
+  inv.milestones.forEach((m) => {
+    const ar = Math.max(0, (m.covered || 0) - (m.paid || 0));   // sent, awaiting payment
+    const toBill = m.remaining != null ? m.remaining : (m.tier !== "realized" ? m.amount : 0);
+    if (ar > 0.5 && m.due_date) inflow.push({ date: m.due_date.slice(0, 10), amt: ar });
+    if (toBill > 0.5 && m.invoice_date) inflow.push({ date: m.invoice_date.slice(0, 10), amt: toBill });
+  });
   const outflow = [
     ...crew.installments.filter((i) => i.tier !== "realized" && i.pay_date).map((i) => ({ date: i.pay_date.slice(0, 10), amt: i.amount })),
     ...exp.items.filter((i) => i.tier !== "realized" && i.expense_date).map((i) => ({ date: i.expense_date.slice(0, 10), amt: i.amount })),

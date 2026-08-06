@@ -304,7 +304,7 @@ export async function projectsHubPage(routeFn) {
     const att = attById.get(String(p.project_qbo_id)) || {};
     const os = att.outstanding || {}, aro = att.ar_overdue;
     const toBill = f ? Math.max(0, (Number(f.estimate_line_amt) || 0) - (Number(f.invoice_line_amt) || 0)) : 0;
-    const ar = f ? Number(f.balance_amt) || 0 : 0;
+    const ar = f ? Number(f.open_invoice_total_amt) || 0 : 0;  // true open A/R (unpaid invoices)
     const crewDue = os.crew_due || 0, expLeft = os.exp_to_spend || 0;
     const line = (label, val, extra = "") => `<div><span class="text-black/40">${label}</span> <b class="tabular-nums text-ink-900">${money(val)}</b>${extra}</div>`;
     const rows = [];
@@ -432,7 +432,7 @@ export async function projectsHubPage(routeFn) {
       ? `<span class="${expOver ? "text-red-600" : "text-emerald-700"} font-semibold">${money(f.expense_actual)}</span> <span class="text-black/40">/ ${money(f.expense_estimated)} est</span>`
       : money(f.expense_line_amt);
     const financial = kv("Estimate", money(f.estimate_line_amt)) + kv("Invoiced", money(f.invoice_line_amt))
-                    + kv("Expenses", expLine) + kv("Open A/R", money(f.balance_amt))
+                    + kv("Expenses", expLine) + kv("Open A/R", money(f.open_invoice_total_amt))
                     + kv("Profit", `${money(f.actual_profit != null ? f.actual_profit : f.projected_profit)} · ${pct(f.actual_profit_pct != null ? f.actual_profit_pct : f.projected_profit_pct)}`);
     const notes = c.notes && c.notes.length
       ? `<div class="text-[12.5px] text-black/55 italic leading-relaxed space-y-1">${c.notes.map((n) => `<div>“${escapeHtml(n)}”</div>`).join("")}</div>`
