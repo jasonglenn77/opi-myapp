@@ -741,21 +741,48 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
     }
 
 
+def _tier_installments(by_date, paid, books_closed):
+    """Burn a crew rollup's bi-weekly lumps down against actual paid — earliest
+    dates fill first, splitting the boundary lump (partial)."""
+    out, cum = [], 0.0
+    for idx, d in enumerate(sorted(by_date.keys())):
+        amt = by_date[d]
+        covered = min(amt, max(0.0, paid - cum))
+        cum += amt
+        if books_closed or covered >= amt - EPS:
+            tier, label = "realized", "Paid"
+        elif covered > EPS:
+            tier, label = "partial", f"Partial · ${round(covered):,} paid"
+        else:
+            tier, label = "scheduled", "Scheduled"
+        out.append({"seq": idx + 1, "pay_date": d, "amount": amt, "tier": tier,
+                    "paid": round(covered, 2), "remaining": round(amt - covered, 2),
+                    "status_label": label})
+    return out
+
+
 def _compose_crew_rollups(conn, entity_id, books_closed):
-    """Crew payments grouped into rollups by assigned crew: the per-estimate
-    schedules for one crew are summed into a single lump per pay date, tiered
-    against that crew's actual QBO Contract-Labor bills. Reassigning an estimate
-    to another crew simply moves it to a different rollup group (the 3-and-1 case)."""
+    """Crew payments grouped into rollups by assigned crew: per-estimate schedules
+    for one crew are summed into a single lump per pay date and burned down against
+    that crew's actual QBO Contract-Labor bills (partial fills the earliest date).
+    Contract-Labor paid to a vendor that ISN'T an assigned crew (no crew assigned,
+    or paid to a different vendor — common on legacy projects picked up as-is) is
+    kept in a separate 'Other crews paid' group, so every crew and every dollar is
+    represented and the totals reconcile — without mis-crediting an assigned crew."""
     from app.payments.routes import _crew_vendor
     sched_map = _load_schedules(conn, entity_id)
-    paid_by_vid = {str(r["v"]): float(r["amt"] or 0) for r in conn.execute(text("""
-        SELECT t.vendor_qbo_id AS v, ROUND(SUM(l.amount), 2) AS amt
+    paid_rows = conn.execute(text("""
+        SELECT t.vendor_qbo_id AS vid,
+               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name')) AS vendor,
+               ROUND(SUM(l.amount), 2) AS amt
         FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
         WHERE l.line_customer_qbo_id = :e AND t.entity_type = 'Bill'
           AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
           AND t.vendor_qbo_id IS NOT NULL
-        GROUP BY t.vendor_qbo_id
-    """), {"e": entity_id}).mappings().all()}
+        GROUP BY t.vendor_qbo_id, vendor
+    """), {"e": entity_id}).mappings().all()
+    paid_by_vid = {str(r["vid"]): float(r["amt"] or 0) for r in paid_rows}
+    vendor_name = {str(r["vid"]): (r["vendor"] or "—") for r in paid_rows}
     offers = _offer_rows(conn, "o.entity_id = :e", {"e": entity_id})
 
     groups = {}
@@ -764,7 +791,8 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
             continue
         cid = s.get("crew_id")
         g = groups.setdefault(cid, {"crew_id": cid, "crew_name": s.get("crew_name"),
-                                    "estimates": [], "labor": 0.0, "by_date": {}})
+                                    "estimates": [], "labor": 0.0, "by_date": {}, "vid": None})
+        g["vid"] = str(_crew_vendor(conn, cid)) if cid else None
         g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
                                "labor": round(float(s.get("contract_labor") or 0), 2)})
         g["labor"] = round(g["labor"] + float(s.get("contract_labor") or 0), 2)
@@ -773,37 +801,37 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
             if d:
                 g["by_date"][d] = round(g["by_date"].get(d, 0.0) + float(i["amount"] or 0), 2)
 
+    matched_vids = {g["vid"] for g in groups.values() if g["vid"]}
+    null_group = next((g for g in groups.values() if g["crew_id"] is None), None)
+    unmatched = {v: a for v, a in paid_by_vid.items() if v not in matched_vids}
+    unmatched_total = round(sum(unmatched.values()), 2)
+
     out = []
     for cid, g in groups.items():
-        vid = _crew_vendor(conn, cid) if cid else None
-        paid = paid_by_vid.get(str(vid), 0.0) if vid else 0.0
-        installments, cum = [], 0.0
-        for idx, d in enumerate(sorted(g["by_date"].keys())):
-            amt = g["by_date"][d]
-            tier = "realized" if (books_closed or cum + amt <= paid + EPS) else "scheduled"
-            cum += amt
-            installments.append({"seq": idx + 1, "pay_date": d, "amount": amt, "tier": tier,
-                                 "status_label": "Paid" if tier == "realized" else "Scheduled"})
+        paid = paid_by_vid.get(g["vid"], 0.0) if g["vid"] else 0.0
+        if cid is None:               # unassigned rollup absorbs the unmatched cash
+            paid = round(paid + unmatched_total, 2)
         crew_offer = next((o for o in offers if o["crew_id"] == cid and o["status"] in ("accepted", "sent")), None)
         out.append({
             "crew_id": cid, "crew_name": g["crew_name"],
             "estimates": sorted(g["estimates"], key=lambda x: x["doc"] or ""),
             "labor": g["labor"], "paid_qbo": round(paid, 2),
             "remaining": round(max(0.0, g["labor"] - paid), 2),
-            "installments": installments, "offer": crew_offer,
+            "installments": _tier_installments(g["by_date"], paid, books_closed),
+            "offer": crew_offer, "is_other": False,
         })
     out.sort(key=lambda x: -x["labor"])
-    # Reconcile with actual crew cash: any Contract-Labor bill whose vendor didn't
-    # match an assigned crew (e.g. the estimate has no crew assigned, or was paid
-    # to a different vendor) still belongs to this project. Attribute the unmatched
-    # remainder to the largest rollup so the rollup's "paid" reflects reality.
-    total_actual = round(sum(paid_by_vid.values()), 2)
-    matched = round(sum(g["paid_qbo"] for g in out), 2)
-    unmatched = round(total_actual - matched, 2)
-    if unmatched > EPS and out:
-        g = out[0]  # largest labor
-        g["paid_qbo"] = round(g["paid_qbo"] + unmatched, 2)
-        g["remaining"] = round(max(0.0, g["labor"] - g["paid_qbo"]), 2)
+
+    # Unmatched crew cash not absorbed by a null-crew rollup → its own group.
+    if unmatched_total > EPS and null_group is None:
+        out.append({
+            "crew_id": None, "crew_name": "Other crews paid (not assigned)",
+            "estimates": [], "labor": 0.0, "paid_qbo": unmatched_total, "remaining": 0.0,
+            "installments": [], "offer": None, "is_other": True,
+            "vendors": sorted([{"vendor": vendor_name[v], "amount": round(a, 2)}
+                               for v, a in unmatched.items()], key=lambda x: -x["amount"]),
+        })
+
     return {"rollups": out,
             "total_labor": round(sum(g["labor"] for g in out), 2),
             "total_paid": round(sum(g["paid_qbo"] for g in out), 2)}

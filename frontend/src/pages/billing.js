@@ -220,9 +220,24 @@ function render(container, entityId, d) {
   // ── CREW section: rollup payment blocks (header) + per-estimate assignment rows ──
   const rollupBlock = (g) => {
     const cn = g.crew_name || "Unassigned";
+    // "Other crews paid" — actual Contract-Labor cash to vendors that aren't an
+    // assigned crew (unassigned estimates, or paid to a different vendor on a
+    // legacy project). No schedule/offer — just the reconciling actual bills.
+    if (g.is_other) {
+      const rows = (g.vendors || []).map((v) => `<tr class="border-b border-black/[0.04]"><td class="py-1 pl-4 pr-3 text-black/70 font-semibold">${escapeHtml(v.vendor)}</td><td class="py-1 pl-2 pr-4 text-right tabular-nums font-semibold text-ink-900">${money(v.amount)}</td></tr>`).join("");
+      return `<div class="rounded-xl border border-amber-200 overflow-hidden mb-3">
+        <div class="flex items-center gap-2 px-4 py-2.5 bg-amber-50 border-b border-amber-200 flex-wrap">
+          <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">Other crews</span>
+          <span class="text-[13px] font-bold text-ink-900">${escapeHtml(cn)}</span>
+          <span class="ml-auto tabular-nums text-[13px]"><b class="text-ink-900">${money(g.paid_qbo)}</b> <span class="text-black/45">paid</span></span>
+        </div>
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><tbody>${rows}</tbody></table></div>
+        <div class="px-4 py-2 text-[11px] text-amber-800 bg-amber-50/60 border-t border-amber-200">Contract-Labor paid to crews not assigned to an estimate here. Assign the estimate to one of these crews to fold it into a rollup.</div>
+      </div>`;
+    }
     const chips = g.estimates.map((e) => `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}</span>`).join("");
     const insts = g.installments.map((i) => `
-      <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60">${shortDate(i.pay_date)}</td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
+      <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60"><span class="flex items-center gap-2">${DOT[i.tier] || ""}${shortDate(i.pay_date)}</span></td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
     const o = g.offer;
     let offerLine;
     if (p.books_closed)
@@ -364,7 +379,7 @@ function render(container, entityId, d) {
       <div class="card p-4 sm:p-5">
         <div class="text-sm font-bold text-ink-900 mb-3">Cash summary — paid vs. expected</div>
         ${burnRow("Customer invoices", money(est.contract_total) + " · " + est.accepted.length + " estimate" + (est.accepted.length === 1 ? "" : "s"), invBar)}
-        ${burnRow("Crew payments", money(crewLaborEst) + " · " + roll.rollups.length + " rollup" + (roll.rollups.length === 1 ? "" : "s"), crewBar)}
+        ${(() => { const nr = roll.rollups.filter((r) => !r.is_other).length; return burnRow("Crew payments", money(crewLaborEst) + " · " + nr + " rollup" + (nr === 1 ? "" : "s"), crewBar); })()}
         ${burnRow("Project expenses", money(exp.estimate_total) + " estimate", expBar)}
         <div class="flex gap-4 flex-wrap mt-3 pt-3 border-t border-black/10 text-[11px] text-black/55">
           <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-700"></i>Paid / collected</span>
