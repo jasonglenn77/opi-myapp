@@ -41,7 +41,7 @@ from app.payments.routes import (
     _project_meta, _crew_options, _crew_vendor, _qbo_payments,
     _even_split, _converted_estimates_with_labor, _load_schedules,
 )
-from app.projects.routes import _operational_status
+from app.projects.routes import _operational_status, _latest_status
 from app.offers.routes import _offer_rows, _estimate_suggestions
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
@@ -82,36 +82,11 @@ def _weekly_split(total, start, end):
 # Project context: name, dates, contract value, books-closed
 # ---------------------------------------------------------------------------
 def _canonical_status(conn, entity_id):
-    """The SAME project-grain operational status the Projects hub shows — so the
-    Billing tab never disagrees with Assignment. Gathers the schedule-item
-    statuses + PM/crew presence and runs the shared _operational_status()."""
-    r = conn.execute(text("""
-        SELECT
-          GROUP_CONCAT(DISTINCT psi.status) AS all_statuses,
-          MIN(psi.start_date)               AS start_date,
-          COUNT(psi.id)                     AS n_items,
-          MAX(CASE WHEN spm.id IS NOT NULL THEN 1 ELSE 0 END) AS has_pm,
-          MAX(CASE WHEN swc.id IS NOT NULL THEN 1 ELSE 0 END) AS has_crew
-        FROM projects p
-        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
-        LEFT JOIN project_schedule_items psi ON psi.project_id = p.id
-        LEFT JOIN project_schedule_item_project_managers spm
-               ON spm.schedule_item_id = psi.id AND spm.unassigned_at IS NULL
-        LEFT JOIN project_schedule_item_work_crews swc
-               ON swc.schedule_item_id = psi.id AND swc.unassigned_at IS NULL
-        WHERE qc.qbo_id = :e
-    """), {"e": entity_id}).mappings().first()
-    statuses = (r["all_statuses"] or "") if r else ""
-    stset = {s.strip() for s in statuses.split(",") if s.strip()}
-    needs = (not r or (r["n_items"] or 0) == 0 or not stset or stset <= {"needs_attention"})
-    p = {
-        "needs_assignment": needs,
-        "all_statuses": statuses,
-        "start_date": r["start_date"] if r else None,
-        "primary_project_manager": "x" if (r and r["has_pm"]) else "",
-        "primary_work_crew": "x" if (r and r["has_crew"]) else "",
-    }
-    return _operational_status(p)
+    """The Billing tab shows the SAME status as the Projects hub / Assignment: the
+    project's final assignment-row status (NOT a derived operational status). A
+    project can have dates + a paid deposit yet still be 'not started' / 'pending'
+    — the office's status is the source of truth."""
+    return _latest_status(conn, entity_id)
 
 
 # ---------------------------------------------------------------------------
@@ -987,12 +962,12 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
 
-        # Canonical status (same as the Projects hub / Assignment) drives books-closed.
+        # Status = the project's final assignment-row status (same as the hub).
+        # Books close ONLY when the office marks the project completed — not when
+        # invoices happen to be paid.
         op_status = _canonical_status(conn, entity_id)
         has_dates = bool(ctx.get("start_date") and ctx.get("end_date"))
-        if op_status == "needs_assignment" and not has_dates:
-            op_status = "needs_dates"
-        books_closed = op_status == "complete"
+        books_closed = op_status == "completed"
 
         crew_vendor_ids = _all_crew_vendor_ids(conn, entity_id)
         inv = _compose_invoices(conn, entity_id, books_closed)

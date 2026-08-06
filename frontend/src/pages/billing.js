@@ -69,10 +69,12 @@ const shortDate = (s) => {
 };
 
 const STATUS_PILL = {
-  complete:      ["Complete", "text-emerald-700 bg-emerald-50 border-emerald-200"],
-  in_progress:   ["In progress", "text-emerald-700 bg-emerald-50 border-emerald-200"],
-  scheduled:     ["Scheduled", "text-blue-700 bg-blue-50 border-blue-200"],
-  needs_dates:   ["Needs dates", "text-amber-800 bg-amber-50 border-amber-300"],
+  completed:       ["Complete", "text-emerald-700 bg-emerald-50 border-emerald-200"],
+  in_progress:     ["In progress", "text-emerald-700 bg-emerald-50 border-emerald-200"],
+  not_started:     ["Not started", "text-slate-700 bg-slate-100 border-slate-300"],
+  pending:         ["Pending", "text-amber-800 bg-amber-50 border-amber-300"],
+  needs_attention: ["Needs attention", "text-rose-700 bg-rose-50 border-rose-200"],
+  canceled:        ["Canceled", "text-black/50 bg-black/10 border-black/15"],
 };
 
 // Warm cache: entity-detail calls prefetchBilling() the moment a project opens,
@@ -110,7 +112,7 @@ function render(container, entityId, d) {
   const roll = d.crew_rollups || { rollups: [], total_labor: 0, total_paid: 0 };
   const inv = d.invoices, crew = d.crew, exp = d.expenses;
   const crews = d.crews || [];
-  const [stLabel, stCls] = STATUS_PILL[p.operational_status] || ["Scheduled", "text-blue-700 bg-blue-50 border-blue-200"];
+  const [stLabel, stCls] = STATUS_PILL[p.operational_status] || [p.operational_status || "—", "text-slate-700 bg-slate-100 border-slate-300"];
   const crewName = (id) => { const c = crews.find((x) => String(x.id) === String(id)); return c ? (c.parent_name ? c.parent_name + " — " : "") + c.name : null; };
   const crewOpts = (sel) => `<option value="">Unassigned</option>` + crews.map((c) => `<option value="${c.id}" ${String(c.id) === String(sel) ? "selected" : ""}>${escapeHtml((c.parent_name ? c.parent_name + " — " : "") + c.name)}</option>`).join("");
   // Crew "paid" = ALL actual Contract-Labor bills (any vendor, incl. crews not

@@ -82,11 +82,31 @@ def delete_schedule_item(schedule_item_id: int, user=Depends(get_current_user)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+# Project status = the LATEST assignment row's status (owner decision): a project
+# with several assignment rows inherits the final row's status (e.g. 3 completed +
+# a final 'pending' row → the project is 'pending'). This is the single status
+# shown on the Projects hub and the Billing tab — no separate derived status.
+_STATUS_ORDER = ["needs_attention", "pending", "not_started", "in_progress", "completed", "canceled"]
+
+
+def _latest_status(conn, qbo_id):
+    """The status of the project's final assignment row (latest by date, then
+    sort order). Falls back to 'needs_attention' when there are no rows."""
+    r = conn.execute(text("""
+        SELECT psi.status
+        FROM myapp.project_schedule_items psi
+        JOIN myapp.projects p ON p.id = psi.project_id
+        JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id
+        WHERE qc.qbo_id = :q
+        ORDER BY psi.start_date IS NULL, psi.start_date DESC, psi.sort_order DESC, psi.id DESC
+        LIMIT 1
+    """), {"q": qbo_id}).scalar()
+    return r or "needs_attention"
+
+
 def _operational_status(p):
-    """Project-grain operational status for the Projects hub — distinct from the
-    opportunity's estimating lifecycle. Stages: needs_assignment -> assigned ->
-    scheduled -> in_progress -> complete (+ canceled). Derived from the project's
-    schedule-item statuses (all_statuses) + whether a start date is set."""
+    """DEPRECATED for display — kept for any legacy callers. The hub + billing now
+    use _latest_status (the final assignment row's status)."""
     if p.get("needs_assignment"):
         return "needs_assignment"
     statuses = {s.strip() for s in (p.get("all_statuses") or "").split(",") if s.strip()}
@@ -734,6 +754,16 @@ def projects_basic(user=Depends(get_current_user)):
         AND wc.is_active = 1
         AND wc.parent_id IS NOT NULL
       GROUP BY p.qbo_customer_id
+    ),
+
+    latest_status_meta AS (
+      SELECT qbo_customer_id, status AS latest_status FROM (
+        SELECT p.qbo_customer_id, psi.status,
+               ROW_NUMBER() OVER (PARTITION BY p.qbo_customer_id
+                 ORDER BY psi.start_date IS NULL, psi.start_date DESC, psi.sort_order DESC, psi.id DESC) AS rn
+        FROM myapp.projects p
+        JOIN myapp.project_schedule_items psi ON psi.project_id = p.id
+      ) x WHERE rn = 1
     )
 
     SELECT
@@ -745,6 +775,7 @@ def projects_basic(user=Depends(get_current_user)):
 
       COALESCE(am.all_statuses,   '')                AS all_statuses,
       COALESCE(am.primary_status, 'needs_attention') AS project_status,
+      COALESCE(lsm.latest_status, 'needs_attention') AS operational_status,
       am.all_start_dates,
       am.earliest_start_date                         AS start_date,
       am.all_end_dates,
@@ -775,6 +806,7 @@ def projects_basic(user=Depends(get_current_user)):
     LEFT JOIN assignment_meta am ON am.qbo_customer_id = qc.id
     LEFT JOIN pm_meta        pm ON pm.qbo_customer_id = qc.id
     LEFT JOIN crew_meta      cr ON cr.qbo_customer_id = qc.id
+    LEFT JOIN latest_status_meta lsm ON lsm.qbo_customer_id = qc.id
     LEFT JOIN (
       SELECT qbo_customer_id, COUNT(*) AS file_count
       FROM myapp.project_files
@@ -788,9 +820,8 @@ def projects_basic(user=Depends(get_current_user)):
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
 
+    # operational_status now = the final assignment row's status (from the SQL).
     visible = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
-    for p in visible:
-        p["operational_status"] = _operational_status(p)
     return {"projects": visible[:1000]}
 
 

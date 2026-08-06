@@ -28,26 +28,20 @@ function rangeShort(a, b) {
 }
 
 // Operational status → label + pill styling. Order drives the filter pills.
+// Status = the project's final assignment-row status (set on the Assignment
+// page). Order drives the filter pills.
 const OP_STATUS = {
-  needs_assignment: { label: "Needs assignment", cls: "bg-rose-100 text-rose-800" },
-  pending:          { label: "Pending",          cls: "bg-amber-100 text-amber-800" },
-  assigned:         { label: "Assigned",         cls: "bg-slate-200 text-slate-700" },
-  scheduled:        { label: "Scheduled",        cls: "bg-sky-100 text-sky-800" },
-  in_progress:      { label: "In progress",      cls: "bg-indigo-100 text-indigo-800" },
-  complete:         { label: "Complete",         cls: "bg-emerald-100 text-emerald-800" },
-  canceled:         { label: "Canceled",         cls: "bg-black/10 text-black/50" },
+  needs_attention: { label: "Needs attention", cls: "bg-rose-100 text-rose-800" },
+  pending:         { label: "Pending",         cls: "bg-amber-100 text-amber-800" },
+  not_started:     { label: "Not started",     cls: "bg-slate-200 text-slate-700" },
+  in_progress:     { label: "In progress",     cls: "bg-indigo-100 text-indigo-800" },
+  completed:       { label: "Complete",        cls: "bg-emerald-100 text-emerald-800" },
+  canceled:        { label: "Canceled",        cls: "bg-black/10 text-black/50" },
 };
 const statusBadge = (s) => {
   const m = OP_STATUS[s] || { label: s || "—", cls: "bg-black/10 text-black/50" };
   return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold rounded-full px-2 py-0.5 whitespace-nowrap ${m.cls}">${escapeHtml(m.label)}</span>`;
 };
-
-// Stored (user-set) statuses, for the inline editor. These are what the status
-// endpoint accepts; the colored pill above shows the derived operational status.
-const STORED_STATUS = [
-  ["needs_attention", "Needs attention"], ["pending", "Pending"], ["not_started", "Not started"],
-  ["in_progress", "In progress"], ["completed", "Completed"], ["canceled", "Canceled"],
-];
 
 // Which project-workspace tab each detail card opens.
 const CARD_TAB = {
@@ -92,7 +86,7 @@ function profitInfo(fin) {
 function deriveFlags(p, fin, att) {
   const flags = [];
   const est = att && att.estimates, offer = att && att.offer;
-  if (p.operational_status === "needs_assignment")
+  if (p.operational_status === "needs_attention")
     flags.push({ c: "bad", i: "!", card: "team", t: "Needs attention — assign PM, crew, and dates" });
   else if (p.operational_status === "pending")
     flags.push({ c: "warn", i: "◔", card: "team", t: "Pending — partially set up (crew and/or dates unknown)" });
@@ -117,7 +111,7 @@ function deriveFlags(p, fin, att) {
   }
 
   const starts = csvList(p.all_start_dates), crews = csvList(p.all_work_crews);
-  const settled = ["canceled", "complete"].includes(p.operational_status);
+  const settled = ["canceled", "completed"].includes(p.operational_status);
   const dcount = starts.length;
   if (dcount > 1)
     flags.push({ c: "mut", i: "⑂", card: "schedule", t: `${dcount} separate date ranges` });
@@ -134,7 +128,7 @@ function deriveFlags(p, fin, att) {
   // in progress); a neutral flag, not an alarm. Daily-log status stays in the
   // card (its workflow is still being finalized), not the flag row.
   const kick = att && att.kickoff;
-  if (["scheduled", "in_progress"].includes(p.operational_status)) {
+  if (["not_started", "in_progress"].includes(p.operational_status)) {
     const done = kick ? kick.done : 0, total = (kick && kick.total) || 13;
     if (done < total)
       flags.push({ c: "mut", i: "☑", card: "process", t: `Kick-off & process: ${done} of ${total} steps done` });
@@ -317,12 +311,9 @@ export async function projectsHubPage(routeFn) {
     if (!bits.length) return "";
     return `<div class="mt-1 flex flex-wrap gap-1">${bits.map((b) => `<span class="inline-flex items-center text-[10px] font-semibold px-1.5 py-px rounded bg-indigo-50 text-indigo-700 border border-indigo-100">${b}</span>`).join("")}</div>`;
   };
-  // Inline status editor — a native select styled by the derived operational status.
-  const statusCell = (p) => {
-    const m = OP_STATUS[p.operational_status] || { cls: "bg-black/10 text-black/50" };
-    const opts = STORED_STATUS.map(([v, l]) => `<option value="${v}" ${p.project_status === v ? "selected" : ""}>${l}</option>`).join("");
-    return `<select class="ph-status text-[11px] font-bold rounded-md border border-black/10 pl-1.5 pr-1 py-0.5 cursor-pointer ${m.cls}" title="Set project status" data-qid="${escapeHtml(String(p.project_qbo_id))}">${opts}</select>`;
-  };
+  // Status is read-only here — it's the final assignment row's status, set on the
+  // Assignment page (Projects hub reflects it, doesn't edit it).
+  const statusCell = (p) => statusBadge(p.operational_status);
 
   const rowHtml = (p) => {
     const att = attById.get(String(p.project_qbo_id));
@@ -537,8 +528,6 @@ export async function projectsHubPage(routeFn) {
       if (qid) { setBack(qid); try { sessionStorage.setItem("opi_entity_tab", tab); } catch (_) {} location.hash = `#/entity/project/${qid}`; }
       return;
     }
-    // interacting with the inline status editor must not toggle the row
-    if (e.target.closest(".ph-status")) return;
     const row = e.target.closest("tr.ph-row");
     if (!row) return;
     const qid = row.getAttribute("data-qid");
@@ -550,24 +539,6 @@ export async function projectsHubPage(routeFn) {
     }
     if (row.classList.contains("open")) collapse(row, qid);
     else expand(row, qid);
-  });
-
-  // inline status change → persist + refresh the list (operational status is
-  // recomputed server-side, and flags/pills depend on it).
-  listEl.addEventListener("change", async (e) => {
-    const sel = e.target.closest("select.ph-status");
-    if (!sel) return;
-    const qid = sel.getAttribute("data-qid"), status = sel.value;
-    sel.disabled = true;
-    try {
-      await api(`/projects/${encodeURIComponent(qid)}/status`, { method: "POST", body: JSON.stringify({ status }) });
-      const d = await api("/projects/basic");
-      all = d.projects || [];
-      renderList();
-    } catch (err) {
-      sel.disabled = false;
-      alert("Couldn't update status: " + (err?.message || "error"));
-    }
   });
 
   // Load the project list first (fast); merge financials + attention when ready.
