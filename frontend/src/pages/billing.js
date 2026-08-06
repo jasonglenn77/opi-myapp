@@ -129,13 +129,19 @@ function render(container, entityId, d) {
     { v: roll.total_paid, cls: SEG.realized, label: money(roll.total_paid) + " paid", title: "Paid to crews" },
     { v: crewLeft, cls: SEG.scheduled, label: money(crewLeft) + " left", title: "Scheduled" },
   ]);
+  const expSpent = exp.spent_qbo || 0, expEst = exp.estimate_total || 0;
+  const expBar = burnBar([
+    { v: Math.min(expSpent, expEst), cls: SEG.committed, label: money(Math.min(expSpent, expEst)) + " spent", title: "Spent (QBO)" },
+    { v: Math.max(0, expEst - expSpent), cls: SEG.scheduled, label: money(Math.max(0, expEst - expSpent)) + " left", title: "Left to spend" },
+    { v: Math.max(0, expSpent - expEst), cls: "bg-red-600 text-white", label: money(Math.max(0, expSpent - expEst)) + " over", title: "Over the estimate" },
+  ]);
 
   // ── banners ──
   const reviewList = est.accepted.filter((a) => !a.confirmed);
   const banner = est.needs_review > 0 ? `
     <div class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center gap-3">
       <span class="w-6 h-6 rounded-md bg-amber-500 text-white flex items-center justify-center font-extrabold shrink-0">!</span>
-      <div class="text-[13px] text-amber-900"><b>${est.needs_review} estimate${est.needs_review > 1 ? "s" : ""} need${est.needs_review > 1 ? "" : "s"} review</b> — confirm ${est.needs_review > 1 ? "their" : "its"} invoice schedule &amp; crew assignment (${reviewList.map((a) => "#" + escapeHtml(a.doc)).join(", ")}).</div>
+      <div class="text-[13px] text-amber-900"><b>${est.needs_review} estimate${est.needs_review > 1 ? "s" : ""} need${est.needs_review > 1 ? "" : "s"} review</b> — newly converted; confirm ${est.needs_review > 1 ? "their" : "its"} invoice schedule &amp; crew assignment (${reviewList.map((a) => "#" + escapeHtml(a.doc)).join(", ")}).</div>
     </div>` : "";
   const completePrompt = p.appears_complete ? `
     <div class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 flex items-center gap-3">
@@ -155,7 +161,15 @@ function render(container, entityId, d) {
       <div class="text-[13px] text-amber-900"><b>No assignment dates yet.</b> Add a start/end on the <b>Assignment</b> tab and the crew &amp; invoice schedules will generate automatically.</div>
     </div>` : "";
 
-  // ── per-estimate invoice cards ──
+  // collapsible actuals disclosure
+  const actualsBlock = (title, count, innerHtml) => `
+    <details class="group/act border-t border-black/[0.06] bg-black/[0.012]">
+      <summary class="px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wide text-black/40 hover:text-black/60">
+        <svg class="w-3 h-3 transition-transform group-open/act:rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+        ${escapeHtml(title)} <span class="text-black/30">(${count})</span>
+      </summary><div class="px-4 pb-3 overflow-x-auto">${innerHtml}</div></details>`;
+
+  // ── INVOICES section: one card per estimate (schedule + actual invoices) ──
   const milestoneRow = (m) => `
     <tr class="border-b border-black/5">
       <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[m.tier]}${eInput("milestone", m.id, "label", m.label || "Milestone", "text", "font-semibold min-w-[8rem]")}</span></td>
@@ -165,78 +179,116 @@ function render(container, entityId, d) {
       <td class="py-1 px-2 text-right">${eInput("milestone", m.id, "amount", Math.round(m.amount), "number", "ml-auto")}</td>
       <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(m.status_label)}${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`;
-  const estimateCard = (a) => {
+  const invEstimateCard = (a) => {
     const nr = !a.confirmed;
-    const cn = crewName(a.crew_id) || "Unassigned";
     const statusPill = nr
       ? `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">● Needs review</span>`
       : `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Confirmed</span>`;
-    const reviewBar = nr ? `
-      <div class="flex items-center gap-2 flex-wrap bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12.5px] text-amber-900">
-        <span>Review the schedule &amp; crew, then confirm.</span>
-        <label class="ml-auto flex items-center gap-1">Crew <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select></label>
-        <button data-confirm-est data-eq="${a.qbo_id}" class="text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-3 py-1">Confirm</button>
-      </div>` : "";
     const rows = a.milestones.map(milestoneRow).join("");
+    const acts = a.invoice_actuals || [];
+    const actTotal = acts.reduce((s, x) => s + (x.amount || 0), 0);
+    const actuals = acts.length ? actualsBlock("Actual invoices in QuickBooks", acts.length,
+      `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Date</th><th class="font-bold">Due</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
+       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : "Sent · A/R")}</td></tr>`).join("")}</tbody>
+       <tfoot><tr class="border-t-2 border-black/15 font-bold"><td class="py-1.5" colspan="3">Total invoiced <span class="font-normal text-black/45">vs ${money(a.value)} est</span></td><td class="py-1.5 text-right tabular-nums">${money(actTotal)}</td><td></td></tr></tfoot></table>`) : "";
     return `<details open class="group card overflow-hidden mb-3 ${nr ? "border-amber-300" : ""}">
       <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
         <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-sm font-bold text-ink-900">Estimate <span class="text-blue-700">#${escapeHtml(a.doc || "—")}</span></span>
         ${statusPill}
-        <span class="text-[11px] text-black/45">→ ${escapeHtml(cn)}</span>
         <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(a.value)}</span>
       </summary>
-      ${reviewBar}
       <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
         <th class="py-2 pl-4 pr-3 text-left">Milestone</th><th class="py-2 px-2 text-left">%</th><th class="py-2 px-2 text-left">Invoice</th><th class="py-2 px-2 text-left">Due</th><th class="py-2 px-2 text-right">Amount</th><th class="py-2 pl-2 pr-4 text-right">Status</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       ${a.schedule_id ? addBtn("milestone", a.schedule_id, "Add invoice milestone") : ""}
+      ${actuals}
     </details>`;
   };
 
-  // ── crew rollup cards ──
-  const rollupCard = (g) => {
+  // ── CREW section: rollup payment blocks (header) + per-estimate assignment rows ──
+  const rollupBlock = (g) => {
     const cn = g.crew_name || "Unassigned";
     const chips = g.estimates.map((e) => `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}</span>`).join("");
     const insts = g.installments.map((i) => `
-      <tr class="border-b border-black/5">
-        <td class="py-1 pl-4 pr-3 tabular-nums text-black/60">${shortDate(i.pay_date)}</td>
-        <td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td>
-        <td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td>
-      </tr>`).join("");
+      <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60">${shortDate(i.pay_date)}</td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
     const o = g.offer;
     let offerLine;
     if (o && o.status === "accepted")
       offerLine = `<div class="px-4 py-2.5 bg-emerald-50 border-t border-emerald-200 text-[12.5px] text-emerald-900 flex items-center gap-2 flex-wrap"><b>✓ Offer accepted</b> — ${escapeHtml(cn)} · ${money(o.labor_amount)}<button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-black/45 hover:underline">Withdraw</button></div>`;
     else if (o && o.status === "sent")
-      offerLine = `<div class="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-[12.5px] text-blue-900 flex items-center gap-2 flex-wrap"><b>Offer sent</b> to ${escapeHtml(cn)} — awaiting response<button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-blue-700 hover:underline">Withdraw</button></div>`;
+      offerLine = `<div class="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-[12.5px] text-blue-900 flex items-center gap-2 flex-wrap"><b>Offer sent</b> to ${escapeHtml(cn)} — awaiting response<button data-offer-accept="${o.id}" class="text-[11.5px] font-bold text-emerald-700 hover:underline">Record accepted</button><button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-blue-700 hover:underline">Withdraw</button></div>`;
     else offerLine = g.crew_id
       ? `<div class="px-4 py-2.5 border-t border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap"><span class="font-semibold text-black/55">Rollup offer:</span><span>${escapeHtml(cn)} · ${money(g.labor)}</span><button data-offer-send data-crew="${g.crew_id}" data-labor="${Math.round(g.labor)}" class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer</button><button data-offer-script data-crew="${g.crew_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button></div>`
-      : `<div class="px-4 py-2.5 border-t border-black/[0.06] text-[12px] text-amber-700 bg-amber-50">Assign these estimates to a crew (in their invoice cards above) to send an offer.</div>`;
-    return `<div class="card overflow-hidden mb-3">
-      <div class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] flex-wrap">
-        <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">Rollup</span>
-        <span class="text-sm font-bold text-ink-900">${escapeHtml(cn)}</span>
+      : `<div class="px-4 py-2.5 border-t border-black/[0.06] text-[12px] text-amber-700 bg-amber-50">Assign these estimates to a crew below to send an offer.</div>`;
+    return `<div class="rounded-xl border border-black/10 overflow-hidden mb-3">
+      <div class="flex items-center gap-2 px-4 py-2.5 bg-indigo-50/60 border-b border-black/10 flex-wrap">
+        <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200">Rollup</span>
+        <span class="text-[13px] font-bold text-ink-900">${escapeHtml(cn)}</span>
         <span class="text-[11.5px] text-black/45">covers ${g.estimates.length} estimate${g.estimates.length > 1 ? "s" : ""}</span>
         <span class="ml-auto tabular-nums text-[13px]"><b class="text-ink-900">${money(g.paid_qbo)}</b> <span class="text-black/45">paid / ${money(g.labor)}</span></span>
       </div>
       <div class="px-4 py-2 flex flex-wrap gap-1.5 border-b border-black/[0.05]">${chips}</div>
-      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-2 pl-4 pr-3 text-left">Pay date</th><th class="py-2 px-2 text-right">Amount (lump)</th><th class="py-2 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-3 text-black/40 text-[12px]">No installments — add assignment dates.</td></tr>`}</tbody></table></div>
+      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-2 pl-4 pr-3 text-left">Rollup pay date</th><th class="py-2 px-2 text-right">Amount (lump)</th><th class="py-2 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-3 text-black/40 text-[12px]">No installments — add assignment dates.</td></tr>`}</tbody></table></div>
       ${offerLine}
     </div>`;
   };
+  const crewEstimateRow = (a) => {
+    const insts = (a.crew_installments || []).map((i) => `
+      <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60">${shortDate(i.pay_date)}</td><td class="py-1 px-2 text-right tabular-nums font-semibold">${money(i.amount)}</td></tr>`).join("");
+    return `<details class="group/ce border-b border-black/[0.06]">
+      <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015] flex-wrap">
+        <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+        <span class="text-[12.5px] font-semibold text-ink-900">Estimate #${escapeHtml(a.doc || "—")}</span>
+        <span class="tabular-nums text-[12px] text-black/55">${money(a.labor)} labor</span>
+        <span class="ml-auto flex items-center gap-1 text-[11.5px]" onclick="event.stopPropagation()">Crew
+          <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select>
+          <button data-crew-browse data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-blue-600 hover:underline">browse →</button>
+        </span>
+      </summary>
+      <div class="overflow-x-auto px-2 pb-2"><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-4">Pay date (this estimate)</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${insts || `<tr><td colspan="2" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
+    </details>`;
+  };
+  const crewActualsTotal = (crew.actuals || []).reduce((s, a) => s + (a.amount || 0), 0);
+  const crewActuals = (crew.actuals && crew.actuals.length) ? actualsBlock("Actual crew bills in QuickBooks", crew.actuals.length, (() => {
+    const byV = {}; crew.actuals.forEach((a) => { (byV[a.vendor || "—"] ||= []).push(a); });
+    return Object.keys(byV).sort().map((v) => { const rows = byV[v]; const sub = rows.reduce((s, a) => s + a.amount, 0);
+      return `<div class="mb-2"><div class="flex justify-between text-[11px] font-bold text-ink-900 border-b border-black/10 pb-1 mb-1"><span>${escapeHtml(v)}</span><span class="tabular-nums text-black/55">${money(sub)}</span></div>
+        <table class="w-full text-[12px]"><tbody>${rows.map((a) => `<tr class="border-b border-black/[0.04]"><td class="py-1 pr-3 text-black/50">Contract Labor</td><td class="py-1 pr-3 tabular-nums text-black/60">${a.doc ? "#" + escapeHtml(a.doc) : ""}</td><td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td><td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+    }).join("") + `<div class="flex justify-between text-[12px] font-bold border-t-2 border-black/15 pt-1.5"><span>Total paid to crews</span><span class="tabular-nums">${money(crewActualsTotal)}</span></div>`;
+  })()) : "";
 
-  // ── pending tray ──
+  // ── EXPENSES section: per-category (est-vs-actual header, weekly + actuals inside) ──
+  const expenseCat = (c) => {
+    const over = c.variance > 0.5;
+    const weekly = (c.weekly || []).map((w) => `<tr class="border-b border-black/5"><td class="py-1 pl-6 pr-3 tabular-nums text-black/55">Week of ${shortDate(w.week_of)}</td><td class="py-1 pr-4 text-right tabular-nums font-semibold">${money(w.amount)}</td></tr>`).join("");
+    const acts = c.actuals || [];
+    const actuals = acts.length ? actualsBlock("Actual expenses in QuickBooks", acts.length,
+      `<table class="w-full text-[12px]"><tbody>${acts.map((a) => `<tr class="border-b border-black/[0.04]"><td class="py-1 pr-3 font-semibold">${escapeHtml(a.vendor || "—")}</td><td class="py-1 pr-3 text-black/50">${escapeHtml(a.source_item || "")}</td><td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td><td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>`) : "";
+    return `<details class="group/ec border-b border-black/[0.06]">
+      <summary class="flex items-center gap-2 px-4 py-2.5 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015] flex-wrap">
+        <svg class="w-3 h-3 text-black/30 transition-transform group-open/ec:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+        <span class="text-[13px] font-bold text-ink-900">${escapeHtml(c.category)}</span>
+        <span class="ml-auto flex items-center gap-3 text-[12px] tabular-nums">
+          <span class="text-black/50">est ${money(c.estimated)}</span>
+          <span class="font-semibold ${over ? "text-red-600" : "text-ink-900"}">actual ${money(c.actual)}</span>
+          <span class="${over ? "text-red-600 font-bold" : "text-emerald-700"}">${over ? "over " + money(c.variance) : money(c.remaining) + " left"}</span>
+        </span>
+      </summary>
+      <div class="bg-black/[0.012]">
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-6">Weekly schedule</th><th class="py-1 text-right pr-4">Amount</th></tr></thead><tbody>${weekly || `<tr><td colspan="2" class="px-6 py-2 text-black/40 text-[12px]">No weekly schedule (needs dates + estimate).</td></tr>`}</tbody></table></div>
+        ${actuals}
+      </div>
+    </details>`;
+  };
+
+  // ── pending tray (bottom) ──
   const pendingTray = est.pending.length ? `
     <div class="card p-4 border-dashed">
       <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-2">Pending estimates — not yet billing</div>
       ${est.pending.map((e) => `<div class="flex items-center gap-2 py-1 text-[12.5px] border-b border-black/[0.05] last:border-0"><span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Pending</span> Estimate <b class="text-blue-700">#${escapeHtml(e.doc || "—")}</b><span class="ml-auto tabular-nums">${money(e.value)}</span></div>`).join("")}
       <div class="text-[11px] text-black/40 mt-1.5">Becomes its own billing section automatically when accepted/converted in QuickBooks.</div>
     </div>` : "";
-
-  // ── shared expenses ──
-  const catRows = (exp.by_category || []).map((c) => `<tr class="border-t border-black/[0.05]"><td class="py-1 font-semibold">${escapeHtml(c.category)}</td><td class="py-1 text-right tabular-nums text-black/60">${money(c.estimated)}</td><td class="py-1 text-right tabular-nums font-semibold">${money(c.actual)}</td><td class="py-1 text-right tabular-nums font-semibold ${c.variance > 0.5 ? "text-red-600" : (c.variance < -0.5 ? "text-emerald-700" : "text-black/40")}">${c.variance > 0.5 ? "+" : ""}${money(c.variance)}</td></tr>`).join("");
-  const weeklyRows = (exp.weekly || []).map((w) => `<tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60">Week of ${shortDate(w.week_of)}</td><td class="py-1 pr-4 text-right tabular-nums font-semibold">${money(w.amount)}</td></tr>`).join("");
 
   const contribHtml = buildContribution(inv, crew, exp);
 
@@ -278,38 +330,54 @@ function render(container, entityId, d) {
         <div class="text-sm font-bold text-ink-900 mb-3">Cash summary — paid vs. expected</div>
         ${burnRow("Customer invoices", money(est.contract_total) + " · " + est.accepted.length + " estimate" + (est.accepted.length === 1 ? "" : "s"), invBar)}
         ${burnRow("Crew payments", money(roll.total_labor) + " · " + roll.rollups.length + " rollup" + (roll.rollups.length === 1 ? "" : "s"), crewBar)}
+        ${burnRow("Project expenses", money(exp.estimate_total) + " estimate", expBar)}
         <div class="flex gap-4 flex-wrap mt-3 pt-3 border-t border-black/10 text-[11px] text-black/55">
           <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-700"></i>Paid / collected</span>
-          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-ink-900"></i>Invoiced · A/R</span>
-          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-200"></i>Scheduled</span>
+          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-ink-900"></i>Invoiced · spent</span>
+          <span class="inline-flex items-center gap-1.5"><i class="w-2.5 h-2.5 rounded-sm bg-emerald-200"></i>Scheduled / left</span>
         </div>
       </div>
 
-      <!-- customer invoices, per estimate -->
-      <div>
-        <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-2 mt-1">Customer invoices — one schedule per estimate</div>
-        ${est.accepted.map(estimateCard).join("") || `<div class="card p-6 text-sm text-black/45">No accepted estimates yet.</div>`}
-      </div>
+      <!-- INVOICES -->
+      <details open class="group card overflow-hidden">
+        <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="text-sm font-bold text-ink-900">Customer invoices</span>
+          <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">35 / 35 / 30 · net-30</span>
+          <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(est.contract_total)}</span>
+        </summary>
+        <div class="p-3">
+          ${est.accepted.map(invEstimateCard).join("") || `<div class="p-4 text-sm text-black/45">No accepted estimates yet.</div>`}
+        </div>
+      </details>
 
-      <!-- crew rollups -->
-      <div>
-        <div class="text-[11px] font-bold uppercase tracking-wide text-black/40 mb-2">Crew assignments &amp; rollup payments</div>
-        ${roll.rollups.map(rollupCard).join("") || `<div class="card p-6 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
-      </div>
+      <!-- CREW PAYMENTS -->
+      <details open class="group card overflow-hidden">
+        <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="text-sm font-bold text-ink-900">Crew payments</span>
+          <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">rollup by crew · bi-weekly</span>
+          <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(roll.total_labor)} labor</span>
+        </summary>
+        <div class="p-3">
+          ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
+          ${est.accepted.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}</div></div>` : ""}
+        </div>
+        ${crewActuals}
+      </details>
+
+      <!-- EXPENSES -->
+      <details open class="group card overflow-hidden">
+        <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="text-sm font-bold text-ink-900">Project expenses</span>
+          <span class="text-[11.5px] text-black/45">estimated vs. actual by line item · weekly cash-out</span>
+          <span class="ml-auto tabular-nums text-[12px] text-black/55">${money(exp.estimate_total)} est · ${money(exp.spent_qbo)} actual</span>
+        </summary>
+        ${(exp.by_category && exp.by_category.length) ? exp.by_category.map(expenseCat).join("") : `<div class="px-4 py-4 text-[12.5px] text-black/45">No estimate cost lines to plan from.</div>`}
+      </details>
 
       ${pendingTray}
-
-      <!-- shared expenses -->
-      <div class="card overflow-hidden">
-        <div class="px-4 py-3 border-b border-black/10 bg-black/[0.02] flex items-center gap-2 flex-wrap">
-          <span class="text-sm font-bold text-ink-900">Project expenses</span>
-          <span class="text-[11.5px] text-black/45">shared across the project</span>
-          <span class="ml-auto tabular-nums text-[12px] text-black/55">${money(exp.estimate_total)} est · ${money(exp.spent_qbo)} actual</span>
-        </div>
-        ${catRows ? `<div class="px-4 py-3"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Estimated vs. actual by category</div><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Category</th><th class="text-right font-bold">Estimated</th><th class="text-right font-bold">Actual (QBO)</th><th class="text-right font-bold">Variance</th></tr></thead><tbody>${catRows}</tbody></table></div>` : `<div class="px-4 py-4 text-[12.5px] text-black/45">No estimate cost lines to plan from.</div>`}
-        ${weeklyRows ? `<details class="border-t border-black/[0.06] bg-black/[0.012]"><summary class="px-4 py-2.5 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden text-[10.5px] font-bold uppercase tracking-wide text-black/40 hover:text-black/60">Weekly cash-out schedule <span class="text-black/30">(total spread weekly)</span></summary><div class="px-4 pb-3 overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] text-black/40"><th class="text-left pb-1 pl-4">Week</th><th class="text-right pb-1 pr-4">Amount</th></tr></thead><tbody>${weeklyRows}</tbody></table></div></details>` : ""}
-      </div>
-
       ${contribHtml}
     </div>`;
 
@@ -374,6 +442,24 @@ function render(container, entityId, d) {
     if (confirmEst) {
       const eq = confirmEst.getAttribute("data-eq");
       post(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/confirm`, "Confirming…", confirmEst);
+      return;
+    }
+    // browse crews (availability picker) for one estimate → assign on pick
+    const browse = e.target.closest("[data-crew-browse]");
+    if (browse) {
+      const eq = browse.getAttribute("data-eq");
+      openCrewRoster(entityId, p.start_date, p.end_date, async (crewId) => {
+        try { await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/crew`, { method: "POST", body: JSON.stringify({ crew_id: crewId ? Number(crewId) : null }) }); await reload(); }
+        catch (err) { alert("Reassign failed: " + (err?.message || "error")); }
+      });
+      return;
+    }
+    // record a sent offer as accepted (office-side)
+    const oAccept = e.target.closest("[data-offer-accept]");
+    if (oAccept) {
+      oAccept.disabled = true;
+      try { await api(`/offers/${oAccept.getAttribute("data-offer-accept")}/respond`, { method: "POST", body: JSON.stringify({ status: "accepted" }) }); await reload(); }
+      catch (err) { oAccept.disabled = false; alert("Failed: " + (err?.message || "error")); }
       return;
     }
     const script = e.target.closest("[data-offer-script]");

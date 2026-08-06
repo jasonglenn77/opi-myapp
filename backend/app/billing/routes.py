@@ -251,15 +251,22 @@ def _default_crew_for_project(conn, entity_id, meta):
 
 
 def _ensure_estimate_billing(conn, entity_id, default_crew_id):
-    """Create a billing header for any accepted estimate that lacks one. New ones
-    start unconfirmed (=needs review) and inherit the project's default crew."""
+    """Create a billing header for any accepted estimate that lacks one, inheriting
+    the project's default crew. The estimates present when a project is FIRST set
+    up are auto-confirmed (they're the known baseline); estimates that convert
+    LATER — after headers already exist — arrive unconfirmed (= needs review), so
+    the office knows something new showed up."""
+    initial_setup = conn.execute(text(
+        "SELECT COUNT(*) FROM project_estimate_billing WHERE entity_id=:e"), {"e": entity_id}).scalar() == 0
     for e in _estimates_for_billing(conn, entity_id):
         if e["status"] == "accepted" and not e["has_header"]:
             conn.execute(text("""
                 INSERT INTO project_estimate_billing
-                  (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, confirmed)
-                VALUES (:e, :eq, :dn, :c, 0)
-            """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"], "c": default_crew_id})
+                  (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, confirmed,
+                   confirmed_at)
+                VALUES (:e, :eq, :dn, :c, :cf, CASE WHEN :cf=1 THEN NOW() ELSE NULL END)
+            """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"],
+                   "c": default_crew_id, "cf": 1 if initial_setup else 0})
 
 
 def _ensure_invoice_schedules(conn, entity_id, ctx):
@@ -307,6 +314,13 @@ def _compose_estimates(conn, entity_id):
     invoiced, open_ar = _qbo_invoiced(conn, entity_id)
     collected = round(invoiced - open_ar, 2)
 
+    # actual QBO invoices grouped by the estimate they're linked to (LinkedTxn),
+    # and each estimate's own crew payment installments — both shown per estimate.
+    actuals_by_est = {}
+    for a in _actual_invoices(conn, entity_id):
+        actuals_by_est.setdefault(str(a.get("estimate_doc") or ""), []).append(a)
+    crew_map = _load_schedules(conn, entity_id)  # keyed by estimate_qbo_id
+
     # load per-estimate invoice schedules + milestones
     scheds = {}
     for s in conn.execute(text(
@@ -352,11 +366,15 @@ def _compose_estimates(conn, entity_id):
         milestones = [_ms_out(m) for m in ms]
         if not e["confirmed"]:
             needs_review += 1
+        cs, cinsts = crew_map.get(e["qbo_id"], (None, []))
         accepted.append({
             "qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"],
             "labor": e["labor"], "confirmed": e["confirmed"], "crew_id": e["crew_id"],
             "schedule_id": sid, "milestones": milestones,
             "invoice_subtotal": round(sum(m["amount"] for m in milestones), 2),
+            "invoice_actuals": actuals_by_est.get(str(e["doc_number"] or ""), []),
+            "crew_schedule_id": (cs["id"] if cs else None),
+            "crew_installments": cinsts,
         })
     return {
         "accepted": accepted, "pending": pending, "needs_review": needs_review,
@@ -749,7 +767,7 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
             "total_paid": round(sum(g["paid_qbo"] for g in out), 2)}
 
 
-def _compose_expenses(conn, entity_id, books_closed):
+def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
     items = conn.execute(text("""
         SELECT id, category, description, amount, expense_date, status, note, sort_order, edited
         FROM project_expense_items WHERE entity_id = :e ORDER BY sort_order, expense_date, id
@@ -793,13 +811,21 @@ def _compose_expenses(conn, entity_id, books_closed):
     for i in items:
         c = i["category"] or "Other"
         cat_est[c] = round(cat_est.get(c, 0.0) + float(i["amount"] or 0), 2)
+    cat_acts = {}
     for a in actuals:
         c = a["category"] or "Other"
         cat_act[c] = round(cat_act.get(c, 0.0) + a["amount"], 2)
+        cat_acts.setdefault(c, []).append(a)
+    # Each category line carries its own weekly cash-out schedule (that category's
+    # estimated total spread evenly across the project weeks) + its actual bills,
+    # so the UI can show estimated-vs-actual, then the weekly plan, then a drill-in.
     by_category = [
         {"category": c, "estimated": round(cat_est.get(c, 0.0), 2),
          "actual": round(cat_act.get(c, 0.0), 2),
-         "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2)}
+         "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2),
+         "remaining": round(max(0.0, cat_est.get(c, 0.0) - cat_act.get(c, 0.0)), 2),
+         "weekly": _weekly_split(round(cat_est.get(c, 0.0), 2), start, end),
+         "actuals": cat_acts.get(c, [])}
         for c in sorted(set(cat_est) | set(cat_act))
     ]
     return {
@@ -986,9 +1012,8 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
             "assigned_crew": ({"crew_id": assigned["crew_id"], "crew_name": assigned["crew_name"]}
                               if assigned else None),
         })
-        exp = _compose_expenses(conn, entity_id, books_closed)
-        exp["weekly"] = _weekly_split(exp["estimate_total"],
-                                      _pd(ctx.get("start_date")), _pd(ctx.get("end_date")))
+        exp = _compose_expenses(conn, entity_id, books_closed,
+                                _pd(ctx.get("start_date")), _pd(ctx.get("end_date")))
         estimates = _compose_estimates(conn, entity_id)
         crew_rollups = _compose_crew_rollups(conn, entity_id, books_closed)
         crews = _crew_options(conn)
