@@ -3,13 +3,14 @@ import { setShell } from "../shell.js";
 import { fmtMoney } from "../utils/format.js";
 
 export async function cashflowPage(routeFn) {
-  let mode = "forecast"; // "forecast" | "actuals"
+  let mode = "forecast_v2"; // "forecast_v2" | "forecast" | "actuals"
 
   const bodyHtml = `
     <div class="card px-4 py-3 mb-4">
       <div class="flex flex-wrap items-end gap-x-3 gap-y-2">
         <div class="flex items-center gap-1.5">
-          <button id="cfModeForecast" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Forecast</button>
+          <button id="cfModeV2" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Forecast+</button>
+          <button id="cfModeForecast" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Forecast (old)</button>
           <button id="cfModeActuals" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Actuals</button>
         </div>
         <div>
@@ -22,7 +23,17 @@ export async function cashflowPage(routeFn) {
         </div>
         <div id="cfWeeksWrap" class="hidden">
           <div class="label mb-0.5"># weeks</div>
-          <input id="cfWeeks" type="number" min="1" max="52" step="1" class="input py-1.5" style="width:78px" value="13" />
+          <input id="cfWeeks" type="number" min="1" max="520" step="1" class="input py-1.5" style="width:78px" value="13" />
+        </div>
+        <div id="cfHorizon" class="hidden">
+          <div class="label mb-0.5">Horizon</div>
+          <div class="flex items-center gap-1">
+            <button data-wk="13" class="cf-wk px-2 py-1.5 rounded-lg text-xs font-bold border border-black/15">13</button>
+            <button data-wk="26" class="cf-wk px-2 py-1.5 rounded-lg text-xs font-bold border border-black/15">26</button>
+            <button data-wk="52" class="cf-wk px-2 py-1.5 rounded-lg text-xs font-bold border border-black/15">52</button>
+            <input id="cfHorizonWeeks" type="number" min="4" max="520" step="1" class="input py-1.5 ml-1" style="width:74px" value="26" title="Weeks to forecast (no cap)" />
+            <span class="text-[11px] text-black/40">wks</span>
+          </div>
         </div>
         <button id="cfGenerate" class="btn-primary py-2">Generate</button>
         <button id="cfCategories" class="px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Categories</button>
@@ -62,9 +73,20 @@ export async function cashflowPage(routeFn) {
           <button id="cfInfoClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
         </div>
         <div class="text-sm text-black/70 space-y-3 overflow-y-auto pr-1" style="min-height:0;">
-          <p>Two views, switched at the top left:</p>
+          <p>Three views, switched at the top left:</p>
           <div>
-            <div class="font-bold text-ink-900">📈 Forecast — the next 13 weeks</div>
+            <div class="font-bold text-ink-900">🚀 Forecast+ — the new schedule-driven forecast</div>
+            <p class="text-black/60">Starts from your real QuickBooks bank balance and rolls forward week by week, as far out as you set the horizon (no 13-week cap).</p>
+            <ul class="list-disc ml-5 mt-1 space-y-1 text-black/60">
+              <li><span class="font-semibold text-ink-900">Committed</span>: open invoices coming in and open bills going out, on their due dates.</li>
+              <li><span class="font-semibold text-ink-900">Recurring</span>: an overhead &amp; payroll run-rate going out.</li>
+              <li><span class="font-semibold text-ink-900">Scheduled</span>: the invoice, crew, and expense plans from every project's Billing &amp; Schedule tab — so this forecast is the sum of all those tabs. Edit a project's schedule and it flows up here.</li>
+              <li><span class="font-semibold text-ink-900">Committed, not yet scheduled</span>: cash on won projects that don't have start dates yet is held in a backlog line, out of the weekly balance, until the dates are set.</li>
+            </ul>
+            <p class="text-black/50 mt-1">The scheduled layer is cached (it reads every project); <span class="font-semibold">↻ Refresh schedules</span> recomputes it after edits.</p>
+          </div>
+          <div>
+            <div class="font-bold text-ink-900">📈 Forecast (old) — the next 13 weeks</div>
             <p class="text-black/60">A forward look at your cash position week by week. Each week opens at the prior week's ending balance, then adds inflow and subtracts outflow.</p>
             <ul class="list-disc ml-5 mt-1 space-y-1 text-black/60">
               <li><span class="font-semibold text-ink-900">Committed</span> (always counted): open invoices coming in by their due date; open bills plus an overhead &amp; payroll run-rate going out.</li>
@@ -113,8 +135,11 @@ export async function cashflowPage(routeFn) {
   const grid = document.getElementById("cfGrid");
   const kpis = document.getElementById("cfKpis");
   const modeDesc = document.getElementById("cfModeDesc");
+  const btnV2 = document.getElementById("cfModeV2");
   const btnForecast = document.getElementById("cfModeForecast");
   const btnActuals = document.getElementById("cfModeActuals");
+  const horizonWrap = document.getElementById("cfHorizon");
+  const horizonWeeks = document.getElementById("cfHorizonWeeks");
 
   // forecast projected-layer toggles (row-level checkboxes drive these)
   const proj = { inc_active: true, inc_awarded: true, inc_jobcost: true };
@@ -162,7 +187,74 @@ export async function cashflowPage(routeFn) {
     });
   }
 
-  function render(d) { return d.mode === "forecast" ? renderForecast(d) : renderActuals(d); }
+  function render(d) {
+    if (d.mode === "forecast_v2") return renderForecastV2(d);
+    return d.mode === "forecast" ? renderForecast(d) : renderActuals(d);
+  }
+
+  // ── Forecast+ renderer (Phase 3b: committed QBO + scheduled project layer,
+  //    unbounded weekly horizon, real bank anchor, option-a backlog) ──────────
+  function renderForecastV2(d) {
+    const weekCols = d.week_ends.map((w, i) => {
+      const [, m, day] = w.split("-");
+      return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
+    }).join("");
+
+    const secRow = (s, group, bg) => {
+      const hasRows = s.rows && s.rows.length;
+      return dataRow(s.label, s.weekly_totals, { indent: true, bg, toggleGroup: hasRows ? group : null })
+        + (hasRows ? detailRows(s.rows, group, "#fbfbfb") : "");
+    };
+    const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`, "#fbfdfb")).join("");
+    const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`, "#fffafa")).join("");
+
+    // freshness + backlog strip
+    const c = d.cache || {};
+    const stamp = c.computed_at ? new Date(c.computed_at + "Z").toLocaleString() : "never";
+    const fresh = c.computing
+      ? `<span class="inline-flex items-center gap-1.5 text-amber-700"><span class="cf-spin animate-spin inline-block h-3 w-3 rounded-full border-2 border-amber-500 border-t-transparent"></span>Updating scheduled cash…</span>`
+      : `<span class="text-black/50">Scheduled cash as of <b class="text-black/70">${stamp}</b>${c.stale ? ` <span class="text-amber-700 font-semibold">· stale</span>` : ""}</span>`;
+    const bk = d.backlog || { in: 0, out: 0 };
+    const backlogChip = (bk.in > 0.5 || bk.out > 0.5)
+      ? `<div class="text-[12px] text-black/60 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+           <b class="text-amber-800">Committed, not yet scheduled:</b>
+           ${bk.in > 0.5 ? ` in ${fmtMoney(bk.in)}` : ""}${bk.out > 0.5 ? ` · out ${fmtMoney(bk.out)}` : ""}
+           <span class="text-black/45"> — projects awaiting start dates; held out of the weekly balance.</span>
+         </div>`
+      : "";
+
+    grid.innerHTML = `
+      <div class="flex flex-wrap items-center justify-between gap-3 px-1 pb-3">
+        <div class="text-[12px]">${fresh} <button data-cf-refresh class="ml-2 font-semibold text-brand-700 hover:underline">↻ Refresh schedules</button></div>
+        ${backlogChip}
+      </div>
+      <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + d.weeks * 68}px">
+        <thead>
+          <tr class="border-b border-black/10 text-black/60">
+            <th class="py-2 pr-3 text-left whitespace-nowrap" style="${STICKY}background:#fff">Week ending →</th>
+            ${weekCols}
+          </tr>
+        </thead>
+        <tbody>
+          ${dataRow("Opening Cash Balance", d.summary.opening, { bold: true, bg: "#f8fafc" })}
+
+          ${sectionHeader("CASH INFLOW", d.weeks)}
+          ${dataRow(d.inflow.label, d.inflow.weekly_totals, { bold: true, bg: "#f4f7f5" })}
+          ${inSecs}
+
+          ${sectionHeader("CASH OUTFLOW", d.weeks)}
+          ${dataRow(d.outflow.label, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7" })}
+          ${outSecs}
+
+          <tr><td colspan="${1 + d.weeks}" class="pt-2"></td></tr>
+          ${dataRow("Total Surplus / (Deficit)", d.summary.surplus, { bold: true, bg: "#f8fafc" })}
+          ${dataRow("Ending Cash Balance", d.summary.ending, { bold: true, bg: "#eef2ff" })}
+        </tbody>
+      </table>`;
+    wireToggles();
+    const rb = grid.querySelector("[data-cf-refresh]");
+    if (rb) rb.addEventListener("click", refreshSchedules);
+  }
 
   // ── Actuals renderer (historical; unchanged shape) ─────────────────────────
   function renderActuals(d) {
@@ -294,10 +386,14 @@ export async function cashflowPage(routeFn) {
 
   function applyModeUi() {
     const active = "bg-ink-900 text-white border-ink-900";
+    btnV2.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "forecast_v2" ? active : "border-black/15"}`;
     btnForecast.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "forecast" ? active : "border-black/15"}`;
     btnActuals.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "actuals" ? active : "border-black/15"}`;
     weeksWrap.classList.toggle("hidden", mode !== "actuals");
-    modeDesc.textContent = mode === "forecast"
+    horizonWrap.classList.toggle("hidden", mode !== "forecast_v2");
+    modeDesc.textContent = mode === "forecast_v2"
+      ? "Forward cash from your real bank balance — committed (open invoices/bills) + recurring overhead + the scheduled crew/invoice/expense plans on every project. Extend the horizon as far as you like."
+      : mode === "forecast"
       ? "Forward 13 weeks — committed (open invoices/bills + overhead run-rate) plus toggleable projected layers. “Beyond 13 wk” holds amounts past the window. Tap ⓘ for details."
       : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out.";
   }
@@ -309,20 +405,38 @@ export async function cashflowPage(routeFn) {
     if (!Number.isNaN(ob)) params.set("opening_balance", String(ob));
     if (startEl.value) params.set("start_date", startEl.value);
     if (mode === "actuals") params.set("weeks", String(parseInt(weeksEl.value, 10) || 13));
+    if (mode === "forecast_v2") params.set("weeks", String(Math.max(4, Math.min(520, parseInt(horizonWeeks.value, 10) || 26))));
     if (mode === "forecast") {
       params.set("inc_active", proj.inc_active ? "1" : "0");
       params.set("inc_awarded", proj.inc_awarded ? "1" : "0");
       params.set("inc_jobcost", proj.inc_jobcost ? "1" : "0");
     }
-    const endpoint = mode === "actuals" ? "actuals" : "forecast";
+    const endpoint = mode === "actuals" ? "actuals" : mode === "forecast_v2" ? "forecast-v2" : "forecast";
     try {
       const d = await api(`/cashflow/${endpoint}?${params.toString()}`);
       renderKpis(d);
       render(d);
+      if (mode === "forecast_v2") schedulePoll(d.cache);
     } catch (e) {
       kpis.innerHTML = "";
       grid.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`;
     }
+  }
+
+  // While the scheduled-cash cache is still computing (background recompute),
+  // reload every few seconds until it lands — self-perpetuating via load().
+  let pollTimer = null;
+  function schedulePoll(cache) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    if (mode === "forecast_v2" && cache && (cache.stale || cache.computing)) {
+      pollTimer = setTimeout(load, 6000);
+    }
+  }
+
+  // Force a recompute of the scheduled-cash cache; the poll picks up the result.
+  async function refreshSchedules() {
+    try { await api("/cashflow/forecast-v2/refresh", { method: "POST" }); } catch (e) { /* ignore */ }
+    load();
   }
 
   function setMode(m) {
@@ -333,9 +447,13 @@ export async function cashflowPage(routeFn) {
     load();
   }
 
+  btnV2.addEventListener("click", () => setMode("forecast_v2"));
   btnForecast.addEventListener("click", () => setMode("forecast"));
   btnActuals.addEventListener("click", () => setMode("actuals"));
   document.getElementById("cfGenerate").addEventListener("click", load);
+  document.querySelectorAll(".cf-wk").forEach(b =>
+    b.addEventListener("click", () => { horizonWeeks.value = b.getAttribute("data-wk"); if (mode === "forecast_v2") load(); }));
+  horizonWeeks.addEventListener("change", () => { if (mode === "forecast_v2") load(); });
 
   // ---- Info modal ----
   const infoModal = document.getElementById("cfInfoModal");
