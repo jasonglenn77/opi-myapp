@@ -897,18 +897,18 @@ def projects_attention(user=Depends(get_current_user)):
         SELECT entity_id AS pid, SUM(done) AS done_today
         FROM myapp.project_daily_log WHERE log_date = CURDATE() GROUP BY entity_id
     """)
-    # on-site setup presence, best-effort from the estimate line items: does the
-    # job include wire guidance, travel, overage/remob, or rental equipment?
+    # on-site setup from the ASSIGNMENT page (project_schedule_items): wire
+    # guidance, travel/overage days, and equipment type — the office's own values.
     setup_sql = text("""
-        SELECT sl.project_customer_qbo_id AS pid,
-               MAX(sl.item_name REGEXP 'wire') AS wire,
-               MAX(sl.item_name REGEXP 'travel|lodg|mobil|per diem|fuel|flight|airfare') AS travel,
-               MAX(sl.item_name REGEXP 'overage|remobil|buffer|extra day') AS overage,
-               MAX(sl.item_name REGEXP 'equip|lift|scrubber|saw|dumpster|propane|rental|scissor|boom') AS equipment
-        FROM myapp.qbo_sales_transaction_lines sl
-        JOIN myapp.qbo_transactions t ON t.id = sl.transaction_id
-        WHERE t.entity_type='Estimate' AND sl.project_customer_qbo_id IS NOT NULL AND sl.item_name IS NOT NULL
-        GROUP BY sl.project_customer_qbo_id
+        SELECT qc.qbo_id AS pid,
+               MAX(psi.wire_guidance) AS wire,
+               COALESCE(SUM(psi.travel_days), 0) AS travel_days,
+               COALESCE(SUM(psi.overage_days), 0) AS overage_days,
+               GROUP_CONCAT(DISTINCT NULLIF(psi.equipment_type,'') ORDER BY psi.equipment_type SEPARATOR ', ') AS equipment
+        FROM myapp.project_schedule_items psi
+        JOIN myapp.projects p ON p.id = psi.project_id
+        JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id
+        GROUP BY qc.qbo_id
     """)
     with engine.connect() as conn:
         est_rows = conn.execute(est_sql).mappings().all()
@@ -938,8 +938,10 @@ def projects_attention(user=Depends(get_current_user)):
         out.setdefault(str(r["pid"]), {})["daily"] = {"today_done": int(r["done_today"] or 0)}
     for r in setup_rows:
         out.setdefault(str(r["pid"]), {})["setup"] = {
-            "wire": bool(r["wire"]), "travel": bool(r["travel"]),
-            "overage": bool(r["overage"]), "equipment": bool(r["equipment"]),
+            "wire": bool(r["wire"]),
+            "travel_days": int(r["travel_days"] or 0),
+            "overage_days": int(r["overage_days"] or 0),
+            "equipment": (r["equipment"] or "").strip() or None,
         }
     return {"attention": out, "kickoff_total": kickoff_total}
 
@@ -1013,33 +1015,26 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
         estimates = [{"doc": r["doc_number"], "amount": float(r["total_amt"] or 0),
                       "date": r["d"], "status": est_state.get(r["st"], (r["st"] or "").lower())} for r in est_rows]
 
-        # on-site setup from the estimate lines: travel/overage day counts (parsed
-        # from item names) + the equipment types quoted. Best-effort until phase
-        # shared costs are structured.
-        line_rows = conn.execute(text("""
-            SELECT sl.item_name
-            FROM myapp.qbo_sales_transaction_lines sl
-            JOIN myapp.qbo_transactions t ON t.id = sl.transaction_id
-            WHERE t.entity_type='Estimate' AND sl.project_customer_qbo_id=:q
-              AND sl.item_name IS NOT NULL
-        """), {"q": qbo_id}).mappings().all()
-        travel_days = overage_days = 0
-        equipment_types = []
-        for lr in line_rows:
-            name = (lr["item_name"] or "")
-            low = name.lower()
-            md = re.search(r"(\d+)\s*day", low)
-            n = int(md.group(1)) if md else 0
-            if re.search(r"travel|mobil|lodg|per diem", low):
-                travel_days += n
-            if re.search(r"overage|remobil|extra day", low):
-                overage_days += n
-            if re.search(r"equip|lift|scrubber|saw|dumpster|rental|scissor|boom|floor", low):
-                et = (name.split(":")[-1] if ":" in name else name).strip()
-                if et and et.lower() not in [x.lower() for x in equipment_types]:
-                    equipment_types.append(et)
-        site_setup = {"travel_days": travel_days, "overage_days": overage_days,
-                      "equipment_types": equipment_types[:10]}
+        # on-site setup from the ASSIGNMENT (project_schedule_items): wire guidance,
+        # travel/overage days, equipment type, notes — the office's entered values.
+        srow = conn.execute(text("""
+            SELECT MAX(psi.wire_guidance) AS wire,
+                   COALESCE(SUM(psi.travel_days),0) AS travel_days,
+                   COALESCE(SUM(psi.overage_days),0) AS overage_days,
+                   GROUP_CONCAT(DISTINCT NULLIF(psi.equipment_type,'') SEPARATOR ', ') AS equipment,
+                   GROUP_CONCAT(DISTINCT NULLIF(TRIM(psi.notes),'') SEPARATOR ' · ') AS notes
+            FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id=psi.project_id
+            JOIN myapp.qbo_customers qc ON qc.id=p.qbo_customer_id
+            WHERE qc.qbo_id=:q
+        """), {"q": qbo_id}).mappings().first()
+        site_setup = {
+            "wire": bool(srow and srow["wire"]),
+            "travel_days": int(srow["travel_days"] or 0) if srow else 0,
+            "overage_days": int(srow["overage_days"] or 0) if srow else 0,
+            "equipment": (srow["equipment"] or "").strip() or None if srow else None,
+            "notes": (srow["notes"] or "").strip() or None if srow else None,
+        }
 
         # expenses by category — estimated (from estimate cost lines) vs actual
         # (QBO bills/purchases), with what's left to spend. Contract Labor / margin

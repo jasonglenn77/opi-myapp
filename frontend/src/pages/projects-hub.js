@@ -52,7 +52,7 @@ const STORED_STATUS = [
 // Which project-workspace tab each detail card opens.
 const CARD_TAB = {
   schedule: "assignment", team: "assignment", estimates: "changeorders", expenses: "billing",
-  site: "billing", offer: "billing", financial: "financials", process: "kickoff", notes: "assignment", upcoming: "billing",
+  offer: "billing", financial: "financials", process: "kickoff", notes: "assignment", upcoming: "billing",
 };
 
 // Flag legend — icon + meaning, for the collapsible header legend.
@@ -124,10 +124,11 @@ function deriveFlags(p, fin, att) {
   if (!dcount && !settled)
     flags.push({ c: "warn", i: "▦", card: "schedule", t: "No schedule dates set" });
 
-  // No crew and no live offer — the crew still needs to be sourced.
+  // No crew and no live offer — the crew still needs to be sourced. Points at the
+  // Team card (where the missing crew shows) so that card highlights.
   const offerLive = offer && (offer.state === "accepted" || offer.state === "sent");
   if (!settled && !crews.length && !offerLive)
-    flags.push({ c: "warn", i: "◷", card: "offer", t: "No crew assigned and no offer sent" });
+    flags.push({ c: "warn", i: "◷", card: "team", t: "No crew assigned and no offer sent" });
 
   // kick-off & process — only surface once a project is active (scheduled or
   // in progress); a neutral flag, not an alarm. Daily-log status stays in the
@@ -149,6 +150,24 @@ export async function projectsHubPage(routeFn) {
   const cardCache = new Map(); // project_qbo_id -> card detail (lazy)
   const openSet = new Set();   // project_qbo_id currently expanded
   let statusFilter = "all", search = "", sortKey = "project_name", sortDir = "asc";
+
+  // Restore the table's state (open rows / filter / sort / scroll) so returning
+  // from a project workspace lands you exactly where you left off.
+  let restore = null;
+  try { restore = JSON.parse(sessionStorage.getItem("opi_hub_state") || "null"); } catch (_) {}
+  if (restore) {
+    statusFilter = restore.statusFilter || "all"; search = restore.search || "";
+    sortKey = restore.sortKey || sortKey; sortDir = restore.sortDir || sortDir;
+    (restore.open || []).forEach((q) => openSet.add(String(q)));
+  }
+  const saveHubState = () => {
+    try {
+      const le = document.getElementById("phList");
+      sessionStorage.setItem("opi_hub_state", JSON.stringify({
+        open: [...openSet], statusFilter, search, sortKey, sortDir, scroll: le ? le.scrollTop : 0,
+      }));
+    } catch (_) {}
+  };
 
   const body = `
     <div class="w-full">
@@ -282,11 +301,18 @@ export async function projectsHubPage(routeFn) {
     return `<div class="flex gap-1 justify-end items-center flex-wrap">${chips}<span class="ph-caret text-black/35 text-[11px] ml-0.5">▸</span></div>`;
   };
   // On-site setup presence (wire / travel / overage / equipment), from the estimate.
+  // Assignment setup values (wire / travel days / overage days / equipment),
+  // sourced from the Assignment page. Only shows what's set.
   const setupChips = (p) => {
     const s = (attById.get(String(p.project_qbo_id)) || {}).setup;
     if (!s) return "";
-    const defs = [["wire", "W", "Wire guidance"], ["travel", "T", "Travel"], ["overage", "O", "Overage / remob"], ["equipment", "E", "Rental equipment"]];
-    return `<div class="mt-1 flex gap-0.5">${defs.map(([k, l, t]) => `<span class="inline-flex items-center justify-center w-[15px] h-[15px] rounded text-[9px] font-bold ${s[k] ? "bg-indigo-100 text-indigo-700" : "bg-black/[0.04] text-black/25"}" title="${t}: ${s[k] ? "yes" : "no"}">${l}</span>`).join("")}</div>`;
+    const bits = [];
+    if (s.wire) bits.push("Wire");
+    if (s.travel_days) bits.push(`${s.travel_days}d travel`);
+    if (s.overage_days) bits.push(`${s.overage_days}d overage`);
+    if (s.equipment) bits.push(escapeHtml(s.equipment));
+    if (!bits.length) return "";
+    return `<div class="mt-1 flex flex-wrap gap-1">${bits.map((b) => `<span class="inline-flex items-center text-[10px] font-semibold px-1.5 py-px rounded bg-indigo-50 text-indigo-700 border border-indigo-100">${b}</span>`).join("")}</div>`;
   };
   // Inline status editor — a native select styled by the derived operational status.
   const statusCell = (p) => {
@@ -343,15 +369,13 @@ export async function projectsHubPage(routeFn) {
       : `<div class="text-black/35 text-[12.5px]">No dates assigned yet</div>`;
     const team = kv("Project managers", c.pms.length ? c.pms.map(escapeHtml).join(", ") : "—")
                + kv("Work crews", c.crews.length ? c.crews.map(escapeHtml).join(", ") : "—");
-    // Site setup — travel/overage day counts + equipment types quoted (from the estimate)
-    const ss = c.site_setup || { travel_days: 0, overage_days: 0, equipment_types: [] };
-    const siteSetup = kv("Travel days", ss.travel_days || "—") + kv("Overage days", ss.overage_days || "—")
-      + `<div class="pt-1"><div class="text-[11px] text-black/45 mb-1">Equipment</div>${ss.equipment_types.length ? `<div class="flex flex-wrap gap-1">${ss.equipment_types.map((t) => `<span class="text-[10.5px] font-semibold px-1.5 py-0.5 rounded bg-black/[0.03] border border-black/10 text-black/60">${escapeHtml(t)}</span>`).join("")}</div>` : `<span class="text-black/30 text-[12px]">—</span>`}</div>`;
-    // Expenses by category — estimated vs spent, with what's left to spend
+    // Expenses by category — estimated vs spent, with what's left to spend + totals.
     const ec = c.expense_categories || [];
-    const overCats = ec.filter((x) => x.remaining < -0.5).length;
+    const eTot = ec.reduce((a, x) => { a.est += x.estimated; a.act += x.actual; a.rem += x.remaining; return a; }, { est: 0, act: 0, rem: 0 });
+    const eOver = eTot.rem < -0.5;
     const expensesByCat = ec.length ? `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Category</th><th class="text-right font-bold">Est</th><th class="text-right font-bold">Spent</th><th class="text-right font-bold">Left</th></tr></thead>
-      <tbody>${ec.map((x) => { const over = x.remaining < -0.5; return `<tr class="border-t border-black/[0.05]"><td class="py-1 font-semibold">${escapeHtml(x.category)}</td><td class="py-1 text-right tabular-nums text-black/55">${money(x.estimated)}</td><td class="py-1 text-right tabular-nums font-semibold ${over ? "text-red-600" : ""}">${money(x.actual)}</td><td class="py-1 text-right tabular-nums font-semibold ${over ? "text-red-600" : "text-emerald-700"}">${over ? "−" + money(-x.remaining) : money(x.remaining)}</td></tr>`; }).join("")}</tbody></table>` : `<div class="text-black/35 text-[12.5px]">No expense lines.</div>`;
+      <tbody>${ec.map((x) => { const over = x.remaining < -0.5; return `<tr class="border-t border-black/[0.05]"><td class="py-1 font-semibold">${escapeHtml(x.category)}</td><td class="py-1 text-right tabular-nums text-black/55">${money(x.estimated)}</td><td class="py-1 text-right tabular-nums font-semibold ${over ? "text-red-600" : ""}">${money(x.actual)}</td><td class="py-1 text-right tabular-nums font-semibold ${over ? "text-red-600" : "text-emerald-700"}">${over ? "−" + money(-x.remaining) : money(x.remaining)}</td></tr>`; }).join("")}</tbody>
+      <tfoot><tr class="border-t-2 border-black/15 font-bold text-ink-900"><td class="py-1">Total</td><td class="py-1 text-right tabular-nums">${money(eTot.est)}</td><td class="py-1 text-right tabular-nums ${eOver ? "text-red-600" : ""}">${money(eTot.act)}</td><td class="py-1 text-right tabular-nums ${eOver ? "text-red-600" : "text-emerald-700"}">${eOver ? "−" + money(-eTot.rem) : money(eTot.rem)}</td></tr></tfoot></table>` : `<div class="text-black/35 text-[12.5px]">No expense lines.</div>`;
     const estPill = (n, label, cls) => n ? `<span class="text-[11.5px] font-semibold px-2 py-0.5 rounded border ${cls}">${n} ${label}</span>` : "";
     const eb = c.estimates.reduce((m, e) => { m[e.status] = (m[e.status] || 0) + 1; return m; }, {});
     const ests = `<div class="flex flex-wrap gap-1.5 mb-2">
@@ -371,7 +395,7 @@ export async function projectsHubPage(routeFn) {
     const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
     const expOver = f.expense_actual != null && f.expense_estimated != null && f.expense_actual > f.expense_estimated + 0.5;
     const expLine = f.expense_estimated != null
-      ? `<span class="${expOver ? "text-red-600 font-bold" : ""}">${money(f.expense_actual)} <span class="font-normal text-black/40">/ ${money(f.expense_estimated)} est${expOver ? " ⚑" : ""}</span></span>`
+      ? `<span class="${expOver ? "text-red-600" : "text-emerald-700"} font-semibold">${money(f.expense_actual)}</span> <span class="text-black/40">/ ${money(f.expense_estimated)} est</span>`
       : money(f.expense_line_amt);
     const financial = kv("Estimate", money(f.estimate_line_amt)) + kv("Invoiced", money(f.invoice_line_amt))
                     + kv("Expenses", expLine) + kv("Open A/R", money(f.balance_amt))
@@ -414,11 +438,10 @@ export async function projectsHubPage(routeFn) {
         ${box(p.project_qbo_id, "schedule", "Schedule — all ranges", "LIVE", dates, fb.schedule)}
         ${box(p.project_qbo_id, "team", "Team", "LIVE", team, fb.team)}
         ${box(p.project_qbo_id, "estimates", "Estimates", "LIVE", ests, fb.estimates)}
-        ${box(p.project_qbo_id, "expenses", "Expenses by category", "LIVE", expensesByCat, fb.expenses)}
-        ${box(p.project_qbo_id, "site", "Site setup", "LIVE", siteSetup, fb.site)}
         ${box(p.project_qbo_id, "offer", "Crew offer", "LIVE", offerInner, fb.offer)}
         ${box(p.project_qbo_id, "upcoming", "Upcoming", "LIVE", upcoming, fb.upcoming)}
         ${box(p.project_qbo_id, "financial", "Financials", "LIVE", financial, fb.financial)}
+        ${box(p.project_qbo_id, "expenses", "Expenses by category", "LIVE", expensesByCat, fb.expenses)}
         ${box(p.project_qbo_id, "process", "Kick-off &amp; process", "LIVE", process, fb.process)}
         ${box(p.project_qbo_id, "notes", "Notes", "LIVE", notes, fb.notes)}
       </div>`;
@@ -483,6 +506,7 @@ export async function projectsHubPage(routeFn) {
     const open = e.target.closest("a.ph-open, a.ph-tablink, a[href^='#/entity/project/']");
     if (open) {
       setBack(decodeURIComponent(open.getAttribute("href").split("/").pop()));
+      saveHubState();
       const tab = open.getAttribute("data-tab");
       if (tab) { try { sessionStorage.setItem("opi_entity_tab", tab); } catch (_) {} }
       return;
@@ -490,6 +514,7 @@ export async function projectsHubPage(routeFn) {
     // clicking a detail card opens the project workspace at that card's tab
     const card = e.target.closest(".ph-card[data-open-tab]");
     if (card) {
+      saveHubState();
       const detRow = card.closest("tr.ph-detail");
       const qid = detRow && detRow.getAttribute("data-qid");
       const tab = card.getAttribute("data-open-tab");
@@ -542,10 +567,22 @@ export async function projectsHubPage(routeFn) {
   sizeCard();
   requestAnimationFrame(sizeCard);
 
+  // Restore expanded rows (load their cards) from a prior visit; keep the target
+  // scroll around so it survives the financials/attention re-renders below.
+  let pendingScroll = (restore && restore.scroll) || 0;
+  const applyScroll = () => { if (pendingScroll) { try { listEl.scrollTop = pendingScroll; } catch (_) {} } };
+  if (openSet.size) {
+    for (const qid of openSet) {
+      try { await loadCard(qid); renderDetailInto(qid); } catch (_) {}
+    }
+  }
+  applyScroll();
+  listEl.addEventListener("wheel", () => { pendingScroll = 0; }, { once: true, passive: true });
+
   api("/projects/financials")
-    .then((d) => { finById = new Map((d.financials || []).map((f) => [f.qbo_customer_id, f])); renderList(); })
+    .then((d) => { finById = new Map((d.financials || []).map((f) => [f.qbo_customer_id, f])); renderList(); applyScroll(); })
     .catch(() => {});
   api("/projects/attention")
-    .then((d) => { attById = new Map(Object.entries(d.attention || {})); renderList(); })
+    .then((d) => { attById = new Map(Object.entries(d.attention || {})); renderList(); applyScroll(); })
     .catch(() => {});
 }
