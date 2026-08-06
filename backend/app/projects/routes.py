@@ -1106,25 +1106,49 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
                  "today_touched": int(drow["touched_today"] or 0) if drow else 0,
                  "last_date": str(drow["last_date"]) if drow and drow["last_date"] else None}
 
-        # next upcoming customer invoice + crew payment (only where a billing
-        # schedule has been generated; otherwise none). Cheap indexed lookups.
-        next_inv = conn.execute(text("""
-            SELECT DATE_FORMAT(m.invoice_date,'%Y-%m-%d') AS d, m.amount
-            FROM myapp.project_invoice_milestones m
-            JOIN myapp.project_invoice_schedules s ON s.id = m.schedule_id
+        # Whether the books are closed (all schedule items complete) — once closed,
+        # only sent A/R stays relevant; upcoming invoices/crew/expenses are moot.
+        stset = {s.strip() for s in ((conn.execute(text("""
+            SELECT GROUP_CONCAT(DISTINCT psi.status) FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id=psi.project_id JOIN myapp.qbo_customers qc ON qc.id=p.qbo_customer_id
+            WHERE qc.qbo_id=:q
+        """), {"q": qbo_id}).scalar()) or "").split(",") if s.strip()}
+        complete = bool(stset) and stset <= {"completed", "canceled"} and "completed" in stset
+
+        # Sent A/R — real QBO invoices with an open balance (amount + soonest due).
+        ar = conn.execute(text("""
+            WITH latest AS (
+              SELECT qt.total_amt, qt.balance_amt, qt.due_date,
+                     ROW_NUMBER() OVER (PARTITION BY COALESCE(qt.doc_number,qt.qbo_id) ORDER BY qt.id DESC) rn
+              FROM myapp.qbo_transactions qt WHERE qt.entity_type='Invoice' AND qt.customer_qbo_id=:q
+            )
+            SELECT COALESCE(SUM(balance_amt),0) AS total, COUNT(*) AS cnt,
+                   DATE_FORMAT(MIN(due_date),'%Y-%m-%d') AS next_due,
+                   DATEDIFF(CURDATE(), MIN(due_date)) AS overdue_days
+            FROM latest WHERE rn=1 AND balance_amt > 0.01
+        """), {"q": qbo_id}).mappings().first()
+
+        # Upcoming customer invoices still to be sent (scheduled, not yet invoiced).
+        inv_up = conn.execute(text("""
+            SELECT COALESCE(SUM(m.amount),0) AS total, DATE_FORMAT(MIN(m.invoice_date),'%Y-%m-%d') AS next_date
+            FROM myapp.project_invoice_milestones m JOIN myapp.project_invoice_schedules s ON s.id=m.schedule_id
             WHERE s.entity_id=:q AND m.invoice_date >= CURDATE()
-            ORDER BY m.invoice_date LIMIT 1
         """), {"q": qbo_id}).mappings().first()
-        next_pay = conn.execute(text("""
-            SELECT DATE_FORMAT(i.pay_date,'%Y-%m-%d') AS d, i.amount
-            FROM myapp.project_payment_installments i
-            JOIN myapp.project_payment_schedules s ON s.id = i.schedule_id
+        # Crew payments still scheduled to be sent (total).
+        crew_up = conn.execute(text("""
+            SELECT COALESCE(SUM(i.amount),0) AS total
+            FROM myapp.project_payment_installments i JOIN myapp.project_payment_schedules s ON s.id=i.schedule_id
             WHERE s.entity_id=:q AND i.pay_date >= CURDATE()
-            ORDER BY i.pay_date LIMIT 1
-        """), {"q": qbo_id}).mappings().first()
+        """), {"q": qbo_id}).scalar()
+        exp_remaining = round(max(0.0, sum(est_by_cat.values()) - sum(act_by_cat.values())), 2)
+
         upcoming = {
-            "invoice": ({"date": next_inv["d"], "amount": float(next_inv["amount"] or 0)} if next_inv else None),
-            "payment": ({"date": next_pay["d"], "amount": float(next_pay["amount"] or 0)} if next_pay else None),
+            "complete": bool(complete),
+            "ar": {"total": round(float(ar["total"] or 0), 2), "count": int(ar["cnt"] or 0),
+                   "next_due": ar["next_due"], "overdue_days": int(ar["overdue_days"]) if ar["overdue_days"] is not None else None},
+            "invoices": {"total": round(float(inv_up["total"] or 0), 2), "next_date": inv_up["next_date"]},
+            "crew": {"total": round(float(crew_up or 0), 2)},
+            "expenses": {"total": exp_remaining},
         }
 
     financial["expense_estimated"] = round(sum(est_by_cat.values()), 2)

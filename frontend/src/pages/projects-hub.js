@@ -405,11 +405,24 @@ export async function projectsHubPage(routeFn) {
       : `<div class="text-black/35 text-[12.5px]">No notes</div>`;
 
     const up = c.upcoming || {};
-    const upRow = (label, o) => kv(label, o
-      ? `<span class="tabular-nums font-semibold">${money(o.amount)}</span> <span class="text-black/40">· ${escapeHtml(shortDate(o.date))}</span>`
-      : `<span class="text-black/30">none scheduled</span>`);
-    const upcoming = upRow("Next invoice", up.invoice) + upRow("Next crew pay", up.payment)
-      + `<div class="text-[10.5px] text-black/35 mt-1">From the billing schedule (once generated)</div>`;
+    const ar = up.ar || { total: 0, count: 0 };
+    // Sent A/R — always relevant. Overdue days if past due.
+    const arDue = ar.next_due
+      ? (ar.overdue_days > 0 ? `<span class="text-red-600 font-semibold">${ar.overdue_days}d overdue</span>` : `due ${escapeHtml(shortDate(ar.next_due))}`)
+      : "";
+    const arRow = kv(`Sent · A/R${ar.count ? " (" + ar.count + ")" : ""}`,
+      ar.total > 0 ? `<span class="tabular-nums font-semibold">${money(ar.total)}</span>${arDue ? ` <span class="text-black/45 text-[11px]">· ${arDue}</span>` : ""}` : `<span class="text-black/30">none</span>`);
+    let upcoming;
+    if (up.complete) {
+      upcoming = arRow + `<div class="text-[11px] text-emerald-700 mt-1.5">🔒 Books closed — nothing else outstanding.</div>`;
+    } else {
+      const line = (label, amt, extra = "") => kv(label, amt > 0
+        ? `<span class="tabular-nums font-semibold">${money(amt)}</span>${extra}` : `<span class="text-black/30">—</span>`);
+      upcoming = arRow
+        + line("Invoices to send", up.invoices?.total, up.invoices?.next_date ? ` <span class="text-black/45 text-[11px]">· next ${escapeHtml(shortDate(up.invoices.next_date))}</span>` : "")
+        + line("Crew payments due", up.crew?.total)
+        + line("Expenses to spend", up.expenses?.total);
+    }
 
     const kk = c.kickoff || { done: 0, total: 13 };
     const kpct = kk.total ? Math.round((kk.done / kk.total) * 100) : 0;
