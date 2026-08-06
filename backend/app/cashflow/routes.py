@@ -2,11 +2,12 @@
 from datetime import date, datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.auth import require_capability
 from . import service
+from . import schedule_forecast as _sf
 
 router = APIRouter(prefix="/api/cashflow", tags=["cashflow"])
 
@@ -57,6 +58,47 @@ def forecast(
             raise HTTPException(status_code=400, detail="start_date must be YYYY-MM-DD")
     return service.generate_forecast(start_date=sd, opening_balance=opening_balance,
                                      inc_active=inc_active, inc_awarded=inc_awarded, inc_jobcost=inc_jobcost)
+
+
+def _safe_recompute():
+    try:
+        _sf.recompute_cache()
+    except Exception:
+        pass  # background best-effort; the next request retries
+
+
+@router.get("/forecast-v2")
+def forecast_v2(
+    background: BackgroundTasks,
+    start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to the coming Friday)"),
+    weeks: int = Query(26, ge=1, le=520, description="Horizon in weeks (unbounded — user extends as far as they want)"),
+    opening_balance: Optional[float] = Query(None, description="Override the opening balance (defaults to the live QBO bank balance)"),
+    _user=Depends(require_capability("page.cashflow")),
+):
+    """Phase-3b forecast: real bank anchor + committed QBO layers + recurring +
+    the project-schedule scheduled layer (cached). Re-bucketable to any horizon.
+    If the scheduled cache is stale/absent, a background recompute is kicked off
+    and the current (stale/empty) snapshot is returned immediately."""
+    sd = None
+    if start_date:
+        try:
+            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start_date must be YYYY-MM-DD")
+    result = service.generate_forecast_v2(start_date=sd, weeks=weeks, opening_balance=opening_balance)
+    c = result.get("cache") or {}
+    if c.get("stale") and not c.get("computing"):
+        background.add_task(_safe_recompute)
+    return result
+
+
+@router.post("/forecast-v2/refresh")
+def forecast_v2_refresh(background: BackgroundTasks, _user=Depends(require_capability("page.cashflow"))):
+    """Force a background recompute of the scheduled-cash cache (the ~30s pass)."""
+    _, meta = _sf.get_events()
+    if not meta.get("computing"):
+        background.add_task(_safe_recompute)
+    return {"ok": True, "queued": True, "cache": meta}
 
 
 @router.get("/actuals")

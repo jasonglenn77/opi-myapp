@@ -137,12 +137,42 @@ def _project_events(conn, entity_id):
     }
 
 
-def collect_scheduled(start_date: date | None = None, weeks: int = 26) -> dict:
-    """Aggregate the scheduled tier of every candidate project into weekly buckets.
+# ---------------------------------------------------------------------------
+# Expensive pass: collect every project's raw (horizon-independent) events once.
+# This is the ~30s part; it is cached and re-bucketed for any horizon cheaply.
+# ---------------------------------------------------------------------------
+def compute_all_events() -> dict:
+    """Walk every candidate project once and gather its scheduled cash EVENTS
+    (dated, horizon-independent) plus the option-a backlog. Cache this; bucket it
+    into any weekly horizon with `bucket_events` (cheap)."""
+    all_events = []
+    backlog_in = backlog_out = 0.0
+    projects = []
+    with engine.begin() as conn:  # begin(): the ensure-pass may write new schedules
+        for eid in _candidate_project_ids(conn):
+            ev = _project_events(conn, eid)
+            if not ev:
+                continue
+            projects.append({k: ev[k] for k in
+                             ("entity_id", "name", "status", "has_dates",
+                              "backlog_in", "backlog_out", "scheduled_in", "scheduled_out")})
+            backlog_in += ev["backlog_in"]
+            backlog_out += ev["backlog_out"]
+            for e in ev["events"]:
+                all_events.append({**e, "entity_id": eid})
+    projects.sort(key=lambda p: -(p["scheduled_in"] + p["scheduled_out"]))
+    return {
+        "computed_at": _iso_now(),
+        "events": all_events,
+        "backlog": {"in": round(backlog_in, 2), "out": round(backlog_out, 2)},
+        "projects": projects,
+        "project_count": len(projects),
+    }
 
-    Returns weekly inflow/outflow arrays, a `beyond` bucket for cash dated past the
-    horizon, the option-a `backlog` (dated-less committed cash), and per-project
-    contributions (for drill-down + reconciliation against each Billing tab)."""
+
+def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26) -> dict:
+    """Cheaply bucket a cached event payload into a weekly horizon. Overdue-unpaid
+    events pull to the current week; past-horizon events roll into `beyond`."""
     today = date.today()
     if start_date is None:
         start_date = _next_weekday(today, WEEK_END_WEEKDAY)  # coming Friday
@@ -164,32 +194,17 @@ def collect_scheduled(start_date: date | None = None, weeks: int = 26) -> dict:
     inflow = [0.0] * weeks
     outflow = [0.0] * weeks
     beyond_in = beyond_out = 0.0
-    backlog_in = backlog_out = 0.0
-    projects = []
-
-    with engine.begin() as conn:  # begin(): the ensure-pass may write new schedules
-        for eid in _candidate_project_ids(conn):
-            ev = _project_events(conn, eid)
-            if not ev:
-                continue
-            projects.append({k: ev[k] for k in
-                             ("entity_id", "name", "status", "has_dates",
-                              "backlog_in", "backlog_out", "scheduled_in", "scheduled_out")})
-            backlog_in += ev["backlog_in"]
-            backlog_out += ev["backlog_out"]
-            for e in ev["events"]:
-                wi = week_index(e["date"])
-                if wi is None:
-                    if e["dir"] == "in":
-                        beyond_in += e["amt"]
-                    else:
-                        beyond_out += e["amt"]
-                elif e["dir"] == "in":
-                    inflow[wi] += e["amt"]
-                else:
-                    outflow[wi] += e["amt"]
-
-    projects.sort(key=lambda p: -(p["scheduled_in"] + p["scheduled_out"]))
+    for e in payload.get("events", []):
+        wi = week_index(e["date"])
+        if wi is None:
+            if e["dir"] == "in":
+                beyond_in += e["amt"]
+            else:
+                beyond_out += e["amt"]
+        elif e["dir"] == "in":
+            inflow[wi] += e["amt"]
+        else:
+            outflow[wi] += e["amt"]
     return {
         "week_ends": [d.isoformat() for d in week_ends],
         "weeks": weeks,
@@ -197,7 +212,109 @@ def collect_scheduled(start_date: date | None = None, weeks: int = 26) -> dict:
         "outflow": [round(x, 2) for x in outflow],
         "beyond_in": round(beyond_in, 2),
         "beyond_out": round(beyond_out, 2),
-        "backlog": {"in": round(backlog_in, 2), "out": round(backlog_out, 2)},
-        "projects": projects,
-        "project_count": len(projects),
+        "backlog": payload.get("backlog", {"in": 0.0, "out": 0.0}),
+        "projects": payload.get("projects", []),
+        "project_count": payload.get("project_count", 0),
+        "computed_at": payload.get("computed_at"),
     }
+
+
+def collect_scheduled(start_date: date | None = None, weeks: int = 26) -> dict:
+    """Convenience: compute events live (uncached) + bucket. Prefer the cached
+    path (get_events + bucket_events) for anything user-facing."""
+    return bucket_events(compute_all_events(), start_date, weeks)
+
+
+# ---------------------------------------------------------------------------
+# DB-backed cache for the expensive event pass (singleton row). Re-bucketing for
+# a horizon is cheap, so we cache the horizon-independent events and re-bucket
+# live. Refresh recomputes; edits elsewhere mark it stale via touch_dirty().
+# ---------------------------------------------------------------------------
+import json as _json
+from datetime import datetime as _dt
+
+
+def _iso_now() -> str:
+    return _dt.utcnow().replace(microsecond=0).isoformat()
+
+
+def ensure_cache_table():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cashflow_schedule_cache (
+              id TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+              payload LONGTEXT NULL,
+              computed_at DATETIME NULL,
+              computing TINYINT(1) NOT NULL DEFAULT 0,
+              dirty TINYINT(1) NOT NULL DEFAULT 1,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB
+        """))
+        conn.execute(text(
+            "INSERT IGNORE INTO cashflow_schedule_cache (id, dirty) VALUES (1, 1)"))
+
+
+def _read_cache_row():
+    ensure_cache_table()
+    with engine.connect() as conn:
+        return conn.execute(text(
+            "SELECT payload, computed_at, computing, dirty FROM cashflow_schedule_cache WHERE id=1"
+        )).mappings().first()
+
+
+def touch_dirty():
+    """Mark the cached forecast stale (call after any billing-schedule edit)."""
+    try:
+        ensure_cache_table()
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE cashflow_schedule_cache SET dirty=1 WHERE id=1"))
+    except Exception:
+        pass  # never let cache bookkeeping break a billing write
+
+
+def recompute_cache():
+    """Run the expensive pass and store it. Guards against concurrent runs via the
+    `computing` flag (best-effort across the 2 workers)."""
+    ensure_cache_table()
+    with engine.begin() as conn:
+        already = conn.execute(text(
+            "SELECT computing FROM cashflow_schedule_cache WHERE id=1")).scalar()
+        if already:
+            return False
+        conn.execute(text("UPDATE cashflow_schedule_cache SET computing=1 WHERE id=1"))
+    try:
+        payload = compute_all_events()
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE cashflow_schedule_cache
+                SET payload=:p, computed_at=:c, computing=0, dirty=0 WHERE id=1
+            """), {"p": _json.dumps(payload), "c": payload["computed_at"]})
+        return True
+    except Exception:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE cashflow_schedule_cache SET computing=0 WHERE id=1"))
+        raise
+
+
+def get_events(max_age_seconds: int = 1800):
+    """Return (payload, meta). Serves the cached event payload; meta tells the
+    caller whether it's fresh/stale/absent/computing so the route can decide to
+    kick a background recompute."""
+    row = _read_cache_row()
+    payload = None
+    if row and row["payload"]:
+        try:
+            payload = _json.loads(row["payload"])
+        except Exception:
+            payload = None
+    computed_at = row["computed_at"] if row else None
+    computing = bool(row["computing"]) if row else False
+    dirty = bool(row["dirty"]) if row else True
+    age = None
+    if computed_at:
+        age = (_dt.utcnow() - computed_at).total_seconds()
+    stale = dirty or age is None or age > max_age_seconds
+    meta = {"computed_at": computed_at.isoformat() if computed_at else None,
+            "age_seconds": int(age) if age is not None else None,
+            "computing": computing, "stale": stale, "has_data": payload is not None}
+    return payload, meta
