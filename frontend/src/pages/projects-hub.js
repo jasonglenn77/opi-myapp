@@ -197,9 +197,12 @@ export async function projectsHubPage(routeFn) {
   };
   window.addEventListener("resize", sizeCard);
 
+  // "Value" = the contract (accepted-estimate) amount, falling back to invoiced
+  // for legacy projects with no estimate. (Previously showed invoiced-to-date,
+  // which understated the contract on part-billed projects.)
   const finVal = (p) => {
     const f = finById.get(p.qbo_customer_id);
-    return f ? (Number(f.invoice_line_amt) || Number(f.estimate_line_amt) || 0) : 0;
+    return f ? (Number(f.estimate_line_amt) || Number(f.invoice_line_amt) || 0) : 0;
   };
   const searchKey = (p) => `${p.project_name || ""} ${p.all_project_managers || ""} ${p.all_work_crews || ""} ${p.linked_quote_number || ""}`.toLowerCase();
   const sortVal = (p, key) => {
