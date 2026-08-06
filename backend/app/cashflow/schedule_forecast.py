@@ -1,0 +1,203 @@
+"""Schedule-driven cash forecast (Phase 3b).
+
+Aggregates every project's per-estimate billing schedules — the SAME schedules
+shown on each project's Billing & Schedule tab — into the company forecast, so
+"forecast = sum of every project's tab."
+
+Only the **scheduled** tier of each project is contributed here (cash not yet in
+QuickBooks): the *committed* tier (open QBO invoices/bills) is already counted by
+the QBO-driven committed layer in service.generate_forecast, so taking only the
+scheduled tier avoids double-counting a bill/invoice that's already booked.
+
+Placement rules:
+  - a scheduled item dated within the horizon  -> its week
+  - a scheduled item dated in the PAST but still unpaid (overdue) -> current week
+  - a scheduled item dated past the horizon     -> `beyond`
+  - a scheduled item with NO date (project awaiting a start date) -> the option-a
+    "committed, not yet scheduled" backlog (kept OFF the weekly grid, per owner)
+"""
+from datetime import date, timedelta
+
+from sqlalchemy import text
+
+from app.db import engine
+
+EPS = 0.5
+WEEK_END_WEEKDAY = 4  # Friday
+
+
+def _iso(d):
+    """Normalize a date/datetime/str to a YYYY-MM-DD string (or None)."""
+    if not d:
+        return None
+    if isinstance(d, str):
+        return d[:10]
+    return d.isoformat()[:10]
+
+
+def _next_weekday(d: date, weekday: int) -> date:
+    return d + timedelta(days=(weekday - d.weekday()) % 7)
+
+
+def _candidate_project_ids(conn):
+    """Projects that can contribute forward cash: is_project=1 with at least one
+    assignment row not completed/canceled. Completed projects' remaining cash is
+    caught by the committed QBO layers, so we skip them to keep the pass cheap."""
+    rows = conn.execute(text("""
+        SELECT DISTINCT c.qbo_id
+        FROM qbo_customers c
+        JOIN projects p ON p.qbo_customer_id = c.id
+        JOIN project_schedule_items si ON si.project_id = p.id
+        WHERE c.is_project = 1
+          AND si.status NOT IN ('completed', 'canceled')
+    """)).scalars().all()
+    return [str(r) for r in rows]
+
+
+def _project_events(conn, entity_id):
+    """The scheduled-tier forward cash events for one project, reusing the exact
+    per-project compose pipeline (so the numbers match the Billing tab)."""
+    import app.billing.routes as B
+
+    ctx = B._project_ctx(conn, entity_id)
+    if not ctx:
+        return None
+    meta = B._project_meta(conn, entity_id) or {}
+
+    # create-if-missing (same order as get_bundle) — generates schedules for
+    # projects never opened in the Billing tab.
+    B._ensure_estimate_billing(conn, entity_id, B._default_crew_for_project(conn, entity_id, meta))
+    B._ensure_invoice_schedules(conn, entity_id, ctx)
+    B._ensure_crew_schedules(conn, entity_id, ctx, meta)
+    B._ensure_expense_items(conn, entity_id, ctx)
+    B._ensure_expense_installments(conn, entity_id, ctx)
+
+    op_status = B._canonical_status(conn, entity_id)
+    books_closed = op_status == "completed"
+    if books_closed:
+        return None  # trust actuals; nothing scheduled remains
+
+    cvi = B._all_crew_vendor_ids(conn, entity_id)
+    inv = B._compose_invoices(conn, entity_id, books_closed)
+    crew = B._compose_crew(conn, entity_id, meta, cvi, books_closed)
+    exp = B._compose_expenses(conn, entity_id, books_closed,
+                              B._pd(ctx.get("start_date")), B._pd(ctx.get("end_date")))
+
+    events, backlog_in, backlog_out = [], 0.0, 0.0
+
+    # Inflow: scheduled (not-yet-invoiced) milestones on their planned invoice date.
+    for m in inv["milestones"]:
+        if m.get("tier") != "scheduled":
+            continue
+        amt = float(m.get("amount") or 0)
+        if amt <= EPS:
+            continue
+        d = _iso(m.get("invoice_date"))
+        if d:
+            events.append({"date": d, "dir": "in", "amt": amt, "src": "invoice"})
+        else:
+            backlog_in += amt
+
+    # Outflow crew: scheduled (unpaid) installments on their pay date.
+    for i in crew["installments"]:
+        if i.get("tier") != "scheduled":
+            continue
+        amt = float(i.get("amount") or 0)
+        if amt <= EPS:
+            continue
+        d = _iso(i.get("pay_date"))
+        if d:
+            events.append({"date": d, "dir": "out", "amt": amt, "src": "crew"})
+        else:
+            backlog_out += amt
+
+    # Outflow expenses: scheduled weekly installments on their week_of date.
+    for cat in exp["by_category"]:
+        for w in cat.get("weekly", []):
+            if w.get("tier") != "scheduled":
+                continue
+            amt = float(w.get("amount") or 0)
+            if amt <= EPS:
+                continue
+            d = _iso(w.get("week_of"))
+            if d:
+                events.append({"date": d, "dir": "out", "amt": amt, "src": "expense"})
+            else:
+                backlog_out += amt
+
+    if not events and backlog_in <= EPS and backlog_out <= EPS:
+        return None
+    return {
+        "entity_id": entity_id, "name": ctx["name"], "status": op_status,
+        "has_dates": bool(ctx.get("start_date") and ctx.get("end_date")),
+        "events": events,
+        "backlog_in": round(backlog_in, 2), "backlog_out": round(backlog_out, 2),
+        "scheduled_in": round(sum(e["amt"] for e in events if e["dir"] == "in"), 2),
+        "scheduled_out": round(sum(e["amt"] for e in events if e["dir"] == "out"), 2),
+    }
+
+
+def collect_scheduled(start_date: date | None = None, weeks: int = 26) -> dict:
+    """Aggregate the scheduled tier of every candidate project into weekly buckets.
+
+    Returns weekly inflow/outflow arrays, a `beyond` bucket for cash dated past the
+    horizon, the option-a `backlog` (dated-less committed cash), and per-project
+    contributions (for drill-down + reconciliation against each Billing tab)."""
+    today = date.today()
+    if start_date is None:
+        start_date = _next_weekday(today, WEEK_END_WEEKDAY)  # coming Friday
+    week_ends = [start_date + timedelta(days=7 * i) for i in range(weeks)]
+    win_start = week_ends[0] - timedelta(days=6)
+    win_end = week_ends[-1]
+
+    def week_index(iso_d):
+        d = date.fromisoformat(iso_d)
+        if d < win_start:
+            return 0                       # overdue but unpaid -> pull to current week
+        if d > win_end:
+            return None                    # beyond the horizon
+        for i, we in enumerate(week_ends):
+            if (we - timedelta(days=6)) <= d <= we:
+                return i
+        return None
+
+    inflow = [0.0] * weeks
+    outflow = [0.0] * weeks
+    beyond_in = beyond_out = 0.0
+    backlog_in = backlog_out = 0.0
+    projects = []
+
+    with engine.begin() as conn:  # begin(): the ensure-pass may write new schedules
+        for eid in _candidate_project_ids(conn):
+            ev = _project_events(conn, eid)
+            if not ev:
+                continue
+            projects.append({k: ev[k] for k in
+                             ("entity_id", "name", "status", "has_dates",
+                              "backlog_in", "backlog_out", "scheduled_in", "scheduled_out")})
+            backlog_in += ev["backlog_in"]
+            backlog_out += ev["backlog_out"]
+            for e in ev["events"]:
+                wi = week_index(e["date"])
+                if wi is None:
+                    if e["dir"] == "in":
+                        beyond_in += e["amt"]
+                    else:
+                        beyond_out += e["amt"]
+                elif e["dir"] == "in":
+                    inflow[wi] += e["amt"]
+                else:
+                    outflow[wi] += e["amt"]
+
+    projects.sort(key=lambda p: -(p["scheduled_in"] + p["scheduled_out"]))
+    return {
+        "week_ends": [d.isoformat() for d in week_ends],
+        "weeks": weeks,
+        "inflow": [round(x, 2) for x in inflow],
+        "outflow": [round(x, 2) for x in outflow],
+        "beyond_in": round(beyond_in, 2),
+        "beyond_out": round(beyond_out, 2),
+        "backlog": {"in": round(backlog_in, 2), "out": round(backlog_out, 2)},
+        "projects": projects,
+        "project_count": len(projects),
+    }
