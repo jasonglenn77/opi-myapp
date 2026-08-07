@@ -511,10 +511,10 @@ def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks):
         LEFT JOIN qbo_customers qc ON qc.qbo_id = l.customer_qbo_id
         WHERE l.rn = 1
           AND l.balance_amt > 0
-          AND l.due_date BETWEEN :ws AND :bc
+          AND l.due_date <= :bc
     """)
     with engine.connect() as conn:
-        rows = conn.execute(sql, {"ws": win_start, "bc": beyond_cap}).mappings().all()
+        rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
     return _bucket(rows, week_ends, win_end, weeks)
 
 
@@ -592,10 +592,10 @@ def _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks):
         FROM latest
         WHERE rn = 1
           AND balance_amt > 0
-          AND due_date BETWEEN :ws AND :bc
+          AND due_date <= :bc
     """)
     with engine.connect() as conn:
-        rows = conn.execute(sql, {"ws": win_start, "bc": beyond_cap}).mappings().all()
+        rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
     return _bucket(rows, week_ends, win_end, weeks)
 
 
@@ -701,6 +701,7 @@ def _outflow_recurring(today, weeks):
 # ---------------------------------------------------------------------------
 def _bucket(rows, week_ends, win_end, weeks):
     grouped = defaultdict(lambda: {"weekly": [0.0] * weeks, "beyond": 0.0})
+    first_start = week_ends[0] - timedelta(days=6)   # Saturday of the current week
     for r in rows:
         d = r["due_date"]
         if d is None:
@@ -708,6 +709,9 @@ def _bucket(rows, week_ends, win_end, weeks):
         amt = float(r["amount"] or 0)
         if d > win_end:
             grouped[r["name"]]["beyond"] += amt
+            continue
+        if d < first_start:
+            grouped[r["name"]]["weekly"][0] += amt   # overdue/unpaid -> current week
             continue
         for i, we in enumerate(week_ends):
             if (we - timedelta(days=6)) <= d <= we:

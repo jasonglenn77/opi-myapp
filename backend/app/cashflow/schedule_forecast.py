@@ -166,36 +166,117 @@ def _project_events(conn, entity_id):
 
 
 # ---------------------------------------------------------------------------
-# Expensive pass: collect every project's raw (horizon-independent) events once.
-# This is the ~30s part; it is cached and re-bucketed for any horizon cheaply.
+# Per-project materialized cache (incremental). Each project's cash contribution
+# is stored in project_cash_cache tagged with a source_version (max updated_at of
+# its schedule tables). Only projects whose schedules changed are recomputed; the
+# rest are read straight from the table — so editing one project no longer forces
+# a full ~5-minute rebuild.
 # ---------------------------------------------------------------------------
-def compute_all_events() -> dict:
-    """Walk every candidate project once and gather its scheduled cash EVENTS
-    (dated, horizon-independent) plus the option-a backlog. Cache this; bucket it
-    into any weekly horizon with `bucket_events` (cheap)."""
-    all_events = []
-    backlog_in = backlog_out = 0.0
-    backlog_projects = []
-    projects = []
-    with engine.begin() as conn:  # begin(): the ensure-pass may write new schedules
-        for eid in _candidate_project_ids(conn):
+import json as _pj
+
+_VERSIONS_SQL = text("""
+  SELECT entity_id, MAX(v) AS v FROM (
+    SELECT s.entity_id, MAX(pi.updated_at) v FROM project_payment_installments pi
+      JOIN project_payment_schedules s ON s.id = pi.schedule_id GROUP BY s.entity_id
+    UNION ALL
+    SELECT s.entity_id, MAX(m.updated_at) FROM project_invoice_milestones m
+      JOIN project_invoice_schedules s ON s.id = m.schedule_id GROUP BY s.entity_id
+    UNION ALL
+    SELECT ei.entity_id, MAX(ei.updated_at) FROM project_expense_installments ei GROUP BY ei.entity_id
+    UNION ALL
+    SELECT c.qbo_id, MAX(si.updated_at) FROM project_schedule_items si
+      JOIN projects p ON p.id = si.project_id JOIN qbo_customers c ON c.id = p.qbo_customer_id
+      WHERE c.is_project = 1 GROUP BY c.qbo_id
+  ) x GROUP BY entity_id
+""")
+
+_ONE_VERSION_SQL = text("""
+  SELECT MAX(v) FROM (
+    SELECT MAX(pi.updated_at) v FROM project_payment_installments pi
+      JOIN project_payment_schedules s ON s.id = pi.schedule_id WHERE s.entity_id = :e
+    UNION ALL
+    SELECT MAX(m.updated_at) FROM project_invoice_milestones m
+      JOIN project_invoice_schedules s ON s.id = m.schedule_id WHERE s.entity_id = :e
+    UNION ALL
+    SELECT MAX(ei.updated_at) FROM project_expense_installments ei WHERE ei.entity_id = :e
+    UNION ALL
+    SELECT MAX(si.updated_at) FROM project_schedule_items si
+      JOIN projects p ON p.id = si.project_id JOIN qbo_customers c ON c.id = p.qbo_customer_id
+      WHERE c.qbo_id = :e
+  ) x
+""")
+
+
+def ensure_project_cache_table():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS project_cash_cache (
+              entity_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL PRIMARY KEY,
+              payload JSON NOT NULL,
+              source_version DATETIME NULL,
+              computed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB
+        """))
+
+
+def refresh_stale():
+    """Recompute + upsert only the projects whose schedules changed since we last
+    stored them. Each project runs in its own transaction, so progress persists
+    and we never hold one long lock. Returns how many were refreshed."""
+    ensure_project_cache_table()
+    with engine.connect() as conn:
+        cands = _candidate_project_ids(conn)
+        cur = {str(r["entity_id"]): r["v"] for r in conn.execute(_VERSIONS_SQL).mappings().all()}
+        stored = {r["entity_id"]: r["source_version"] for r in
+                  conn.execute(text("SELECT entity_id, source_version FROM project_cash_cache")).mappings().all()}
+    stale = [e for e in cands
+             if not (e in stored and stored[e] is not None and cur.get(e) is not None and stored[e] >= cur[e])]
+    for eid in stale:
+        with engine.begin() as conn:  # ensure-pass may write; own txn per project
             ev = _project_events(conn, eid)
-            if not ev:
-                continue
-            projects.append({k: ev[k] for k in
-                             ("entity_id", "name", "status", "has_dates",
-                              "backlog_in", "backlog_out", "scheduled_in", "scheduled_out")})
-            backlog_in += ev["backlog_in"]
-            backlog_out += ev["backlog_out"]
-            if ev.get("backlog_detail"):
-                backlog_projects.append(ev["backlog_detail"])
-            for e in ev["events"]:
-                all_events.append({**e, "entity_id": eid})
-    projects.sort(key=lambda p: -(p["scheduled_in"] + p["scheduled_out"]))
-    backlog_projects.sort(key=lambda p: -(p["to_bill"] + p["ar"] + p["out"]))
-    # Totals derived from the per-project rows, so the chip/totals ALWAYS equal
-    # the sum of the drill-down. `in` = still-to-bill, `out` = estimated crew+exp,
-    # `ar`/`paid` = already-on-grid / already-in-bank context, `net` = in − out.
+            pv = conn.execute(_ONE_VERSION_SQL, {"e": eid}).scalar()  # post-ensure version
+            conn.execute(text("""
+                INSERT INTO project_cash_cache (entity_id, payload, source_version, computed_at)
+                VALUES (:e, :p, :v, NOW())
+                ON DUPLICATE KEY UPDATE payload=VALUES(payload), source_version=VALUES(source_version), computed_at=NOW()
+            """), {"e": eid, "p": _pj.dumps(ev or {"empty": True}, default=str), "v": pv})
+    # forget projects that are no longer candidates (completed/canceled)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            DELETE FROM project_cash_cache WHERE entity_id NOT IN (
+              SELECT DISTINCT c.qbo_id FROM qbo_customers c
+              JOIN projects p ON p.qbo_customer_id = c.id
+              JOIN project_schedule_items si ON si.project_id = p.id
+              WHERE c.is_project = 1 AND si.status NOT IN ('completed', 'canceled'))
+        """))
+    return len(stale)
+
+
+def compute_all_events() -> dict:
+    """Refresh only the changed projects, then aggregate every project's stored
+    cash contribution into the horizon-independent payload (events + backlog).
+    Fast after the first warm-up — only edited projects are recomputed."""
+    refresh_stale()
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT entity_id, payload FROM project_cash_cache")).mappings().all()
+    all_events, backlog_projects, projects = [], [], []
+    for r in rows:
+        try:
+            p = _pj.loads(r["payload"]) if r["payload"] else {}
+        except Exception:
+            p = {}
+        if not p or p.get("empty"):
+            continue
+        projects.append({k: p.get(k) for k in
+                         ("entity_id", "name", "status", "has_dates",
+                          "backlog_in", "backlog_out", "scheduled_in", "scheduled_out")})
+        for e in p.get("events", []):
+            all_events.append({**e, "entity_id": r["entity_id"]})
+        if p.get("backlog_detail"):
+            backlog_projects.append(p["backlog_detail"])
+    projects.sort(key=lambda x: -((x.get("scheduled_in") or 0) + (x.get("scheduled_out") or 0)))
+    backlog_projects.sort(key=lambda x: -(x["to_bill"] + x["ar"] + x["out"]))
     return {
         "computed_at": _iso_now(),
         "events": all_events,
