@@ -226,10 +226,25 @@ export async function cashflowPage(routeFn) {
   // ── Forecast+ renderer (Phase 3b: committed QBO + scheduled project layer,
   //    unbounded weekly horizon, real bank anchor, option-a backlog) ──────────
   function renderForecastV2(d) {
+    // Past-due column: everything dated before the current week, in its own
+    // leading column so week 1 shows only its true Sat–Fri items.
+    const pd = d.past_due || { opening: d.opening_balance, ending: d.opening_balance, inflow: 0, outflow: 0, surplus: 0 };
+    const hasPD = Math.abs(pd.inflow) > 0.5 || Math.abs(pd.outflow) > 0.5;
+    const PD_BG = "#fbf6ea", PD_SEP = "border-right:2px solid rgba(0,0,0,.18)";
+    const pdCell = (v, extraCls = "") => hasPD
+      ? `<td class="px-2 py-1 text-right whitespace-nowrap ${extraCls}" style="font-variant-numeric:tabular-nums;${PD_SEP};background:${PD_BG}">${cell(v)}</td>` : "";
+    const extra = hasPD ? 1 : 0;
+
+    const pdHead = hasPD
+      ? `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold" style="${PD_SEP};background:${PD_BG}"><div>Past due</div><div class="text-[10px] font-normal text-black/40">overdue</div></th>` : "";
     const weekCols = d.week_ends.map((w, i) => {
       const [, m, day] = w.split("-");
       return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
     }).join("");
+
+    const rowV2 = (label, pdv, weekly, { bold = false, bg = "#ffffff" } = {}) => `<tr>
+        <td class="py-1 pr-3 ${bold ? "font-bold" : ""} whitespace-nowrap" style="${STICKY}background:${bg};padding-left:0.75rem">${escapeHtml(label)}</td>
+        ${pdCell(pdv, bold ? "font-semibold" : "")}${numCells(weekly, bold ? "font-semibold" : "")}</tr>`;
 
     // confidence tiers: how firm a section's cash is (committed QBO > scheduled
     // app plans > estimated run-rate). Shades the section row + a dot.
@@ -238,13 +253,16 @@ export async function cashflowPage(routeFn) {
       scheduled: { dot: "bg-emerald-500", bg: "#f0f8f2", name: "Scheduled" },
       estimated: { dot: "border-[1.5px] border-black/40", bg: "#f7f7f8", name: "Estimated" },
     };
+    const detailV2 = (rows, group) => rows.map(r => `<tr class="cf-detail" data-group="${group}" style="display:none">
+        <td class="py-1 pr-3 text-black/60 whitespace-nowrap" style="${STICKY}background:#fbfbfb;padding-left:2.25rem">${escapeHtml(r.label)}</td>
+        ${pdCell(r.pastdue || 0, "text-black/60")}${numCells(r.weekly, "text-black/60")}</tr>`).join("");
     const secRow = (s, group) => {
       const t = TIER[s.tier] || TIER.scheduled;
       const hasRows = s.rows && s.rows.length;
       const chev = hasRows ? `<button data-toggle="${group}" class="mr-1 text-black/40 hover:text-black" style="font-size:11px">▸</button>` : "";
       const dot = `<span class="inline-block w-2 h-2 rounded-full align-middle mr-1.5 ${t.dot}"></span>`;
       const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}</td>`;
-      return `<tr>${label}${numCells(s.weekly_totals)}</tr>` + (hasRows ? detailRows(s.rows, group, "#fbfbfb") : "");
+      return `<tr>${label}${pdCell(s.pastdue || 0)}${numCells(s.weekly_totals)}</tr>` + (hasRows ? detailV2(s.rows, group) : "");
     };
     const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`)).join("");
     const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`)).join("");
@@ -275,29 +293,30 @@ export async function cashflowPage(routeFn) {
         <div class="flex items-center gap-3">${legend}</div>
         ${backlogChip}
       </div>
-      <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + d.weeks * 68}px">
+      <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + (d.weeks + extra) * 68}px">
         <thead>
           <tr class="border-b border-black/10 text-black/60">
             <th class="py-2 pr-3 text-left whitespace-nowrap" style="${STICKY}background:#fff">Week ending →</th>
-            ${weekCols}
+            ${pdHead}${weekCols}
           </tr>
         </thead>
         <tbody>
-          ${dataRow("Opening Cash Balance", d.summary.opening, { bold: true, bg: "#f8fafc" })}
+          ${rowV2("Opening Cash Balance", pd.opening, d.summary.opening, { bold: true, bg: "#f8fafc" })}
 
-          ${sectionHeader("CASH INFLOW", d.weeks)}
-          ${dataRow(d.inflow.label, d.inflow.weekly_totals, { bold: true, bg: "#f4f7f5" })}
+          ${sectionHeader("CASH INFLOW", d.weeks + extra)}
+          ${rowV2(d.inflow.label, d.inflow.pastdue_total, d.inflow.weekly_totals, { bold: true, bg: "#f4f7f5" })}
           ${inSecs}
 
-          ${sectionHeader("CASH OUTFLOW", d.weeks)}
-          ${dataRow(d.outflow.label, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7" })}
+          ${sectionHeader("CASH OUTFLOW", d.weeks + extra)}
+          ${rowV2(d.outflow.label, d.outflow.pastdue_total, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7" })}
           ${outSecs}
 
-          <tr><td colspan="${1 + d.weeks}" class="pt-2"></td></tr>
-          ${dataRow("Total Surplus / (Deficit)", d.summary.surplus, { bold: true, bg: "#f8fafc" })}
-          ${dataRow("Ending Cash Balance", d.summary.ending, { bold: true, bg: "#eef2ff" })}
+          <tr><td colspan="${1 + extra + d.weeks}" class="pt-2"></td></tr>
+          ${rowV2("Total Surplus / (Deficit)", pd.surplus, d.summary.surplus, { bold: true, bg: "#f8fafc" })}
+          ${rowV2("Ending Cash Balance", pd.ending, d.summary.ending, { bold: true, bg: "#eef2ff" })}
         </tbody>
-      </table>`;
+      </table>
+      ${hasPD ? `<div class="text-[11px] text-black/45 mt-2 px-1">The <b>Past due</b> column holds cash dated before the current week — overdue invoices to collect and bills/crew/expenses to catch up on — so each week shows only its own dates. It settles off your opening balance; week 1 opens at its result.</div>` : ""}`;
     wireToggles();
     const rb = grid.querySelector("[data-cf-refresh]");
     if (rb) rb.addEventListener("click", refreshSchedules);

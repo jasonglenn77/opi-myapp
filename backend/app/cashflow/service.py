@@ -335,16 +335,18 @@ def generate_forecast_v2(start_date: date | None = None,
         opening_balance = bank.get("balance", 0.0)
 
     # ---- committed layers (fast, live from QBO) ----
-    inv_rows = _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks)
-    ap_rows = _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks)
+    inv_rows = _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=True)
+    ap_rows = _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=True)
     inv_wt = _column_sums(inv_rows, weeks)
     ap_wt = _column_sums(ap_rows, weeks)
+    inv_pd = round(sum(r.get("pastdue", 0) for r in inv_rows), 2)   # overdue A/R
+    ap_pd = round(sum(r.get("pastdue", 0) for r in ap_rows), 2)     # overdue A/P
 
     # ---- recurring overhead: the editable schedule (seeded from the run-rate the
     #      first time), expanded by cadence across the weekly grid ----
     from . import overhead as OV
     OV.seed_if_empty(today)
-    rec_wt, rec_rows = OV.expand(week_ends)
+    rec_wt, rec_rows = OV.expand(week_ends)  # cadence-based; no past-due
 
     # ---- scheduled layer (cached event pass, bucketed to this horizon) ----
     payload, cache_meta = SF.get_events(max_age_seconds)
@@ -354,24 +356,34 @@ def generate_forecast_v2(start_date: date | None = None,
         backlog = sched["backlog"]
         sched_projects = sched["projects"]
         beyond_in, beyond_out = sched["beyond_in"], sched["beyond_out"]
+        sched_pd_in, sched_pd_out = sched["pastdue_in"], sched["pastdue_out"]
     else:
         sched_in = [0.0] * weeks
         sched_out = [0.0] * weeks
         backlog = {"in": 0.0, "out": 0.0}
         sched_projects = []
-        beyond_in = beyond_out = 0.0
+        beyond_in = beyond_out = sched_pd_in = sched_pd_out = 0.0
 
-    def _sec(key, label, rows, wt, tier):
+    def _sec(key, label, rows, wt, tier, pastdue=0.0):
         return {"key": key, "label": label, "rows": rows, "tier": tier,
                 "weekly_totals": [round(x, 2) for x in wt],
-                "grand_total": round(sum(wt), 2)}
+                "grand_total": round(sum(wt), 2), "pastdue": round(pastdue, 2)}
 
     inflow_weekly = [round(inv_wt[i] + sched_in[i], 2) for i in range(weeks)]
     outflow_weekly = [round(ap_wt[i] + rec_wt[i] + sched_out[i], 2) for i in range(weeks)]
 
-    # ---- rolling balance off the real bank balance ----
+    # ---- past-due column: everything dated before the current week, its own
+    #      leading period so week 1 shows only its true Sat–Fri items. It settles
+    #      off the opening bank balance; week 1 then opens at its ending. (Same
+    #      ending balances as folding it into week 1 — just cleanly separated.) ----
+    pastdue_in = round(inv_pd + sched_pd_in, 2)
+    pastdue_out = round(ap_pd + sched_pd_out, 2)
+    pd_opening = round(float(opening_balance), 2)
+    pd_ending = round(pd_opening + pastdue_in - pastdue_out, 2)
+
+    # ---- rolling weekly balance, opening at the post-past-due balance ----
     opening, surplus, ending = _zeros(weeks), _zeros(weeks), _zeros(weeks)
-    bal = float(opening_balance)
+    bal = pd_ending
     for i in range(weeks):
         opening[i] = round(bal, 2)
         surplus[i] = round(inflow_weekly[i] - outflow_weekly[i], 2)
@@ -387,30 +399,37 @@ def generate_forecast_v2(start_date: date | None = None,
         "opening_balance": round(float(opening_balance), 2),
         "bank": bank,
         "cache": cache_meta,
+        "past_due": {
+            "label": "Past due",
+            "inflow": pastdue_in, "outflow": pastdue_out,
+            "opening": pd_opening, "surplus": round(pastdue_in - pastdue_out, 2), "ending": pd_ending,
+        },
         "inflow": {
             "label": "Cash Inflow",
             "sections": [
-                _sec("ar", "Committed — open invoices (A/R, by due date)", inv_rows, inv_wt, "committed"),
+                _sec("ar", "Committed — open invoices (A/R, by due date)", inv_rows, inv_wt, "committed", inv_pd),
                 {"key": "scheduled", "label": "Scheduled — to bill (project schedules)", "tier": "scheduled",
                  "weekly_totals": [round(x, 2) for x in sched_in],
-                 "grand_total": round(sum(sched_in), 2)},
+                 "grand_total": round(sum(sched_in), 2), "pastdue": round(sched_pd_in, 2)},
             ],
             "weekly_totals": inflow_weekly,
             "grand_total": round(sum(inflow_weekly), 2),
             "beyond_total": round(beyond_in, 2),
+            "pastdue_total": pastdue_in,
         },
         "outflow": {
             "label": "Cash Outflow",
             "sections": [
-                _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed"),
-                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated"),
+                _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed", ap_pd),
+                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated", 0.0),
                 {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)", "tier": "scheduled",
                  "weekly_totals": [round(x, 2) for x in sched_out],
-                 "grand_total": round(sum(sched_out), 2)},
+                 "grand_total": round(sum(sched_out), 2), "pastdue": round(sched_pd_out, 2)},
             ],
             "weekly_totals": outflow_weekly,
             "grand_total": round(sum(outflow_weekly), 2),
             "beyond_total": round(beyond_out, 2),
+            "pastdue_total": pastdue_out,
         },
         "backlog": backlog,
         "projects": sched_projects,
@@ -494,7 +513,7 @@ def generate_actuals(start_date: date | None = None,
 # ---------------------------------------------------------------------------
 # Inflow: open Invoices by due date (deduped to the latest version per doc)
 # ---------------------------------------------------------------------------
-def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks):
+def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=False):
     sql = text("""
         WITH latest AS (
             SELECT qt.id, qt.customer_qbo_id, qt.doc_number, qt.due_date, qt.balance_amt,
@@ -515,7 +534,7 @@ def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks):
     """)
     with engine.connect() as conn:
         rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
-    return _bucket(rows, week_ends, win_end, weeks)
+    return _bucket(rows, week_ends, win_end, weeks, split_pastdue)
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +594,7 @@ def _inflow_projected(win_start, win_end, week_ends, weeks, status):
 # ---------------------------------------------------------------------------
 # Outflow A/P: open Bills by due date, grouped by vendor
 # ---------------------------------------------------------------------------
-def _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks):
+def _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=False):
     sql = text("""
         WITH latest AS (
             SELECT qt.id, qt.vendor_qbo_id, qt.doc_number, qt.due_date, qt.balance_amt,
@@ -596,7 +615,7 @@ def _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks):
     """)
     with engine.connect() as conn:
         rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
-    return _bucket(rows, week_ends, win_end, weeks)
+    return _bucket(rows, week_ends, win_end, weeks, split_pastdue)
 
 
 # ---------------------------------------------------------------------------
@@ -699,8 +718,8 @@ def _outflow_recurring(today, weeks):
 # Dates after the window land in `beyond`; in-window dates in their week.
 # Callers exclude before-window dates via SQL (so past-due isn't double-placed).
 # ---------------------------------------------------------------------------
-def _bucket(rows, week_ends, win_end, weeks):
-    grouped = defaultdict(lambda: {"weekly": [0.0] * weeks, "beyond": 0.0})
+def _bucket(rows, week_ends, win_end, weeks, split_pastdue=False):
+    grouped = defaultdict(lambda: {"weekly": [0.0] * weeks, "beyond": 0.0, "pastdue": 0.0})
     first_start = week_ends[0] - timedelta(days=6)   # Saturday of the current week
     for r in rows:
         d = r["due_date"]
@@ -711,7 +730,12 @@ def _bucket(rows, week_ends, win_end, weeks):
             grouped[r["name"]]["beyond"] += amt
             continue
         if d < first_start:
-            grouped[r["name"]]["weekly"][0] += amt   # overdue/unpaid -> current week
+            # overdue: its own "Past due" column (Forecast+) so week 1 stays clean,
+            # or folded into the current week for the old forecast.
+            if split_pastdue:
+                grouped[r["name"]]["pastdue"] += amt
+            else:
+                grouped[r["name"]]["weekly"][0] += amt
             continue
         for i, we in enumerate(week_ends):
             if (we - timedelta(days=6)) <= d <= we:
@@ -721,8 +745,9 @@ def _bucket(rows, week_ends, win_end, weeks):
     for name, v in grouped.items():
         wk = [round(x, 2) for x in v["weekly"]]
         out.append({"label": name, "kind": "scheduled", "weekly": wk,
-                    "beyond": round(v["beyond"], 2), "total": round(sum(wk), 2)})
-    out.sort(key=lambda x: x["total"] + x["beyond"], reverse=True)
+                    "beyond": round(v["beyond"], 2), "pastdue": round(v["pastdue"], 2),
+                    "total": round(sum(wk), 2)})
+    out.sort(key=lambda x: x["total"] + x["beyond"] + x["pastdue"], reverse=True)
     return out
 
 

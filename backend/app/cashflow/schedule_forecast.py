@@ -295,8 +295,9 @@ def compute_all_events() -> dict:
 
 
 def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26) -> dict:
-    """Cheaply bucket a cached event payload into a weekly horizon. Overdue-unpaid
-    events pull to the current week; past-horizon events roll into `beyond`."""
+    """Cheaply bucket a cached event payload into a weekly horizon. Overdue events
+    (before the current week) go into their own `pastdue` bucket so week 1 stays
+    clean; past-horizon events roll into `beyond`."""
     today = date.today()
     if start_date is None:
         start_date = _next_weekday(today, WEEK_END_WEEKDAY)  # coming Friday
@@ -304,31 +305,38 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
     win_start = week_ends[0] - timedelta(days=6)
     win_end = week_ends[-1]
 
-    def week_index(iso_d):
+    def classify(iso_d):
         d = date.fromisoformat(iso_d)
         if d < win_start:
-            return 0                       # overdue but unpaid -> pull to current week
+            return "past"                  # overdue -> its own Past-due column
         if d > win_end:
-            return None                    # beyond the horizon
+            return "beyond"                # past the horizon
         for i, we in enumerate(week_ends):
             if (we - timedelta(days=6)) <= d <= we:
                 return i
-        return None
+        return "beyond"
 
     inflow = [0.0] * weeks
     outflow = [0.0] * weeks
     beyond_in = beyond_out = 0.0
+    pastdue_in = pastdue_out = 0.0
     for e in payload.get("events", []):
-        wi = week_index(e["date"])
-        if wi is None:
-            if e["dir"] == "in":
+        c = classify(e["date"])
+        is_in = e["dir"] == "in"
+        if c == "past":
+            if is_in:
+                pastdue_in += e["amt"]
+            else:
+                pastdue_out += e["amt"]
+        elif c == "beyond":
+            if is_in:
                 beyond_in += e["amt"]
             else:
                 beyond_out += e["amt"]
-        elif e["dir"] == "in":
-            inflow[wi] += e["amt"]
+        elif is_in:
+            inflow[c] += e["amt"]
         else:
-            outflow[wi] += e["amt"]
+            outflow[c] += e["amt"]
     return {
         "week_ends": [d.isoformat() for d in week_ends],
         "weeks": weeks,
@@ -336,6 +344,8 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         "outflow": [round(x, 2) for x in outflow],
         "beyond_in": round(beyond_in, 2),
         "beyond_out": round(beyond_out, 2),
+        "pastdue_in": round(pastdue_in, 2),
+        "pastdue_out": round(pastdue_out, 2),
         "backlog": payload.get("backlog", {"in": 0.0, "out": 0.0}),
         "projects": payload.get("projects", []),
         "project_count": payload.get("project_count", 0),
