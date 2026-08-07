@@ -361,8 +361,8 @@ def generate_forecast_v2(start_date: date | None = None,
         sched_projects = []
         beyond_in = beyond_out = 0.0
 
-    def _sec(key, label, rows, wt):
-        return {"key": key, "label": label, "rows": rows,
+    def _sec(key, label, rows, wt, tier):
+        return {"key": key, "label": label, "rows": rows, "tier": tier,
                 "weekly_totals": [round(x, 2) for x in wt],
                 "grand_total": round(sum(wt), 2)}
 
@@ -390,8 +390,8 @@ def generate_forecast_v2(start_date: date | None = None,
         "inflow": {
             "label": "Cash Inflow",
             "sections": [
-                _sec("ar", "Committed — open invoices (A/R, by due date)", inv_rows, inv_wt),
-                {"key": "scheduled", "label": "Scheduled — to bill (project schedules)",
+                _sec("ar", "Committed — open invoices (A/R, by due date)", inv_rows, inv_wt, "committed"),
+                {"key": "scheduled", "label": "Scheduled — to bill (project schedules)", "tier": "scheduled",
                  "weekly_totals": [round(x, 2) for x in sched_in],
                  "grand_total": round(sum(sched_in), 2)},
             ],
@@ -402,9 +402,9 @@ def generate_forecast_v2(start_date: date | None = None,
         "outflow": {
             "label": "Cash Outflow",
             "sections": [
-                _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt),
-                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt),
-                {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)",
+                _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed"),
+                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated"),
+                {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)", "tier": "scheduled",
                  "weekly_totals": [round(x, 2) for x in sched_out],
                  "grand_total": round(sum(sched_out), 2)},
             ],

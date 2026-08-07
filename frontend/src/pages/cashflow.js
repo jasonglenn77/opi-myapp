@@ -231,13 +231,25 @@ export async function cashflowPage(routeFn) {
       return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
     }).join("");
 
-    const secRow = (s, group, bg) => {
-      const hasRows = s.rows && s.rows.length;
-      return dataRow(s.label, s.weekly_totals, { indent: true, bg, toggleGroup: hasRows ? group : null })
-        + (hasRows ? detailRows(s.rows, group, "#fbfbfb") : "");
+    // confidence tiers: how firm a section's cash is (committed QBO > scheduled
+    // app plans > estimated run-rate). Shades the section row + a dot.
+    const TIER = {
+      committed: { dot: "bg-ink-900", bg: "#eef1f4", name: "Committed" },
+      scheduled: { dot: "bg-emerald-500", bg: "#f0f8f2", name: "Scheduled" },
+      estimated: { dot: "border-[1.5px] border-black/40", bg: "#f7f7f8", name: "Estimated" },
     };
-    const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`, "#fbfdfb")).join("");
-    const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`, "#fffafa")).join("");
+    const secRow = (s, group) => {
+      const t = TIER[s.tier] || TIER.scheduled;
+      const hasRows = s.rows && s.rows.length;
+      const chev = hasRows ? `<button data-toggle="${group}" class="mr-1 text-black/40 hover:text-black" style="font-size:11px">▸</button>` : "";
+      const dot = `<span class="inline-block w-2 h-2 rounded-full align-middle mr-1.5 ${t.dot}"></span>`;
+      const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}</td>`;
+      return `<tr>${label}${numCells(s.weekly_totals)}</tr>` + (hasRows ? detailRows(s.rows, group, "#fbfbfb") : "");
+    };
+    const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`)).join("");
+    const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`)).join("");
+    const legend = ["committed", "scheduled", "estimated"].map(k =>
+      `<span class="inline-flex items-center gap-1.5 text-[11px] text-black/55"><span class="inline-block w-2 h-2 rounded-full ${TIER[k].dot}"></span>${TIER[k].name}</span>`).join("");
 
     // freshness + backlog strip
     const c = d.cache || {};
@@ -260,6 +272,7 @@ export async function cashflowPage(routeFn) {
     grid.innerHTML = `
       <div class="flex flex-wrap items-center justify-between gap-3 px-1 pb-3">
         <div class="text-[12px]">${fresh} <button data-cf-refresh class="ml-2 font-semibold text-brand-700 hover:underline">↻ Refresh schedules</button></div>
+        <div class="flex items-center gap-3">${legend}</div>
         ${backlogChip}
       </div>
       <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + d.weeks * 68}px">
