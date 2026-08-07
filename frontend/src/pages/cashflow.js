@@ -130,6 +130,8 @@ export async function cashflowPage(routeFn) {
         <div id="cfGrid" class="p-4 text-sm text-black/50">Loading…</div>
       </div>
     </div>
+
+    <div id="cfCards" class="mt-4"></div>
   `;
 
   setShell({ title: "", subtitle: "", bodyHtml, showLogout: true, routeFn });
@@ -493,11 +495,43 @@ export async function cashflowPage(routeFn) {
       const d = await api(`/cashflow/${endpoint}?${params.toString()}`);
       renderKpis(d);
       render(d);
-      if (mode === "forecast_v2") schedulePoll(d.cache);
+      if (mode === "forecast_v2") { schedulePoll(d.cache); loadCreditCards(); }
+      else cardsEl.innerHTML = "";
     } catch (e) {
       kpis.innerHTML = "";
       grid.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`;
     }
+  }
+
+  // ── Credit cards: parked/informational panel (Forecast+ only). The balances are
+  //    tracked but NOT in the forecast math yet — pending how payoffs are scheduled.
+  const cardsEl = document.getElementById("cfCards");
+  let ccData = null;
+  async function loadCreditCards() {
+    if (!ccData) {
+      try { ccData = await api("/cashflow/credit-cards"); }
+      catch (e) { ccData = { available: false }; }
+    }
+    if (mode !== "forecast_v2" || !ccData.available) { cardsEl.innerHTML = ""; return; }
+    const accts = (ccData.accounts || []).filter(a => Math.abs(a.balance) > 0.5);
+    const rows = accts.map(a => `
+      <tr class="border-b border-black/[0.04]">
+        <td class="py-1 pr-3 text-black/70">${escapeHtml(a.name)}</td>
+        <td class="py-1 pl-2 text-right tabular-nums ${a.credit_balance ? "text-emerald-700" : "text-black/70"}">${a.credit_balance ? "credit " + fmtMoney(-a.owed) : fmtMoney(a.owed)}</td>
+      </tr>`).join("");
+    cardsEl.innerHTML = `
+      <details class="group/cc card p-0 overflow-hidden">
+        <summary class="flex items-center gap-2 px-4 py-3 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015]">
+          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open/cc:rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="text-sm font-bold text-ink-900">Credit cards</span>
+          <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Tracked · not in forecast yet</span>
+          <span class="ml-auto text-[13px] tabular-nums"><span class="text-black/45">owed</span> <b class="text-ink-900">${fmtMoney(ccData.total_owed || 0)}</b></span>
+        </summary>
+        <div class="px-4 pb-4 border-t border-black/[0.06]">
+          <div class="text-[12px] text-black/50 py-2">Card balances from QuickBooks. Not folded into the forecast until we set how the cards are paid off — card charges aren't cash out of the bank until the card is paid.</div>
+          <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pr-3 text-left">Card</th><th class="py-1.5 pl-2 text-right">Owed</th></tr></thead><tbody>${rows || `<tr><td colspan="2" class="py-3 text-black/40">No card balances.</td></tr>`}</tbody></table></div>
+        </div>
+      </details>`;
   }
 
   // While the scheduled-cash cache is still computing (background recompute),

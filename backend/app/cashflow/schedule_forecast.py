@@ -281,6 +281,13 @@ def _iso_now() -> str:
     return _dt.utcnow().replace(microsecond=0).isoformat()
 
 
+# The schedule tables whose edits should invalidate the cache. All have an
+# updated_at that bumps on any INSERT/UPDATE (project_schedule_items covers
+# assignment date changes → dated/undated → backlog vs grid).
+_SOURCE_TABLES = ("project_payment_installments", "project_expense_installments",
+                  "project_invoice_milestones", "project_schedule_items")
+
+
 def ensure_cache_table():
     with engine.begin() as conn:
         conn.execute(text("""
@@ -288,6 +295,7 @@ def ensure_cache_table():
               id TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
               payload LONGTEXT NULL,
               computed_at DATETIME NULL,
+              source_max DATETIME NULL,
               computing TINYINT(1) NOT NULL DEFAULT 0,
               dirty TINYINT(1) NOT NULL DEFAULT 1,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -297,27 +305,37 @@ def ensure_cache_table():
             "INSERT IGNORE INTO cashflow_schedule_cache (id, dirty) VALUES (1, 1)"))
 
 
+def _source_max(conn):
+    """Latest updated_at across all schedule tables — the 'data version'. Any
+    schedule edit bumps this, so cache.source_max < this ⇒ the cache is stale."""
+    parts = " UNION ALL ".join(f"SELECT MAX(updated_at) m FROM {t}" for t in _SOURCE_TABLES)
+    return conn.execute(text(f"SELECT MAX(m) FROM ({parts}) x")).scalar()
+
+
 def _read_cache_row():
     ensure_cache_table()
     with engine.connect() as conn:
-        return conn.execute(text(
-            "SELECT payload, computed_at, computing, dirty FROM cashflow_schedule_cache WHERE id=1"
+        row = conn.execute(text(
+            "SELECT payload, computed_at, source_max, computing, dirty FROM cashflow_schedule_cache WHERE id=1"
         )).mappings().first()
+        cur_max = _source_max(conn)
+    return row, cur_max
 
 
 def touch_dirty():
-    """Mark the cached forecast stale (call after any billing-schedule edit)."""
+    """Explicitly mark the cached forecast stale. (The source_max check already
+    catches schedule edits automatically; this is a belt-and-suspenders hook.)"""
     try:
         ensure_cache_table()
         with engine.begin() as conn:
             conn.execute(text("UPDATE cashflow_schedule_cache SET dirty=1 WHERE id=1"))
     except Exception:
-        pass  # never let cache bookkeeping break a billing write
+        pass  # never let cache bookkeeping break a caller
 
 
 def recompute_cache():
-    """Run the expensive pass and store it. Guards against concurrent runs via the
-    `computing` flag (best-effort across the 2 workers)."""
+    """Run the expensive pass and store it (with the current data version).
+    Guards against concurrent runs via the `computing` flag."""
     ensure_cache_table()
     with engine.begin() as conn:
         already = conn.execute(text(
@@ -328,10 +346,13 @@ def recompute_cache():
     try:
         payload = compute_all_events()
         with engine.begin() as conn:
+            # capture source_max AFTER the ensure-pass so create-if-missing writes
+            # don't make the fresh cache look immediately stale.
+            src = _source_max(conn)
             conn.execute(text("""
                 UPDATE cashflow_schedule_cache
-                SET payload=:p, computed_at=:c, computing=0, dirty=0 WHERE id=1
-            """), {"p": _json.dumps(payload), "c": payload["computed_at"]})
+                SET payload=:p, computed_at=:c, source_max=:s, computing=0, dirty=0 WHERE id=1
+            """), {"p": _json.dumps(payload), "c": payload["computed_at"], "s": src})
         return True
     except Exception:
         with engine.begin() as conn:
@@ -340,10 +361,11 @@ def recompute_cache():
 
 
 def get_events(max_age_seconds: int = 1800):
-    """Return (payload, meta). Serves the cached event payload; meta tells the
-    caller whether it's fresh/stale/absent/computing so the route can decide to
-    kick a background recompute."""
-    row = _read_cache_row()
+    """Return (payload, meta). Serves the cached event payload; meta says whether
+    it's fresh/stale/absent/computing so the route can kick a background recompute.
+    Stale when: explicitly dirty, older than the TTL, OR a schedule table changed
+    since the cache was built (source_max moved)."""
+    row, cur_max = _read_cache_row()
     payload = None
     if row and row["payload"]:
         try:
@@ -351,13 +373,16 @@ def get_events(max_age_seconds: int = 1800):
         except Exception:
             payload = None
     computed_at = row["computed_at"] if row else None
+    source_max = row["source_max"] if row else None
     computing = bool(row["computing"]) if row else False
     dirty = bool(row["dirty"]) if row else True
     age = None
     if computed_at:
         age = (_dt.utcnow() - computed_at).total_seconds()
-    stale = dirty or age is None or age > max_age_seconds
+    edited_since = (cur_max is not None and (source_max is None or cur_max > source_max))
+    stale = dirty or edited_since or age is None or age > max_age_seconds
     meta = {"computed_at": computed_at.isoformat() if computed_at else None,
             "age_seconds": int(age) if age is not None else None,
-            "computing": computing, "stale": stale, "has_data": payload is not None}
+            "computing": computing, "stale": stale, "has_data": payload is not None,
+            "edited_since": edited_since}
     return payload, meta
