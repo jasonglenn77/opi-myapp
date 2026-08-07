@@ -222,15 +222,22 @@ def _parse_d(s):
         raise HTTPException(status_code=400, detail="bad date")
 
 
+def _friday_on_or_after(d):
+    """OPI pays crews on Fridays — snap a date up to the next Friday (weekday 4)."""
+    return d + timedelta(days=(4 - d.weekday()) % 7)
+
+
 def _even_split(contract, start, end, lead_days):
-    """Bi-weekly installments in arrears; even split, last row carries the rounding."""
+    """Bi-weekly installments in arrears; even split, last row carries the rounding.
+    Pay dates land on a Friday (OPI payroll day); the send-invoice date is `lead_days`
+    before, which keeps it on a Friday too."""
     days = (end - start).days if (start and end) else 0
     num = max(1, ceil(days / 14)) if days > 0 else 1
     base = round(contract / num, 2)
     out = []
     for i in range(1, num + 1):
         amt = base if i < num else round(contract - base * (num - 1), 2)
-        pay = start + timedelta(days=14 * i)
+        pay = _friday_on_or_after(start + timedelta(days=14 * i))
         out.append({"seq": i, "pay_date": pay, "amount": amt,
                     "send_invoice_date": pay - timedelta(days=lead_days),
                     "status": "pending", "note": "Final" if i == num else f"PMT {i}"})

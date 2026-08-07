@@ -560,6 +560,22 @@ def _actual_expenses(conn, entity_id):
     return out
 
 
+def _offer_scope(conn, entity_id):
+    """Scope of work for the crew offer script = the 'Installation (Labor)' group
+    line's description on the latest accepted/converted estimate (that's where the
+    BOM / scope narrative lives on OPI estimates)."""
+    return conn.execute(text("""
+        SELECT sl.description
+        FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
+        WHERE t.entity_type = 'Estimate' AND t.customer_qbo_id = :e
+          AND JSON_UNQUOTE(JSON_EXTRACT(sl.raw_json, '$.DetailType')) = 'GroupLineDetail'
+          AND JSON_UNQUOTE(JSON_EXTRACT(sl.raw_json, '$.GroupLineDetail.GroupItemRef.name')) = 'Installation (Labor)'
+          AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
+          AND sl.description IS NOT NULL AND sl.description <> ''
+        ORDER BY t.txn_date DESC LIMIT 1
+    """), {"e": entity_id}).scalar()
+
+
 def _project_offer(conn, entity_id):
     """Current crew job-offer state for the project (surfaced in the crew section)."""
     offers = _offer_rows(conn, "o.entity_id = :e", {"e": entity_id})
@@ -1119,6 +1135,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         crew_rollups = _compose_crew_rollups(conn, entity_id, books_closed)
         crews = _crew_options(conn)
         drift = _drift_reasons(conn, entity_id, ctx, inv)
+        offer_scope = _offer_scope(conn, entity_id)
 
     kpis = {
         "contract": inv["summary"]["total"],
@@ -1153,4 +1170,5 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         "crew_rollups": crew_rollups,
         "kpis": kpis,
         "crews": crews,
+        "offer_scope": offer_scope,
     }

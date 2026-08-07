@@ -516,7 +516,7 @@ function render(container, entityId, d) {
     if (script) {
       const cid = script.getAttribute("data-crew");
       const g = roll.rollups.find((x) => String(x.crew_id) === String(cid));
-      if (g) openOfferScriptModal(rollupScript(g, p.name));
+      if (g) openOfferScriptModal(rollupScript(g, p, d.offer_scope));
       return;
     }
     const oSend = e.target.closest("[data-offer-send]");
@@ -557,17 +557,63 @@ function render(container, entityId, d) {
 
 // Scripted rollup crew offer — estimates + labor + total + payment schedule,
 // ready to copy/email. Built from one crew rollup group.
-function rollupScript(g, projectName) {
+// Parse "6467 - TVH - Olathe, KS" -> { company: "TVH", location: "Olathe, KS" }.
+// OPI project display names are "<num> - <company> - <city, ST>".
+function parseProjectName(name) {
+  const parts = String(name || "").split(" - ");
+  if (parts.length >= 3 && /^\d+$/.test(parts[0].trim()))
+    return { company: parts[1].trim(), location: parts.slice(2).join(" - ").trim() };
+  if (parts.length === 2) return { company: parts[0].trim(), location: parts[1].trim() };
+  return { company: String(name || "").trim(), location: "" };
+}
+
+const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function longDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso.slice(0, 10) + "T00:00:00");
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+function dowOf(iso) {
+  if (!iso) return "";
+  return DOW[new Date(iso.slice(0, 10) + "T00:00:00").getDay()];
+}
+
+// Build the OPI crew job-offer email. Mirrors the format OPI sends:
+// boilerplate terms, the offer line (company: location - Day M/D - $labor),
+// scope of work (from the estimate's Installation (Labor) description), and the
+// payment schedule (send-invoice date + pay date + amount, on Fridays).
+function rollupScript(g, project, scope) {
+  const { company, location } = parseProjectName(project?.name);
+  const start = project?.start_date;
+  const offerLine = `${company}${location ? ": " + location : ""}${start ? " - " + dowOf(start) + " " + longDate(start) : ""} - ${money(g.labor)}`;
   const L = [];
-  L.push(`Job offer — ${projectName || "Project"}`);
-  if (g.crew_name) L.push(`Crew: ${g.crew_name}`);
+  L.push(`Please see the official offer below. The Payment Schedule below shows you when to send an invoice for payment and when it's expected to pay. This is subject to change.`);
   L.push("");
-  L.push("Scope (contract labor by estimate):");
-  (g.estimates || []).forEach((e) => L.push(`  Estimate #${e.doc}: ${money(e.labor)}`));
-  L.push(`Total labor: ${money(g.labor)}`);
+  L.push("Offer is based on a 5 man crew, working 7am-7pm");
+  L.push("Offer is based on a lump sum");
   L.push("");
-  L.push("Payment schedule (bi-weekly, in arrears):");
-  (g.installments || []).forEach((i) => L.push(`  ${shortDate(i.pay_date)}: ${money(i.amount)}`));
+  L.push("Please note we will need your daily updates submitted to the designated PM no later than 5pm each day.");
+  L.push("Work outside of the scope below needs to be approved/reported to the PM before work is performed.");
+  L.push("Delays, changes or issues related to the customer or equipment needs to be reported to the PM ASAP.");
+  L.push("");
+  L.push(offerLine);
+  L.push("");
+  L.push("Scope of work:");
+  L.push((scope && scope.trim()) ? scope.trim() : "[Add the Installation (Labor) scope from the estimate]");
+  L.push("");
+  L.push("Payment Schedule:");
+  const insts = g.installments || [];
+  if (!insts.length) {
+    L.push("  (no schedule yet — add assignment dates)");
+  } else {
+    L.push("  Send Invoice   Payment Date   Amount");
+    insts.forEach((i) => {
+      const pay = i.pay_date ? i.pay_date.slice(0, 10) : null;
+      const send = pay ? new Date(new Date(pay + "T00:00:00").getTime() - 7 * 864e5).toISOString().slice(0, 10) : null;
+      L.push(`  ${(send ? longDate(send) : "—").padEnd(13)}  ${(pay ? longDate(pay) : "—").padEnd(13)}  ${money(i.amount)}`);
+    });
+  }
+  L.push(`  Total: ${money(g.labor)}`);
   return L.join("\n");
 }
 
