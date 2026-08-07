@@ -146,18 +146,29 @@ def estimate_lines(project_qbo_id: str, qbo_estimate_id: str, user=Depends(get_c
     _require(user)
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT sl.item_name, sl.description, sl.qty, sl.unit_price, sl.amount, sl.cost_amount
+            SELECT sl.item_name, sl.description, sl.qty, sl.unit_price, sl.amount, sl.cost_amount,
+                   JSON_UNQUOTE(JSON_EXTRACT(sl.raw_json, '$.DetailType')) AS detail_type,
+                   JSON_UNQUOTE(JSON_EXTRACT(sl.raw_json, '$.GroupLineDetail.GroupItemRef.name')) AS group_name
             FROM qbo_sales_transaction_lines sl
             JOIN qbo_transactions t ON t.id = sl.transaction_id
-            WHERE t.entity_type = 'Estimate' AND t.qbo_id = :e AND sl.line_level = 'child'
+            WHERE t.entity_type = 'Estimate' AND t.qbo_id = :e
+              AND (sl.line_level = 'child'
+                   OR JSON_UNQUOTE(JSON_EXTRACT(sl.raw_json, '$.DetailType')) = 'GroupLineDetail')
             ORDER BY sl.line_num, sl.id
         """), {"e": qbo_estimate_id}).mappings().all()
     num = lambda v: float(v) if v is not None else None
-    return {"lines": [{
-        "item": r["item_name"], "description": r["description"],
-        "qty": num(r["qty"]), "unit_price": num(r["unit_price"]),
-        "amount": float(r["amount"] or 0), "cost_amount": num(r["cost_amount"]),
-    } for r in rows]}
+    out = []
+    for r in rows:
+        header = r["detail_type"] == "GroupLineDetail"
+        out.append({
+            # group/header rows (Installation (Labor), Rentals, Site Rentals) carry
+            # the section name + subtotal so the tab shows the estimate's structure.
+            "item": r["group_name"] if header else r["item_name"],
+            "description": r["description"], "header": header,
+            "qty": num(r["qty"]), "unit_price": num(r["unit_price"]),
+            "amount": float(r["amount"] or 0), "cost_amount": num(r["cost_amount"]),
+        })
+    return {"lines": out}
 
 
 class COPdfLine(BaseModel):

@@ -49,8 +49,14 @@ export async function mountChangeOrdersPanel(container, entityId) {
     if (!lines || !lines.length) return `<div class="text-[11px] text-black/40 py-1">No line items on this estimate.</div>`;
     return `<table class="w-full text-[11px]">
       <thead><tr class="text-left text-black/40"><th class="py-1 pr-3 font-bold">Item</th><th class="py-1 pr-3 font-bold">Description</th><th class="py-1 pr-3 font-bold text-right">Qty</th><th class="py-1 pr-3 font-bold text-right">Rate</th><th class="py-1 pr-3 font-bold text-right">Amount</th><th class="py-1 font-bold text-right">Cost</th></tr></thead>
-      <tbody>${lines.map(l => `<tr class="border-t border-black/5">
-        <td class="py-1 pr-3 font-semibold text-ink-900 whitespace-nowrap">${escapeHtml(l.item || "—")}</td>
+      <tbody>${lines.map(l => l.header
+        ? `<tr class="border-t border-black/10 bg-black/[0.03]">
+        <td class="py-1 pr-3 font-bold text-ink-900 whitespace-nowrap" colspan="4">${escapeHtml(l.item || "—")}</td>
+        <td class="py-1 pr-3 text-right tabular-nums font-bold">${money(l.amount)}</td>
+        <td class="py-1"></td>
+      </tr>`
+        : `<tr class="border-t border-black/5">
+        <td class="py-1 pr-3 pl-3 font-semibold text-ink-900 whitespace-nowrap">${escapeHtml(l.item || "—")}</td>
         <td class="py-1 pr-3 text-black/60 max-w-[300px] truncate">${escapeHtml(l.description || "")}</td>
         <td class="py-1 pr-3 text-right tabular-nums">${l.qty != null ? l.qty : "—"}</td>
         <td class="py-1 pr-3 text-right tabular-nums">${l.unit_price != null ? money(l.unit_price) : "—"}</td>
