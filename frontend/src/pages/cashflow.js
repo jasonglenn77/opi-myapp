@@ -111,6 +111,18 @@ export async function cashflowPage(routeFn) {
       </div>
     </div>
 
+    <div id="cfBacklogModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-6 flex flex-col" style="width:100%;max-width:56rem;max-height:85vh;overflow:hidden;">
+        <div class="flex items-center justify-between mb-1">
+          <div class="text-lg font-extrabold">Committed, not yet scheduled</div>
+          <button id="cfBacklogClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
+        </div>
+        <div class="text-xs text-black/50 mb-3">Won projects with a contract but no start dates yet — so their cash isn't on the weekly grid. This is what would flow in and out <span class="font-semibold">if they all got scheduled</span>. Already-paid deposits are in your bank balance; sent invoices (A/R) are already on the forecast by their due date.</div>
+        <div id="cfBacklogSummary" class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3"></div>
+        <div id="cfBacklogBody" class="overflow-y-auto" style="flex:1 1 auto;min-height:0;"></div>
+      </div>
+    </div>
+
     <div id="cfKpis" class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4"></div>
 
     <div class="card p-0 overflow-hidden">
@@ -143,6 +155,7 @@ export async function cashflowPage(routeFn) {
 
   // forecast projected-layer toggles (row-level checkboxes drive these)
   const proj = { inc_active: true, inc_awarded: true, inc_jobcost: true };
+  let lastBacklog = null; // most recent Forecast+ backlog, for the drill-down modal
 
   // ---- formatting helpers ----
   const cell = (n) => {
@@ -215,12 +228,16 @@ export async function cashflowPage(routeFn) {
       ? `<span class="inline-flex items-center gap-1.5 text-amber-700"><span class="cf-spin animate-spin inline-block h-3 w-3 rounded-full border-2 border-amber-500 border-t-transparent"></span>Updating scheduled cash…</span>`
       : `<span class="text-black/50">Scheduled cash as of <b class="text-black/70">${stamp}</b>${c.stale ? ` <span class="text-amber-700 font-semibold">· stale</span>` : ""}</span>`;
     const bk = d.backlog || { in: 0, out: 0 };
-    const backlogChip = (bk.in > 0.5 || bk.out > 0.5)
-      ? `<div class="text-[12px] text-black/60 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-           <b class="text-amber-800">Committed, not yet scheduled:</b>
-           ${bk.in > 0.5 ? ` in ${fmtMoney(bk.in)}` : ""}${bk.out > 0.5 ? ` · out ${fmtMoney(bk.out)}` : ""}
-           <span class="text-black/45"> — projects awaiting start dates; held out of the weekly balance.</span>
-         </div>`
+    lastBacklog = bk;
+    const bkIn = (bk.in || 0) + (bk.ar || 0);
+    const hasBk = (bk.count || 0) > 0 || bkIn > 0.5 || (bk.out || 0) > 0.5;
+    const netPos = (bk.net || 0) >= 0;
+    const backlogChip = hasBk
+      ? `<button data-cf-backlog class="text-left text-[12px] text-black/70 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 hover:bg-amber-100">
+           <b class="text-amber-800">Committed, not yet scheduled</b> · ${bk.count || 0} project${bk.count === 1 ? "" : "s"}
+           <span class="text-black/55"> — in ${fmtMoney(bkIn)} · out ${fmtMoney(bk.out || 0)} · </span><b class="${netPos ? "text-emerald-700" : "text-red-600"}">net ${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}</b>
+           <span class="text-brand-700 font-semibold ml-1">view →</span>
+         </button>`
       : "";
 
     grid.innerHTML = `
@@ -254,6 +271,58 @@ export async function cashflowPage(routeFn) {
     wireToggles();
     const rb = grid.querySelector("[data-cf-refresh]");
     if (rb) rb.addEventListener("click", refreshSchedules);
+    const bb = grid.querySelector("[data-cf-backlog]");
+    if (bb) bb.addEventListener("click", openBacklog);
+  }
+
+  // ── Backlog drill-down (undated projects: what flows if they all get dates) ──
+  const backlogModal = document.getElementById("cfBacklogModal");
+  const backlogSummary = document.getElementById("cfBacklogSummary");
+  const backlogBody = document.getElementById("cfBacklogBody");
+  const closeBacklog = () => { backlogModal.classList.add("hidden"); backlogModal.classList.remove("flex"); };
+  document.getElementById("cfBacklogClose").addEventListener("click", closeBacklog);
+  backlogModal.addEventListener("click", (e) => { if (e.target === backlogModal) closeBacklog(); });
+
+  function openBacklog() {
+    const bk = lastBacklog || {};
+    const projs = bk.projects || [];
+    const totIn = (bk.in || 0) + (bk.ar || 0);
+    const netPos = (bk.net || 0) >= 0;
+    const stat = (label, val, cls = "") => `
+      <div class="rounded-xl border border-black/10 p-3">
+        <div class="text-[11px] font-semibold text-black/50">${label}</div>
+        <div class="text-lg font-extrabold ${cls}">${val}</div>
+      </div>`;
+    backlogSummary.innerHTML =
+      stat("Coming in (to collect)", fmtMoney(totIn), "text-emerald-700") +
+      stat("Going out (estimated)", fmtMoney(bk.out || 0), "text-red-600") +
+      stat("Net cash impact", `${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}`, netPos ? "text-emerald-700" : "text-red-600") +
+      stat("Already in the bank", fmtMoney(bk.paid || 0), "text-black/60");
+    const num = (v, cls = "text-black/60") => v > 0.5
+      ? `<span class="tabular-nums ${cls}">${fmtMoney(v)}</span>` : `<span class="text-black/20">–</span>`;
+    const rows = projs.map((p) => `
+      <tr class="border-b border-black/5">
+        <td class="py-1.5 pr-3"><div class="font-semibold text-ink-900">${escapeHtml(p.name)}</div><div class="text-[10px] text-black/40">${escapeHtml(p.status)}</div></td>
+        <td class="py-1.5 px-2 text-right">${num(p.paid)}</td>
+        <td class="py-1.5 px-2 text-right">${num(p.ar, "text-black/70")}</td>
+        <td class="py-1.5 px-2 text-right">${num(p.to_bill, "font-semibold text-emerald-700")}</td>
+        <td class="py-1.5 px-2 text-right">${num(p.out, "text-red-600")}</td>
+        <td class="py-1.5 pl-2 text-right tabular-nums font-bold ${p.net >= 0 ? "text-emerald-700" : "text-red-600"}">${p.net >= 0 ? "+" : ""}${fmtMoney(p.net || 0)}</td>
+      </tr>`).join("");
+    backlogBody.innerHTML = `
+      <table class="w-full text-[12.5px]">
+        <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
+          <th class="py-2 pr-3 text-left">Project</th>
+          <th class="py-2 px-2 text-right">Paid (banked)</th>
+          <th class="py-2 px-2 text-right">Sent · A/R</th>
+          <th class="py-2 px-2 text-right">To bill</th>
+          <th class="py-2 px-2 text-right">Est. out</th>
+          <th class="py-2 pl-2 text-right">Net</th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="py-4 text-black/40">No undated projects.</td></tr>`}</tbody>
+      </table>
+      <div class="text-[11px] text-black/45 mt-3">“To bill” + “Sent · A/R” is cash still to collect; “Est. out” is estimated crew + expenses from each project's estimate (net of any spend so far). “Net” = in − out. When a project gets start/end dates, its cash moves onto the weekly forecast automatically.</div>`;
+    backlogModal.classList.remove("hidden"); backlogModal.classList.add("flex");
   }
 
   // ── Actuals renderer (historical; unchanged shape) ─────────────────────────

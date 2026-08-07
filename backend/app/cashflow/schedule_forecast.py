@@ -76,6 +76,7 @@ def _project_events(conn, entity_id):
     books_closed = op_status == "completed"
     if books_closed:
         return None  # trust actuals; nothing scheduled remains
+    has_dates = bool(ctx.get("start_date") and ctx.get("end_date"))
 
     cvi = B._all_crew_vendor_ids(conn, entity_id)
     inv = B._compose_invoices(conn, entity_id, books_closed)
@@ -125,13 +126,37 @@ def _project_events(conn, entity_id):
             else:
                 backlog_out += amt
 
+    # Backlog detail (option a): for an undated project, the crew/expense SCHEDULE
+    # can't be generated, but the ESTIMATE baseline still tells us the expected
+    # cost. Surface the full picture per project so the chip can drill down:
+    # already paid (in the bank), sent A/R (already on the grid), still-to-bill,
+    # estimated crew+expense out (net of any actual spend), and the net swing.
+    backlog_detail = None
+    if not has_dates and backlog_in > EPS:
+        ests = B._estimates_for_billing(conn, entity_id)
+        crew_est = round(sum(float(e["labor"] or 0) for e in ests if e["status"] == "accepted"), 2)
+        exp_est = round(sum(B._estimate_costs_by_category(conn, entity_id).values()), 2)
+        crew_out = round(max(0.0, crew_est - float(crew.get("paid_qbo") or 0)), 2)
+        exp_out = round(max(0.0, exp_est - float(exp.get("spent_qbo") or 0)), 2)
+        paid = round(float(inv.get("paid_qbo") or 0), 2)
+        ar = round(max(0.0, float(inv.get("invoiced_qbo") or 0) - paid), 2)
+        to_bill = round(backlog_in, 2)
+        est_out = round(crew_out + exp_out, 2)
+        backlog_detail = {
+            "entity_id": entity_id, "name": ctx["name"], "status": op_status,
+            "paid": paid, "ar": ar, "to_bill": to_bill,
+            "crew_out": crew_out, "exp_out": exp_out, "out": est_out,
+            "net": round((to_bill + ar) - est_out, 2),
+        }
+
     if not events and backlog_in <= EPS and backlog_out <= EPS:
         return None
     return {
         "entity_id": entity_id, "name": ctx["name"], "status": op_status,
-        "has_dates": bool(ctx.get("start_date") and ctx.get("end_date")),
+        "has_dates": has_dates,
         "events": events,
         "backlog_in": round(backlog_in, 2), "backlog_out": round(backlog_out, 2),
+        "backlog_detail": backlog_detail,
         "scheduled_in": round(sum(e["amt"] for e in events if e["dir"] == "in"), 2),
         "scheduled_out": round(sum(e["amt"] for e in events if e["dir"] == "out"), 2),
     }
@@ -147,6 +172,8 @@ def compute_all_events() -> dict:
     into any weekly horizon with `bucket_events` (cheap)."""
     all_events = []
     backlog_in = backlog_out = 0.0
+    backlog_paid = backlog_ar = backlog_est_out = 0.0
+    backlog_projects = []
     projects = []
     with engine.begin() as conn:  # begin(): the ensure-pass may write new schedules
         for eid in _candidate_project_ids(conn):
@@ -158,13 +185,28 @@ def compute_all_events() -> dict:
                               "backlog_in", "backlog_out", "scheduled_in", "scheduled_out")})
             backlog_in += ev["backlog_in"]
             backlog_out += ev["backlog_out"]
+            if ev.get("backlog_detail"):
+                bd = ev["backlog_detail"]
+                backlog_projects.append(bd)
+                backlog_paid += bd["paid"]
+                backlog_ar += bd["ar"]
+                backlog_est_out += bd["out"]
             for e in ev["events"]:
                 all_events.append({**e, "entity_id": eid})
     projects.sort(key=lambda p: -(p["scheduled_in"] + p["scheduled_out"]))
+    backlog_projects.sort(key=lambda p: -(p["to_bill"] + p["ar"] + p["out"]))
     return {
         "computed_at": _iso_now(),
         "events": all_events,
-        "backlog": {"in": round(backlog_in, 2), "out": round(backlog_out, 2)},
+        "backlog": {
+            "in": round(backlog_in, 2),            # still-to-bill (inflow)
+            "out": round(backlog_est_out, 2),      # estimated crew+expense (outflow)
+            "paid": round(backlog_paid, 2),        # already collected (in the bank)
+            "ar": round(backlog_ar, 2),            # sent, awaiting payment (already on grid)
+            "net": round((backlog_in + backlog_ar) - backlog_est_out, 2),
+            "projects": backlog_projects,
+            "count": len(backlog_projects),
+        },
         "projects": projects,
         "project_count": len(projects),
     }
