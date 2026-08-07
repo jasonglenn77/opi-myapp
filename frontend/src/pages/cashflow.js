@@ -229,13 +229,12 @@ export async function cashflowPage(routeFn) {
       : `<span class="text-black/50">Scheduled cash as of <b class="text-black/70">${stamp}</b>${c.stale ? ` <span class="text-amber-700 font-semibold">· stale</span>` : ""}</span>`;
     const bk = d.backlog || { in: 0, out: 0 };
     lastBacklog = bk;
-    const bkIn = (bk.in || 0) + (bk.ar || 0);
-    const hasBk = (bk.count || 0) > 0 || bkIn > 0.5 || (bk.out || 0) > 0.5;
+    const hasBk = (bk.count || 0) > 0 || (bk.in || 0) > 0.5 || (bk.out || 0) > 0.5;
     const netPos = (bk.net || 0) >= 0;
     const backlogChip = hasBk
       ? `<button data-cf-backlog class="text-left text-[12px] text-black/70 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 hover:bg-amber-100">
            <b class="text-amber-800">Committed, not yet scheduled</b> · ${bk.count || 0} project${bk.count === 1 ? "" : "s"}
-           <span class="text-black/55"> — in ${fmtMoney(bkIn)} · out ${fmtMoney(bk.out || 0)} · </span><b class="${netPos ? "text-emerald-700" : "text-red-600"}">net ${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}</b>
+           <span class="text-black/55"> — to bill ${fmtMoney(bk.in || 0)} · est. out ${fmtMoney(bk.out || 0)} · </span><b class="${netPos ? "text-emerald-700" : "text-red-600"}">net ${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}</b>
            <span class="text-brand-700 font-semibold ml-1">view →</span>
          </button>`
       : "";
@@ -286,7 +285,6 @@ export async function cashflowPage(routeFn) {
   function openBacklog() {
     const bk = lastBacklog || {};
     const projs = bk.projects || [];
-    const totIn = (bk.in || 0) + (bk.ar || 0);
     const netPos = (bk.net || 0) >= 0;
     const stat = (label, val, cls = "") => `
       <div class="rounded-xl border border-black/10 p-3">
@@ -294,12 +292,22 @@ export async function cashflowPage(routeFn) {
         <div class="text-lg font-extrabold ${cls}">${val}</div>
       </div>`;
     backlogSummary.innerHTML =
-      stat("Coming in (to collect)", fmtMoney(totIn), "text-emerald-700") +
-      stat("Going out (estimated)", fmtMoney(bk.out || 0), "text-red-600") +
-      stat("Net cash impact", `${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}`, netPos ? "text-emerald-700" : "text-red-600") +
-      stat("Already in the bank", fmtMoney(bk.paid || 0), "text-black/60");
+      stat("New inflow (to bill)", fmtMoney(bk.in || 0), "text-emerald-700") +
+      stat("New outflow (est.)", fmtMoney(bk.out || 0), "text-red-600") +
+      stat("Net added to forecast", `${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}`, netPos ? "text-emerald-700" : "text-red-600") +
+      stat("Already counted (A/R + banked)", fmtMoney((bk.ar || 0) + (bk.paid || 0)), "text-black/60");
     const num = (v, cls = "text-black/60") => v > 0.5
       ? `<span class="tabular-nums ${cls}">${fmtMoney(v)}</span>` : `<span class="text-black/20">–</span>`;
+    const netCell = (v) => `<span class="tabular-nums font-bold ${v >= 0 ? "text-emerald-700" : "text-red-600"}">${v >= 0 ? "+" : ""}${fmtMoney(v || 0)}</span>`;
+    const totalsRow = `
+      <tr class="border-b-2 border-black/20 font-bold" style="background:#f8fafc">
+        <td class="py-2 pr-3">All ${bk.count || 0} project${bk.count === 1 ? "" : "s"}</td>
+        <td class="py-2 px-2 text-right">${num(bk.paid, "text-black/70")}</td>
+        <td class="py-2 px-2 text-right">${num(bk.ar, "text-black/70")}</td>
+        <td class="py-2 px-2 text-right">${num(bk.in, "text-emerald-700")}</td>
+        <td class="py-2 px-2 text-right">${num(bk.out, "text-red-600")}</td>
+        <td class="py-2 pl-2 text-right">${netCell(bk.net || 0)}</td>
+      </tr>`;
     const rows = projs.map((p) => `
       <tr class="border-b border-black/5">
         <td class="py-1.5 pr-3"><div class="font-semibold text-ink-900">${escapeHtml(p.name)}</div><div class="text-[10px] text-black/40">${escapeHtml(p.status)}</div></td>
@@ -307,21 +315,21 @@ export async function cashflowPage(routeFn) {
         <td class="py-1.5 px-2 text-right">${num(p.ar, "text-black/70")}</td>
         <td class="py-1.5 px-2 text-right">${num(p.to_bill, "font-semibold text-emerald-700")}</td>
         <td class="py-1.5 px-2 text-right">${num(p.out, "text-red-600")}</td>
-        <td class="py-1.5 pl-2 text-right tabular-nums font-bold ${p.net >= 0 ? "text-emerald-700" : "text-red-600"}">${p.net >= 0 ? "+" : ""}${fmtMoney(p.net || 0)}</td>
+        <td class="py-1.5 pl-2 text-right">${netCell(p.net || 0)}</td>
       </tr>`).join("");
     backlogBody.innerHTML = `
       <table class="w-full text-[12.5px]">
         <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
           <th class="py-2 pr-3 text-left">Project</th>
           <th class="py-2 px-2 text-right">Paid (banked)</th>
-          <th class="py-2 px-2 text-right">Sent · A/R</th>
-          <th class="py-2 px-2 text-right">To bill</th>
-          <th class="py-2 px-2 text-right">Est. out</th>
-          <th class="py-2 pl-2 text-right">Net</th>
+          <th class="py-2 px-2 text-right">A/R (on forecast)</th>
+          <th class="py-2 px-2 text-right">To bill (new in)</th>
+          <th class="py-2 px-2 text-right">Est. out (new)</th>
+          <th class="py-2 pl-2 text-right">Net added</th>
         </tr></thead>
-        <tbody>${rows || `<tr><td colspan="6" class="py-4 text-black/40">No undated projects.</td></tr>`}</tbody>
+        <tbody>${totalsRow}${rows || `<tr><td colspan="6" class="py-4 text-black/40">No undated projects.</td></tr>`}</tbody>
       </table>
-      <div class="text-[11px] text-black/45 mt-3">“To bill” + “Sent · A/R” is cash still to collect; “Est. out” is estimated crew + expenses from each project's estimate (net of any spend so far). “Net” = in − out. When a project gets start/end dates, its cash moves onto the weekly forecast automatically.</div>`;
+      <div class="text-[11px] text-black/45 mt-3"><b>Net added</b> = “To bill” − “Est. out” — what each project would <span class="font-semibold">add to the forecast</span> once it's scheduled. <b>Paid</b> is already in your bank balance and <b>A/R</b> is already on the weekly grid by its due date, so neither is in “Net added” (no double-counting). Est. out = crew + expenses from the estimate, net of any spend so far.</div>`;
     backlogModal.classList.remove("hidden"); backlogModal.classList.add("flex");
   }
 

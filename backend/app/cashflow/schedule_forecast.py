@@ -94,9 +94,9 @@ def _project_events(conn, entity_id):
         if amt <= EPS:
             continue
         d = _iso(m.get("invoice_date"))
-        if d:
+        if d and has_dates:  # only on the grid if the project is fully dated
             events.append({"date": d, "dir": "in", "amt": amt, "src": "invoice"})
-        else:
+        else:                # undated (incl. partial start-only) -> all to backlog
             backlog_in += amt
 
     # Outflow crew: scheduled (unpaid) installments on their pay date.
@@ -107,7 +107,7 @@ def _project_events(conn, entity_id):
         if amt <= EPS:
             continue
         d = _iso(i.get("pay_date"))
-        if d:
+        if d and has_dates:
             events.append({"date": d, "dir": "out", "amt": amt, "src": "crew"})
         else:
             backlog_out += amt
@@ -121,7 +121,7 @@ def _project_events(conn, entity_id):
             if amt <= EPS:
                 continue
             d = _iso(w.get("week_of"))
-            if d:
+            if d and has_dates:
                 events.append({"date": d, "dir": "out", "amt": amt, "src": "expense"})
             else:
                 backlog_out += amt
@@ -142,11 +142,14 @@ def _project_events(conn, entity_id):
         ar = round(max(0.0, float(inv.get("invoiced_qbo") or 0) - paid), 2)
         to_bill = round(backlog_in, 2)
         est_out = round(crew_out + exp_out, 2)
+        # Net = what this project would ADD to the forecast if it got scheduled:
+        # new inflow (to-bill) minus new outflow (est). A/R + paid are NOT here —
+        # A/R is already on the grid by its due date, paid is already in the bank.
         backlog_detail = {
             "entity_id": entity_id, "name": ctx["name"], "status": op_status,
             "paid": paid, "ar": ar, "to_bill": to_bill,
             "crew_out": crew_out, "exp_out": exp_out, "out": est_out,
-            "net": round((to_bill + ar) - est_out, 2),
+            "net": round(to_bill - est_out, 2),
         }
 
     if not events and backlog_in <= EPS and backlog_out <= EPS:
@@ -172,7 +175,6 @@ def compute_all_events() -> dict:
     into any weekly horizon with `bucket_events` (cheap)."""
     all_events = []
     backlog_in = backlog_out = 0.0
-    backlog_paid = backlog_ar = backlog_est_out = 0.0
     backlog_projects = []
     projects = []
     with engine.begin() as conn:  # begin(): the ensure-pass may write new schedules
@@ -186,24 +188,23 @@ def compute_all_events() -> dict:
             backlog_in += ev["backlog_in"]
             backlog_out += ev["backlog_out"]
             if ev.get("backlog_detail"):
-                bd = ev["backlog_detail"]
-                backlog_projects.append(bd)
-                backlog_paid += bd["paid"]
-                backlog_ar += bd["ar"]
-                backlog_est_out += bd["out"]
+                backlog_projects.append(ev["backlog_detail"])
             for e in ev["events"]:
                 all_events.append({**e, "entity_id": eid})
     projects.sort(key=lambda p: -(p["scheduled_in"] + p["scheduled_out"]))
     backlog_projects.sort(key=lambda p: -(p["to_bill"] + p["ar"] + p["out"]))
+    # Totals derived from the per-project rows, so the chip/totals ALWAYS equal
+    # the sum of the drill-down. `in` = still-to-bill, `out` = estimated crew+exp,
+    # `ar`/`paid` = already-on-grid / already-in-bank context, `net` = in − out.
     return {
         "computed_at": _iso_now(),
         "events": all_events,
         "backlog": {
-            "in": round(backlog_in, 2),            # still-to-bill (inflow)
-            "out": round(backlog_est_out, 2),      # estimated crew+expense (outflow)
-            "paid": round(backlog_paid, 2),        # already collected (in the bank)
-            "ar": round(backlog_ar, 2),            # sent, awaiting payment (already on grid)
-            "net": round((backlog_in + backlog_ar) - backlog_est_out, 2),
+            "in": round(sum(p["to_bill"] for p in backlog_projects), 2),
+            "out": round(sum(p["out"] for p in backlog_projects), 2),
+            "paid": round(sum(p["paid"] for p in backlog_projects), 2),
+            "ar": round(sum(p["ar"] for p in backlog_projects), 2),
+            "net": round(sum(p["net"] for p in backlog_projects), 2),
             "projects": backlog_projects,
             "count": len(backlog_projects),
         },
