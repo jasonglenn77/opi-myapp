@@ -303,14 +303,14 @@ export async function projectsHubPage(routeFn) {
     const f = finById.get(p.qbo_customer_id);
     const att = attById.get(String(p.project_qbo_id)) || {};
     const os = att.outstanding || {}, aro = att.ar_overdue;
-    // A completed/canceled project is done — nothing left to bill/spend on the
-    // plan (its books are closed). A/R can still be outstanding (customer may
-    // still owe), so that line stays. This also avoids showing "to bill" from a
-    // still-Pending estimate on a finished project (e.g. #1069's unaccepted CO).
-    const done = p.operational_status === "completed" || p.operational_status === "canceled";
-    const toBill = (f && !done) ? Math.max(0, (Number(f.estimate_line_amt) || 0) - (Number(f.invoice_line_amt) || 0)) : 0;
+    // Show outstandings for EVERY status on purpose: a completed project that
+    // still has to-bill / crew / expense outstanding is a signal something's off
+    // (e.g. closed too early, or books not actually closed) — the office should
+    // see it and reopen if needed. Contract value now comes from the estimate
+    // header total, so it's the real quoted amount (fixes #1069's phantom to-bill).
+    const toBill = f ? Math.max(0, (Number(f.estimate_line_amt) || 0) - (Number(f.invoice_line_amt) || 0)) : 0;
     const ar = f ? Number(f.open_invoice_total_amt) || 0 : 0;  // true open A/R (unpaid invoices)
-    const crewDue = done ? 0 : (os.crew_due || 0), expLeft = done ? 0 : (os.exp_to_spend || 0);
+    const crewDue = os.crew_due || 0, expLeft = os.exp_to_spend || 0;
     const line = (label, val, extra = "") => `<div><span class="text-black/40">${label}</span> <b class="tabular-nums text-ink-900">${money(val)}</b>${extra}</div>`;
     const rows = [];
     if (toBill > 0.5) rows.push(line("Bill", toBill));

@@ -736,13 +736,27 @@ def refresh_project_financial_summary() -> dict:
                 SUM(CASE WHEN balance_amt > 0 THEN COALESCE(total_amt, 0) ELSE 0 END) AS open_invoice_total_amt
               FROM ar_lines
               GROUP BY project_qbo_id
+            ),
+
+            -- Contract value = the accepted estimates' HEADER totals (what the
+            -- customer was quoted). The sum of child line items is unreliable:
+            -- grouped/optional/quantity lines can sum above or below the header
+            -- (e.g. #3635 lines $98,092 vs header $34,332). The header is truth.
+            estimate_header AS (
+              SELECT qc.qbo_id AS project_qbo_id,
+                     SUM(COALESCE(qt.total_amt, 0)) AS estimate_header_amt
+              FROM myapp.qbo_customers qc
+              INNER JOIN latest_sales_txns qt
+                ON qt.customer_qbo_id = qc.qbo_id AND qt.entity_type = 'Estimate'
+              WHERE qc.is_project = 1
+              GROUP BY qc.qbo_id
             )
             SELECT
               qc.id,
               qc.qbo_id,
 
               COALESCE(sr.estimate_cost_amt, 0),
-              COALESCE(sr.estimate_line_amt, 0),
+              COALESCE(eh.estimate_header_amt, 0),
               COALESCE(sr.invoice_line_amt,  0),
               COALESCE(er.expense_line_amt,  0),
               COALESCE(ar.invoice_balance_amt, 0),
@@ -756,11 +770,11 @@ def refresh_project_financial_summary() -> dict:
                 ELSE (COALESCE(sr.invoice_line_amt, 0) - COALESCE(er.expense_line_amt, 0))
                      / COALESCE(sr.invoice_line_amt, 0)
               END,
-              (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0)),
+              (COALESCE(eh.estimate_header_amt, 0) - COALESCE(sr.estimate_cost_amt, 0)),
               CASE
-                WHEN COALESCE(sr.estimate_line_amt, 0) = 0 THEN NULL
-                ELSE (COALESCE(sr.estimate_line_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
-                     / COALESCE(sr.estimate_line_amt, 0)
+                WHEN COALESCE(eh.estimate_header_amt, 0) = 0 THEN NULL
+                ELSE (COALESCE(eh.estimate_header_amt, 0) - COALESCE(sr.estimate_cost_amt, 0))
+                     / COALESCE(eh.estimate_header_amt, 0)
               END,
               (COALESCE(sr.estimate_cost_amt, 0) - COALESCE(er.expense_line_amt, 0)),
               CASE
@@ -770,9 +784,10 @@ def refresh_project_financial_summary() -> dict:
               END
 
             FROM myapp.qbo_customers qc
-            LEFT JOIN sales_rollup   sr ON sr.project_qbo_id = qc.qbo_id
-            LEFT JOIN expense_rollup er ON er.project_qbo_id = qc.qbo_id
-            LEFT JOIN ar_rollup      ar ON ar.project_qbo_id = qc.qbo_id
+            LEFT JOIN sales_rollup     sr ON sr.project_qbo_id = qc.qbo_id
+            LEFT JOIN estimate_header  eh ON eh.project_qbo_id = qc.qbo_id
+            LEFT JOIN expense_rollup   er ON er.project_qbo_id = qc.qbo_id
+            LEFT JOIN ar_rollup        ar ON ar.project_qbo_id = qc.qbo_id
             WHERE qc.is_project = 1
 
             ON DUPLICATE KEY UPDATE
