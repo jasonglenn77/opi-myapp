@@ -101,6 +101,46 @@ def forecast_v2_refresh(background: BackgroundTasks, _user=Depends(require_capab
     return {"ok": True, "queued": True, "cache": meta}
 
 
+class OverheadItem(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    amount: Optional[float] = None
+    cadence: Optional[str] = None
+    anchor_date: Optional[str] = None
+    end_date: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@router.get("/overhead")
+def overhead_list(_user=Depends(require_capability("page.cashflow"))):
+    """The editable recurring-overhead schedule (rent, insurance, payroll, loans).
+    Seeds from the trailing run-rate the first time it's read."""
+    from . import overhead as OV
+    OV.seed_if_empty()
+    return {"items": OV.list_overhead(), "cadences": list(OV.CADENCES)}
+
+
+@router.post("/overhead")
+def overhead_create(item: OverheadItem, _user=Depends(require_capability("page.cashflow"))):
+    from . import overhead as OV
+    oid = OV.create(item.model_dump(exclude_none=True))
+    return {"ok": True, "id": oid}
+
+
+@router.patch("/overhead/{oid}")
+def overhead_update(oid: int, item: OverheadItem, _user=Depends(require_capability("page.cashflow"))):
+    from . import overhead as OV
+    OV.update(oid, item.model_dump(exclude_unset=True))
+    return {"ok": True}
+
+
+@router.delete("/overhead/{oid}")
+def overhead_delete(oid: int, _user=Depends(require_capability("page.cashflow"))):
+    from . import overhead as OV
+    OV.delete(oid)
+    return {"ok": True}
+
+
 @router.get("/actuals")
 def actuals(
     start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to trailing 13 weeks)"),

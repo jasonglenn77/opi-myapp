@@ -337,10 +337,14 @@ def generate_forecast_v2(start_date: date | None = None,
     # ---- committed layers (fast, live from QBO) ----
     inv_rows = _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks)
     ap_rows = _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks)
-    rec_rows = _outflow_recurring(today, weeks)
     inv_wt = _column_sums(inv_rows, weeks)
     ap_wt = _column_sums(ap_rows, weeks)
-    rec_wt = _column_sums(rec_rows, weeks)
+
+    # ---- recurring overhead: the editable schedule (seeded from the run-rate the
+    #      first time), expanded by cadence across the weekly grid ----
+    from . import overhead as OV
+    OV.seed_if_empty(today)
+    rec_wt, rec_rows = OV.expand(week_ends)
 
     # ---- scheduled layer (cached event pass, bucketed to this horizon) ----
     payload, cache_meta = SF.get_events(max_age_seconds)
@@ -399,7 +403,7 @@ def generate_forecast_v2(start_date: date | None = None,
             "label": "Cash Outflow",
             "sections": [
                 _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt),
-                _sec("recurring", "Recurring — overhead & payroll (run-rate)", rec_rows, rec_wt),
+                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt),
                 {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)",
                  "weekly_totals": [round(x, 2) for x in sched_out],
                  "grand_total": round(sum(sched_out), 2)},
