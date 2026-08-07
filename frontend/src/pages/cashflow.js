@@ -37,6 +37,7 @@ export async function cashflowPage(routeFn) {
         </div>
         <button id="cfGenerate" class="btn-primary py-2">Generate</button>
         <button id="cfCategories" class="px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Categories</button>
+        <button id="cfOverhead" class="hidden px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Overhead</button>
         <button id="cfInfo" type="button" title="How this page works" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/15 text-black/55 hover:bg-black/5">
           <svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -120,6 +121,21 @@ export async function cashflowPage(routeFn) {
         <div class="text-xs text-black/50 mb-3">Won projects with a contract but no start dates yet — so their cash isn't on the weekly grid. This is what would flow in and out <span class="font-semibold">if they all got scheduled</span>. Already-paid deposits are in your bank balance; sent invoices (A/R) are already on the forecast by their due date.</div>
         <div id="cfBacklogSummary" class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3"></div>
         <div id="cfBacklogBody" class="overflow-y-auto" style="flex:1 1 auto;min-height:0;"></div>
+      </div>
+    </div>
+
+    <div id="cfOverheadModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-6 flex flex-col" style="width:100%;max-width:56rem;max-height:85vh;overflow:hidden;">
+        <div class="flex items-center justify-between mb-1">
+          <div class="text-lg font-extrabold">Recurring overhead</div>
+          <button id="cfOverheadClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
+        </div>
+        <div class="text-xs text-black/50 mb-3">The recurring cash going out — rent, insurance, payroll, loan payments. Each item lands in the forecast by its cadence from the reference date. Seeded from your trailing spend; edit into real items. Changes show in the forecast right away.</div>
+        <div id="cfOverheadBody" class="overflow-y-auto" style="flex:1 1 auto;min-height:0;">Loading…</div>
+        <div class="flex items-center justify-between gap-2 pt-3 border-t border-black/10 mt-2">
+          <button id="cfOverheadAdd" class="text-sm font-semibold text-brand-700 hover:underline">+ Add item</button>
+          <button id="cfOverheadDone" class="btn-primary">Done</button>
+        </div>
       </div>
     </div>
 
@@ -470,6 +486,7 @@ export async function cashflowPage(routeFn) {
     btnActuals.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "actuals" ? active : "border-black/15"}`;
     weeksWrap.classList.toggle("hidden", mode !== "actuals");
     horizonWrap.classList.toggle("hidden", mode !== "forecast_v2");
+    document.getElementById("cfOverhead").classList.toggle("hidden", mode !== "forecast_v2");
     modeDesc.textContent = mode === "forecast_v2"
       ? "Forward cash from your real bank balance — committed (open invoices/bills) + recurring overhead + the scheduled crew/invoice/expense plans on every project. Extend the horizon as far as you like."
       : mode === "forecast"
@@ -542,6 +559,70 @@ export async function cashflowPage(routeFn) {
     if (mode === "forecast_v2" && cache && (cache.stale || cache.computing)) {
       pollTimer = setTimeout(load, 6000);
     }
+  }
+
+  // ── Recurring overhead editor (Forecast+) ─────────────────────────────────
+  const ovModal = document.getElementById("cfOverheadModal");
+  const ovBody = document.getElementById("cfOverheadBody");
+  let ovCadences = ["weekly", "biweekly", "monthly", "quarterly", "annual"];
+  let ovDirty = false; // did anything change → reload forecast on close
+  const closeOverhead = () => {
+    ovModal.classList.add("hidden"); ovModal.classList.remove("flex");
+    if (ovDirty) { ovDirty = false; load(); }  // recurring is live → reflect edits
+  };
+  document.getElementById("cfOverhead").addEventListener("click", openOverhead);
+  document.getElementById("cfOverheadClose").addEventListener("click", closeOverhead);
+  document.getElementById("cfOverheadDone").addEventListener("click", closeOverhead);
+  ovModal.addEventListener("click", (e) => { if (e.target === ovModal) closeOverhead(); });
+  document.getElementById("cfOverheadAdd").addEventListener("click", async () => {
+    await api("/cashflow/overhead", { method: "POST", body: JSON.stringify({ name: "New item", amount: 0, cadence: "monthly", anchor_date: (startEl.value || new Date().toISOString().slice(0, 10)) }) });
+    ovDirty = true; renderOverhead();
+  });
+
+  const OV_IN = "bg-transparent border border-black/15 rounded px-1.5 py-1 text-[12.5px] outline-none focus:border-blue-500 focus:bg-white";
+  async function renderOverhead() {
+    let items = [];
+    try { const r = await api("/cashflow/overhead"); items = r.items || []; ovCadences = r.cadences || ovCadences; }
+    catch (e) { ovBody.innerHTML = `<div class="py-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`; return; }
+    const cadOpts = (sel) => ovCadences.map(c => `<option value="${c}" ${c === sel ? "selected" : ""}>${c}</option>`).join("");
+    const rows = items.map(i => `
+      <tr class="border-b border-black/5" data-ov="${i.id}">
+        <td class="py-1 pr-2"><input data-f="name" value="${escapeHtml(i.name || "")}" class="${OV_IN} w-full"></td>
+        <td class="py-1 px-1"><input data-f="amount" type="number" step="1" value="${Math.round(i.amount || 0)}" class="${OV_IN} w-24 text-right tabular-nums"></td>
+        <td class="py-1 px-1"><select data-f="cadence" class="${OV_IN}">${cadOpts(i.cadence)}</select></td>
+        <td class="py-1 px-1"><input data-f="anchor_date" type="date" value="${(i.anchor_date || "").slice(0, 10)}" class="${OV_IN} w-32 tabular-nums"></td>
+        <td class="py-1 px-1"><input data-f="end_date" type="date" value="${(i.end_date || "").slice(0, 10)}" class="${OV_IN} w-32 tabular-nums"></td>
+        <td class="py-1 pl-1 text-right"><button data-ov-del="${i.id}" class="text-black/30 hover:text-red-600 text-[13px]" title="Remove">✕</button></td>
+      </tr>`).join("");
+    ovBody.innerHTML = `
+      <table class="w-full text-[12.5px]">
+        <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
+          <th class="py-1.5 pr-2 text-left">Item</th><th class="py-1.5 px-1 text-right">Amount</th>
+          <th class="py-1.5 px-1 text-left">Cadence</th><th class="py-1.5 px-1 text-left">Starting</th>
+          <th class="py-1.5 px-1 text-left">Ends (optional)</th><th class="py-1.5"></th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="py-4 text-black/40">No overhead items.</td></tr>`}</tbody>
+      </table>`;
+    ovBody.querySelectorAll("[data-ov] [data-f]").forEach(el => {
+      el.addEventListener("change", async () => {
+        const id = el.closest("[data-ov]").getAttribute("data-ov");
+        const field = el.getAttribute("data-f");
+        let val = el.value;
+        if (field === "amount") val = parseFloat(val) || 0;
+        if ((field === "anchor_date" || field === "end_date") && !val) val = null;
+        try { await api(`/cashflow/overhead/${id}`, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); ovDirty = true; }
+        catch (e) { alert("Failed to save: " + (e.message || e)); }
+      });
+    });
+    ovBody.querySelectorAll("[data-ov-del]").forEach(b => b.addEventListener("click", async () => {
+      await api(`/cashflow/overhead/${b.getAttribute("data-ov-del")}`, { method: "DELETE" });
+      ovDirty = true; renderOverhead();
+    }));
+  }
+  function openOverhead() {
+    ovBody.innerHTML = `<div class="py-4 text-sm text-black/40">Loading…</div>`;
+    ovModal.classList.remove("hidden"); ovModal.classList.add("flex");
+    renderOverhead();
   }
 
   // Force a recompute of the scheduled-cash cache; the poll picks up the result.
