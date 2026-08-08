@@ -86,14 +86,16 @@ def _project_events(conn, entity_id):
 
     events, backlog_in, backlog_out = [], 0.0, 0.0
 
-    # Inflow: scheduled (not-yet-invoiced) milestones on their planned invoice date.
+    # Inflow: scheduled (not-yet-invoiced) milestones on their DUE date — that's
+    # when the cash is expected (net terms after billing), matching how committed
+    # A/R is placed. Fall back to the invoice date if no due date.
     for m in inv["milestones"]:
         if m.get("tier") != "scheduled":
             continue
         amt = float(m.get("amount") or 0)
         if amt <= EPS:
             continue
-        d = _iso(m.get("invoice_date"))
+        d = _iso(m.get("due_date") or m.get("invoice_date"))
         if d and has_dates:  # only on the grid if the project is fully dated
             events.append({"date": d, "dir": "in", "amt": amt, "src": "invoice"})
         else:                # undated (incl. partial start-only) -> all to backlog

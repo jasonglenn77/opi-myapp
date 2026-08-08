@@ -758,17 +758,21 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
 
 
 def _tier_installments(by_date, paid, books_closed):
-    """Burn a crew rollup's bi-weekly lumps down against actual paid — earliest
-    dates fill first, splitting the boundary lump (partial)."""
+    """Burn a crew rollup's bi-weekly lumps down against what was ACTUALLY paid to
+    this crew — earliest dates fill first, splitting the boundary lump (partial).
+    Status reflects real payment even on a closed project: if this crew wasn't paid
+    (e.g. the work went to another crew), it shows unpaid, not a blanket "Paid"."""
     out, cum = [], 0.0
     for idx, d in enumerate(sorted(by_date.keys())):
         amt = by_date[d]
         covered = min(amt, max(0.0, paid - cum))
         cum += amt
-        if books_closed or covered >= amt - EPS:
+        if covered >= amt - EPS:
             tier, label = "realized", "Paid"
         elif covered > EPS:
             tier, label = "partial", f"Partial · ${round(covered):,} paid"
+        elif books_closed:
+            tier, label = "scheduled", "Not paid"   # closed project, this crew unpaid
         else:
             tier, label = "scheduled", "Scheduled"
         out.append({"seq": idx + 1, "pay_date": d, "amount": amt, "tier": tier,

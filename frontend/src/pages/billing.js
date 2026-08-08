@@ -24,6 +24,7 @@ const PILL = {
   "Bill · A/P":  "text-ink-900 bg-black/[0.06] border border-black/15",
   Scheduled:     "text-emerald-700 bg-transparent border border-emerald-300",
   "To bill":     "text-emerald-700 bg-transparent border border-emerald-300",
+  "Not paid":    "text-rose-700 bg-rose-50 border border-rose-200",
   Allocated:     "text-black/45 bg-transparent border border-black/15",
 };
 function pill(label) {
@@ -410,6 +411,16 @@ function render(container, entityId, d) {
           <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(crewLaborEst)} labor</span>
         </summary>
         <div class="p-3">
+          ${(() => {
+            const v = crewLaborEst - crewPaid;  // + = under estimate, − = over
+            if (crewPaid <= 0.5 && !p.books_closed) return "";
+            return `<div class="flex items-center gap-3 px-3 py-2 mb-2 rounded-lg bg-black/[0.02] border border-black/10 text-[12.5px] flex-wrap">
+              <span class="text-black/55">Estimated labor <b class="text-ink-900 tabular-nums">${money(crewLaborEst)}</b></span>
+              <span class="text-black/55">Actual paid <b class="text-ink-900 tabular-nums">${money(crewPaid)}</b></span>
+              <span class="ml-auto font-bold tabular-nums ${Math.abs(v) < 0.5 ? "text-black/50" : v > 0 ? "text-emerald-700" : "text-red-600"}">${Math.abs(v) < 0.5 ? "on estimate" : money(Math.abs(v)) + (v > 0 ? " under estimate" : " over estimate")}</span>
+              ${p.books_closed ? `<span class="text-[10px] font-bold uppercase tracking-wide text-black/40 bg-black/[0.06] border border-black/15 px-1.5 py-0.5 rounded">final</span>` : ""}
+            </div>`;
+          })()}
           ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
           ${est.accepted.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}</div></div>` : ""}
         </div>
