@@ -114,12 +114,18 @@ def _project_events(conn, entity_id):
         else:
             backlog_out += amt
 
-    # Outflow expenses: scheduled weekly installments on their week_of date.
+    # Outflow expenses: still-to-spend weekly installments on their week_of date.
+    # Scheduled weeks contribute their full amount; a partially-spent boundary week
+    # contributes only its unspent remainder.
     for cat in exp["by_category"]:
         for w in cat.get("weekly", []):
-            if w.get("tier") != "scheduled":
+            t = w.get("tier")
+            if t == "scheduled":
+                amt = float(w.get("amount") or 0)
+            elif t == "partial":
+                amt = round(float(w.get("amount") or 0) - float(w.get("paid") or 0), 2)
+            else:
                 continue
-            amt = float(w.get("amount") or 0)
             if amt <= EPS:
                 continue
             d = _iso(w.get("week_of"))

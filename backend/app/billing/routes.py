@@ -348,35 +348,33 @@ def _compose_estimates(conn, entity_id):
         """), {"sid": s["id"]}).mappings().all()
         scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
 
-    # global burn-down across all milestones by invoice date — PARTIAL: the
-    # QBO invoiced/collected totals fill the milestone stack, splitting the
-    # boundary milestone (e.g. $6k invoiced vs 3.5/3.5/3 → line 2 is part-sent).
-    flat = []
-    for eq, (sid, ms) in scheds.items():
-        for m in ms:
-            flat.append(m)
-    flat.sort(key=lambda m: (str(m["invoice_date"] or "9999"), m["seq"] or 0))
-    tier_by, cum = {}, 0.0
-    for m in flat:
-        amt = float(m["amount"] or 0)
-        covered = min(amt, max(0.0, invoiced - cum))   # invoiced (sent) portion
-        paid = min(amt, max(0.0, collected - cum))     # collected (paid) portion
-        cum += amt
-        if paid >= amt - EPS:
-            tier, label = "realized", "Paid"
-        elif covered >= amt - EPS:
-            tier, label = "committed", "Sent · A/R"
-        elif covered > EPS:
-            tier, label = "partial", f"Partial · ${round(covered):,} sent"
-        else:
-            tier, label = "scheduled", "To bill"
-        tier_by[m["id"]] = {"tier": tier, "label": label,
-                            "covered": round(covered, 2), "paid": round(paid, 2),
-                            "remaining": round(amt - covered, 2)}
+    # Per-estimate burn-down: each estimate's milestones burn down against the
+    # actual QBO invoices LINKED to that estimate (LinkedTxn) — so an estimate
+    # with sent invoices shows Sent·A/R and one with none shows To bill, instead
+    # of one project-wide pool spilling across estimates. Invoices with no
+    # estimate link fold into the first accepted estimate as a catch-all.
+    def _tier_est(ms, est_invoiced, est_collected):
+        out, cum = {}, 0.0
+        for m in sorted(ms, key=lambda m: (str(m["invoice_date"] or "9999"), m["seq"] or 0)):
+            amt = float(m["amount"] or 0)
+            covered = min(amt, max(0.0, est_invoiced - cum))   # sent (invoiced)
+            paid = min(amt, max(0.0, est_collected - cum))     # collected (paid)
+            cum += amt
+            if paid >= amt - EPS:
+                tier, label = "realized", "Paid"
+            elif covered >= amt - EPS:
+                tier, label = "committed", "Sent · A/R"
+            elif covered > EPS:
+                tier, label = "partial", f"Partial · ${round(covered):,} sent"
+            else:
+                tier, label = "scheduled", "To bill"
+            out[m["id"]] = {"tier": tier, "label": label, "covered": round(covered, 2),
+                            "paid": round(paid, 2), "remaining": round(amt - covered, 2)}
+        return out
 
-    def _ms_out(m):
-        t = tier_by.get(m["id"], {"tier": "scheduled", "label": "To bill",
-                                  "covered": 0.0, "paid": 0.0, "remaining": float(m["amount"] or 0)})
+    def _ms_out(m, tb):
+        t = tb.get(m["id"], {"tier": "scheduled", "label": "To bill",
+                             "covered": 0.0, "paid": 0.0, "remaining": float(m["amount"] or 0)})
         return {
             "id": m["id"], "seq": m["seq"], "label": m["label"], "pct": float(m["pct"] or 0),
             "invoice_date": str(m["invoice_date"]) if m["invoice_date"] else None,
@@ -386,7 +384,12 @@ def _compose_estimates(conn, entity_id):
             "status_label": t["label"],
         }
 
+    unlinked = actuals_by_est.get("", [])
+    unlinked_inv = round(sum(a["amount"] for a in unlinked), 2)
+    unlinked_coll = round(sum(a["amount"] - a["balance"] for a in unlinked), 2)
+
     accepted, pending, needs_review = [], [], 0
+    first_accepted = True
     for e in ests:
         if e["status"] == "pending":
             pending.append({"qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"]})
@@ -394,16 +397,29 @@ def _compose_estimates(conn, entity_id):
         if e["status"] != "accepted":
             continue
         sid, ms = scheds.get(e["qbo_id"], (None, []))
-        milestones = [_ms_out(m) for m in ms]
+        est_actuals = list(actuals_by_est.get(str(e["doc_number"] or ""), []))
+        est_invoiced = round(sum(a["amount"] for a in est_actuals), 2)
+        est_collected = round(sum(a["amount"] - a["balance"] for a in est_actuals), 2)
+        if first_accepted and unlinked:          # fold unlinked invoices into the first estimate
+            est_invoiced = round(est_invoiced + unlinked_inv, 2)
+            est_collected = round(est_collected + unlinked_coll, 2)
+            est_actuals = est_actuals + unlinked
+        first_accepted = False
+        tb = _tier_est(ms, est_invoiced, est_collected)
+        milestones = [_ms_out(m, tb) for m in ms]
         if not e["confirmed"]:
             needs_review += 1
         cs, cinsts = crew_map.get(e["qbo_id"], (None, []))
+        h_paid = round(sum(mo["paid"] for mo in milestones), 2)
+        h_sent_ar = round(sum(mo["covered"] - mo["paid"] for mo in milestones), 2)
+        h_tobill = round(sum(mo["remaining"] for mo in milestones), 2)
         accepted.append({
             "qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"],
             "labor": e["labor"], "confirmed": e["confirmed"], "crew_id": e["crew_id"],
             "schedule_id": sid, "milestones": milestones,
             "invoice_subtotal": round(sum(m["amount"] for m in milestones), 2),
-            "invoice_actuals": actuals_by_est.get(str(e["doc_number"] or ""), []),
+            "invoice_actuals": est_actuals,
+            "paid": h_paid, "sent_ar": h_sent_ar, "to_bill": h_tobill,
             "crew_schedule_id": (cs["id"] if cs else None),
             "crew_installments": cinsts,
         })
@@ -918,15 +934,26 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
         inst_by_cat.setdefault(r["category"], []).append(r)
 
     def _cat_weekly(cat, actual):
+        # Burn each category's weekly plan down against ACTUAL spend — earliest
+        # weeks fill first, splitting the boundary week (partial). On a closed
+        # project, weeks the money never reached show "Not spent", not "Paid".
         out, cum = [], 0.0
         for r in inst_by_cat.get(cat, []):
             amt = float(r["amount"] or 0)
-            tier = "realized" if (books_closed or cum + amt <= actual + EPS) else "scheduled"
+            covered = min(amt, max(0.0, actual - cum))
             cum += amt
+            if covered >= amt - EPS:
+                tier, label = "realized", "Paid"
+            elif covered > EPS:
+                tier, label = "partial", f"Partial · ${round(covered):,} spent"
+            elif books_closed:
+                tier, label = "scheduled", "Not spent"
+            else:
+                tier, label = "scheduled", "Scheduled"
             out.append({"id": r["id"], "seq": r["seq"],
                         "week_of": str(r["week_of"]) if r["week_of"] else None,
                         "amount": amt, "tier": tier, "edited": bool(r["edited"]),
-                        "status_label": "Paid" if tier == "realized" else "Scheduled"})
+                        "paid": round(covered, 2), "status_label": label})
         return out
     by_category = [
         {"category": c, "estimated": round(cat_est.get(c, 0.0), 2),

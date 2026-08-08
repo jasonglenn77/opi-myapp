@@ -25,6 +25,7 @@ const PILL = {
   Scheduled:     "text-emerald-700 bg-transparent border border-emerald-300",
   "To bill":     "text-emerald-700 bg-transparent border border-emerald-300",
   "Not paid":    "text-rose-700 bg-rose-50 border border-rose-200",
+  "Not spent":   "text-rose-700 bg-rose-50 border border-rose-200",
   Allocated:     "text-black/45 bg-transparent border border-black/15",
 };
 function pill(label) {
@@ -208,7 +209,12 @@ function render(container, entityId, d) {
         <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-sm font-bold text-ink-900">Estimate <span class="text-blue-700">#${escapeHtml(a.doc || "—")}</span></span>
         ${statusPill}
-        <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(a.value)}</span>
+        <span class="ml-auto flex items-center gap-2.5 text-[11.5px] tabular-nums flex-wrap justify-end">
+          ${a.paid > 0.5 ? `<span class="text-emerald-700 font-semibold">${money(a.paid)} paid</span>` : ""}
+          ${a.sent_ar > 0.5 ? `<span class="text-ink-900 font-semibold">${money(a.sent_ar)} sent · A/R</span>` : ""}
+          ${a.to_bill > 0.5 ? `<span class="text-emerald-600 font-semibold">${money(a.to_bill)} to bill</span>` : ""}
+          <span class="text-[13px] font-bold text-ink-900 border-l border-black/15 pl-2.5">${money(a.value)}</span>
+        </span>
       </summary>
       <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
         <th class="py-2 pl-4 pr-3 text-left">Milestone</th><th class="py-2 px-2 text-left">%</th><th class="py-2 px-2 text-left">Invoice</th><th class="py-2 px-2 text-left">Due</th><th class="py-2 px-2 text-right">Amount</th><th class="py-2 pl-2 pr-4 text-right">Status</th>
@@ -273,7 +279,7 @@ function render(container, entityId, d) {
     // crew assignment lives OUTSIDE the <summary> so clicks reach the delegated
     // handler (a stopPropagation in the summary was swallowing them).
     const assignRow = complete
-      ? `<div class="px-4 py-1.5 text-[11.5px] text-black/55">Crew paid: <b class="text-ink-900">${escapeHtml(crewName(a.crew_id) || "—")}</b> · books closed</div>`
+      ? `<div class="px-4 py-1.5 text-[11.5px] text-black/55">Crew assigned: <b class="text-ink-900">${escapeHtml(crewName(a.crew_id) || "—")}</b> · books closed <span class="text-black/40">(actual payments may differ — see rollup + Other crews above)</span></div>`
       : `<div class="px-4 py-1.5 flex items-center gap-1.5 text-[11.5px] flex-wrap"><span class="text-black/55">Crew</span>
           <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select>
           <button data-crew-browse data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-blue-600 hover:underline">browse crews →</button></div>`;
@@ -408,7 +414,10 @@ function render(container, entityId, d) {
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Crew payments</span>
           <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">rollup by crew · bi-weekly</span>
-          <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(crewLaborEst)} labor</span>
+          <span class="ml-auto flex items-center gap-3 text-[12px] tabular-nums">
+            <span class="text-black/55">est labor <b class="text-ink-900">${money(crewLaborEst)}</b></span>
+            <span class="text-black/55">paid <b class="text-ink-900">${money(crewPaid)}</b></span>
+          </span>
         </summary>
         <div class="p-3">
           ${(() => {
