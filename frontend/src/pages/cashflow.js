@@ -280,7 +280,7 @@ export async function cashflowPage(routeFn) {
       const editHint = isRec ? ` <span class="text-[10px] font-semibold text-amber-700">✎ edit cells for what-if</span>` : "";
       const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}${vt}${editHint}</td>`;
       const detA = hasRows ? detailV2(s.rows, group, hasAlt ? "a" : "", isRec) : "";
-      const detB = hasAlt ? detailV2(s.alt_rows, group, "b") : "";
+      const detB = hasAlt ? detailV2(s.alt_rows, group, "b", isRec) : "";  // recurring: both views editable
       const totalCells = isRec ? numCellsR(s.weekly_totals, "recTotal") : numCells(s.weekly_totals);
       return `<tr>${label}${pdCell(s.pastdue || 0)}${totalCells}</tr>` + detA + detB;
     };
@@ -361,6 +361,7 @@ export async function cashflowPage(routeFn) {
       viewOf[g] = (viewOf[g] === "b") ? "a" : "b";
       btn.textContent = (viewOf[g] === "b" ? btn.dataset.vb : btn.dataset.va) + " ⇄";
       applyDetail(g);
+      if (g === recGroup) recomputeWhatIf();  // what-if follows the visible recurring view
     }));
     const rb = grid.querySelector("[data-cf-refresh]");
     if (rb) rb.addEventListener("click", refreshSchedules);
@@ -373,7 +374,9 @@ export async function cashflowPage(routeFn) {
     // ── live what-if: edit a recurring cell → re-roll the balance (not saved) ──
     const wWeeks = d.weeks;
     const inflowTotal = d.inflow.weekly_totals;
-    const recSec = d.outflow.sections.find(s => s.key === "recurring");
+    const recIdx = d.outflow.sections.findIndex(s => s.key === "recurring");
+    const recGroup = recIdx >= 0 ? `outv2_${recIdx}` : null;
+    const recSec = recIdx >= 0 ? d.outflow.sections[recIdx] : null;
     const baseRecurring = (recSec && recSec.weekly_totals) || new Array(wWeeks).fill(0);
     const baseOutOther = d.outflow.weekly_totals.map((v, w) => v - (baseRecurring[w] || 0));
     const opening0 = (d.summary.opening[0] != null) ? d.summary.opening[0] : 0;
@@ -382,8 +385,11 @@ export async function cashflowPage(routeFn) {
       td.innerHTML = cell(arr[+td.getAttribute("data-w")]);
     });
     function recomputeWhatIf() {
+      // sum only the CURRENTLY SHOWN recurring view's cells (both views are
+      // editable but each reconciles to the same total — never sum both).
+      const view = recGroup ? (viewOf[recGroup] || "a") : "a";
       const newRec = new Array(wWeeks).fill(0);
-      grid.querySelectorAll("td.cf-recedit").forEach(td => {
+      grid.querySelectorAll(`.cf-detail[data-group="${recGroup}"][data-view="${view}"] td.cf-recedit`).forEach(td => {
         newRec[+td.getAttribute("data-w")] += parseFloat((td.textContent || "").replace(/[^0-9.\-]/g, "")) || 0;
       });
       const outTotal = [], surplus = [], opening = [], ending = [];
