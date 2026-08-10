@@ -219,15 +219,17 @@ export async function cashflowPage(routeFn) {
   }
 
   function render(d) {
-    if (d.mode === "forecast_v2") return renderForecastV2(d);
-    return d.mode === "forecast" ? renderForecast(d) : renderActuals(d);
+    if (d.mode === "forecast_v2" || d.mode === "actuals") return renderForecastV2(d);
+    return renderForecast(d);
   }
 
   // ── Forecast+ renderer (Phase 3b: committed QBO + scheduled project layer,
   //    unbounded weekly horizon, real bank anchor, option-a backlog) ──────────
   function renderForecastV2(d) {
+    const isActuals = d.mode === "actuals";
     // Past-due column: everything dated before the current week, in its own
-    // leading column so week 1 shows only its true Sat–Fri items.
+    // leading column so week 1 shows only its true Sat–Fri items. (Actuals are
+    // all historical — no past-due.)
     const pd = d.past_due || { opening: d.opening_balance, ending: d.opening_balance, inflow: 0, outflow: 0, surplus: 0 };
     const hasPD = Math.abs(pd.inflow) > 0.5 || Math.abs(pd.outflow) > 0.5;
     const PD_BG = "#fbf6ea", PD_SEP = "border-right:2px solid rgba(0,0,0,.18)";
@@ -307,12 +309,15 @@ export async function cashflowPage(routeFn) {
          </button>`
       : "";
 
-    grid.innerHTML = `
-      <div class="flex flex-wrap items-center justify-between gap-3 px-1 pb-3">
+    const strip = isActuals
+      ? `<div class="px-1 pb-3 text-[12px] text-black/50">Realized cash — actual customer payments in, bill payments &amp; card/check spend out, by the week they cleared. Click a project to open it.</div>`
+      : `<div class="flex flex-wrap items-center justify-between gap-3 px-1 pb-3">
         <div class="text-[12px]">${fresh} <button data-cf-refresh class="ml-2 font-semibold text-brand-700 hover:underline">↻ Refresh schedules</button></div>
         <div class="flex items-center gap-3">${legend}</div>
         ${backlogChip}
-      </div>
+      </div>`;
+    grid.innerHTML = `
+      ${strip}
       <div data-cf-whatif class="hidden items-center gap-2 mb-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-[12px] text-amber-900">
         <b>What-if mode</b> — showing a hypothetical balance from your recurring edits (not saved).
         <button data-cf-whatif-reset class="ml-auto font-bold text-brand-700 hover:underline">Reset to actual</button>

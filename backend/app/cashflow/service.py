@@ -471,13 +471,14 @@ def generate_actuals(start_date: date | None = None,
                 return i
         return None
 
-    payments = _actual_payments(win_start, win_end, week_index, weeks)
-    billpays = _actual_billpayments(win_start, win_end, week_index, weeks)
-    purchases = _actual_purchases(win_start, win_end, week_index, weeks)
+    pay_rows = _act_payments(win_start, win_end, week_index, weeks)          # by customer (linked)
+    bp_rows = _act_billpay(win_start, win_end, week_index, weeks)            # by vendor
+    pur_cat = _act_purchases_by(win_start, win_end, week_index, weeks, "category")
+    pur_proj = _act_purchases_by(win_start, win_end, week_index, weeks, "project")
 
-    inflow_totals = _column_sums(payments, weeks)
-    bp_totals = _column_sums(billpays, weeks)
-    pur_totals = _column_sums(purchases, weeks)
+    inflow_totals = _column_sums(pay_rows, weeks)
+    bp_totals = _column_sums(bp_rows, weeks)
+    pur_totals = _column_sums(pur_cat, weeks)   # category & project views share the same total
     outflow_totals = [round(bp_totals[i] + pur_totals[i], 2) for i in range(weeks)]
 
     opening, surplus, ending = _zeros(weeks), _zeros(weeks), _zeros(weeks)
@@ -488,6 +489,13 @@ def generate_actuals(start_date: date | None = None,
         bal = bal + inflow_totals[i] - outflow_totals[i]
         ending[i] = round(bal, 2)
 
+    def _asec(key, label, rows, wt, alt=None, va=None, vb=None):
+        s = {"key": key, "label": label, "rows": rows, "tier": "committed",
+             "weekly_totals": [round(x, 2) for x in wt], "grand_total": round(sum(wt), 2)}
+        if alt is not None:
+            s.update({"alt_rows": alt, "view_a": va, "view_b": vb})
+        return s
+
     return {
         "mode": "actuals",
         "as_of": today.isoformat(),
@@ -497,18 +505,16 @@ def generate_actuals(start_date: date | None = None,
         "opening_balance": round(float(opening_balance), 2),
         "inflow": {
             "label": "Cash Collected",
-            "sublabel": "customer payments received",
-            "rows": payments,
+            "sections": [_asec("payments", "Customer payments received", pay_rows, inflow_totals)],
             "weekly_totals": [round(x, 2) for x in inflow_totals],
             "grand_total": round(sum(inflow_totals), 2),
         },
         "outflow": {
             "label": "Cash Paid Out",
             "sections": [
-                {"key": "billpay", "label": "Bill payments (vendors/contractors)", "rows": billpays,
-                 "weekly_totals": [round(x, 2) for x in bp_totals]},
-                {"key": "purchases", "label": "Direct expenses (cards/checks)", "rows": purchases,
-                 "weekly_totals": [round(x, 2) for x in pur_totals]},
+                _asec("billpay", "Bill payments (vendors/contractors)", bp_rows, bp_totals),
+                _asec("purchases", "Direct expenses (cards/checks)", pur_cat, pur_totals,
+                      pur_proj, "By category", "By project"),
             ],
             "weekly_totals": outflow_totals,
             "grand_total": round(sum(outflow_totals), 2),
@@ -802,59 +808,89 @@ def _bucket(rows, week_ends, win_end, weeks, split_pastdue=False):
 # ---------------------------------------------------------------------------
 # Actuals queries (realized cash by txn_date)
 # ---------------------------------------------------------------------------
-def _actual_payments(win_start, win_end, week_index, weeks):
+def _bucket_named(rows, week_index, weeks):
+    """Group (name, due_date, amount [, link_id, is_project]) rows into weekly rows,
+    carrying an optional project link so the Actuals view can drill to a project."""
+    grouped = {}
+    for r in rows:
+        idx = week_index(r["due_date"])
+        if idx is None:
+            continue
+        g = grouped.setdefault(r["name"], {"weekly": [0.0] * weeks, "link_id": None, "is_project": False})
+        g["weekly"][idx] += float(r["amount"] or 0)
+        if r.get("link_id") is not None and g["link_id"] is None:
+            g["link_id"] = str(r["link_id"])
+            g["is_project"] = bool(r.get("is_project"))
+    out = [{"label": name, "weekly": [round(x, 2) for x in g["weekly"]],
+            "link_id": g["link_id"], "is_project": g["is_project"],
+            "total": round(sum(g["weekly"]), 2)} for name, g in grouped.items()]
+    out.sort(key=lambda x: -x["total"])
+    return out
+
+
+def _act_payments(win_start, win_end, week_index, weeks):
+    """Customer payments received, by customer (linked to the project)."""
     sql = text("""
         SELECT COALESCE(qc.display_name,
                         JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.CustomerRef.name')),
                         'Unknown') AS name,
+               qc.qbo_id AS link_id, qc.is_project AS is_project,
                qt.txn_date AS due_date, qt.total_amt AS amount
         FROM qbo_transactions qt
         LEFT JOIN qbo_customers qc ON qc.qbo_id = qt.customer_qbo_id
-        WHERE qt.entity_type = 'Payment'
-          AND qt.txn_date BETWEEN :ws AND :we
+        WHERE qt.entity_type = 'Payment' AND qt.txn_date BETWEEN :ws AND :we
           AND qt.total_amt IS NOT NULL
     """)
     with engine.connect() as conn:
         rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
-    return _bucket_by_name(rows, week_index, weeks)
+    return _bucket_named(rows, week_index, weeks)
 
 
-def _actual_billpayments(win_start, win_end, week_index, weeks):
+def _act_billpay(win_start, win_end, week_index, weeks):
+    """Bill payments (vendors/contractors), by vendor. BillPayments carry no
+    project tag, so this is vendor-only (the vendor is the crew/company paid)."""
     sql = text("""
         SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.VendorRef.name')),
                         'Unknown vendor') AS name,
                qt.txn_date AS due_date, qt.total_amt AS amount
         FROM qbo_transactions qt
-        WHERE qt.entity_type = 'BillPayment'
-          AND qt.txn_date BETWEEN :ws AND :we
+        WHERE qt.entity_type = 'BillPayment' AND qt.txn_date BETWEEN :ws AND :we
           AND qt.total_amt IS NOT NULL
     """)
     with engine.connect() as conn:
         rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
-    return _bucket_by_name(rows, week_index, weeks)
+    return _bucket_named(rows, week_index, weeks)
 
 
-def _actual_purchases(win_start, win_end, week_index, weeks):
-    """Direct expenses (cards/checks), grouped by account category, by header date."""
+def _act_purchases_by(win_start, win_end, week_index, weeks, dim):
+    """Direct expenses (cards/checks) grouped by `dim`: 'category' (expense
+    account) or 'project' (the line's customer tag; untagged -> Non-project).
+    Both views drop the same user-excluded categories, so their totals match."""
     sql = text("""
-        SELECT COALESCE(
-                 SUBSTRING_INDEX(
-                   JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')),
-                   ':', 1),
-                 'Other') AS name,
+        SELECT COALESCE(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(
+                 l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1), 'Other') AS category,
+               l.line_customer_qbo_id AS proj_id, qc.display_name AS proj_name, qc.is_project AS is_project,
                qt.txn_date AS due_date, l.amount AS amount
         FROM qbo_transactions qt
         JOIN qbo_transaction_lines l ON l.transaction_id = qt.id
-        WHERE qt.entity_type = 'Purchase'
-          AND qt.txn_date BETWEEN :ws AND :we
+        LEFT JOIN qbo_customers qc ON qc.qbo_id = l.line_customer_qbo_id
+        WHERE qt.entity_type = 'Purchase' AND qt.txn_date BETWEEN :ws AND :we
           AND l.amount IS NOT NULL
     """)
-    with engine.connect() as conn:
-        rows = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
-    grouped = _bucket_by_name(rows, week_index, weeks)
-    # Drop categories the user has classified as transfers/financing (non-operating).
     excluded = _excluded_categories()
-    return [r for r in grouped if r["label"] not in excluded]
+    with engine.connect() as conn:
+        raw = conn.execute(sql, {"ws": win_start, "we": win_end}).mappings().all()
+    rows = []
+    for r in raw:
+        if r["category"] in excluded:
+            continue
+        if dim == "project":
+            rows.append({"name": r["proj_name"] or "Non-project / overhead", "due_date": r["due_date"],
+                         "amount": r["amount"], "link_id": r["proj_id"] if r["proj_name"] else None,
+                         "is_project": r["is_project"]})
+        else:
+            rows.append({"name": r["category"], "due_date": r["due_date"], "amount": r["amount"]})
+    return _bucket_named(rows, week_index, weeks)
 
 
 # ---------------------------------------------------------------------------
