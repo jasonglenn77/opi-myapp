@@ -9,8 +9,7 @@ export async function cashflowPage(routeFn) {
     <div class="card px-4 py-3 mb-4">
       <div class="flex flex-wrap items-end gap-x-3 gap-y-2">
         <div class="flex items-center gap-1.5">
-          <button id="cfModeV2" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Forecast+</button>
-          <button id="cfModeForecast" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Forecast (old)</button>
+          <button id="cfModeV2" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Forecast</button>
           <button id="cfModeActuals" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Actuals</button>
         </div>
         <div>
@@ -73,41 +72,48 @@ export async function cashflowPage(routeFn) {
           <div class="text-lg font-extrabold">How the Cash Flow page works</div>
           <button id="cfInfoClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
         </div>
-        <div class="text-sm text-black/70 space-y-3 overflow-y-auto pr-1" style="min-height:0;">
-          <p>Three views, switched at the top left:</p>
+        <div class="text-sm text-black/70 space-y-4 overflow-y-auto pr-1" style="min-height:0;">
+          <p>This page shows your cash two ways, switched at the top left: <span class="font-semibold text-ink-900">Forecast</span> (what's coming) and <span class="font-semibold text-ink-900">Actuals</span> (what already happened).</p>
+
           <div>
-            <div class="font-bold text-ink-900">🚀 Forecast+ — the new schedule-driven forecast</div>
-            <p class="text-black/60">Starts from your real QuickBooks bank balance and rolls forward week by week, as far out as you set the horizon (no 13-week cap).</p>
-            <ul class="list-disc ml-5 mt-1 space-y-1 text-black/60">
-              <li><span class="font-semibold text-ink-900">Committed</span>: open invoices coming in and open bills going out, on their due dates.</li>
-              <li><span class="font-semibold text-ink-900">Recurring</span>: an overhead &amp; payroll run-rate going out.</li>
-              <li><span class="font-semibold text-ink-900">Scheduled</span>: the invoice, crew, and expense plans from every project's Billing &amp; Schedule tab — so this forecast is the sum of all those tabs. Edit a project's schedule and it flows up here.</li>
-              <li><span class="font-semibold text-ink-900">Committed, not yet scheduled</span>: cash on won projects that don't have start dates yet is held in a backlog line, out of the weekly balance, until the dates are set.</li>
-            </ul>
-            <p class="text-black/50 mt-1">The scheduled layer is cached (it reads every project); <span class="font-semibold">↻ Refresh schedules</span> recomputes it after edits.</p>
+            <div class="font-bold text-ink-900">How the Forecast builds each week</div>
+            <p class="text-black/60">It starts at your <span class="font-semibold">real QuickBooks bank balance</span>, then each week: <span class="font-semibold">opening → + cash in − cash out → ending</span>, and the next week opens where the last one ended. You can extend the horizon as far out as you want (13 / 26 / 52 or any number of weeks).</p>
           </div>
+
           <div>
-            <div class="font-bold text-ink-900">📈 Forecast (old) — the next 13 weeks</div>
-            <p class="text-black/60">A forward look at your cash position week by week. Each week opens at the prior week's ending balance, then adds inflow and subtracts outflow.</p>
-            <ul class="list-disc ml-5 mt-1 space-y-1 text-black/60">
-              <li><span class="font-semibold text-ink-900">Committed</span> (always counted): open invoices coming in by their due date; open bills plus an overhead &amp; payroll run-rate going out.</li>
-              <li><span class="font-semibold text-ink-900">Projected</span> (each row has a checkbox to include or exclude): un-invoiced balance on active projects + awarded-but-not-started estimates coming in; a job-cost run-rate (contractor + materials) going out. Use these to see the realistic picture vs. just what's booked today.</li>
-              <li><span class="font-semibold text-ink-900">Beyond 13 wk</span> column: amounts dated past the 13-week window (e.g. awarded work further out). Informational — it isn't part of the week-13 ending balance.</li>
+            <div class="font-bold text-ink-900">What the lines mean — and where each number comes from</div>
+            <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
+              <li><span class="font-semibold text-ink-900">Committed</span> — the firmest money, because it's already in QuickBooks. <em>In</em> = customer invoices you've already sent, placed on their due date. <em>Out</em> = bills you've already entered, on their due date.</li>
+              <li><span class="font-semibold text-ink-900">Scheduled</span> — the plans from each project's <span class="font-semibold">Billing &amp; Schedule</span> tab that aren't in QuickBooks yet: invoices you're set to send, crew payments, and project expenses, each on its planned date. The forecast is the sum of every project's tab, so if you fix a project's schedule it updates here.</li>
+              <li><span class="font-semibold text-ink-900">Recurring</span> — your steady overhead: rent, insurance, payroll, loan payments. It's an editable schedule seeded from your <span class="font-semibold">actual past spending</span> (with each item's cadence — weekly, monthly, etc. — detected from history). Adjust it with the <span class="font-semibold">Overhead</span> button.</li>
             </ul>
           </div>
+
           <div>
-            <div class="font-bold text-ink-900">📒 Actuals — what really happened</div>
-            <p class="text-black/60">Historical realized cash for a date range you choose: actual customer payments received in, actual bill payments + card/check spend out.</p>
+            <div class="font-bold text-ink-900">Reading the grid</div>
+            <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
+              <li><span class="font-semibold text-ink-900">Confidence dots</span> next to each line show how firm it is: <span class="font-semibold">committed</span> (in QuickBooks) → <span class="font-semibold">scheduled</span> (planned) → <span class="font-semibold">estimated</span> (run-rate).</li>
+              <li><span class="font-semibold text-ink-900">Past due</span> column — anything dated before this week (overdue invoices to collect, bills/plans to catch up on) sits in its own column, so each week shows only its true Sat–Fri dates.</li>
+              <li><span class="font-semibold text-ink-900">Committed, not yet scheduled</span> — won projects that don't have start dates yet. Their cash is held out of the weekly balance until dates are set; click it to see those projects and what they'd add.</li>
+              <li><span class="font-semibold text-ink-900">Drill in</span> — expand any section to see the detail; use the <span class="font-semibold">⇄</span> toggle to switch views (by vendor / project / category / item); and <span class="font-semibold">click a project name</span> to open its Billing &amp; Schedule tab.</li>
+              <li><span class="font-semibold text-ink-900">What-if</span> — expand Recurring and type a new amount into a weekly cell to see the balance change live. It's a scenario only — nothing is saved; <span class="font-semibold">Reset to actual</span> restores it.</li>
+            </ul>
           </div>
+
           <div>
-            <div class="font-bold text-ink-900">Opening balance</div>
-            <p class="text-black/60">Auto-fills from your QuickBooks bank balance (editable). It seeds week 1.</p>
+            <div class="font-bold text-ink-900">Actuals — what already happened</div>
+            <p class="text-black/60">Same layout, for a date range you choose: real customer payments received <em>in</em>, and bill payments + card/check spend <em>out</em>, by the week the cash actually moved. Expand, toggle, and click through to projects the same way.</p>
           </div>
+
           <div>
-            <div class="font-bold text-ink-900">Categories</div>
-            <p class="text-black/60">Classifies which accounts are true operating spend. Everything counts by default; you exclude non-operating items (bank transfers, credit-card payments, loan principal). Exclusions apply to Actuals cash-out and the forecast job-cost run-rate.</p>
+            <div class="font-bold text-ink-900">Where the numbers come from</div>
+            <p class="text-black/60">Everything reads from your QuickBooks data that we've already synced into the app — invoices, bills, payments, purchases, and bank balances. <span class="font-semibold text-ink-900">Opening this page never calls QuickBooks</span>, so it never uses your Intuit API limits. To pull the latest, run <span class="font-semibold">"Sync transactions now"</span> on the QuickBooks page.</p>
           </div>
-          <p class="text-[12px] text-black/45">All figures come from QuickBooks. Run a sync on the QuickBooks page to refresh invoices, bills, payments and bank balances. The projected job-cost run-rate is an interim estimate — it'll be replaced by scheduled crew payments once the contractor payment schedule is built.</p>
+
+          <div>
+            <div class="font-bold text-ink-900">Opening balance &amp; Categories</div>
+            <p class="text-black/60"><span class="font-semibold">Opening balance</span> auto-fills from your QuickBooks bank balance (editable). <span class="font-semibold">Categories</span> lets you exclude non-operating accounts (bank transfers, loan principal, etc.) from the spending views.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -166,14 +172,11 @@ export async function cashflowPage(routeFn) {
   const kpis = document.getElementById("cfKpis");
   const modeDesc = document.getElementById("cfModeDesc");
   const btnV2 = document.getElementById("cfModeV2");
-  const btnForecast = document.getElementById("cfModeForecast");
   const btnActuals = document.getElementById("cfModeActuals");
   const horizonWrap = document.getElementById("cfHorizon");
   const horizonWeeks = document.getElementById("cfHorizonWeeks");
 
-  // forecast projected-layer toggles (row-level checkboxes drive these)
-  const proj = { inc_active: true, inc_awarded: true, inc_jobcost: true };
-  let lastBacklog = null; // most recent Forecast+ backlog, for the drill-down modal
+  let lastBacklog = null; // most recent Forecast backlog, for the drill-down modal
 
   // ---- formatting helpers ----
   const cell = (n) => {
@@ -219,8 +222,7 @@ export async function cashflowPage(routeFn) {
   }
 
   function render(d) {
-    if (d.mode === "forecast_v2" || d.mode === "actuals") return renderForecastV2(d);
-    return renderForecast(d);
+    return renderForecastV2(d);  // Forecast and Actuals both use the unified renderer
   }
 
   // ── Forecast+ renderer (Phase 3b: committed QBO + scheduled project layer,
@@ -474,115 +476,7 @@ export async function cashflowPage(routeFn) {
     backlogModal.classList.remove("hidden"); backlogModal.classList.add("flex");
   }
 
-  // ── Actuals renderer (historical; unchanged shape) ─────────────────────────
-  function renderActuals(d) {
-    const weekCols = d.week_ends.map((w, i) => {
-      const [, m, day] = w.split("-");
-      return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
-    }).join("");
-
-    const outSections = d.outflow.sections.map((s, i) =>
-      dataRow(s.label, s.weekly_totals, { toggleGroup: `out${i}`, indent: true }) +
-      detailRows(s.rows, `out${i}`)
-    ).join("");
-
-    grid.innerHTML = `
-      <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${260 + d.weeks * 70}px">
-        <thead>
-          <tr class="border-b border-black/10 text-black/60">
-            <th class="py-2 pr-3 text-left whitespace-nowrap" style="${STICKY}background:#fff">Week ending →</th>
-            ${weekCols}
-          </tr>
-        </thead>
-        <tbody>
-          ${dataRow("Opening Cash Balance", d.summary.opening, { bold: true, bg: "#f8fafc" })}
-
-          ${sectionHeader(d.inflow.label.toUpperCase() + (d.inflow.sublabel ? ` <span class="font-normal text-black/40 text-xs">(${d.inflow.sublabel})</span>` : ""), d.weeks)}
-          ${dataRow(d.inflow.label, d.inflow.weekly_totals, { bold: true, toggleGroup: "inflow", bg: "#f4f7f5" })}
-          ${detailRows(d.inflow.rows, "inflow", "#fbfdfb")}
-
-          ${sectionHeader(d.outflow.label.toUpperCase(), d.weeks)}
-          ${dataRow(d.outflow.label, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7" })}
-          ${outSections}
-
-          <tr><td colspan="${1 + d.weeks}" class="pt-2"></td></tr>
-          ${dataRow("Total Surplus / (Deficit)", d.summary.surplus, { bold: true, bg: "#f8fafc" })}
-          ${dataRow("Ending Cash Balance", d.summary.ending, { bold: true, bg: "#eef2ff" })}
-        </tbody>
-      </table>`;
-    wireToggles();
-  }
-
-  // ── Forecast renderer (Committed + toggleable Projected + Beyond column) ───
-  const BEYOND_BORDER = "border-left:1px solid rgba(0,0,0,.10)";
-  const fCells = (weekly, beyond, extraCls = "") =>
-    weekly.map(v => `<td class="px-2 py-1 text-right whitespace-nowrap ${extraCls}" style="font-variant-numeric:tabular-nums">${cell(v)}</td>`).join("")
-    + `<td class="px-2 py-1 text-right whitespace-nowrap ${extraCls}" style="font-variant-numeric:tabular-nums;${BEYOND_BORDER}">${beyond ? cell(beyond) : `<span class="text-black/20">–</span>`}</td>`;
-
-  function fRow(label, weekly, beyond, opts = {}) {
-    const { bold = false, bg = "#ffffff", indent = false, toggleGroup = null, checkbox = null, on = false, muted = false } = opts;
-    const chev = toggleGroup ? `<button data-toggle="${toggleGroup}" class="mr-1 text-black/40 hover:text-black" style="font-size:11px">▸</button>` : "";
-    const cb = checkbox ? `<input type="checkbox" data-inc="${checkbox}" ${on ? "checked" : ""} class="mr-1.5 h-3.5 w-3.5 align-middle rounded border-black/30" title="Include in totals & balance">` : "";
-    const pad = indent ? "padding-left:1.5rem" : "padding-left:0.75rem";
-    return `<tr class="${muted ? "opacity-50" : ""}">
-        <td class="py-1 pr-3 ${bold ? "font-bold" : ""} whitespace-nowrap" style="${STICKY}background:${bg};${pad}">${cb}${chev}${escapeHtml(label)}</td>
-        ${fCells(weekly, beyond, bold ? "font-semibold" : "")}</tr>`;
-  }
-  const fDetail = (rows, group, bg = "#ffffff") => rows.map(r => `
-      <tr class="cf-detail" data-group="${group}" style="display:none">
-        <td class="py-1 pr-3 text-black/60 whitespace-nowrap" style="${STICKY}background:${bg};padding-left:2.25rem">${escapeHtml(r.label)}</td>
-        ${fCells(r.weekly, r.beyond || 0, "text-black/60")}</tr>`).join("");
-  const fHeader = (txt, cols) => `<tr><td colspan="${2 + cols}" class="pt-3 pb-1 font-bold text-brand-700" style="${STICKY}background:#fff;padding-left:0.75rem">${txt}</td></tr>`;
-  const paramFor = (key) => key === "jobcost" ? "inc_jobcost" : "inc_" + key.replace("proj_", "");
-
-  function renderForecast(d) {
-    const weekCols = d.week_ends.map((w, i) => {
-      const [, m, day] = w.split("-");
-      return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
-    }).join("");
-    const beyondHead = `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold" style="${BEYOND_BORDER}"><div>Beyond</div><div class="text-[10px] font-normal text-black/40">13 wk +</div></th>`;
-    const z = new Array(d.weeks).fill(0);
-    const inf = d.inflow, out = d.outflow;
-
-    const projRows = (sections, prefix, bg) => sections.map(s =>
-      fRow(s.label, s.weekly_totals, s.beyond, { indent: true, bg, toggleGroup: `${prefix}_${s.key}`, checkbox: paramFor(s.key), on: s.included, muted: !s.included }) +
-      fDetail(s.rows, `${prefix}_${s.key}`, "#fbfbfb")
-    ).join("");
-    const commRows = (sections, prefix, bg) => sections.map(s =>
-      fRow(s.label, s.weekly_totals, s.beyond, { indent: true, bg, toggleGroup: `${prefix}_${s.key}` }) +
-      fDetail(s.rows, `${prefix}_${s.key}`, "#fbfbfb")
-    ).join("");
-
-    grid.innerHTML = `
-      <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + (d.weeks + 1) * 70}px">
-        <thead>
-          <tr class="border-b border-black/10 text-black/60">
-            <th class="py-2 pr-3 text-left whitespace-nowrap" style="${STICKY}background:#fff">Week ending →</th>
-            ${weekCols}${beyondHead}
-          </tr>
-        </thead>
-        <tbody>
-          ${fRow("Opening Cash Balance", d.summary.opening, 0, { bold: true, bg: "#f8fafc" })}
-
-          ${fHeader("CASH INFLOW", d.weeks)}
-          ${fRow(inf.label, inf.weekly_totals, inf.beyond_total, { bold: true, toggleGroup: "inflow", bg: "#f4f7f5" })}
-          ${commRows([inf.committed], "inf", "#fbfdfb")}
-          ${projRows(inf.projected, "inf", "#fbfdfb")}
-
-          ${fHeader("CASH OUTFLOW", d.weeks)}
-          ${fRow(out.label, out.weekly_totals, out.beyond_total, { bold: true, bg: "#fff7f7" })}
-          ${commRows(out.committed, "out", "#fffafa")}
-          ${projRows(out.projected, "out", "#fffafa")}
-
-          <tr><td colspan="${2 + d.weeks}" class="pt-2"></td></tr>
-          ${fRow("Total Surplus / (Deficit)", d.summary.surplus, 0, { bold: true, bg: "#f8fafc" })}
-          ${fRow("Ending Cash Balance", d.summary.ending, 0, { bold: true, bg: "#eef2ff" })}
-        </tbody>
-      </table>`;
-    wireToggles();
-    grid.querySelectorAll("[data-inc]").forEach(cb =>
-      cb.addEventListener("change", () => { proj[cb.getAttribute("data-inc")] = cb.checked; load(); }));
-  }
+  // (old Forecast/Actuals renderers removed — both views now use renderForecastV2)
 
   function renderKpis(d) {
     const minEnding = Math.min(...d.summary.ending);
@@ -605,16 +499,13 @@ export async function cashflowPage(routeFn) {
   function applyModeUi() {
     const active = "bg-ink-900 text-white border-ink-900";
     btnV2.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "forecast_v2" ? active : "border-black/15"}`;
-    btnForecast.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "forecast" ? active : "border-black/15"}`;
     btnActuals.className = `px-3 py-1.5 rounded-xl text-sm font-bold border ${mode === "actuals" ? active : "border-black/15"}`;
     weeksWrap.classList.toggle("hidden", mode !== "actuals");
     horizonWrap.classList.toggle("hidden", mode !== "forecast_v2");
     document.getElementById("cfOverhead").classList.toggle("hidden", mode !== "forecast_v2");
     modeDesc.textContent = mode === "forecast_v2"
-      ? "Forward cash from your real bank balance — committed (open invoices/bills) + recurring overhead + the scheduled crew/invoice/expense plans on every project. Extend the horizon as far as you like."
-      : mode === "forecast"
-      ? "Forward 13 weeks — committed (open invoices/bills + overhead run-rate) plus toggleable projected layers. “Beyond 13 wk” holds amounts past the window. Tap ⓘ for details."
-      : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out.";
+      ? "Forward cash from your real bank balance — committed (open invoices/bills) + recurring overhead + the scheduled crew/invoice/expense plans on every project. Extend the horizon as far as you like. Tap ⓘ for how it's built."
+      : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out. Tap ⓘ for details.";
   }
 
   async function load() {
@@ -625,12 +516,7 @@ export async function cashflowPage(routeFn) {
     if (startEl.value) params.set("start_date", startEl.value);
     if (mode === "actuals") params.set("weeks", String(parseInt(weeksEl.value, 10) || 13));
     if (mode === "forecast_v2") params.set("weeks", String(Math.max(4, Math.min(520, parseInt(horizonWeeks.value, 10) || 26))));
-    if (mode === "forecast") {
-      params.set("inc_active", proj.inc_active ? "1" : "0");
-      params.set("inc_awarded", proj.inc_awarded ? "1" : "0");
-      params.set("inc_jobcost", proj.inc_jobcost ? "1" : "0");
-    }
-    const endpoint = mode === "actuals" ? "actuals" : mode === "forecast_v2" ? "forecast-v2" : "forecast";
+    const endpoint = mode === "actuals" ? "actuals" : "forecast-v2";
     try {
       const d = await api(`/cashflow/${endpoint}?${params.toString()}`);
       renderKpis(d);
@@ -763,7 +649,6 @@ export async function cashflowPage(routeFn) {
   }
 
   btnV2.addEventListener("click", () => setMode("forecast_v2"));
-  btnForecast.addEventListener("click", () => setMode("forecast"));
   btnActuals.addEventListener("click", () => setMode("actuals"));
   document.getElementById("cfGenerate").addEventListener("click", load);
   document.querySelectorAll(".cf-wk").forEach(b =>
