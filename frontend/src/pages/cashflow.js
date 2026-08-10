@@ -242,9 +242,16 @@ export async function cashflowPage(routeFn) {
       return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
     }).join("");
 
-    const rowV2 = (label, pdv, weekly, { bold = false, bg = "#ffffff" } = {}) => `<tr>
+    // numeric cells tagged with week (+ row id) so the live what-if can update them
+    const numCellsR = (arr, rowId, cls = "") => arr.map((v, w) =>
+      `<td class="px-2 py-1 text-right whitespace-nowrap ${cls}" data-w="${w}"${rowId ? ` data-r="${rowId}"` : ""} style="font-variant-numeric:tabular-nums">${cell(v)}</td>`).join("");
+    // editable recurring cells — type a number to see the cash impact (what-if)
+    const editCellsR = (arr) => arr.map((v, w) =>
+      `<td class="px-2 py-1 text-right whitespace-nowrap cf-recedit" data-w="${w}" contenteditable="true" spellcheck="false" style="font-variant-numeric:tabular-nums;outline:none;cursor:text;background:#fffdf0;border:1px dashed rgba(0,0,0,.12)">${Math.round(v)}</td>`).join("");
+
+    const rowV2 = (label, pdv, weekly, { bold = false, bg = "#ffffff", rowId = "" } = {}) => `<tr>
         <td class="py-1 pr-3 ${bold ? "font-bold" : ""} whitespace-nowrap" style="${STICKY}background:${bg};padding-left:0.75rem">${escapeHtml(label)}</td>
-        ${pdCell(pdv, bold ? "font-semibold" : "")}${numCells(weekly, bold ? "font-semibold" : "")}</tr>`;
+        ${pdCell(pdv, bold ? "font-semibold" : "")}${numCellsR(weekly, rowId, bold ? "font-semibold" : "")}</tr>`;
 
     // confidence tiers: how firm a section's cash is (committed QBO > scheduled
     // app plans > estimated run-rate). Shades the section row + a dot.
@@ -253,25 +260,29 @@ export async function cashflowPage(routeFn) {
       scheduled: { dot: "bg-emerald-500", bg: "#f0f8f2", name: "Scheduled" },
       estimated: { dot: "border-[1.5px] border-black/40", bg: "#f7f7f8", name: "Estimated" },
     };
-    const detailV2 = (rows, group, view = "") => rows.map(r => {
+    const detailV2 = (rows, group, view = "", editable = false) => rows.map(r => {
       const lbl = (r.link_id && r.is_project)
         ? `<a href="#/entity/project/${escapeHtml(String(r.link_id))}" data-cf-proj class="text-blue-700 hover:underline">${escapeHtml(r.label)}</a>`
         : escapeHtml(r.label);
+      const cells = editable ? editCellsR(r.weekly) : numCells(r.weekly, "text-black/60");
       return `<tr class="cf-detail" data-group="${group}"${view ? ` data-view="${view}"` : ""} style="display:none">
         <td class="py-1 pr-3 text-black/60 whitespace-nowrap" style="${STICKY}background:#fbfbfb;padding-left:2.25rem">${lbl}</td>
-        ${pdCell(r.pastdue || 0, "text-black/60")}${numCells(r.weekly, "text-black/60")}</tr>`;
+        ${pdCell(r.pastdue || 0, "text-black/60")}${cells}</tr>`;
     }).join("");
     const secRow = (s, group) => {
       const t = TIER[s.tier] || TIER.scheduled;
       const hasRows = s.rows && s.rows.length;
       const hasAlt = s.alt_rows && s.alt_rows.length;
+      const isRec = s.key === "recurring";  // recurring category cells are editable (what-if)
       const chev = (hasRows || hasAlt) ? `<button data-toggle="${group}" class="mr-1 text-black/40 hover:text-black" style="font-size:11px">▸</button>` : "";
       const dot = `<span class="inline-block w-2 h-2 rounded-full align-middle mr-1.5 ${t.dot}"></span>`;
       const vt = hasAlt ? ` <button data-view-toggle="${group}" data-va="${escapeHtml(s.view_a || "A")}" data-vb="${escapeHtml(s.view_b || "B")}" class="ml-1 align-middle text-[10px] font-bold text-blue-600 border border-blue-200 rounded px-1.5 py-0.5 hover:bg-blue-50">${escapeHtml(s.view_a || "A")} ⇄</button>` : "";
-      const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}${vt}</td>`;
-      const detA = hasRows ? detailV2(s.rows, group, hasAlt ? "a" : "") : "";
+      const editHint = isRec ? ` <span class="text-[10px] font-semibold text-amber-700">✎ edit cells for what-if</span>` : "";
+      const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}${vt}${editHint}</td>`;
+      const detA = hasRows ? detailV2(s.rows, group, hasAlt ? "a" : "", isRec) : "";
       const detB = hasAlt ? detailV2(s.alt_rows, group, "b") : "";
-      return `<tr>${label}${pdCell(s.pastdue || 0)}${numCells(s.weekly_totals)}</tr>` + detA + detB;
+      const totalCells = isRec ? numCellsR(s.weekly_totals, "recTotal") : numCells(s.weekly_totals);
+      return `<tr>${label}${pdCell(s.pastdue || 0)}${totalCells}</tr>` + detA + detB;
     };
     const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`)).join("");
     const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`)).join("");
@@ -302,6 +313,10 @@ export async function cashflowPage(routeFn) {
         <div class="flex items-center gap-3">${legend}</div>
         ${backlogChip}
       </div>
+      <div data-cf-whatif class="hidden items-center gap-2 mb-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-[12px] text-amber-900">
+        <b>What-if mode</b> — showing a hypothetical balance from your recurring edits (not saved).
+        <button data-cf-whatif-reset class="ml-auto font-bold text-brand-700 hover:underline">Reset to actual</button>
+      </div>
       <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + (d.weeks + extra) * 68}px">
         <thead>
           <tr class="border-b border-black/10 text-black/60">
@@ -310,19 +325,19 @@ export async function cashflowPage(routeFn) {
           </tr>
         </thead>
         <tbody>
-          ${rowV2("Opening Cash Balance", pd.opening, d.summary.opening, { bold: true, bg: "#f8fafc" })}
+          ${rowV2("Opening Cash Balance", pd.opening, d.summary.opening, { bold: true, bg: "#f8fafc", rowId: "opening" })}
 
           ${sectionHeader("CASH INFLOW", d.weeks + extra)}
           ${rowV2(d.inflow.label, d.inflow.pastdue_total, d.inflow.weekly_totals, { bold: true, bg: "#f4f7f5" })}
           ${inSecs}
 
           ${sectionHeader("CASH OUTFLOW", d.weeks + extra)}
-          ${rowV2(d.outflow.label, d.outflow.pastdue_total, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7" })}
+          ${rowV2(d.outflow.label, d.outflow.pastdue_total, d.outflow.weekly_totals, { bold: true, bg: "#fff7f7", rowId: "outTotal" })}
           ${outSecs}
 
           <tr><td colspan="${1 + extra + d.weeks}" class="pt-2"></td></tr>
-          ${rowV2("Total Surplus / (Deficit)", pd.surplus, d.summary.surplus, { bold: true, bg: "#f8fafc" })}
-          ${rowV2("Ending Cash Balance", pd.ending, d.summary.ending, { bold: true, bg: "#eef2ff" })}
+          ${rowV2("Total Surplus / (Deficit)", pd.surplus, d.summary.surplus, { bold: true, bg: "#f8fafc", rowId: "surplus" })}
+          ${rowV2("Ending Cash Balance", pd.ending, d.summary.ending, { bold: true, bg: "#eef2ff", rowId: "ending" })}
         </tbody>
       </table>
       ${hasPD ? `<div class="text-[11px] text-black/45 mt-2 px-1">The <b>Past due</b> column holds cash dated before the current week — overdue invoices to collect and bills/crew/expenses to catch up on — so each week shows only its own dates. It settles off your opening balance; week 1 opens at its result.</div>` : ""}`;
@@ -354,6 +369,39 @@ export async function cashflowPage(routeFn) {
     // clicking a project row → open its Billing & Schedule tab
     grid.querySelectorAll("a[data-cf-proj]").forEach(a =>
       a.addEventListener("click", () => { try { sessionStorage.setItem("opi_entity_tab", "billing"); } catch (_) {} }));
+
+    // ── live what-if: edit a recurring cell → re-roll the balance (not saved) ──
+    const wWeeks = d.weeks;
+    const inflowTotal = d.inflow.weekly_totals;
+    const recSec = d.outflow.sections.find(s => s.key === "recurring");
+    const baseRecurring = (recSec && recSec.weekly_totals) || new Array(wWeeks).fill(0);
+    const baseOutOther = d.outflow.weekly_totals.map((v, w) => v - (baseRecurring[w] || 0));
+    const opening0 = (d.summary.opening[0] != null) ? d.summary.opening[0] : 0;
+    const whatifBar = grid.querySelector("[data-cf-whatif]");
+    const setRow = (rowId, arr) => grid.querySelectorAll(`td[data-r="${rowId}"]`).forEach(td => {
+      td.innerHTML = cell(arr[+td.getAttribute("data-w")]);
+    });
+    function recomputeWhatIf() {
+      const newRec = new Array(wWeeks).fill(0);
+      grid.querySelectorAll("td.cf-recedit").forEach(td => {
+        newRec[+td.getAttribute("data-w")] += parseFloat((td.textContent || "").replace(/[^0-9.\-]/g, "")) || 0;
+      });
+      const outTotal = [], surplus = [], opening = [], ending = [];
+      let bal = opening0;
+      for (let w = 0; w < wWeeks; w++) {
+        const ot = baseOutOther[w] + newRec[w];
+        const su = inflowTotal[w] - ot;
+        opening[w] = bal; ending[w] = bal + su; bal = ending[w];
+        outTotal[w] = ot; surplus[w] = su;
+      }
+      setRow("recTotal", newRec); setRow("outTotal", outTotal);
+      setRow("surplus", surplus); setRow("opening", opening); setRow("ending", ending);
+      const changed = newRec.some((v, w) => Math.abs(v - (baseRecurring[w] || 0)) > 0.5);
+      if (whatifBar) { whatifBar.classList.toggle("hidden", !changed); whatifBar.classList.toggle("flex", changed); }
+    }
+    grid.querySelectorAll("td.cf-recedit").forEach(td => td.addEventListener("input", recomputeWhatIf));
+    const wreset = grid.querySelector("[data-cf-whatif-reset]");
+    if (wreset) wreset.addEventListener("click", () => renderForecastV2(d));
   }
 
   // ── Backlog drill-down (undated projects: what flows if they all get dates) ──
