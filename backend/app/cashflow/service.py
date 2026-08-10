@@ -357,12 +357,14 @@ def generate_forecast_v2(start_date: date | None = None,
         sched_projects = sched["projects"]
         beyond_in, beyond_out = sched["beyond_in"], sched["beyond_out"]
         sched_pd_in, sched_pd_out = sched["pastdue_in"], sched["pastdue_out"]
+        sched_in_rows, sched_out_rows = sched["sched_in_rows"], sched["sched_out_rows"]
     else:
         sched_in = [0.0] * weeks
         sched_out = [0.0] * weeks
         backlog = {"in": 0.0, "out": 0.0}
         sched_projects = []
         beyond_in = beyond_out = sched_pd_in = sched_pd_out = 0.0
+        sched_in_rows = sched_out_rows = []
 
     def _sec(key, label, rows, wt, tier, pastdue=0.0):
         return {"key": key, "label": label, "rows": rows, "tier": tier,
@@ -409,6 +411,7 @@ def generate_forecast_v2(start_date: date | None = None,
             "sections": [
                 _sec("ar", "Committed — open invoices (A/R, by due date)", inv_rows, inv_wt, "committed", inv_pd),
                 {"key": "scheduled", "label": "Scheduled — to bill (project schedules)", "tier": "scheduled",
+                 "rows": sched_in_rows,
                  "weekly_totals": [round(x, 2) for x in sched_in],
                  "grand_total": round(sum(sched_in), 2), "pastdue": round(sched_pd_in, 2)},
             ],
@@ -423,6 +426,7 @@ def generate_forecast_v2(start_date: date | None = None,
                 _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed", ap_pd),
                 _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated", 0.0),
                 {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)", "tier": "scheduled",
+                 "rows": sched_out_rows,
                  "weekly_totals": [round(x, 2) for x in sched_out],
                  "grand_total": round(sum(sched_out), 2), "pastdue": round(sched_pd_out, 2)},
             ],
@@ -525,6 +529,7 @@ def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks, split_pas
             WHERE qt.entity_type = 'Invoice'
         )
         SELECT COALESCE(qc.display_name, 'Unknown') AS name,
+               qc.qbo_id AS link_id, qc.is_project AS is_project,
                l.due_date, l.balance_amt AS amount
         FROM latest l
         LEFT JOIN qbo_customers qc ON qc.qbo_id = l.customer_qbo_id
@@ -719,13 +724,18 @@ def _outflow_recurring(today, weeks):
 # Callers exclude before-window dates via SQL (so past-due isn't double-placed).
 # ---------------------------------------------------------------------------
 def _bucket(rows, week_ends, win_end, weeks, split_pastdue=False):
-    grouped = defaultdict(lambda: {"weekly": [0.0] * weeks, "beyond": 0.0, "pastdue": 0.0})
+    grouped = defaultdict(lambda: {"weekly": [0.0] * weeks, "beyond": 0.0, "pastdue": 0.0,
+                                   "link_id": None, "is_project": False})
     first_start = week_ends[0] - timedelta(days=6)   # Saturday of the current week
     for r in rows:
         d = r["due_date"]
         if d is None:
             continue
         amt = float(r["amount"] or 0)
+        g0 = grouped[r["name"]]
+        if r.get("link_id") is not None and g0["link_id"] is None:
+            g0["link_id"] = str(r["link_id"])
+            g0["is_project"] = bool(r.get("is_project"))
         if d > win_end:
             grouped[r["name"]]["beyond"] += amt
             continue
@@ -746,6 +756,7 @@ def _bucket(rows, week_ends, win_end, weeks, split_pastdue=False):
         wk = [round(x, 2) for x in v["weekly"]]
         out.append({"label": name, "kind": "scheduled", "weekly": wk,
                     "beyond": round(v["beyond"], 2), "pastdue": round(v["pastdue"], 2),
+                    "link_id": v["link_id"], "is_project": v["is_project"],
                     "total": round(sum(wk), 2)})
     out.sort(key=lambda x: x["total"] + x["beyond"] + x["pastdue"], reverse=True)
     return out

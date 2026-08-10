@@ -328,23 +328,53 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
     outflow = [0.0] * weeks
     beyond_in = beyond_out = 0.0
     pastdue_in = pastdue_out = 0.0
+    # per-project breakdown for the expandable scheduled sections
+    name_by = {p["entity_id"]: p.get("name") for p in payload.get("projects", [])}
+    proj_in, proj_out = {}, {}  # entity_id -> {weekly, pastdue, beyond, src{}}
+
+    def _pg(bucket, eid):
+        return bucket.setdefault(eid, {"weekly": [0.0] * weeks, "pastdue": 0.0, "beyond": 0.0, "src": {}})
+
     for e in payload.get("events", []):
         c = classify(e["date"])
         is_in = e["dir"] == "in"
+        eid = e.get("entity_id")
+        pg = _pg(proj_in if is_in else proj_out, eid)
+        pg["src"][e.get("src")] = round(pg["src"].get(e.get("src"), 0.0) + e["amt"], 2)
         if c == "past":
             if is_in:
                 pastdue_in += e["amt"]
             else:
                 pastdue_out += e["amt"]
+            pg["pastdue"] += e["amt"]
         elif c == "beyond":
             if is_in:
                 beyond_in += e["amt"]
             else:
                 beyond_out += e["amt"]
+            pg["beyond"] += e["amt"]
         elif is_in:
             inflow[c] += e["amt"]
+            pg["weekly"][c] += e["amt"]
         else:
             outflow[c] += e["amt"]
+            pg["weekly"][c] += e["amt"]
+
+    def _proj_rows(bucket):
+        rows = []
+        for eid, g in bucket.items():
+            wk = [round(x, 2) for x in g["weekly"]]
+            total = round(sum(wk), 2)
+            pastd = round(g["pastdue"], 2)
+            if total + pastd <= EPS:      # nothing in the window or past-due -> hide
+                continue                  # (its cash is beyond the horizon; extend to see it)
+            rows.append({"label": name_by.get(eid) or str(eid), "link_id": str(eid),
+                         "is_project": True, "weekly": wk,
+                         "pastdue": pastd, "beyond": round(g["beyond"], 2),
+                         "src": g["src"], "total": total})
+        rows.sort(key=lambda r: -(r["total"] + r["pastdue"]))
+        return rows
+
     return {
         "week_ends": [d.isoformat() for d in week_ends],
         "weeks": weeks,
@@ -354,6 +384,8 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         "beyond_out": round(beyond_out, 2),
         "pastdue_in": round(pastdue_in, 2),
         "pastdue_out": round(pastdue_out, 2),
+        "sched_in_rows": _proj_rows(proj_in),
+        "sched_out_rows": _proj_rows(proj_out),
         "backlog": payload.get("backlog", {"in": 0.0, "out": 0.0}),
         "projects": payload.get("projects", []),
         "project_count": payload.get("project_count", 0),

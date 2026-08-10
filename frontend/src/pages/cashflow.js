@@ -253,9 +253,14 @@ export async function cashflowPage(routeFn) {
       scheduled: { dot: "bg-emerald-500", bg: "#f0f8f2", name: "Scheduled" },
       estimated: { dot: "border-[1.5px] border-black/40", bg: "#f7f7f8", name: "Estimated" },
     };
-    const detailV2 = (rows, group) => rows.map(r => `<tr class="cf-detail" data-group="${group}" style="display:none">
-        <td class="py-1 pr-3 text-black/60 whitespace-nowrap" style="${STICKY}background:#fbfbfb;padding-left:2.25rem">${escapeHtml(r.label)}</td>
-        ${pdCell(r.pastdue || 0, "text-black/60")}${numCells(r.weekly, "text-black/60")}</tr>`).join("");
+    const detailV2 = (rows, group) => rows.map(r => {
+      const lbl = (r.link_id && r.is_project)
+        ? `<a href="#/entity/project/${escapeHtml(String(r.link_id))}" data-cf-proj class="text-blue-700 hover:underline">${escapeHtml(r.label)}</a>`
+        : escapeHtml(r.label);
+      return `<tr class="cf-detail" data-group="${group}" style="display:none">
+        <td class="py-1 pr-3 text-black/60 whitespace-nowrap" style="${STICKY}background:#fbfbfb;padding-left:2.25rem">${lbl}</td>
+        ${pdCell(r.pastdue || 0, "text-black/60")}${numCells(r.weekly, "text-black/60")}</tr>`;
+    }).join("");
     const secRow = (s, group) => {
       const t = TIER[s.tier] || TIER.scheduled;
       const hasRows = s.rows && s.rows.length;
@@ -322,6 +327,9 @@ export async function cashflowPage(routeFn) {
     if (rb) rb.addEventListener("click", refreshSchedules);
     const bb = grid.querySelector("[data-cf-backlog]");
     if (bb) bb.addEventListener("click", openBacklog);
+    // clicking a project row → open its Billing & Schedule tab
+    grid.querySelectorAll("a[data-cf-proj]").forEach(a =>
+      a.addEventListener("click", () => { try { sessionStorage.setItem("opi_entity_tab", "billing"); } catch (_) {} }));
   }
 
   // ── Backlog drill-down (undated projects: what flows if they all get dates) ──
