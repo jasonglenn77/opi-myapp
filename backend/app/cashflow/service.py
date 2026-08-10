@@ -336,7 +336,7 @@ def generate_forecast_v2(start_date: date | None = None,
 
     # ---- committed layers (fast, live from QBO) ----
     inv_rows = _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=True)
-    ap_rows = _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=True)
+    ap_rows, ap_proj_rows = _outflow_bills2(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=True)
     inv_wt = _column_sums(inv_rows, weeks)
     ap_wt = _column_sums(ap_rows, weeks)
     inv_pd = round(sum(r.get("pastdue", 0) for r in inv_rows), 2)   # overdue A/R
@@ -358,13 +358,14 @@ def generate_forecast_v2(start_date: date | None = None,
         beyond_in, beyond_out = sched["beyond_in"], sched["beyond_out"]
         sched_pd_in, sched_pd_out = sched["pastdue_in"], sched["pastdue_out"]
         sched_in_rows, sched_out_rows = sched["sched_in_rows"], sched["sched_out_rows"]
+        sched_out_by_type = sched["sched_out_by_type"]
     else:
         sched_in = [0.0] * weeks
         sched_out = [0.0] * weeks
         backlog = {"in": 0.0, "out": 0.0}
         sched_projects = []
         beyond_in = beyond_out = sched_pd_in = sched_pd_out = 0.0
-        sched_in_rows = sched_out_rows = []
+        sched_in_rows = sched_out_rows = sched_out_by_type = []
 
     def _sec(key, label, rows, wt, tier, pastdue=0.0):
         return {"key": key, "label": label, "rows": rows, "tier": tier,
@@ -423,12 +424,13 @@ def generate_forecast_v2(start_date: date | None = None,
         "outflow": {
             "label": "Cash Outflow",
             "sections": [
-                _sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed", ap_pd),
-                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated", 0.0),
+                {**_sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed", ap_pd),
+                 "alt_rows": ap_proj_rows, "view_a": "By vendor", "view_b": "By project"},
                 {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)", "tier": "scheduled",
-                 "rows": sched_out_rows,
+                 "rows": sched_out_rows, "alt_rows": sched_out_by_type, "view_a": "By project", "view_b": "By type",
                  "weekly_totals": [round(x, 2) for x in sched_out],
                  "grand_total": round(sum(sched_out), 2), "pastdue": round(sched_pd_out, 2)},
+                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated", 0.0),
             ],
             "weekly_totals": outflow_weekly,
             "grand_total": round(sum(outflow_weekly), 2),
@@ -621,6 +623,40 @@ def _outflow_bills(win_start, beyond_cap, week_ends, win_end, weeks, split_pastd
     with engine.connect() as conn:
         rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
     return _bucket(rows, week_ends, win_end, weeks, split_pastdue)
+
+
+def _outflow_bills2(win_start, beyond_cap, week_ends, win_end, weeks, split_pastdue=False):
+    """Committed A/P bucketed BOTH ways — by vendor (company) and by project — so
+    the section can toggle between them. A bill's project is the customer tag on
+    its lines; untagged bills fall under 'Non-project / overhead'."""
+    sql = text("""
+        WITH latest AS (
+            SELECT qt.id, qt.vendor_qbo_id, qt.doc_number, qt.due_date, qt.balance_amt,
+                   JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.VendorRef.name')) AS vendor,
+                   ROW_NUMBER() OVER (PARTITION BY qt.vendor_qbo_id, COALESCE(qt.doc_number, qt.qbo_id)
+                                      ORDER BY qt.id DESC) AS rn
+            FROM qbo_transactions qt WHERE qt.entity_type = 'Bill'
+        ),
+        bill AS (
+            SELECT l.id, l.due_date, l.balance_amt,
+                   COALESCE(l.vendor, 'Unknown vendor') AS vendor,
+                   (SELECT ln.line_customer_qbo_id FROM qbo_transaction_lines ln
+                    WHERE ln.transaction_id = l.id AND ln.line_customer_qbo_id IS NOT NULL LIMIT 1) AS proj_qbo_id
+            FROM latest l WHERE l.rn = 1 AND l.balance_amt > 0 AND l.due_date <= :bc
+        )
+        SELECT b.vendor, b.due_date, b.balance_amt AS amount, b.proj_qbo_id,
+               qc.display_name AS proj_name, qc.is_project
+        FROM bill b LEFT JOIN qbo_customers qc ON qc.qbo_id = b.proj_qbo_id
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
+    vend_in = [{"name": r["vendor"], "due_date": r["due_date"], "amount": r["amount"]} for r in rows]
+    proj_in = [{"name": (r["proj_name"] or "Non-project / overhead"),
+                "due_date": r["due_date"], "amount": r["amount"],
+                "link_id": r["proj_qbo_id"] if r["proj_name"] else None,
+                "is_project": bool(r["is_project"])} for r in rows]
+    return (_bucket(vend_in, week_ends, win_end, weeks, split_pastdue),
+            _bucket(proj_in, week_ends, win_end, weeks, split_pastdue))
 
 
 # ---------------------------------------------------------------------------

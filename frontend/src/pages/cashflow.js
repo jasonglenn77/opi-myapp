@@ -253,21 +253,25 @@ export async function cashflowPage(routeFn) {
       scheduled: { dot: "bg-emerald-500", bg: "#f0f8f2", name: "Scheduled" },
       estimated: { dot: "border-[1.5px] border-black/40", bg: "#f7f7f8", name: "Estimated" },
     };
-    const detailV2 = (rows, group) => rows.map(r => {
+    const detailV2 = (rows, group, view = "") => rows.map(r => {
       const lbl = (r.link_id && r.is_project)
         ? `<a href="#/entity/project/${escapeHtml(String(r.link_id))}" data-cf-proj class="text-blue-700 hover:underline">${escapeHtml(r.label)}</a>`
         : escapeHtml(r.label);
-      return `<tr class="cf-detail" data-group="${group}" style="display:none">
+      return `<tr class="cf-detail" data-group="${group}"${view ? ` data-view="${view}"` : ""} style="display:none">
         <td class="py-1 pr-3 text-black/60 whitespace-nowrap" style="${STICKY}background:#fbfbfb;padding-left:2.25rem">${lbl}</td>
         ${pdCell(r.pastdue || 0, "text-black/60")}${numCells(r.weekly, "text-black/60")}</tr>`;
     }).join("");
     const secRow = (s, group) => {
       const t = TIER[s.tier] || TIER.scheduled;
       const hasRows = s.rows && s.rows.length;
-      const chev = hasRows ? `<button data-toggle="${group}" class="mr-1 text-black/40 hover:text-black" style="font-size:11px">▸</button>` : "";
+      const hasAlt = s.alt_rows && s.alt_rows.length;
+      const chev = (hasRows || hasAlt) ? `<button data-toggle="${group}" class="mr-1 text-black/40 hover:text-black" style="font-size:11px">▸</button>` : "";
       const dot = `<span class="inline-block w-2 h-2 rounded-full align-middle mr-1.5 ${t.dot}"></span>`;
-      const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}</td>`;
-      return `<tr>${label}${pdCell(s.pastdue || 0)}${numCells(s.weekly_totals)}</tr>` + (hasRows ? detailV2(s.rows, group) : "");
+      const vt = hasAlt ? ` <button data-view-toggle="${group}" data-va="${escapeHtml(s.view_a || "A")}" data-vb="${escapeHtml(s.view_b || "B")}" class="ml-1 align-middle text-[10px] font-bold text-blue-600 border border-blue-200 rounded px-1.5 py-0.5 hover:bg-blue-50">${escapeHtml(s.view_a || "A")} ⇄</button>` : "";
+      const label = `<td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}background:${t.bg};padding-left:1.5rem">${chev}${dot}${escapeHtml(s.label)}${vt}</td>`;
+      const detA = hasRows ? detailV2(s.rows, group, hasAlt ? "a" : "") : "";
+      const detB = hasAlt ? detailV2(s.alt_rows, group, "b") : "";
+      return `<tr>${label}${pdCell(s.pastdue || 0)}${numCells(s.weekly_totals)}</tr>` + detA + detB;
     };
     const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`)).join("");
     const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`)).join("");
@@ -322,7 +326,27 @@ export async function cashflowPage(routeFn) {
         </tbody>
       </table>
       ${hasPD ? `<div class="text-[11px] text-black/45 mt-2 px-1">The <b>Past due</b> column holds cash dated before the current week — overdue invoices to collect and bills/crew/expenses to catch up on — so each week shows only its own dates. It settles off your opening balance; week 1 opens at its result.</div>` : ""}`;
-    wireToggles();
+    // expand/collapse + view-toggle (by vendor/project or project/type). Detail
+    // rows carry data-view; only the current view shows when a group is expanded.
+    const expanded = new Set(), viewOf = {};
+    const applyDetail = (g) => {
+      const open = expanded.has(g), view = viewOf[g] || "a";
+      grid.querySelectorAll(`.cf-detail[data-group="${g}"]`).forEach(r => {
+        r.style.display = (open && (!r.dataset.view || r.dataset.view === view)) ? "table-row" : "none";
+      });
+    };
+    grid.querySelectorAll("[data-toggle]").forEach(btn => btn.addEventListener("click", () => {
+      const g = btn.getAttribute("data-toggle");
+      if (expanded.has(g)) expanded.delete(g); else expanded.add(g);
+      btn.textContent = expanded.has(g) ? "▾" : "▸";
+      applyDetail(g);
+    }));
+    grid.querySelectorAll("[data-view-toggle]").forEach(btn => btn.addEventListener("click", () => {
+      const g = btn.getAttribute("data-view-toggle");
+      viewOf[g] = (viewOf[g] === "b") ? "a" : "b";
+      btn.textContent = (viewOf[g] === "b" ? btn.dataset.vb : btn.dataset.va) + " ⇄";
+      applyDetail(g);
+    }));
     const rb = grid.querySelector("[data-cf-refresh]");
     if (rb) rb.addEventListener("click", refreshSchedules);
     const bb = grid.querySelector("[data-cf-backlog]");

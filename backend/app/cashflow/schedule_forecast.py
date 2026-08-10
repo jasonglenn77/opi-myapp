@@ -330,10 +330,11 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
     pastdue_in = pastdue_out = 0.0
     # per-project breakdown for the expandable scheduled sections
     name_by = {p["entity_id"]: p.get("name") for p in payload.get("projects", [])}
-    proj_in, proj_out = {}, {}  # entity_id -> {weekly, pastdue, beyond, src{}}
+    proj_in, proj_out = {}, {}   # entity_id -> {weekly, pastdue, beyond, src{}}
+    type_out = {}                # src ('crew'/'expense') -> {weekly, pastdue, beyond}
 
-    def _pg(bucket, eid):
-        return bucket.setdefault(eid, {"weekly": [0.0] * weeks, "pastdue": 0.0, "beyond": 0.0, "src": {}})
+    def _pg(bucket, key):
+        return bucket.setdefault(key, {"weekly": [0.0] * weeks, "pastdue": 0.0, "beyond": 0.0, "src": {}})
 
     for e in payload.get("events", []):
         c = classify(e["date"])
@@ -341,24 +342,28 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         eid = e.get("entity_id")
         pg = _pg(proj_in if is_in else proj_out, eid)
         pg["src"][e.get("src")] = round(pg["src"].get(e.get("src"), 0.0) + e["amt"], 2)
+        tg = None if is_in else _pg(type_out, e.get("src") or "other")
         if c == "past":
             if is_in:
                 pastdue_in += e["amt"]
             else:
                 pastdue_out += e["amt"]
             pg["pastdue"] += e["amt"]
+            if tg: tg["pastdue"] += e["amt"]
         elif c == "beyond":
             if is_in:
                 beyond_in += e["amt"]
             else:
                 beyond_out += e["amt"]
             pg["beyond"] += e["amt"]
+            if tg: tg["beyond"] += e["amt"]
         elif is_in:
             inflow[c] += e["amt"]
             pg["weekly"][c] += e["amt"]
         else:
             outflow[c] += e["amt"]
             pg["weekly"][c] += e["amt"]
+            if tg: tg["weekly"][c] += e["amt"]
 
     def _proj_rows(bucket):
         rows = []
@@ -375,6 +380,21 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         rows.sort(key=lambda r: -(r["total"] + r["pastdue"]))
         return rows
 
+    _TYPE_LABEL = {"crew": "Crew payments", "expense": "Project expenses"}
+
+    def _type_rows(bucket):
+        rows = []
+        for src, g in bucket.items():
+            wk = [round(x, 2) for x in g["weekly"]]
+            total = round(sum(wk), 2)
+            pastd = round(g["pastdue"], 2)
+            if total + pastd <= EPS:
+                continue
+            rows.append({"label": _TYPE_LABEL.get(src, src or "Other"), "weekly": wk,
+                         "pastdue": pastd, "beyond": round(g["beyond"], 2), "total": total})
+        rows.sort(key=lambda r: -(r["total"] + r["pastdue"]))
+        return rows
+
     return {
         "week_ends": [d.isoformat() for d in week_ends],
         "weeks": weeks,
@@ -386,6 +406,7 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         "pastdue_out": round(pastdue_out, 2),
         "sched_in_rows": _proj_rows(proj_in),
         "sched_out_rows": _proj_rows(proj_out),
+        "sched_out_by_type": _type_rows(type_out),
         "backlog": payload.get("backlog", {"in": 0.0, "out": 0.0}),
         "projects": payload.get("projects", []),
         "project_count": payload.get("project_count", 0),
