@@ -346,7 +346,7 @@ def generate_forecast_v2(start_date: date | None = None,
     #      first time), expanded by cadence across the weekly grid ----
     from . import overhead as OV
     OV.seed_if_empty(today)
-    rec_wt, rec_rows = OV.expand(week_ends)  # cadence-based; no past-due
+    rec_wt, rec_items, rec_cats = OV.expand(week_ends)  # cadence-based; no past-due
 
     # ---- scheduled layer (cached event pass, bucketed to this horizon) ----
     payload, cache_meta = SF.get_events(max_age_seconds)
@@ -430,7 +430,8 @@ def generate_forecast_v2(start_date: date | None = None,
                  "rows": sched_out_rows, "alt_rows": sched_out_by_type, "view_a": "By project", "view_b": "By type",
                  "weekly_totals": [round(x, 2) for x in sched_out],
                  "grand_total": round(sum(sched_out), 2), "pastdue": round(sched_pd_out, 2)},
-                _sec("recurring", "Recurring — overhead & payroll", rec_rows, rec_wt, "estimated", 0.0),
+                {**_sec("recurring", "Recurring — overhead & payroll", rec_cats, rec_wt, "estimated", 0.0),
+                 "alt_rows": rec_items, "view_a": "By category", "view_b": "By item"},
             ],
             "weekly_totals": outflow_weekly,
             "grand_total": round(sum(outflow_weekly), 2),

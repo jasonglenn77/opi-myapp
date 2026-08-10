@@ -82,34 +82,83 @@ def list_overhead(active_only=False):
     return [dict(r) for r in rows]
 
 
+_PERIODS_PER_YEAR = {"weekly": 52, "biweekly": 26, "monthly": 12, "quarterly": 4, "annual": 1}
+
+
+def _detect_cadence(dates):
+    """Infer a recurring cadence from the spacing of a sub-account's actual
+    transactions (median gap in days). Defaults to monthly on thin history."""
+    ds = sorted(set(dates))
+    if len(ds) >= 2:
+        gaps = sorted((ds[i + 1] - ds[i]).days for i in range(len(ds) - 1))
+        gaps = [g for g in gaps if g > 0]
+        med = gaps[len(gaps) // 2] if gaps else 30
+    else:
+        med = 30
+    if med <= 10:
+        return "weekly"
+    if med <= 20:
+        return "biweekly"
+    if med <= 45:
+        return "monthly"
+    if med <= 135:
+        return "quarterly"
+    return "annual"
+
+
 def seed_if_empty(today: date | None = None) -> int:
-    """Populate from the trailing run-rate the first time (one weekly item per
-    overhead/payroll category), so the forecast is unchanged until edited."""
+    """Populate from the trailing 12 months the first time: ONE item per overhead/
+    payroll SUB-ACCOUNT, with a cadence detected from that account's actual
+    transaction spacing and a per-occurrence amount = trailing total spread over
+    that cadence (so the annual run-rate is preserved). Fully editable after."""
     ensure_table()
     with engine.connect() as conn:
         if conn.execute(text("SELECT COUNT(*) FROM cashflow_overhead")).scalar():
             return 0
     today = today or date.today()
-    from .service import _outflow_recurring
-    rr = _outflow_recurring(today, 1)  # weekly run-rate per label
+    from collections import defaultdict
+    from .service import _CATEGORY_TO_ROW  # account-name parent -> forecast row label
+    start = today - timedelta(days=365)
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')) AS acct,
+                   qt.txn_date AS d, l.amount AS amt
+            FROM qbo_transactions qt
+            JOIN qbo_transaction_lines l ON l.transaction_id = qt.id
+            WHERE qt.entity_type = 'Purchase' AND qt.txn_date >= :start AND qt.txn_date < :today
+              AND JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name') IS NOT NULL
+        """), {"start": start, "today": today}).mappings().all()
+
+    by_acct = defaultdict(list)  # full account name -> [(date, amount)]
+    for r in rows:
+        acct = r["acct"]
+        if not acct or acct.split(":")[0] not in _CATEGORY_TO_ROW:
+            continue  # only overhead/payroll accounts
+        by_acct[acct].append((r["d"], float(r["amt"] or 0)))
+
     with engine.begin() as conn:
         so = 0
-        for row in rr:
-            wk = round(float(row["weekly"][0]), 2)
-            if wk <= 0:
+        for acct, txns in sorted(by_acct.items()):
+            total = round(sum(a for _, a in txns), 2)
+            if total <= 0:
                 continue
+            cadence = _detect_cadence([d for d, _ in txns])
+            per_amt = round(total / _PERIODS_PER_YEAR[cadence], 2)  # preserve annual run-rate
+            anchor = max(d for d, _ in txns)                        # real day-of-cycle
+            parent = acct.split(":")[0]
             so += 1
             conn.execute(text("""
                 INSERT INTO cashflow_overhead
                   (name, category, amount, cadence, anchor_date, active, sort_order, edited)
-                VALUES (:n, :c, :a, 'weekly', :d, 1, :so, 0)
-            """), {"n": row["label"], "c": row["label"], "a": wk, "d": today, "so": so})
+                VALUES (:n, :c, :a, :cad, :d, 1, :so, 0)
+            """), {"n": acct, "c": _CATEGORY_TO_ROW.get(parent, parent),
+                   "a": per_amt, "cad": cadence, "d": anchor, "so": so})
     return so
 
 
 def expand(week_ends):
     """Expand active overhead items into weekly buckets aligned to `week_ends`.
-    Returns (weekly_totals, per_item_detail)."""
+    Returns (weekly_totals, per_item_detail, per_category_detail)."""
     weeks = len(week_ends)
     win_start = week_ends[0] - timedelta(days=6)
     win_end = week_ends[-1]
@@ -122,6 +171,7 @@ def expand(week_ends):
 
     weekly = [0.0] * weeks
     detail = []
+    cat_wk = {}  # category (top-level) -> weekly[]
     for r in list_overhead(active_only=True):
         amt = float(r["amount"] or 0)
         wk = [0.0] * weeks
@@ -130,10 +180,18 @@ def expand(week_ends):
             if i is not None:
                 wk[i] += amt
                 weekly[i] += amt
-        detail.append({"id": r["id"], "label": r["name"], "cadence": r["cadence"],
-                       "amount": round(amt, 2), "weekly": [round(x, 2) for x in wk],
-                       "total": round(sum(wk), 2)})
-    return [round(x, 2) for x in weekly], detail
+        # item label shows just the sub-account (its category groups it)
+        sub = r["name"].split(":", 1)[1].strip() if r["name"] and ":" in r["name"] else r["name"]
+        detail.append({"id": r["id"], "label": sub, "category": r["category"],
+                       "cadence": r["cadence"], "amount": round(amt, 2),
+                       "weekly": [round(x, 2) for x in wk], "total": round(sum(wk), 2)})
+        ca = cat_wk.setdefault(r["category"] or "Other", [0.0] * weeks)
+        for i in range(weeks):
+            ca[i] += wk[i]
+    cat_detail = [{"label": c, "weekly": [round(x, 2) for x in v], "total": round(sum(v), 2)}
+                  for c, v in cat_wk.items()]
+    cat_detail.sort(key=lambda r: -r["total"])
+    return [round(x, 2) for x in weekly], detail, cat_detail
 
 
 # --- CRUD ---------------------------------------------------------------------
