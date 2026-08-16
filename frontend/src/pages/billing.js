@@ -256,9 +256,9 @@ function render(container, entityId, d) {
     else offerLine = g.crew_id
       ? `<div class="px-4 py-2.5 border-t border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap"><span class="font-semibold text-black/55">Rollup offer:</span><span>${escapeHtml(cn)} · ${money(g.labor)}</span><button data-offer-send data-crew="${g.crew_id}" data-labor="${Math.round(g.labor)}" class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer</button><button data-offer-script data-crew="${g.crew_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button></div>`
       : `<div class="px-4 py-2.5 border-t border-black/[0.06] text-[12px] text-amber-700 bg-amber-50">Assign these estimates to a crew below to send an offer.</div>`;
-    return `<div class="rounded-xl border border-black/10 overflow-hidden mb-3">
-      <div class="flex items-center gap-2 px-4 py-2.5 bg-indigo-50/60 border-b border-black/10 flex-wrap">
-        <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200">Rollup</span>
+    return `<div class="rounded-xl border border-blue-300 overflow-hidden mb-3">
+      <div class="flex items-center gap-2 px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex-wrap">
+        <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 border border-blue-200">Rollup</span>
         <span class="text-[13px] font-bold text-ink-900">${escapeHtml(cn)}</span>
         <span class="text-[11.5px] text-black/45">covers ${g.estimates.length} estimate${g.estimates.length > 1 ? "s" : ""}</span>
         <span class="ml-auto tabular-nums text-[13px]"><b class="text-ink-900">${money(g.paid_qbo)}</b> <span class="text-black/45">paid / ${money(g.labor)}</span></span>
@@ -414,22 +414,9 @@ function render(container, entityId, d) {
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Crew payments</span>
           <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">rollup by crew · bi-weekly</span>
-          <span class="ml-auto flex items-center gap-3 text-[12px] tabular-nums">
-            <span class="text-black/55">est labor <b class="text-ink-900">${money(crewLaborEst)}</b></span>
-            <span class="text-black/55">paid <b class="text-ink-900">${money(crewPaid)}</b></span>
-          </span>
+          <span class="ml-auto text-[12px] tabular-nums text-black/55"><b class="text-ink-900">${money(crewLaborEst)}</b> labor</span>
         </summary>
         <div class="p-3">
-          ${(() => {
-            const v = crewLaborEst - crewPaid;  // + = under estimate, − = over
-            if (crewPaid <= 0.5 && !p.books_closed) return "";
-            return `<div class="flex items-center gap-3 px-3 py-2 mb-2 rounded-lg bg-black/[0.02] border border-black/10 text-[12.5px] flex-wrap">
-              <span class="text-black/55">Estimated labor <b class="text-ink-900 tabular-nums">${money(crewLaborEst)}</b></span>
-              <span class="text-black/55">Actual paid <b class="text-ink-900 tabular-nums">${money(crewPaid)}</b></span>
-              <span class="ml-auto font-bold tabular-nums ${Math.abs(v) < 0.5 ? "text-black/50" : v > 0 ? "text-emerald-700" : "text-red-600"}">${Math.abs(v) < 0.5 ? "on estimate" : money(Math.abs(v)) + (v > 0 ? " under estimate" : " over estimate")}</span>
-              ${p.books_closed ? `<span class="text-[10px] font-bold uppercase tracking-wide text-black/40 bg-black/[0.06] border border-black/15 px-1.5 py-0.5 rounded">final</span>` : ""}
-            </div>`;
-          })()}
           ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
           ${est.accepted.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}</div></div>` : ""}
         </div>

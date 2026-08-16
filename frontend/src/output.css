@@ -1457,6 +1457,10 @@ option {
   width: 18px;
 }
 
+.w-\[190px\] {
+  width: 190px;
+}
+
 .w-\[20px\] {
   width: 20px;
 }
@@ -2560,10 +2564,6 @@ option {
   background-color: rgb(238 242 255 / 0.5);
 }
 
-.bg-indigo-50\/60 {
-  background-color: rgb(238 242 255 / 0.6);
-}
-
 .bg-ink-900 {
   --tw-bg-opacity: 1;
   background-color: rgb(11 15 20 / var(--tw-bg-opacity, 1));
@@ -2777,6 +2777,10 @@ option {
 
 .p-0 {
   padding: 0px;
+}
+
+.p-0\.5 {
+  padding: 0.125rem;
 }
 
 .p-1 {
@@ -3995,6 +3999,10 @@ option {
 
 .hover\:text-black\/50:hover {
   color: rgb(0 0 0 / 0.5);
+}
+
+.hover\:text-black\/55:hover {
+  color: rgb(0 0 0 / 0.55);
 }
 
 .hover\:text-black\/60:hover {

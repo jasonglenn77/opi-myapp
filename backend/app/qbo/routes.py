@@ -53,6 +53,23 @@ def sync_accounts(_admin=Depends(require_admin)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/reconcile-deletions")
+def reconcile_deletions(_admin=Depends(require_admin)):
+    """Audit Bills & Invoices against QBO's current Id set and remove any that
+    were deleted in QBO but still linger locally (stale open A/P / A/R that
+    inflates the cash-flow forecast). Then refresh the financial summary."""
+    try:
+        result = service.reconcile_deleted_transactions()
+        try:
+            from app.projects.service import refresh_project_financial_summary
+            refresh_project_financial_summary()
+        except Exception:
+            pass
+        return {"ok": True, "reconciled": result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/status")
 def qbo_status(_admin=Depends(require_admin)):
     service.qbo_init_tables()

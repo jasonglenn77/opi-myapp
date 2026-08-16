@@ -139,8 +139,9 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
 
   mount(`
     <div class="w-full">
-      <div class="mb-3">
+      <div class="mb-3 flex items-center gap-4">
         <a href="${back.hash}" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← Back to ${escapeHtml(back.label)}</a>
+        ${isProject ? `<a href="#/projects" id="edGoProjects" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">Go to Projects →</a>` : ""}
       </div>
       <div class="card flex flex-col overflow-hidden" style="height: calc(100vh - 150px); min-height: 420px;">
         <div class="shrink-0 px-4 sm:px-5 pt-4 border-b border-black/10">
@@ -154,6 +155,14 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         <div id="tabBody" class="flex-1 overflow-auto"></div>
       </div>
     </div>`, routeFn);
+
+  // "Go to Projects" surfaces this project on the hub (All filter, searched to it).
+  if (isProject) {
+    document.getElementById("edGoProjects")?.addEventListener("click", () => {
+      const jobNo = ((entity.name || "").match(/^\s*(\d+)/) || [])[1] || entity.name || "";
+      try { sessionStorage.setItem("opi_hub_state", JSON.stringify({ statusFilter: "all", search: jobNo, open: [], sortKey: "project_name", sortDir: "asc" })); } catch (_) {}
+    });
+  }
 
   // ── documents tab ───────────────────────────────────────────────────────────
   function attachDocHandlers() {

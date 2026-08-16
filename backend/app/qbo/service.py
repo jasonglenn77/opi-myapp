@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta
 import time
 import httpx
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
 from app.db import engine
 
@@ -728,6 +728,109 @@ def fetch_entities_incremental(
 
     return all_rows
 
+
+# ---------------------------------------------------------------------------
+# Deletion handling. The incremental SELECT above only ever returns rows that
+# STILL EXIST in QBO, so a transaction that is hard-deleted in QBO is never
+# seen again and lingers locally as a stale open bill/invoice — inflating the
+# committed A/P & A/R the cash-flow forecast reads. Two mechanisms fix this:
+#   1) CDC (Change Data Capture) — reports rows deleted since a watermark
+#      (flagged status='Deleted'), run every incremental sync.
+#   2) reconcile_deleted_transactions() — a full audit against QBO's current
+#      Id set, for cleaning staleness that predates CDC or falls outside its
+#      ~30-day window.
+# ---------------------------------------------------------------------------
+def _qbo_cdc(realm_id: str, access_token: str, entities: list[str],
+             changed_since: datetime) -> dict:
+    """Change-Data-Capture feed: entities changed since `changed_since`, INCLUDING
+    ones deleted in QBO (item carries status='Deleted'), which a normal SELECT
+    can never surface. Same back-off policy as _qbo_query."""
+    url = f"{QBO_API_BASE}/v3/company/{realm_id}/cdc"
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    params = {"entities": ",".join(entities), "changedSince": _fmt_qbo_dt(changed_since)}
+    with httpx.Client(timeout=60) as client:
+        for attempt in range(1, 6):
+            r = client.get(url, headers=headers, params=params)
+            if (r.status_code == 429 or 500 <= r.status_code < 600) and attempt < 5:
+                time.sleep(min(60, 2 ** attempt))
+                continue
+            r.raise_for_status()
+            return r.json()
+    raise RuntimeError("QBO CDC failed after retries")
+
+
+def _cdc_deleted_ids(cdc_json: dict) -> dict:
+    """Parse a CDC response into {entity_type: [deleted qbo_id, ...]}."""
+    out: dict[str, list[str]] = {}
+    for block in cdc_json.get("CDCResponse", []) or []:
+        for qr in block.get("QueryResponse", []) or []:
+            for key, items in qr.items():
+                if not isinstance(items, list):
+                    continue
+                for it in items:
+                    if isinstance(it, dict) and str(it.get("status", "")).lower() == "deleted" and it.get("Id"):
+                        out.setdefault(key, []).append(str(it["Id"]))
+    return out
+
+
+def _delete_local_transactions(realm_id: str, entity: str, qbo_ids: list) -> int:
+    """Remove locally-stored transactions (their lines cascade via ON DELETE
+    CASCADE) whose QBO Ids are gone. Returns the number removed."""
+    ids = [str(i) for i in qbo_ids if i]
+    if not ids:
+        return 0
+    stmt = text("""
+        DELETE FROM qbo_transactions
+        WHERE realm_id = :r AND entity_type = :e AND qbo_id IN :ids
+    """).bindparams(bindparam("ids", expanding=True))
+    with engine.begin() as conn:
+        res = conn.execute(stmt, {"r": realm_id, "e": entity, "ids": ids})
+        return res.rowcount or 0
+
+
+def sync_deletions_via_cdc(realm_id: str, access_token: str, since: datetime) -> int:
+    """Best-effort: pull CDC since the watermark and delete anything QBO reports
+    as deleted. Caps the window to CDC's ~30-day maximum. Returns rows removed."""
+    changed_since = max(since, datetime.utcnow() - timedelta(days=25))
+    cdc = _qbo_cdc(realm_id, access_token, TRANSACTION_ENTITIES, changed_since)
+    removed = 0
+    for entity, ids in _cdc_deleted_ids(cdc).items():
+        if entity in TRANSACTION_ENTITIES:
+            removed += _delete_local_transactions(realm_id, entity, ids)
+    return removed
+
+
+def reconcile_deleted_transactions(entities=("Bill", "Invoice")) -> dict:
+    """Full audit for the forecast-critical entities: fetch every Id currently in
+    QBO and delete any locally-stored transaction whose Id is gone (deleted in QBO
+    but missed — e.g. before CDC handling existed, or outside its window). Fixes
+    existing staleness like a paid-via-expense bill that QBO A/P no longer carries.
+    """
+    realm_id, access_token = get_valid_access_token()
+    result = {}
+    for entity in entities:
+        existing = set()
+        start = 1
+        while True:
+            q = f"SELECT Id FROM {entity} ORDERBY Id STARTPOSITION {start} MAXRESULTS 1000"
+            data = _qbo_query(realm_id, access_token, q)
+            rows = data.get("QueryResponse", {}).get(entity, []) or []
+            for r in rows:
+                if r.get("Id"):
+                    existing.add(str(r["Id"]))
+            if len(rows) < 1000:
+                break
+            start += 1000
+        with engine.connect() as conn:
+            local = [str(x) for x in conn.execute(text(
+                "SELECT qbo_id FROM qbo_transactions WHERE realm_id = :r AND entity_type = :e"),
+                {"r": realm_id, "e": entity}).scalars().all()]
+        gone = [q for q in local if q not in existing]
+        removed = _delete_local_transactions(realm_id, entity, gone) if gone else 0
+        result[entity] = {"qbo_count": len(existing), "local_count": len(local), "removed": removed}
+    return result
+
+
 def upsert_sales_transaction_lines(
     conn,
     realm_id: str,
@@ -1317,6 +1420,16 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             upserted_lines_total += up_line
             upserted_sales_lines_total += up_sales_line
 
+        # Reconcile deletions the incremental SELECT can't see: CDC reports rows
+        # deleted in QBO since the watermark. Best-effort — never fail the sync
+        # over it. (First full sync has no watermark; nothing to reconcile.)
+        deleted_total = 0
+        if since:
+            try:
+                deleted_total = sync_deletions_via_cdc(realm_id, access_token, since)
+            except Exception:
+                pass
+
         log_sync_finish(run_id, True, fetched=fetched_total, upserted=upserted_txns_total)
         # Rebuild the pre-computed Financials page aggregates since transactions changed.
         try:
@@ -1339,6 +1452,7 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             "transactions_upserted": upserted_txns_total,
             "lines_upserted": upserted_lines_total,
             "sales_lines_upserted": upserted_sales_lines_total,
+            "transactions_deleted": deleted_total,
             "run_id": run_id,
         }
     except Exception as e:

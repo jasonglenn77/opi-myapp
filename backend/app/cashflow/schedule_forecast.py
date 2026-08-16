@@ -377,7 +377,7 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
                          "is_project": True, "weekly": wk,
                          "pastdue": pastd, "beyond": round(g["beyond"], 2),
                          "src": g["src"], "total": total})
-        rows.sort(key=lambda r: -(r["total"] + r["pastdue"]))
+        rows.sort(key=lambda r: (r["label"] or "").lower())  # by project name
         return rows
 
     _TYPE_LABEL = {"crew": "Crew payments", "expense": "Project expenses"}

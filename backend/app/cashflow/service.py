@@ -341,6 +341,11 @@ def generate_forecast_v2(start_date: date | None = None,
     ap_wt = _column_sums(ap_rows, weeks)
     inv_pd = round(sum(r.get("pastdue", 0) for r in inv_rows), 2)   # overdue A/R
     ap_pd = round(sum(r.get("pastdue", 0) for r in ap_rows), 2)     # overdue A/P
+    # Project-keyed views list projects alphabetically by name (the scheduled layer
+    # sorts its project rows the same way). By-vendor / by-type / by-item views keep
+    # their largest-first amount ordering.
+    inv_rows.sort(key=lambda r: (r.get("label") or "").lower())
+    ap_proj_rows.sort(key=lambda r: (r.get("label") or "").lower())
 
     # ---- recurring overhead: the editable schedule (seeded from the run-rate the
     #      first time), expanded by cadence across the weekly grid ----
@@ -410,8 +415,8 @@ def generate_forecast_v2(start_date: date | None = None,
         "inflow": {
             "label": "Cash Inflow",
             "sections": [
-                _sec("ar", "Committed — open invoices (A/R, by due date)", inv_rows, inv_wt, "committed", inv_pd),
-                {"key": "scheduled", "label": "Scheduled — to bill (project schedules)", "tier": "scheduled",
+                _sec("ar", "Open invoices (A/R, by due date)", inv_rows, inv_wt, "committed", inv_pd),
+                {"key": "scheduled", "label": "Need to bill (project schedules)", "tier": "scheduled",
                  "rows": sched_in_rows,
                  "weekly_totals": [round(x, 2) for x in sched_in],
                  "grand_total": round(sum(sched_in), 2), "pastdue": round(sched_pd_in, 2)},
@@ -424,9 +429,9 @@ def generate_forecast_v2(start_date: date | None = None,
         "outflow": {
             "label": "Cash Outflow",
             "sections": [
-                {**_sec("ap", "Committed — open bills (A/P, by due date)", ap_rows, ap_wt, "committed", ap_pd),
+                {**_sec("ap", "Open bills (A/P, by due date)", ap_rows, ap_wt, "committed", ap_pd),
                  "alt_rows": ap_proj_rows, "view_a": "By vendor", "view_b": "By project"},
-                {"key": "scheduled", "label": "Scheduled — crew & expenses (project schedules)", "tier": "scheduled",
+                {"key": "scheduled", "label": "Crew & expenses (project schedules)", "tier": "scheduled",
                  "rows": sched_out_rows, "alt_rows": sched_out_by_type, "view_a": "By project", "view_b": "By type",
                  "weekly_totals": [round(x, 2) for x in sched_out],
                  "grand_total": round(sum(sched_out), 2), "pastdue": round(sched_pd_out, 2)},

@@ -85,7 +85,7 @@ export function bindNavCollapse() {
     const active = [...box.querySelectorAll("a[href]")].some((a) => a.getAttribute("href") === location.hash);
     let collapsed;
     if (active) collapsed = false;
-    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? true : saved === "1"; }
+    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? false : saved === "1"; }
     apply(box, toggle, collapsed);
     if (toggle && !toggle.dataset.collbound) {
       toggle.dataset.collbound = "1";

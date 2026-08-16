@@ -71,14 +71,31 @@ const FLAG_CLS = {
 };
 const ACCENT = { bad: "border-l-rose-400", warn: "border-l-amber-400", good: "border-l-emerald-400", mut: "border-l-slate-300" };
 
-function profitInfo(fin) {
+// Profit shown follows the project's stage:
+//  • not started            → ESTIMATED profit (contract − estimated cost)
+//  • in progress, on budget  → ESTIMATED profit
+//  • in progress, over cost  → actual costs so far vs the full contract (the
+//                              overrun reality: contract − actual cost)
+//  • completed / canceled    → ACTUAL profit (invoiced − actual cost)
+function profitInfo(fin, status) {
   if (!fin) return { pct: null };
-  const inv = Number(fin.invoice_line_amt) || 0;
-  const ap = fin.actual_profit_pct, pp = fin.projected_profit_pct;
-  const useActual = inv > 0 && ap != null;
-  const pct = (useActual ? ap : pp);
-  if (pct == null) return { pct: null };
-  return { pct: pct * 100, actual: useActual, ap, pp };
+  const contract = Number(fin.estimate_line_amt) || 0;   // header contract value
+  const estCost = Number(fin.estimate_cost_amt) || 0;    // estimated cost (labor + expenses)
+  const actCost = Number(fin.expense_line_amt) || 0;     // actual cost so far (incl. crew)
+  const invoiced = Number(fin.invoice_line_amt) || 0;
+  const estProfit = contract - estCost;
+  const done = status === "completed" || status === "canceled";
+  const started = status === "in_progress";
+  let amount, base, kind;
+  if (done) {
+    amount = invoiced - actCost; base = invoiced || contract; kind = "actual";
+  } else if (started && actCost > estCost + 0.5) {
+    amount = contract - actCost; base = contract; kind = "actual";   // over the estimated cost
+  } else {
+    amount = estProfit; base = contract; kind = "estimated";
+  }
+  const pct = base > 0 ? (amount / base) * 100 : null;
+  return { pct, amount, kind };
 }
 
 // Derive the collapsed-row flags from the merged data (basic + financials +
@@ -149,6 +166,9 @@ export async function projectsHubPage(routeFn) {
   const cardCache = new Map(); // project_qbo_id -> card detail (lazy)
   const openSet = new Set();   // project_qbo_id currently expanded
   let statusFilter = "all", search = "", sortKey = "project_name", sortDir = "asc";
+  // Per-column filters (schedule/pm/crew/value/profit/outstanding/flags). Status
+  // stays on the pill row; project/pm/crew text stays on the global search.
+  let colFilters = { schedule: "", pm: "", crew: "", valueMin: "", profit: "", outstanding: "", flags: "" };
 
   // Restore the table's state (open rows / filter / sort / scroll) so returning
   // from a project workspace lands you exactly where you left off.
@@ -163,13 +183,14 @@ export async function projectsHubPage(routeFn) {
   if (restore) {
     statusFilter = restore.statusFilter || "all"; search = restore.search || "";
     sortKey = restore.sortKey || sortKey; sortDir = restore.sortDir || sortDir;
+    if (restore.colFilters) colFilters = { ...colFilters, ...restore.colFilters };
     (restore.open || []).forEach((q) => openSet.add(String(q)));
   }
   const saveHubState = () => {
     try {
       const le = document.getElementById("phList");
       sessionStorage.setItem("opi_hub_state", JSON.stringify({
-        open: [...openSet], statusFilter, search, sortKey, sortDir, scroll: le ? le.scrollTop : 0,
+        open: [...openSet], statusFilter, search, sortKey, sortDir, colFilters, scroll: le ? le.scrollTop : 0,
       }));
     } catch (_) {}
   };
@@ -210,9 +231,26 @@ export async function projectsHubPage(routeFn) {
     return f ? (Number(f.estimate_line_amt) || Number(f.invoice_line_amt) || 0) : 0;
   };
   const searchKey = (p) => `${p.project_name || ""} ${p.all_project_managers || ""} ${p.all_work_crews || ""} ${p.linked_quote_number || ""}`.toLowerCase();
+  // ── shared classifiers (used by both sorting and per-column filters) ──
+  const outstandingTotal = (p) => {
+    const f = finById.get(p.qbo_customer_id);
+    const os = (attById.get(String(p.project_qbo_id)) || {}).outstanding || {};
+    const toBill = f ? Math.max(0, (Number(f.estimate_line_amt) || 0) - (Number(f.invoice_line_amt) || 0)) : 0;
+    const ar = f ? Number(f.open_invoice_total_amt) || 0 : 0;
+    return toBill + ar + (os.crew_due || 0) + (os.exp_to_spend || 0);
+  };
+  const flagScore = (p) => deriveFlags(p, finById.get(p.qbo_customer_id), attById.get(String(p.project_qbo_id)))
+    .reduce((s, f) => s + (f.c === "bad" ? 2 : f.c === "warn" ? 1 : 0), 0);
+  const scheduleClass = (p) => csvList(p.all_start_dates).length ? "scheduled" : (p.operational_status === "pending" ? "tbd" : "unscheduled");
+  const wrapNames = (csv) => { const l = csvList(csv).map((s) => s.toLowerCase()); return l.length ? "||" + l.join("||") + "||" : ""; };
+  const profitClass = (p) => { const pi = profitInfo(finById.get(p.qbo_customer_id), p.operational_status); return pi.pct == null ? "na" : pi.pct < 0 ? "neg" : "pos"; };
   const sortVal = (p, key) => {
     if (key === "value") return finVal(p);
-    if (key === "profit") { const pi = profitInfo(finById.get(p.qbo_customer_id)); return pi.pct == null ? -Infinity : pi.pct; }
+    if (key === "profit") { const pi = profitInfo(finById.get(p.qbo_customer_id), p.operational_status); return pi.pct == null ? -Infinity : pi.pct; }
+    if (key === "pm") return (csvList(p.all_project_managers)[0] || "").toLowerCase();
+    if (key === "crew") return (csvList(p.all_work_crews)[0] || "").toLowerCase();
+    if (key === "outstanding") return outstandingTotal(p);
+    if (key === "flags") return flagScore(p);
     return (p[key] ?? "").toString().toLowerCase();
   };
   const sortedAll = () => {
@@ -222,15 +260,16 @@ export async function projectsHubPage(routeFn) {
   };
 
   const HEADERS = [
-    { key: "operational_status", label: "Status" },
-    { key: "project_name", label: "Project" },
-    { key: "start_date", label: "Schedule" },
-    { key: null, label: "Team" },
-    { key: "project_create_dttm", label: "Created", align: "right" },
-    { key: "value", label: "Value", align: "right" },
-    { key: "profit", label: "Profit", align: "right" },
-    { key: null, label: "Outstanding" },
-    { key: null, label: "Flags", align: "right" },
+    { key: "operational_status", label: "Status", col: "status" },
+    { key: "project_name", label: "Project", col: "project" },
+    { key: "start_date", label: "Schedule", col: "schedule" },
+    { key: "pm", label: "PM", col: "pm" },
+    { key: "crew", label: "Work crew", col: "crew" },
+    { key: "project_create_dttm", label: "Created", align: "right", col: "created" },
+    { key: "value", label: "Value", align: "right", col: "value" },
+    { key: "profit", label: "Profit", align: "right", col: "profit" },
+    { key: "outstanding", label: "Outstanding", col: "outstanding" },
+    { key: "flags", label: "Flags", align: "right", col: "flags" },
   ];
   const arrow = (k) => (sortKey !== k ? "" : sortDir === "asc" ? " ▲" : " ▼");
   const onHeaderClick = (k) => {
@@ -267,10 +306,20 @@ export async function projectsHubPage(routeFn) {
 
   const applyFilter = () => {
     const q = search.toLowerCase();
+    const cf = colFilters;
+    const valueMin = parseFloat(cf.valueMin);
     let shown = 0;
     listEl.querySelectorAll("tr.ph-row").forEach((tr) => {
-      const ok = (statusFilter === "all" || tr.getAttribute("data-status") === statusFilter)
-        && (!q || (tr.getAttribute("data-key") || "").includes(q));
+      const g = (a) => tr.getAttribute(a) || "";
+      let ok = (statusFilter === "all" || g("data-status") === statusFilter)
+        && (!q || g("data-key").includes(q));
+      if (ok && cf.schedule) ok = g("data-schedule") === cf.schedule;
+      if (ok && cf.pm) ok = cf.pm === "__none__" ? g("data-pm") === "" : g("data-pm").includes("||" + cf.pm.toLowerCase() + "||");
+      if (ok && cf.crew) ok = cf.crew === "__none__" ? g("data-crew") === "" : g("data-crew").includes("||" + cf.crew.toLowerCase() + "||");
+      if (ok && !Number.isNaN(valueMin)) ok = (parseFloat(g("data-value")) || 0) >= valueMin;
+      if (ok && cf.profit) ok = g("data-profit") === cf.profit;
+      if (ok && cf.outstanding) ok = cf.outstanding === "has" ? g("data-outstanding") === "1" : g("data-outstanding") === "0";
+      if (ok && cf.flags) ok = cf.flags === "has" ? g("data-flags") === "1" : g("data-flags") === "0";
       tr.hidden = !ok;
       const det = tr.nextElementSibling;
       if (det && det.classList.contains("ph-detail")) det.hidden = !ok || !tr.classList.contains("open");
@@ -290,12 +339,14 @@ export async function projectsHubPage(routeFn) {
     const more = starts.length > 1 ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-blue-700 bg-blue-50 rounded px-1 py-px align-middle">+${starts.length - 1} dates</span>` : "";
     return `<span class="text-ink-900 font-medium">${escapeHtml(label)}</span>${more}`;
   };
-  const teamCell = (p) => {
-    const pms = csvList(p.all_project_managers), crews = csvList(p.all_work_crews);
-    const chip = (n) => n > 1 ? `<span class="ml-1 inline-flex items-center text-[10px] font-bold text-blue-700 bg-blue-50 rounded px-1 py-px align-middle">+${n - 1}</span>` : "";
-    const pm = pms.length ? `${escapeHtml(pms[0])}${chip(pms.length)}` : `<span class="text-black/35">No PM</span>`;
-    const cr = crews.length ? `${escapeHtml(crews[0])}${chip(crews.length)}` : `<span class="text-black/35">No crew</span>`;
-    return `<div class="leading-tight"><div class="text-ink-900">${pm}</div><div class="text-black/55 text-[12px]">${cr}</div></div>`;
+  const _teamChip = (n) => n > 1 ? `<span class="ml-1 inline-flex items-center text-[10px] font-bold text-blue-700 bg-blue-50 rounded px-1 py-px align-middle">+${n - 1}</span>` : "";
+  const pmCell = (p) => {
+    const pms = csvList(p.all_project_managers);
+    return pms.length ? `<span class="text-ink-900">${escapeHtml(pms[0])}${_teamChip(pms.length)}</span>` : `<span class="text-black/35">No PM</span>`;
+  };
+  const crewCell = (p) => {
+    const crews = csvList(p.all_work_crews);
+    return crews.length ? `<span class="text-ink-900">${escapeHtml(crews[0])}${_teamChip(crews.length)}</span>` : `<span class="text-black/35">No crew</span>`;
   };
   // Outstanding cash: invoices still to bill, A/R (sent + overdue days), crew
   // payments due, and estimated expenses left to spend. Only non-zero rows show.
@@ -320,11 +371,13 @@ export async function projectsHubPage(routeFn) {
     return rows.length ? `<div class="text-[11px] leading-snug">${rows.join("")}</div>` : `<span class="text-black/25">—</span>`;
   };
   const profitCell = (p) => {
-    const pi = profitInfo(finById.get(p.qbo_customer_id));
+    const pi = profitInfo(finById.get(p.qbo_customer_id), p.operational_status);
     if (pi.pct == null) return `<span class="text-black/30">—</span>`;
     const neg = pi.pct < 0;
     const cls = neg ? "text-rose-600" : "text-emerald-700";
-    return `<span class="${cls} font-semibold tabular-nums"><span class="text-[9px] align-middle">${neg ? "▾" : "▴"}</span> ${pi.pct.toFixed(1)}%</span>`;
+    const tag = pi.kind === "actual" ? "" : ` <span class="text-black/35 text-[9px] font-normal align-middle">est</span>`;
+    const amt = pi.amount != null ? `<div class="text-[11px] tabular-nums text-black/50">${money(pi.amount)}</div>` : "";
+    return `<div class="leading-tight"><div class="${cls} font-semibold tabular-nums"><span class="text-[9px] align-middle">${neg ? "▾" : "▴"}</span> ${pi.pct.toFixed(1)}%${tag}</div>${amt}</div>`;
   };
   const flagsCell = (p) => {
     const flags = deriveFlags(p, finById.get(p.qbo_customer_id), attById.get(String(p.project_qbo_id)));
@@ -355,14 +408,17 @@ export async function projectsHubPage(routeFn) {
     const open = openSet.has(String(p.project_qbo_id));
     return `
       <tr class="ph-row border-b border-black/5 hover:bg-black/[0.02] cursor-pointer ${open ? "open bg-black/[0.02]" : ""} ${hasAtt ? "ph-att" : ""}"
-          data-qid="${escapeHtml(String(p.project_qbo_id))}" data-status="${escapeHtml(p.operational_status || "")}" data-key="${escapeHtml(searchKey(p))}">
+          data-qid="${escapeHtml(String(p.project_qbo_id))}" data-status="${escapeHtml(p.operational_status || "")}" data-key="${escapeHtml(searchKey(p))}"
+          data-schedule="${scheduleClass(p)}" data-pm="${escapeHtml(wrapNames(p.all_project_managers))}" data-crew="${escapeHtml(wrapNames(p.all_work_crews))}"
+          data-value="${finVal(p)}" data-profit="${profitClass(p)}" data-outstanding="${outstandingTotal(p) > 0.5 ? 1 : 0}" data-flags="${flagScore(p) > 0 ? 1 : 0}">
         <td class="py-2 pl-3 pr-3 align-top">${statusCell(p)}</td>
         <td class="py-2 pr-3 align-top">
           <div class="font-semibold text-ink-900 leading-tight">${escapeHtml(dash(p.project_name))}</div>
           <div class="text-[11.5px] text-black/40 mt-0.5">Quote <span class="text-blue-700 font-semibold">${p.linked_quote_number ? "#" + escapeHtml(String(p.linked_quote_number)) : "—"}</span> · 📎 ${p.file_count || 0}</div>
         </td>
         <td class="py-2 pr-3 align-top text-[12.5px]">${scheduleCell(p)}${setupChips(p)}</td>
-        <td class="py-2 pr-3 align-top text-[12.5px]">${teamCell(p)}</td>
+        <td class="py-2 pr-3 align-top text-[12.5px]">${pmCell(p)}</td>
+        <td class="py-2 pr-3 align-top text-[12.5px]">${crewCell(p)}</td>
         <td class="py-2 pr-3 align-top text-right text-[11.5px] tabular-nums text-black/50 whitespace-nowrap">${p.project_create_dttm ? escapeHtml(shortDate(p.project_create_dttm)) : "—"}</td>
         <td class="py-2 pr-3 align-top text-right tabular-nums font-semibold text-black/75">${money(finVal(p) || null)}</td>
         <td class="py-2 pr-3 align-top text-right">${profitCell(p)}</td>
@@ -370,7 +426,7 @@ export async function projectsHubPage(routeFn) {
         <td class="py-2 pr-3 align-top">${flagsCell(p)}</td>
       </tr>
       <tr class="ph-detail" data-qid="${escapeHtml(String(p.project_qbo_id))}" ${open ? "" : "hidden"}>
-        <td colspan="9" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
+        <td colspan="10" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
           <div class="ph-detail-body" data-qid="${escapeHtml(String(p.project_qbo_id))}">${open && cardCache.has(String(p.project_qbo_id)) ? detailHtml(p, cardCache.get(String(p.project_qbo_id))) : `<div class="text-black/40 text-xs py-4">Loading…</div>`}</div>
         </td>
       </tr>`;
@@ -431,14 +487,25 @@ export async function projectsHubPage(routeFn) {
         + (o.age_days != null ? kv("Age", `${o.age_days} day${o.age_days === 1 ? "" : "s"} ago`) : "")
         + (o.labor ? kv("Labor", money(o.labor)) : "");
     const f = c.financial || {};
-    const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
     const expOver = f.expense_actual != null && f.expense_estimated != null && f.expense_actual > f.expense_estimated + 0.5;
     const expLine = f.expense_estimated != null
       ? `<span class="${expOver ? "text-red-600" : "text-emerald-700"} font-semibold">${money(f.expense_actual)}</span> <span class="text-black/40">/ ${money(f.expense_estimated)} est</span>`
       : money(f.expense_line_amt);
-    const financial = kv("Estimate", money(f.estimate_line_amt)) + kv("Invoiced", money(f.invoice_line_amt))
-                    + kv("Expenses", expLine) + kv("Open A/R", money(f.open_invoice_total_amt))
-                    + kv("Profit", `${money(f.actual_profit != null ? f.actual_profit : f.projected_profit)} · ${pct(f.actual_profit_pct != null ? f.actual_profit_pct : f.projected_profit_pct)}`);
+    // Sent A/R (open, unpaid invoices) is already part of the Invoiced total, so
+    // show it as a sub-line under Invoiced rather than a separate row (#3a).
+    const arSent = Number(f.open_invoice_total_amt) || 0;
+    const invoicedVal = `${money(f.invoice_line_amt)}${arSent > 0.5
+      ? `<div class="text-black/40 text-[11px] font-normal">(${money(arSent)} sent A/R)</div>` : ""}`;
+    // Profit follows the project's stage (see profitInfo): estimated until the
+    // project starts, contract-minus-actual-cost once it's over the estimate,
+    // and true actual profit once complete/canceled (#3b).
+    const pi = profitInfo(f, p.operational_status);
+    const profitVal = pi.pct == null ? "—"
+      : `<span class="${pi.pct < 0 ? "text-rose-600" : "text-emerald-700"}">${money(pi.amount)} · ${pi.pct.toFixed(1)}%</span>`
+        + ` <span class="text-black/35 text-[10px] font-normal">${pi.kind === "actual" ? "actual" : "est"}</span>`;
+    const financial = kv("Estimate", money(f.estimate_line_amt)) + kv("Invoiced", invoicedVal)
+                    + kv("Expenses", expLine)
+                    + kv("Profit", profitVal);
     const notes = c.notes && c.notes.length
       ? `<div class="text-[12.5px] text-black/55 italic leading-relaxed space-y-1">${c.notes.map((n) => `<div>“${escapeHtml(n)}”</div>`).join("")}</div>`
       : `<div class="text-black/35 text-[12.5px]">No notes</div>`;
@@ -499,18 +566,100 @@ export async function projectsHubPage(routeFn) {
       </div>`;
   };
 
+  // ── per-column filters, consolidated into a funnel in each column header ──
+  const FILTER_COLS = new Set(["schedule", "pm", "crew", "value", "profit", "outstanding", "flags"]);
+  const filterKeyOf = (col) => (col === "value" ? "valueMin" : col);
+  const distinctNames = (accessor) => {
+    const set = new Set();
+    all.forEach((p) => csvList(accessor(p)).forEach((n) => n && set.add(n)));
+    return [...set].sort((a, b) => a.localeCompare(b));
+  };
+  const sel = (col, cur, opts) => `<select data-colf="${col}" class="w-full text-[12px] border border-black/15 rounded px-1.5 py-1 bg-white text-black/70">`
+    + opts.map(([v, l]) => `<option value="${escapeHtml(v)}"${v === cur ? " selected" : ""}>${escapeHtml(l)}</option>`).join("") + `</select>`;
+  const filterControlHtml = (col) => {
+    if (col === "schedule") return sel("schedule", colFilters.schedule, [["", "All"], ["scheduled", "Scheduled"], ["unscheduled", "Not scheduled"], ["tbd", "Dates TBD"]]);
+    if (col === "pm") return sel("pm", colFilters.pm, [["", "All"], ["__none__", "No PM"], ...distinctNames((p) => p.all_project_managers).map((n) => [n, n])]);
+    if (col === "crew") return sel("crew", colFilters.crew, [["", "All"], ["__none__", "No crew"], ...distinctNames((p) => p.all_work_crews).map((n) => [n, n])]);
+    if (col === "value") return `<input data-colf="valueMin" value="${escapeHtml(colFilters.valueMin)}" inputmode="numeric" placeholder="Min $" class="w-full text-[12px] border border-black/15 rounded px-2 py-1 bg-white text-black/70 text-right">`;
+    if (col === "profit") return sel("profit", colFilters.profit, [["", "All"], ["pos", "Positive"], ["neg", "Negative"], ["na", "No data"]]);
+    if (col === "outstanding") return sel("outstanding", colFilters.outstanding, [["", "All"], ["has", "Has outstanding"], ["none", "None"]]);
+    if (col === "flags") return sel("flags", colFilters.flags, [["", "All"], ["has", "Flagged"], ["none", "Clear"]]);
+    return "";
+  };
+  const funnelBtn = (col) => {
+    const active = !!colFilters[filterKeyOf(col)];
+    return `<button type="button" data-filter-btn="${col}" title="Filter" class="shrink-0 p-0.5 rounded align-middle ${active ? "text-blue-600" : "text-black/25 hover:text-black/55"}">`
+      + `<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="${active ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2"><path d="M3 4h18l-7 8v6l-4 2v-8z"/></svg></button>`;
+  };
+  const headerCell = (h) => {
+    const sortSpan = h.key
+      ? `<span data-sort="${h.key}" class="cursor-pointer select-none hover:text-black/70">${h.label}${arrow(h.key)}</span>`
+      : `<span>${h.label}</span>`;
+    const inner = `<span class="inline-flex items-center gap-1">${sortSpan}${FILTER_COLS.has(h.col) ? funnelBtn(h.col) : ""}</span>`;
+    return `<th class="py-2 px-3 font-bold bg-white whitespace-nowrap ${h.align === "right" ? "text-right" : ""}">${inner}</th>`;
+  };
+
+  // Funnel dropdown — a floating popover anchored to the clicked column funnel.
+  let popEl = null, popCol = null;
+  const updateFunnel = (col) => {
+    const btn = listEl.querySelector(`[data-filter-btn="${col}"]`);
+    if (!btn) return;
+    const active = !!colFilters[filterKeyOf(col)];
+    btn.classList.toggle("text-blue-600", active);
+    btn.classList.toggle("text-black/25", !active);
+    btn.querySelector("svg")?.setAttribute("fill", active ? "currentColor" : "none");
+  };
+  const onPopDocClick = (e) => { if (popEl && !popEl.contains(e.target) && !e.target.closest("[data-filter-btn]")) closeFilterPopover(); };
+  function closeFilterPopover() {
+    if (!popEl) return;
+    popEl.remove(); popEl = null; popCol = null;
+    document.removeEventListener("mousedown", onPopDocClick, true);
+    window.removeEventListener("resize", closeFilterPopover);
+    listEl.removeEventListener("scroll", closeFilterPopover);
+  }
+  const openFilterPopover = (btn, col) => {
+    if (popCol === col) { closeFilterPopover(); return; }
+    closeFilterPopover();
+    popCol = col;
+    const hasVal = !!colFilters[filterKeyOf(col)];
+    popEl = document.createElement("div");
+    popEl.className = "fixed z-[70] bg-white rounded-lg shadow-soft border border-black/10 p-2 w-[190px]";
+    popEl.innerHTML = `<div class="flex items-center justify-between mb-1"><span class="text-[10px] font-bold uppercase tracking-wide text-black/40">Filter</span>${hasVal ? `<button data-filter-clear class="text-[11px] font-semibold text-blue-600 hover:underline">Clear</button>` : ""}</div>${filterControlHtml(col)}`;
+    document.body.appendChild(popEl);
+    const r = btn.getBoundingClientRect();
+    const pw = popEl.offsetWidth;
+    let left = r.left;
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - 8 - pw;
+    popEl.style.left = Math.max(8, left) + "px";
+    popEl.style.top = (r.bottom + 4) + "px";
+    const ctrl = popEl.querySelector("[data-colf]");
+    if (ctrl) {
+      const evt = ctrl.tagName === "SELECT" ? "change" : "input";
+      ctrl.addEventListener(evt, () => { colFilters[ctrl.getAttribute("data-colf")] = ctrl.value.trim(); applyFilter(); updateFunnel(col); if (ctrl.tagName === "SELECT") closeFilterPopover(); });
+      ctrl.focus?.();
+    }
+    popEl.querySelector("[data-filter-clear]")?.addEventListener("click", () => { colFilters[filterKeyOf(col)] = ""; applyFilter(); updateFunnel(col); closeFilterPopover(); });
+    setTimeout(() => {
+      document.addEventListener("mousedown", onPopDocClick, true);
+      window.addEventListener("resize", closeFilterPopover);
+      listEl.addEventListener("scroll", closeFilterPopover);
+    }, 0);
+  };
+
   const renderList = () => {
     if (!all.length) { listEl.innerHTML = `<div class="text-black/45 py-4">No projects found.</div>`; return; }
+    closeFilterPopover();
     const rows = sortedAll();
     listEl.innerHTML = `
-      <table class="w-full text-sm" style="min-width:1180px;">
-        <thead class="sticky top-0 z-10 bg-white text-left text-black/45"><tr class="border-b border-black/10">
-          ${HEADERS.map((h) => `<th class="py-2 px-3 font-bold ${h.key ? "cursor-pointer select-none hover:text-black/70" : ""} bg-white whitespace-nowrap ${h.align === "right" ? "text-right" : ""}" ${h.key ? `data-sort="${h.key}"` : ""}>${h.label}${arrow(h.key)}</th>`).join("")}
-        </tr></thead>
+      <table class="w-full text-sm" style="min-width:1280px;">
+        <thead class="sticky top-0 z-10 bg-white text-left text-black/45">
+          <tr class="border-b border-black/10">${HEADERS.map(headerCell).join("")}</tr>
+        </thead>
         <tbody>${rows.map(rowHtml).join("")}</tbody>
       </table>
       <div data-empty hidden class="text-black/45 py-4">No projects match.</div>`;
-    listEl.querySelectorAll("[data-sort]").forEach((th) => th.addEventListener("click", () => onHeaderClick(th.getAttribute("data-sort"))));
+    listEl.querySelectorAll("[data-sort]").forEach((el) => el.addEventListener("click", () => onHeaderClick(el.getAttribute("data-sort"))));
+    listEl.querySelectorAll("[data-filter-btn]").forEach((btn) => btn.addEventListener("click", (e) => { e.stopPropagation(); openFilterPopover(btn, btn.getAttribute("data-filter-btn")); }));
     applyFilter();
   };
 

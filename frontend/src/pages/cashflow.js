@@ -35,7 +35,6 @@ export async function cashflowPage(routeFn) {
           </div>
         </div>
         <button id="cfGenerate" class="btn-primary py-2">Generate</button>
-        <button id="cfCategories" class="px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Categories</button>
         <button id="cfOverhead" class="hidden px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Overhead</button>
         <button id="cfInfo" type="button" title="How this page works" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/15 text-black/55 hover:bg-black/5">
           <svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg>
@@ -44,25 +43,6 @@ export async function cashflowPage(routeFn) {
       <div class="flex flex-wrap items-center justify-between gap-x-4 mt-1.5">
         <div id="cfModeDesc" class="text-xs text-black/55"></div>
         <div id="cfBalSource" class="text-[10px] text-black/40"></div>
-      </div>
-    </div>
-
-    <div id="cfCatModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
-      <div class="card p-6 flex flex-col" style="width:100%;max-width:44rem;max-height:85vh;overflow:hidden;">
-        <div class="flex items-center justify-between mb-1">
-          <div class="text-lg font-extrabold">Expense Categories</div>
-          <button id="cfCatClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
-        </div>
-        <div class="text-xs text-black/50 mb-3">Toggle <span class="font-semibold">Exclude</span> for accounts that aren't true operating spend (bank transfers, credit-card payments, loan principal). Excluded accounts are dropped from <span class="font-semibold">Actuals cash-out</span> and the <span class="font-semibold">forecast job-cost run-rate</span>. Everything is included by default — you only mark exclusions. 12-month totals shown for context.</div>
-        <div id="cfCatList" class="divide-y divide-black/5 border-y border-black/10" style="flex:1 1 auto;min-height:0;overflow-y:auto;"></div>
-        <div class="flex items-center justify-between gap-2 pt-3">
-          <button id="cfCatSuggest" type="button" class="text-sm font-semibold text-brand-700 hover:underline">Apply suggested exclusions</button>
-          <div class="flex gap-2">
-            <button id="cfCatCancel" type="button" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Cancel</button>
-            <button id="cfCatSave" type="button" class="btn-primary">Save</button>
-          </div>
-        </div>
-        <div id="cfCatMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
       </div>
     </div>
 
@@ -111,8 +91,8 @@ export async function cashflowPage(routeFn) {
           </div>
 
           <div>
-            <div class="font-bold text-ink-900">Opening balance &amp; Categories</div>
-            <p class="text-black/60"><span class="font-semibold">Opening balance</span> auto-fills from your QuickBooks bank balance (editable). <span class="font-semibold">Categories</span> lets you exclude non-operating accounts (bank transfers, loan principal, etc.) from the spending views.</p>
+            <div class="font-bold text-ink-900">Opening balance &amp; Overhead</div>
+            <p class="text-black/60"><span class="font-semibold">Opening balance</span> auto-fills from your QuickBooks bank balance (editable). The <span class="font-semibold">Overhead</span> button opens the recurring cash-out schedule (rent, insurance, payroll, loan payments…), and you can edit the Recurring rows right in the Cash Outflow table for a live what-if.</p>
           </div>
         </div>
       </div>
@@ -148,7 +128,7 @@ export async function cashflowPage(routeFn) {
     <div id="cfKpis" class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4"></div>
 
     <div class="card p-0 overflow-hidden">
-      <div class="overflow-x-auto">
+      <div id="cfScroll" class="overflow-auto">
         <div id="cfGrid" class="p-4 text-sm text-black/50">Loading…</div>
       </div>
     </div>
@@ -169,6 +149,16 @@ export async function cashflowPage(routeFn) {
   const weeksEl = document.getElementById("cfWeeks");
   const weeksWrap = document.getElementById("cfWeeksWrap");
   const grid = document.getElementById("cfGrid");
+  // Bound the forecast table to the remaining viewport so it scrolls INTERNALLY —
+  // that's what keeps the sticky "Week ending" header row visible while you scroll
+  // through expanded inflow/outflow sections.
+  function sizeCfScroll() {
+    const el = document.getElementById("cfScroll");
+    if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    el.style.maxHeight = Math.max(320, window.innerHeight - top - 16) + "px";
+  }
+  window.addEventListener("resize", sizeCfScroll);
   const kpis = document.getElementById("cfKpis");
   const modeDesc = document.getElementById("cfModeDesc");
   const btnV2 = document.getElementById("cfModeV2");
@@ -240,10 +230,10 @@ export async function cashflowPage(routeFn) {
     const extra = hasPD ? 1 : 0;
 
     const pdHead = hasPD
-      ? `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold" style="${PD_SEP};background:${PD_BG}"><div>Past due</div><div class="text-[10px] font-normal text-black/40">overdue</div></th>` : "";
+      ? `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold" style="position:sticky;top:0;z-index:4;${PD_SEP};background:${PD_BG}"><div>Past due</div><div class="text-[10px] font-normal text-black/40">overdue</div></th>` : "";
     const weekCols = d.week_ends.map((w, i) => {
       const [, m, day] = w.split("-");
-      return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
+      return `<th class="px-2 py-2 text-right whitespace-nowrap font-semibold" style="position:sticky;top:0;z-index:4;background:#fff"><div>${m}/${day}</div><div class="text-[10px] font-normal text-black/40">Wk ${i + 1}</div></th>`;
     }).join("");
 
     // numeric cells tagged with week (+ row id) so the live what-if can update them
@@ -306,7 +296,7 @@ export async function cashflowPage(routeFn) {
     const backlogChip = hasBk
       ? `<button data-cf-backlog class="text-left text-[12px] text-black/70 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 hover:bg-amber-100">
            <b class="text-amber-800">Committed, not yet scheduled</b> · ${bk.count || 0} project${bk.count === 1 ? "" : "s"}
-           <span class="text-black/55"> — to bill ${fmtMoney(bk.in || 0)} · est. out ${fmtMoney(bk.out || 0)} · </span><b class="${netPos ? "text-emerald-700" : "text-red-600"}">net ${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}</b>
+           <span class="text-black/55"> — need to bill ${fmtMoney(bk.in || 0)} · est. out ${fmtMoney(bk.out || 0)} · </span><b class="${netPos ? "text-emerald-700" : "text-red-600"}">net ${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}</b>
            <span class="text-brand-700 font-semibold ml-1">view →</span>
          </button>`
       : "";
@@ -327,7 +317,7 @@ export async function cashflowPage(routeFn) {
       <table class="text-sm" style="border-collapse:separate;border-spacing:0;min-width:${300 + (d.weeks + extra) * 68}px">
         <thead>
           <tr class="border-b border-black/10 text-black/60">
-            <th class="py-2 pr-3 text-left whitespace-nowrap" style="${STICKY}background:#fff">Week ending →</th>
+            <th class="py-2 pr-3 text-left whitespace-nowrap" style="position:sticky;top:0;left:0;z-index:5;background:#fff">Week ending →</th>
             ${pdHead}${weekCols}
           </tr>
         </thead>
@@ -374,9 +364,16 @@ export async function cashflowPage(routeFn) {
     if (rb) rb.addEventListener("click", refreshSchedules);
     const bb = grid.querySelector("[data-cf-backlog]");
     if (bb) bb.addEventListener("click", openBacklog);
-    // clicking a project row → open its Billing & Schedule tab
+    // clicking a project row → open its Billing & Schedule tab, and remember to
+    // send "← Back to Cash Flow" (scoped to this exact project).
     grid.querySelectorAll("a[data-cf-proj]").forEach(a =>
-      a.addEventListener("click", () => { try { sessionStorage.setItem("opi_entity_tab", "billing"); } catch (_) {} }));
+      a.addEventListener("click", () => {
+        try {
+          sessionStorage.setItem("opi_entity_tab", "billing");
+          const pid = (a.getAttribute("href") || "").split("/").pop();
+          if (pid) sessionStorage.setItem("opi_entity_back", JSON.stringify({ entity: "project/" + pid, label: "Cash Flow", hash: "#/cashflow" }));
+        } catch (_) {}
+      }));
 
     // ── live what-if: edit a recurring cell → re-roll the balance (not saved) ──
     const wWeeks = d.weeks;
@@ -415,6 +412,7 @@ export async function cashflowPage(routeFn) {
     grid.querySelectorAll("td.cf-recedit").forEach(td => td.addEventListener("input", recomputeWhatIf));
     const wreset = grid.querySelector("[data-cf-whatif-reset]");
     if (wreset) wreset.addEventListener("click", () => renderForecastV2(d));
+    requestAnimationFrame(sizeCfScroll);  // bound the scroll area so the header stays sticky
   }
 
   // ── Backlog drill-down (undated projects: what flows if they all get dates) ──
@@ -435,7 +433,7 @@ export async function cashflowPage(routeFn) {
         <div class="text-lg font-extrabold ${cls}">${val}</div>
       </div>`;
     backlogSummary.innerHTML =
-      stat("New inflow (to bill)", fmtMoney(bk.in || 0), "text-emerald-700") +
+      stat("New inflow (need to bill)", fmtMoney(bk.in || 0), "text-emerald-700") +
       stat("New outflow (est.)", fmtMoney(bk.out || 0), "text-red-600") +
       stat("Net added to forecast", `${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}`, netPos ? "text-emerald-700" : "text-red-600") +
       stat("Already counted (A/R + banked)", fmtMoney((bk.ar || 0) + (bk.paid || 0)), "text-black/60");
@@ -508,8 +506,11 @@ export async function cashflowPage(routeFn) {
       : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out. Tap ⓘ for details.";
   }
 
-  async function load() {
-    grid.innerHTML = `<div class="p-4 text-sm text-black/50">Loading…</div>`;
+  let lastSig = null;  // signature of the last-rendered numbers (skip no-op re-renders)
+  async function load(silent = false) {
+    // `silent` = a background poll while the cache recomputes: don't blank the
+    // grid, and only re-render if the numbers actually changed (no flash).
+    if (!silent) grid.innerHTML = `<div class="p-4 text-sm text-black/50">Loading…</div>`;
     const params = new URLSearchParams();
     const ob = parseFloat(openingEl.value);
     if (!Number.isNaN(ob)) params.set("opening_balance", String(ob));
@@ -519,13 +520,20 @@ export async function cashflowPage(routeFn) {
     const endpoint = mode === "actuals" ? "actuals" : "forecast-v2";
     try {
       const d = await api(`/cashflow/${endpoint}?${params.toString()}`);
+      const sig = JSON.stringify([d.summary, d.inflow.weekly_totals, d.outflow.weekly_totals,
+                                  d.inflow.grand_total, d.outflow.grand_total, d.backlog, d.past_due]);
+      if (silent && sig === lastSig) {            // nothing changed — no flash
+        if (mode === "forecast_v2") schedulePoll(d.cache);
+        return;
+      }
+      lastSig = sig;
       renderKpis(d);
       render(d);
       if (mode === "forecast_v2") { schedulePoll(d.cache); loadCreditCards(); }
       else cardsEl.innerHTML = "";
     } catch (e) {
       kpis.innerHTML = "";
-      grid.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`;
+      if (!silent) grid.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`;
     }
   }
 
@@ -566,7 +574,7 @@ export async function cashflowPage(routeFn) {
   function schedulePoll(cache) {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     if (mode === "forecast_v2" && cache && (cache.stale || cache.computing)) {
-      pollTimer = setTimeout(load, 6000);
+      pollTimer = setTimeout(() => load(true), 6000);
     }
   }
 
@@ -663,61 +671,8 @@ export async function cashflowPage(routeFn) {
   document.getElementById("cfInfoClose").addEventListener("click", closeInfo);
   infoModal.addEventListener("click", (e) => { if (e.target === infoModal) closeInfo(); });
 
-  // ---- Categories modal ----
-  const catModal = document.getElementById("cfCatModal");
-  const catList = document.getElementById("cfCatList");
-  const catMsg = document.getElementById("cfCatMsg");
-  const openCat = () => { catModal.classList.remove("hidden"); catModal.classList.add("flex"); };
-  const closeCat = () => { catModal.classList.add("hidden"); catModal.classList.remove("flex"); };
-
-  catModal.addEventListener("click", (e) => { if (e.target === catModal) closeCat(); });
-  document.getElementById("cfCatClose").addEventListener("click", closeCat);
-  document.getElementById("cfCatCancel").addEventListener("click", closeCat);
-
-  async function openCategories() {
-    catMsg.textContent = "";
-    catList.innerHTML = `<div class="py-4 text-sm text-black/40">Loading…</div>`;
-    openCat();
-    try {
-      const { categories } = await api("/cashflow/categories");
-      const badge = (c) => {
-        if (c.suggested_exclude) return `<span class="ml-2 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-700">Suggested${c.classification ? " · " + escapeHtml(c.classification) : ""}</span>`;
-        if (c.classification === "Expense") return `<span class="ml-2 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-bold bg-emerald-50 text-emerald-700">Operating</span>`;
-        return "";
-      };
-      catList.innerHTML = categories.map(c => `
-        <label class="flex items-center justify-between gap-3 py-2 cursor-pointer">
-          <div class="min-w-0">
-            <div class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(c.category)}${badge(c)}</div>
-            <div class="text-[11px] text-black/40">12-mo: ${fmtMoney(c.total_12mo)} · ${c.line_ct} txns</div>
-          </div>
-          <span class="flex items-center gap-2 shrink-0 text-xs font-semibold text-black/60">
-            Exclude
-            <input type="checkbox" class="h-4 w-4 rounded border-black/20" data-cat="${escapeHtml(c.category)}" data-suggested="${c.suggested_exclude ? "1" : "0"}" ${c.excluded ? "checked" : ""} />
-          </span>
-        </label>`).join("") || `<div class="py-4 text-sm text-black/40">No expense categories found.</div>`;
-    } catch (e) {
-      catList.innerHTML = `<div class="py-4 text-sm text-red-700">Failed to load categories: ${escapeHtml(e.message || e)}</div>`;
-    }
-  }
-
-  document.getElementById("cfCategories").addEventListener("click", openCategories);
-
-  document.getElementById("cfCatSuggest").addEventListener("click", () => {
-    catList.querySelectorAll('input[data-suggested="1"]').forEach(i => { i.checked = true; });
-  });
-
-  document.getElementById("cfCatSave").addEventListener("click", async () => {
-    catMsg.textContent = "";
-    const excluded = Array.from(catList.querySelectorAll("input[data-cat]:checked")).map(i => i.getAttribute("data-cat"));
-    try {
-      await api("/cashflow/categories", { method: "PUT", body: JSON.stringify({ excluded }) });
-      closeCat();
-      load(); // re-render with the new exclusions applied
-    } catch (e) {
-      catMsg.textContent = "Failed to save: " + (e.message || e);
-    }
-  });
+  // (The old "Categories" exclusion modal was removed — the Overhead editor and
+  //  the editable Recurring cash-outflow rows cover that need now.)
 
   // Auto-fill the opening balance from QuickBooks bank accounts (if synced).
   const balSource = document.getElementById("cfBalSource");
