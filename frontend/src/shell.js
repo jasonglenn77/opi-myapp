@@ -79,13 +79,16 @@ export function bindNavCollapse() {
     const chev = toggle?.querySelector("[data-navchevron]");
     if (chev) chev.style.transform = collapsed ? "rotate(-90deg)" : "";
   };
+  // Teams & Settings start collapsed (they're accessed less often); the rest
+  // start expanded. The group holding the active route always expands.
+  const DEFAULT_COLLAPSED = new Set(["team", "set"]);
   document.querySelectorAll("[data-navchildren]").forEach((box) => {
     const key = box.getAttribute("data-navchildren");
     const toggle = document.querySelector(`[data-navtoggle="${key}"]`);
     const active = [...box.querySelectorAll("a[href]")].some((a) => a.getAttribute("href") === location.hash);
     let collapsed;
     if (active) collapsed = false;
-    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? false : saved === "1"; }
+    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? DEFAULT_COLLAPSED.has(key) : saved === "1"; }
     apply(box, toggle, collapsed);
     if (toggle && !toggle.dataset.collbound) {
       toggle.dataset.collbound = "1";

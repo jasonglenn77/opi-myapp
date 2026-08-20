@@ -121,23 +121,64 @@ def overhead_list(_user=Depends(require_capability("page.cashflow"))):
 
 
 @router.post("/overhead")
-def overhead_create(item: OverheadItem, _user=Depends(require_capability("page.cashflow"))):
+def overhead_create(item: OverheadItem, user=Depends(require_capability("page.cashflow"))):
     from . import overhead as OV
-    oid = OV.create(item.model_dump(exclude_none=True))
+    oid = OV.create(item.model_dump(exclude_none=True), actor=user.get("email"))
     return {"ok": True, "id": oid}
 
 
 @router.patch("/overhead/{oid}")
-def overhead_update(oid: int, item: OverheadItem, _user=Depends(require_capability("page.cashflow"))):
+def overhead_update(oid: int, item: OverheadItem, user=Depends(require_capability("page.cashflow"))):
     from . import overhead as OV
-    OV.update(oid, item.model_dump(exclude_unset=True))
+    OV.update(oid, item.model_dump(exclude_unset=True), actor=user.get("email"))
     return {"ok": True}
 
 
 @router.delete("/overhead/{oid}")
-def overhead_delete(oid: int, _user=Depends(require_capability("page.cashflow"))):
+def overhead_delete(oid: int, user=Depends(require_capability("page.cashflow"))):
     from . import overhead as OV
-    OV.delete(oid)
+    OV.delete(oid, actor=user.get("email"))
+    return {"ok": True}
+
+
+@router.post("/overhead/{oid}/revert")
+def overhead_revert(oid: int, user=Depends(require_capability("page.cashflow"))):
+    """Restore an item to its auto-generated (run-rate seeded) baseline."""
+    from . import overhead as OV
+    ok = OV.revert_to_auto(oid, actor=user.get("email"))
+    if not ok:
+        raise HTTPException(status_code=400, detail="No auto-generated baseline to revert to")
+    return {"ok": True}
+
+
+@router.get("/overhead/{oid}/history")
+def overhead_history(oid: int, _user=Depends(require_capability("page.cashflow"))):
+    from . import overhead as OV
+    return {"history": OV.list_history(oid)}
+
+
+@router.get("/overhead-deleted")
+def overhead_deleted(_user=Depends(require_capability("page.cashflow"))):
+    """Soft-deleted overhead items (restorable)."""
+    from . import overhead as OV
+    return {"items": OV.list_deleted()}
+
+
+@router.post("/overhead/refresh")
+def overhead_refresh(_user=Depends(require_capability("page.cashflow"))):
+    """Re-pull the current trailing-average run-rate: updates auto items (and their
+    revert baselines), regenerates any missing accounts, and leaves manual overrides
+    and deleted items alone. Runs automatically on each QBO sync too."""
+    from . import overhead as OV
+    return {"ok": True, **OV.refresh_auto_from_runrate()}
+
+
+@router.post("/overhead/{oid}/restore")
+def overhead_restore(oid: int, user=Depends(require_capability("page.cashflow"))):
+    from . import overhead as OV
+    ok = OV.restore(oid, actor=user.get("email"))
+    if not ok:
+        raise HTTPException(status_code=400, detail="Item is not deleted")
     return {"ok": True}
 
 

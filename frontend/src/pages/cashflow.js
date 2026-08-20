@@ -65,7 +65,7 @@ export async function cashflowPage(routeFn) {
             <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
               <li><span class="font-semibold text-ink-900">Committed</span> — the firmest money, because it's already in QuickBooks. <em>In</em> = customer invoices you've already sent, placed on their due date. <em>Out</em> = bills you've already entered, on their due date.</li>
               <li><span class="font-semibold text-ink-900">Scheduled</span> — the plans from each project's <span class="font-semibold">Billing &amp; Schedule</span> tab that aren't in QuickBooks yet: invoices you're set to send, crew payments, and project expenses, each on its planned date. The forecast is the sum of every project's tab, so if you fix a project's schedule it updates here.</li>
-              <li><span class="font-semibold text-ink-900">Recurring</span> — your steady overhead: rent, insurance, payroll, loan payments. It's an editable schedule seeded from your <span class="font-semibold">actual past spending</span> (with each item's cadence — weekly, monthly, etc. — detected from history). Adjust it with the <span class="font-semibold">Overhead</span> button.</li>
+              <li><span class="font-semibold text-ink-900">Recurring</span> — your steady overhead: rent, insurance, payroll, loan payments. Each item's amount, cadence (weekly/monthly/…), and start date are <span class="font-semibold">auto-generated from your trailing-12-month spending and stay current</span> — they refresh with every QuickBooks sync. Override any line with the <span class="font-semibold">Overhead</span> button and it holds until you revert it (revert returns it to the live auto value). Deleted lines stay deleted until you restore them.</li>
             </ul>
           </div>
 
@@ -598,10 +598,32 @@ export async function cashflowPage(routeFn) {
 
   const OV_IN = "bg-transparent border border-black/15 rounded px-1.5 py-1 text-[12.5px] outline-none focus:border-blue-500 focus:bg-white";
   async function renderOverhead() {
-    let items = [];
+    let items = [], deleted = [];
     try { const r = await api("/cashflow/overhead"); items = r.items || []; ovCadences = r.cadences || ovCadences; }
     catch (e) { ovBody.innerHTML = `<div class="py-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`; return; }
+    try { const dr = await api("/cashflow/overhead-deleted"); deleted = dr.items || []; } catch (_) {}
     const cadOpts = (sel) => ovCadences.map(c => `<option value="${c}" ${c === sel ? "selected" : ""}>${c}</option>`).join("");
+    const CAD_SHORT = { weekly: "wk", biweekly: "bi-wk", monthly: "mo", quarterly: "qtr", annual: "yr" };
+    const money0 = (v) => "$" + Math.round(Number(v) || 0).toLocaleString();
+    const seedLabel = (i) => i.seed_amount != null ? `${money0(i.seed_amount)}/${CAD_SHORT[i.seed_cadence] || i.seed_cadence}` : "—";
+    const isEdited = (i) => i.seed_amount == null ? !!i.edited
+      : (Math.round(i.amount || 0) !== Math.round(i.seed_amount || 0)
+         || (i.cadence || "") !== (i.seed_cadence || "")
+         || (i.anchor_date || "").slice(0, 10) !== (i.seed_anchor_date || "").slice(0, 10));
+    const sourceCell = (i) => {
+      if (isEdited(i)) {
+        const canRevert = i.seed_amount != null;
+        return `<div class="flex items-center gap-2 justify-end whitespace-nowrap">
+          <span class="text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px">edited</span>
+          ${canRevert ? `<button data-ov-revert="${i.id}" title="Revert to the auto-generated ${seedLabel(i)}" class="text-[11px] font-semibold text-blue-600 hover:underline">↺ ${seedLabel(i)}</button>` : ""}
+          <button data-ov-hist="${i.id}" class="text-[11px] font-semibold text-black/40 hover:text-black/70">history</button>
+        </div>`;
+      }
+      return `<div class="flex items-center gap-2 justify-end whitespace-nowrap">
+        <span class="text-[10px] text-black/30" title="Auto-generated from your trailing-12-month spending — refreshes on each QuickBooks sync">auto</span>
+        <button data-ov-hist="${i.id}" class="text-[11px] font-semibold text-black/35 hover:text-black/70">history</button>
+      </div>`;
+    };
     const rows = items.map(i => `
       <tr class="border-b border-black/5" data-ov="${i.id}">
         <td class="py-1 pr-2"><input data-f="name" value="${escapeHtml(i.name || "")}" class="${OV_IN} w-full"></td>
@@ -609,17 +631,35 @@ export async function cashflowPage(routeFn) {
         <td class="py-1 px-1"><select data-f="cadence" class="${OV_IN}">${cadOpts(i.cadence)}</select></td>
         <td class="py-1 px-1"><input data-f="anchor_date" type="date" value="${(i.anchor_date || "").slice(0, 10)}" class="${OV_IN} w-32 tabular-nums"></td>
         <td class="py-1 px-1"><input data-f="end_date" type="date" value="${(i.end_date || "").slice(0, 10)}" class="${OV_IN} w-32 tabular-nums"></td>
+        <td class="py-1 px-1">${sourceCell(i)}</td>
         <td class="py-1 pl-1 text-right"><button data-ov-del="${i.id}" class="text-black/30 hover:text-red-600 text-[13px]" title="Remove">✕</button></td>
-      </tr>`).join("");
+      </tr>
+      <tr class="ov-hist-row" data-ov-hist-row="${i.id}" hidden><td colspan="7" class="px-3 py-2 bg-black/[0.015] border-b border-black/10"></td></tr>`).join("");
+    const delSection = deleted.length ? `
+      <div class="mt-4 pt-3 border-t border-black/10">
+        <div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Deleted items (${deleted.length}) — restorable</div>
+        <table class="w-full text-[12.5px]"><tbody>
+          ${deleted.map(d => `<tr class="border-b border-black/5" data-ovd="${d.id}">
+            <td class="py-1 pr-2 text-black/50 line-through">${escapeHtml(d.name || "")}</td>
+            <td class="py-1 px-1 text-right tabular-nums text-black/45 whitespace-nowrap">${money0(d.amount)}/${CAD_SHORT[d.cadence] || d.cadence}</td>
+            <td class="py-1 px-1 text-[11px] text-black/40 whitespace-nowrap">deleted ${d.deleted_at ? new Date(d.deleted_at + "Z").toLocaleDateString() : ""}${d.deleted_by ? " · " + escapeHtml(d.deleted_by) : ""}</td>
+            <td class="py-1 pl-1 text-right whitespace-nowrap">
+              <button data-ov-hist="${d.id}" class="text-[11px] font-semibold text-black/40 hover:text-black/70 mr-2">history</button>
+              <button data-ov-restore="${d.id}" class="text-[11px] font-semibold text-blue-600 hover:underline">Restore</button>
+            </td>
+          </tr>
+          <tr class="ov-hist-row" data-ov-hist-row="${d.id}" hidden><td colspan="4" class="px-3 py-2 bg-black/[0.015] border-b border-black/10"></td></tr>`).join("")}
+        </tbody></table>
+      </div>` : "";
     ovBody.innerHTML = `
       <table class="w-full text-[12.5px]">
         <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
           <th class="py-1.5 pr-2 text-left">Item</th><th class="py-1.5 px-1 text-right">Amount</th>
           <th class="py-1.5 px-1 text-left">Cadence</th><th class="py-1.5 px-1 text-left">Starting</th>
-          <th class="py-1.5 px-1 text-left">Ends (optional)</th><th class="py-1.5"></th>
+          <th class="py-1.5 px-1 text-left">Ends (optional)</th><th class="py-1.5 px-1 text-right">Source</th><th class="py-1.5"></th>
         </tr></thead>
-        <tbody>${rows || `<tr><td colspan="6" class="py-4 text-black/40">No overhead items.</td></tr>`}</tbody>
-      </table>`;
+        <tbody>${rows || `<tr><td colspan="7" class="py-4 text-black/40">No overhead items.</td></tr>`}</tbody>
+      </table>${delSection}`;
     ovBody.querySelectorAll("[data-ov] [data-f]").forEach(el => {
       el.addEventListener("change", async () => {
         const id = el.closest("[data-ov]").getAttribute("data-ov");
@@ -627,13 +667,51 @@ export async function cashflowPage(routeFn) {
         let val = el.value;
         if (field === "amount") val = parseFloat(val) || 0;
         if ((field === "anchor_date" || field === "end_date") && !val) val = null;
-        try { await api(`/cashflow/overhead/${id}`, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); ovDirty = true; }
+        try { await api(`/cashflow/overhead/${id}`, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); ovDirty = true; renderOverhead(); }
         catch (e) { alert("Failed to save: " + (e.message || e)); }
       });
     });
     ovBody.querySelectorAll("[data-ov-del]").forEach(b => b.addEventListener("click", async () => {
       await api(`/cashflow/overhead/${b.getAttribute("data-ov-del")}`, { method: "DELETE" });
       ovDirty = true; renderOverhead();
+    }));
+    ovBody.querySelectorAll("[data-ov-revert]").forEach(b => b.addEventListener("click", async () => {
+      try { await api(`/cashflow/overhead/${b.getAttribute("data-ov-revert")}/revert`, { method: "POST" }); ovDirty = true; renderOverhead(); }
+      catch (e) { alert("Failed to revert: " + (e.message || e)); }
+    }));
+    ovBody.querySelectorAll("[data-ov-restore]").forEach(b => b.addEventListener("click", async () => {
+      try { await api(`/cashflow/overhead/${b.getAttribute("data-ov-restore")}/restore`, { method: "POST" }); ovDirty = true; renderOverhead(); }
+      catch (e) { alert("Failed to restore: " + (e.message || e)); }
+    }));
+    const fmtChange = (h) => {
+      const parts = [];
+      if (h.old_amount != null || h.new_amount != null) {
+        const a = money0(h.old_amount), b = money0(h.new_amount);
+        if (a !== b) parts.push(`${a} → ${b}`);
+      }
+      if (h.old_cadence !== h.new_cadence && (h.old_cadence || h.new_cadence)) parts.push(`${h.old_cadence || "—"} → ${h.new_cadence || "—"}`);
+      const od = (h.old_anchor_date || "").slice(0, 10), nd = (h.new_anchor_date || "").slice(0, 10);
+      if (od !== nd && (od || nd)) parts.push(`starts ${od || "—"} → ${nd || "—"}`);
+      return parts.join(" · ") || "(no field change)";
+    };
+    ovBody.querySelectorAll("[data-ov-hist]").forEach(b => b.addEventListener("click", async () => {
+      const id = b.getAttribute("data-ov-hist");
+      const row = ovBody.querySelector(`[data-ov-hist-row="${id}"]`);
+      if (!row) return;
+      if (!row.hidden) { row.hidden = true; return; }
+      const cell = row.querySelector("td");
+      cell.innerHTML = `<div class="text-[11px] text-black/40">Loading history…</div>`;
+      row.hidden = false;
+      try {
+        const { history } = await api(`/cashflow/overhead/${id}/history`);
+        if (!history || !history.length) { cell.innerHTML = `<div class="text-[11px] text-black/40">No changes yet — still the auto-generated value.</div>`; return; }
+        cell.innerHTML = `<div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Change history</div>` +
+          history.map(h => `<div class="flex items-baseline gap-2 text-[11.5px] py-0.5 border-b border-black/[0.05] last:border-0">
+            <span class="text-[9px] font-bold uppercase tracking-wide px-1 py-px rounded ${h.action === "revert" ? "bg-blue-50 text-blue-700" : h.action === "delete" ? "bg-red-50 text-red-700" : h.action === "create" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}">${escapeHtml(h.action)}</span>
+            <span class="text-black/70">${escapeHtml(fmtChange(h))}</span>
+            <span class="ml-auto text-black/40 whitespace-nowrap">${escapeHtml(h.actor || "—")} · ${h.created_at ? new Date(h.created_at + "Z").toLocaleString() : ""}</span>
+          </div>`).join("");
+      } catch (e) { cell.innerHTML = `<div class="text-[11px] text-red-700">Failed to load history: ${escapeHtml(e.message || e)}</div>`; }
     }));
   }
   function openOverhead() {

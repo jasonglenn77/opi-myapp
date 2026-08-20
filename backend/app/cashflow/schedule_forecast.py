@@ -79,27 +79,31 @@ def _project_events(conn, entity_id):
     has_dates = bool(ctx.get("start_date") and ctx.get("end_date"))
 
     cvi = B._all_crew_vendor_ids(conn, entity_id)
-    inv = B._compose_invoices(conn, entity_id, books_closed)
+    est = B._compose_estimates(conn, entity_id)
     crew = B._compose_crew(conn, entity_id, meta, cvi, books_closed)
     exp = B._compose_expenses(conn, entity_id, books_closed,
                               B._pd(ctx.get("start_date")), B._pd(ctx.get("end_date")))
 
     events, backlog_in, backlog_out = [], 0.0, 0.0
 
-    # Inflow: scheduled (not-yet-invoiced) milestones on their DUE date — that's
-    # when the cash is expected (net terms after billing), matching how committed
-    # A/R is placed. Fall back to the invoice date if no due date.
-    for m in inv["milestones"]:
-        if m.get("tier") != "scheduled":
-            continue
-        amt = float(m.get("amount") or 0)
-        if amt <= EPS:
-            continue
-        d = _iso(m.get("due_date") or m.get("invoice_date"))
-        if d and has_dates:  # only on the grid if the project is fully dated
-            events.append({"date": d, "dir": "in", "amt": amt, "src": "invoice"})
-        else:                # undated (incl. partial start-only) -> all to backlog
-            backlog_in += amt
+    # Inflow: the still-to-BILL portion of each invoice milestone, on its DUE date,
+    # using the SAME per-estimate burn-down the Billing tab shows — each estimate's
+    # milestones are burned down against ITS OWN linked invoices — so cash-flow and
+    # Billing always agree. `remaining` is the un-invoiced (to-bill) part at the
+    # dollar level; the already-invoiced part is on the grid via the committed A/R
+    # layer (open invoices) or realized in Actuals (paid). This is exact even when a
+    # milestone straddles the boundary, and it never mis-attributes across estimates
+    # the way a single project-wide pool would.
+    for e in est.get("accepted", []):
+        for m in e.get("milestones", []):
+            remaining = round(float(m.get("remaining") or 0), 2)  # still to bill
+            if remaining <= EPS:
+                continue
+            d = _iso(m.get("due_date") or m.get("invoice_date"))
+            if d and has_dates:  # only on the grid if the project is fully dated
+                events.append({"date": d, "dir": "in", "amt": remaining, "src": "invoice"})
+            else:                # undated (incl. partial start-only) -> all to backlog
+                backlog_in += remaining
 
     # Outflow crew: scheduled (unpaid) installments on their pay date.
     for i in crew["installments"]:
@@ -146,8 +150,8 @@ def _project_events(conn, entity_id):
         exp_est = round(sum(B._estimate_costs_by_category(conn, entity_id).values()), 2)
         crew_out = round(max(0.0, crew_est - float(crew.get("paid_qbo") or 0)), 2)
         exp_out = round(max(0.0, exp_est - float(exp.get("spent_qbo") or 0)), 2)
-        paid = round(float(inv.get("paid_qbo") or 0), 2)
-        ar = round(max(0.0, float(inv.get("invoiced_qbo") or 0) - paid), 2)
+        paid = round(float(est.get("collected") or 0), 2)
+        ar = round(float(est.get("open_ar") or 0), 2)
         to_bill = round(backlog_in, 2)
         est_out = round(crew_out + exp_out, 2)
         # Net = what this project would ADD to the forecast if it got scheduled:

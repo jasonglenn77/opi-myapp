@@ -59,6 +59,9 @@
     @apply text-xl font-extrabold leading-tight text-ink-900;
   }
 
+  /* Sidebar nav links: match the Projects-page project-name size (text-sm / 14px). */
+  #sidebar .nav-item { font-size: 0.875rem; }
+
 }
 
 /* DEBUG: should appear in output.css */

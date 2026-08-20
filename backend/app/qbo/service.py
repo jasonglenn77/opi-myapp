@@ -1431,6 +1431,13 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
                 pass
 
         log_sync_finish(run_id, True, fetched=fetched_total, upserted=upserted_txns_total)
+        # Keep the auto-generated recurring-overhead schedule live off the fresh
+        # trailing average (manual overrides + deleted items untouched). Best-effort.
+        try:
+            from app.cashflow import overhead as OV
+            OV.refresh_auto_from_runrate()
+        except Exception:
+            pass
         # Rebuild the pre-computed Financials page aggregates since transactions changed.
         try:
             from app.projects.service import refresh_project_financial_summary

@@ -805,6 +805,12 @@ option {
 
 /* KPI grid that auto-wraps nicely */
 
+/* Sidebar nav links: match the Projects-page project-name size (text-sm / 14px). */
+
+#sidebar .nav-item {
+  font-size: 0.875rem;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
