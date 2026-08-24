@@ -64,7 +64,7 @@
         <!-- Sidebar + content -->
         <div class="flex gap-4 lg:gap-6 items-start">
           <aside id="sidebar" class="hidden lg:block shrink-0 sticky" style="width:48px; top:84px; transition: width 0.2s ease;">
-            <div class="card overflow-hidden" style="width:100%;">
+            <div class="card" style="width:100%; max-height: calc(100vh - 200px); overflow-x: hidden; overflow-y: auto;">
               <div id="navLabel" class="text-xs font-bold text-black/60 px-3 pt-3 pb-1 whitespace-nowrap overflow-hidden" style="opacity:0; transition: opacity 0.15s ease;">Navigation</div>
               <nav class="py-1">
                 <!-- 1. FINANCIALS -->
@@ -75,7 +75,7 @@
                 <div data-navchildren="fin">
                   <a href="#/financials" data-cap="page.financials" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
-                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Financial Breakdown</span>
+                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Financials</span>
                   </a>
                   <div class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 opacity-40 cursor-default overflow-hidden whitespace-nowrap" title="Coming soon">
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h4"/></svg>
@@ -116,7 +116,7 @@
                 </div>
 
                 <!-- 3. PIPELINE -->
-                <button type="button" data-navtoggle="pipe" data-cap-any="page.estimate,page.customers" aria-label="Toggle pipeline pages" class="nav-label w-full flex items-center justify-between gap-1 px-3 pt-3 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-black/30 hover:text-black/50 whitespace-nowrap overflow-hidden" style="opacity:0; transition:opacity 0.15s ease;">
+                <button type="button" data-navtoggle="pipe" data-cap-any="page.estimate,page.customers,page.settings" aria-label="Toggle pipeline pages" class="nav-label w-full flex items-center justify-between gap-1 px-3 pt-3 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-black/30 hover:text-black/50 whitespace-nowrap overflow-hidden" style="opacity:0; transition:opacity 0.15s ease;">
                   <span>Pipeline</span>
                   <svg data-navchevron class="w-3.5 h-3.5 transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M6 8l4 4 4-4z"/></svg>
                 </button>
@@ -149,6 +149,14 @@
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
                     <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Contacts</span>
                   </a>
+                  <a href="#/settings/lookups" data-cap="page.settings" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                    <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Lookup Values</span>
+                  </a>
+                  <a href="#/settings/rates" data-cap="page.settings" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                    <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
+                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Rate Tables</span>
+                  </a>
                 </div>
 
                 <!-- 4. TEAMS -->
@@ -161,10 +169,10 @@
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
                     <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Users</span>
                   </a>
-                  <a href="#/crew" data-cap="page.crew_portal" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
+                  <div class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 opacity-40 cursor-default overflow-hidden whitespace-nowrap" title="Coming soon">
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2"/><circle cx="9" cy="7" r="3"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Crew Portal</span>
-                  </a>
+                    <span class="nav-label flex items-center gap-1.5" style="opacity:0; transition:opacity 0.15s ease;">Crew Portal <span class="text-[8px] font-bold uppercase tracking-wider bg-black/10 text-black/50 rounded px-1 py-px">Soon</span></span>
+                  </div>
                   <a href="#/teams" data-cap="page.teams" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M3 20c0-3 2.7-5 6-5s6 2 6 5"/><path d="M16 15c2 0 5 1 5 4"/></svg>
                     <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Team Management</span>
@@ -180,14 +188,6 @@
                   <a href="#/settings" data-cap="page.settings" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
                     <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Quoting Metrics</span>
-                  </a>
-                  <a href="#/settings/lookups" data-cap="page.settings" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
-                    <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
-                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Lookup Values</span>
-                  </a>
-                  <a href="#/settings/rates" data-cap="page.settings" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
-                    <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
-                    <span class="nav-label" style="opacity:0; transition:opacity 0.15s ease;">Rate Tables</span>
                   </a>
                   <a href="#/quickbooks" data-cap="page.quickbooks" class="nav-item flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-black/5 font-semibold overflow-hidden whitespace-nowrap">
                     <svg class="nav-icon shrink-0 w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>

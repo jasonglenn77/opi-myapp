@@ -79,16 +79,15 @@ export function bindNavCollapse() {
     const chev = toggle?.querySelector("[data-navchevron]");
     if (chev) chev.style.transform = collapsed ? "rotate(-90deg)" : "";
   };
-  // Teams & Settings start collapsed (they're accessed less often); the rest
-  // start expanded. The group holding the active route always expands.
-  const DEFAULT_COLLAPSED = new Set(["team", "set"]);
+  // All groups start collapsed so the rail stays short; the group holding the
+  // active route always expands, and a user's manual expand/collapse is remembered.
   document.querySelectorAll("[data-navchildren]").forEach((box) => {
     const key = box.getAttribute("data-navchildren");
     const toggle = document.querySelector(`[data-navtoggle="${key}"]`);
     const active = [...box.querySelectorAll("a[href]")].some((a) => a.getAttribute("href") === location.hash);
     let collapsed;
     if (active) collapsed = false;
-    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? DEFAULT_COLLAPSED.has(key) : saved === "1"; }
+    else { const saved = localStorage.getItem(KEY(key)); collapsed = saved == null ? true : saved === "1"; }
     apply(box, toggle, collapsed);
     if (toggle && !toggle.dataset.collbound) {
       toggle.dataset.collbound = "1";
@@ -272,7 +271,17 @@ function updateStickyOffsets() {
 
   // Sidebar only — assignment card/thead are no longer viewport-sticky.
   const sidebar = document.getElementById("sidebar");
-  if (sidebar) sidebar.style.top = (topBarH + 20) + "px";
+  if (sidebar) {
+    sidebar.style.top = (topBarH + 20) + "px";
+    // Cap the nav card to the space actually available from where it sits (below
+    // the page title), not a fixed 100vh offset — otherwise it runs past the
+    // bottom of the screen and forces the whole page to scroll.
+    const sbCard = sidebar.querySelector(".card");
+    if (sbCard) {
+      const t = sidebar.getBoundingClientRect().top;
+      sbCard.style.maxHeight = Math.max(200, window.innerHeight - t - 24) + "px";
+    }
+  }
 
   // Dynamically size the assignment card to fill remaining viewport height.
   const card = document.querySelector("#pageBody .card");

@@ -464,7 +464,6 @@ export async function projectsPage(routeFn) {
         <div class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1.5">
             <div>
-              <div class="text-base font-extrabold">Financials</div>
               <div class="text-xs text-black/50">Sort columns · filter with the funnel · search by name.</div>
             </div>
             <div class="flex items-center gap-2">
@@ -616,8 +615,8 @@ export async function projectsPage(routeFn) {
   `;
 
   setShell({
-    title:      "",        // hide title — card header already shows "Projects"
-    subtitle:   "",        // hide subtitle — saves ~56px of chrome
+    title:      "Financials",
+    subtitle:   "Per-project financial breakdown — estimates, invoicing, costs, and margin. Status, team, and schedule mirror each project's assignment.",
     bodyHtml,
     showLogout: true,
     routeFn,
@@ -687,7 +686,6 @@ export async function projectsPage(routeFn) {
         ${th("projected_profit_pct", "Proj.%",      true)}
         ${th("actual_profit",        "Act.Profit",  true)}
         ${th("actual_profit_pct",    "Act.%",       true)}
-        <th class="py-1.5 px-2 text-left align-middle font-bold text-xs whitespace-nowrap">Files</th>
       </tr>`;
   }
 
@@ -742,25 +740,9 @@ export async function projectsPage(routeFn) {
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums font-semibold ${colorClass(r.actual_profit)}">${finSigned(r.actual_profit)}</td>
           <td class="py-1.5 px-2 text-xs text-right whitespace-nowrap tabular-nums ${colorClass(r.actual_profit_pct)}">${finPctSigned(r.actual_profit_pct)}</td>
 
-          <td class="py-1.5 px-2 text-xs whitespace-nowrap">
-            <div class="flex items-center gap-1.5">
-              <button type="button"
-                class="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100 transition"
-                data-upload-project="${escapeHtml(String(r.qbo_customer_id || ""))}"
-                data-project-name="${escapeHtml(r.project_name || "")}">
-                Upload
-              </button>
-              <button type="button"
-                class="inline-flex items-center rounded-full border border-black/10 bg-white px-2.5 py-0.5 text-[10px] font-semibold text-black/70 hover:bg-black/5 transition ${Number(r.file_count || 0) > 0 ? "" : "opacity-50"}"
-                data-view-files="${escapeHtml(String(r.qbo_customer_id || ""))}"
-                data-project-name="${escapeHtml(r.project_name || "")}">
-                View (${Number(r.file_count || 0)})
-              </button>
-            </div>
-          </td>
         </tr>
       `).join("") ||
-      `<tr><td class="py-8 text-center text-black/40 text-xs" colspan="18">${state.loadingBasic ? "Loading projects…" : "No projects match these filters."}</td></tr>`;
+      `<tr><td class="py-8 text-center text-black/40 text-xs" colspan="17">${state.loadingBasic ? "Loading projects…" : "No projects match these filters."}</td></tr>`;
   }
 
   // ── filtering + sorting ────────────────────────────────────────────────────

@@ -8,12 +8,25 @@ import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 
 const TYPE_STYLE = {
-  estimate: "bg-blue-100 text-blue-700",
+  pipeline: "bg-blue-100 text-blue-700",
   job: "bg-violet-100 text-violet-700",
   project: "bg-emerald-100 text-emerald-700",
 };
 const FUNNEL = (a) => `<svg class="size-3.5 ${a ? "text-blue-600" : "text-black/30"}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`;
 const CHEV = `<svg class="size-4 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 6l6 6-6 6"/></svg>`;
+const CO_STATUS = { approved: "bg-emerald-100 text-emerald-700", pending: "bg-amber-100 text-amber-800", rejected: "bg-red-100 text-red-700", open: "bg-sky-100 text-sky-700" };
+const AVENUES = [
+  { key: "pipeline", label: "Pipeline", hint: "open & declined bids (not yet won)" },
+  { key: "project",  label: "Projects", hint: "won → PO" },
+  { key: "job",      label: "Jobs",     hint: "legacy" },
+];
+const AV_DOT = { pipeline: "bg-blue-500", project: "bg-emerald-500", job: "bg-violet-500" };
+// status buckets used for the per-avenue breakdown on card faces
+const BUCKET_LABEL = { open: "open", declined: "inactive", lost: "lost", needs_assignment: "needs attn",
+  pending: "pending", not_started: "not started", in_progress: "in progress", completed: "complete", canceled: "canceled", active: "active" };
+const BUCKET_DOT = { open: "bg-blue-500", declined: "bg-orange-400", lost: "bg-red-500", needs_assignment: "bg-rose-400",
+  pending: "bg-amber-400", not_started: "bg-slate-400", in_progress: "bg-indigo-500", completed: "bg-emerald-500", canceled: "bg-black/30", active: "bg-emerald-500" };
+const pipelineBucketOf = (s) => { const t = (s || "").toLowerCase(); if (t.includes("lost")) return "lost"; if (t.includes("inactive")) return "declined"; return "open"; };
 
 // Persisted UI state — so returning from an entity's document page restores the
 // user's sort / filters / grouping / expanded customers / scroll position.
@@ -23,6 +36,7 @@ const custUi = { sortKey: "last_activity", sortDir: -1, search: "", groupBy: tru
 // rows keep the pipeline-status colors from the Quoting page.
 const KPI_STYLES = {
   needs_assignment: "bg-kpi-attention-bg border-kpi-attention-bd text-kpi-attention-text",
+  pending:          "bg-amber-100 border-amber-200 text-amber-800",
   not_started:      "bg-kpi-notStarted-bg border-kpi-notStarted-bd text-kpi-notStarted-text",
   in_progress:      "bg-kpi-inProgress-bg border-kpi-inProgress-bd text-kpi-inProgress-text",
   completed:        "bg-kpi-completed-bg border-kpi-completed-bd text-kpi-completed-text",
@@ -44,6 +58,7 @@ function projBucket(v) {
   const s = (v || "").toString().trim().toLowerCase();
   if (!s) return "all";
   if (s === "needs_attention" || s === "needs attention") return "needs_assignment";
+  if (s === "pending") return "pending";
   if (s === "not_started" || s === "not started" || s === "inactive") return "not_started";
   if (s === "in_progress" || s === "in progress" || s === "active") return "in_progress";
   if (s === "scheduled") return "scheduled";
@@ -65,9 +80,11 @@ export async function customersPage(routeFn) {
   const custById = {}; customers.forEach(c => { custById[c.customer_qbo_id] = c; });
 
   let sortKey = custUi.sortKey, sortDir = custUi.sortDir, search = custUi.search, groupBy = custUi.groupBy;
+  let cardSort = custUi.cardSort || "invoiced";   // customer-card sort key
   const filters = custUi.filters;     // shared reference → mutations persist automatically
   const expanded = custUi.expanded;   // shared reference → expansions persist automatically
-  const saveUi = () => { Object.assign(custUi, { sortKey, sortDir, search, groupBy }); };
+  const expandedCO = new Set();       // per-project change-order expansion (this mount)
+  const saveUi = () => { Object.assign(custUi, { sortKey, sortDir, search, groupBy, cardSort }); };
 
   const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString("en-US"));
   const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
@@ -75,7 +92,7 @@ export async function customersPage(routeFn) {
   const statusBadge = (r) => {
     const s = r.status;
     if (!s) return `<span class="text-black/25">—</span>`;
-    if (r.type === "estimate") {
+    if (r.type === "pipeline") {
       const cls = EST_STATUS_COLORS[s] || "bg-sky-100 text-sky-800";
       return `<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap truncate max-w-full ${cls}">${escapeHtml(s)}</span>`;
     }
@@ -85,16 +102,16 @@ export async function customersPage(routeFn) {
 
   const COLS = [
     { key: "customer_name", label: "Customer", type: "text", w: 190, trunc: true, td: (r) => `<span class="font-semibold text-ink-900">${escapeHtml(r.customer_name || "—")}</span>` },
-    { key: "type", label: "Type", type: "multi", w: 90, td: (r) => typeBadge(r.type) },
+    { key: "type", label: "Avenue", type: "multi", w: 90, td: (r) => typeBadge(r.type) },
     { key: "name", label: "Name", type: "text", w: 250, trunc: true, td: (r) => `<span class="text-black/70">${escapeHtml(r.name || "—")}</span>` },
     { key: "status", label: "Status", type: "multi", w: 150, td: (r) => statusBadge(r) },
-    { key: "value", label: "Value", type: "num", w: 110, align: "right", td: (r) => `<span class="tabular-nums ${r.type === "estimate" ? "text-black/55" : "font-semibold text-ink-900"}">${money(r.value)}</span>` },
+    { key: "value", label: "Value", type: "num", w: 110, align: "right", td: (r) => `<span class="tabular-nums ${r.type === "pipeline" ? "text-black/55" : "font-semibold text-ink-900"}">${money(r.value)}</span>` },
     { key: "open_ar", label: "Open AR", type: "num", w: 100, align: "right", td: (r) => r.open_ar > 0 ? `<span class="tabular-nums font-semibold text-amber-700">${money(r.open_ar)}</span>` : `<span class="text-black/25">—</span>` },
     { key: "last_activity", label: "Last activity", type: "date", w: 110, td: (r) => `<span class="text-xs text-black/50 tabular-nums">${ymd(r.last_activity)}</span>` },
   ];
   const dispVal = (r, key) => key === "type" ? r.type : key === "status" ? (r.status || "—") : (r[key] || "");
   const multiOptions = (key) => {
-    if (key === "type") return ["estimate", "job", "project"];
+    if (key === "type") return ["pipeline", "project", "job"];
     const set = new Set(); entities.forEach(r => { const v = dispVal(r, key); if (v) set.add(v); });
     return [...set].sort();
   };
@@ -172,65 +189,146 @@ export async function customersPage(routeFn) {
   const cell = (r, c) => `<td class="px-3 py-2 ${c.trunc ? "truncate" : "whitespace-nowrap"} ${c.align === "right" ? "text-right" : ""}" ${c.trunc ? `title="${escapeHtml(r[c.key] || "")}"` : ""}>${c.td(r)}</td>`;
   const COLSPAN = COLS.length + (groupBy ? 1 : 0);
 
+  // ── card view (grouped-by-customer) ───────────────────────────────────────
+  const statusBreakdownHTML = (items, avenue) => {
+    const counts = {};
+    for (const r of items) {
+      const k = avenue === "pipeline" ? pipelineBucketOf(r.status)
+              : avenue === "project" ? projBucket(r.status) : (r.status || "active");
+      if (k) counts[k] = (counts[k] || 0) + 1;
+    }
+    return Object.keys(counts).sort((a, b) => counts[b] - counts[a]).map(k =>
+      `<span class="inline-flex items-center gap-1 whitespace-nowrap"><span class="inline-block w-1.5 h-1.5 rounded-full ${BUCKET_DOT[k] || "bg-black/30"}"></span>${counts[k]} ${BUCKET_LABEL[k] || k}</span>`
+    ).join(`<span class="text-black/20">·</span>`);
+  };
+  const cardEntityLine = (r) => {
+    const hasCO = (r.co_count || 0) > 0, coOpen = expandedCO.has(String(r.entity_id));
+    let html = `<div class="flex items-center gap-2 py-1 ${r.avenue !== "pipeline" ? "cursor-pointer hover:bg-blue-50/60" : ""}" data-entity="${escapeHtml(r.type)}|${escapeHtml(String(r.entity_id))}">
+      <span class="flex-1 min-w-0 truncate text-black/75" title="${escapeHtml(r.name || "")}">${escapeHtml(r.name || "—")}</span>
+      ${statusBadge(r)}
+      <span class="w-24 text-right tabular-nums text-black/60 shrink-0">${r.value ? money(r.value) : "—"}</span>
+      ${hasCO ? `<button data-co="${escapeHtml(String(r.entity_id))}" class="shrink-0 inline-flex items-center gap-0.5 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-px text-[9px] font-bold text-amber-700 hover:bg-amber-100">${coOpen ? "▾" : "▸"} ${r.co_count} CO${r.co_pending ? `·${r.co_pending}p` : ""}</button>` : `<span class="w-12 shrink-0"></span>`}
+    </div>`;
+    if (hasCO && coOpen) html += (r.change_orders || []).map(co =>
+      `<div class="flex items-center gap-2 py-0.5 pl-4 bg-amber-50/40 text-[11px] text-black/55"><span class="flex-1 truncate">↳ CO #${escapeHtml(String(co.doc || "—"))}</span><span class="inline-flex items-center rounded-full px-2 py-0.5 text-[9px] font-semibold ${CO_STATUS[co.status] || "bg-black/10 text-black/50"}">${escapeHtml(co.status)}</span><span class="w-24 text-right tabular-nums">${money(co.amount)}</span><span class="w-12"></span></div>`).join("");
+    return html;
+  };
+  const renderCards = (list) => {
+    const el = document.getElementById("custCards"); if (!el) return;
+    const byCust = new Map();
+    list.forEach(r => { if (!byCust.has(r.customer_qbo_id)) byCust.set(r.customer_qbo_id, []); byCust.get(r.customer_qbo_id).push(r); });
+    const order = [...byCust.keys()].sort((a, b) => {
+      const ca = custById[a] || {}, cb = custById[b] || {};
+      if (cardSort === "name") return String(ca.name || "").localeCompare(String(cb.name || ""));
+      if (cardSort === "last_activity") return String(cb.last_activity || "").localeCompare(String(ca.last_activity || ""));
+      return (+cb[cardSort] || 0) - (+ca[cardSort] || 0);
+    });
+    const cards = order.map(cid => {
+      const c = custById[cid] || { name: "(unknown)", invoiced: 0, open_ar: 0, pipeline_value: 0 };
+      const kids = byCust.get(cid), open = expanded.has(cid);
+      const avRow = (avKey, label) => {
+        const items = kids.filter(r => r.avenue === avKey); if (!items.length) return "";
+        return `<div class="flex items-start gap-2 text-[11px]">
+          <span class="inline-block w-2 h-2 rounded-full mt-0.5 ${AV_DOT[avKey]}"></span>
+          <span class="font-semibold text-ink-900 w-14 shrink-0">${label}</span>
+          <span class="font-bold tabular-nums text-ink-900 w-7 shrink-0">${items.length}</span>
+          <span class="text-black/50 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">${statusBreakdownHTML(items, avKey)}</span></div>`;
+      };
+      const detail = open ? `<div class="border-t border-black/10 px-4 py-2.5 bg-black/[0.012] max-h-[440px] overflow-auto">
+        ${AVENUES.map(av => {
+          const items = kids.filter(r => r.avenue === av.key); if (!items.length) return "";
+          return `<div class="mb-2.5 last:mb-0"><div class="text-[10px] font-bold uppercase tracking-wider text-black/45 mb-1 flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full ${AV_DOT[av.key]}"></span>${av.label} <span class="text-black/30">${items.length}</span></div>
+            <div class="divide-y divide-black/5">${items.map(cardEntityLine).join("")}</div></div>`;
+        }).join("")}
+        <div class="pt-2 mt-1 border-t border-black/10"><button data-contacts="${escapeHtml(String(cid))}" data-cname="${escapeHtml(c.name)}" class="text-[11px] font-semibold text-blue-600 hover:underline">View contacts →</button></div></div>` : "";
+      return `<div class="card p-0 overflow-hidden self-start ${open ? "col-span-full ring-1 ring-blue-300" : ""}">
+        <div class="px-4 py-3 cursor-pointer hover:bg-black/[0.015]" data-cust="${escapeHtml(String(cid))}">
+          <div class="flex items-center justify-between gap-2"><div class="font-extrabold text-ink-900 truncate">${escapeHtml(c.name)}</div>
+            <span class="inline-flex text-black/35 shrink-0 ${open ? "rotate-90" : ""}" style="transition:transform .12s">${CHEV}</span></div>
+          <div class="text-[11px] text-black/50 mt-0.5 tabular-nums">${money(c.invoiced)} invoiced${c.pipeline_value > 0 ? ` · ${money(c.pipeline_value)} pipeline` : ""}${c.open_ar > 0 ? ` · <span class="text-amber-700 font-semibold">${money(c.open_ar)} AR</span>` : ""}</div>
+          <div class="mt-2 space-y-1">${avRow("pipeline", "Pipeline")}${avRow("project", "Projects")}${avRow("job", "Jobs")}</div></div>
+        ${detail}</div>`;
+    }).join("");
+    el.innerHTML = order.length ? `<div class="grid gap-3 items-start" style="grid-template-columns:repeat(auto-fill,minmax(370px,1fr))">${cards}</div>`
+      : `<div class="py-10 text-center text-black/40 text-sm">No customers match.</div>`;
+    el.querySelectorAll("[data-cust]").forEach(d => d.addEventListener("click", () => {
+      const id = d.dataset.cust; expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderRows();
+    }));
+    el.querySelectorAll("[data-co]").forEach(b => b.addEventListener("click", (e) => {
+      e.stopPropagation(); const id = b.getAttribute("data-co"); expandedCO.has(id) ? expandedCO.delete(id) : expandedCO.add(id); renderRows();
+    }));
+    el.querySelectorAll("[data-contacts]").forEach(b => b.addEventListener("click", (e) => {
+      e.stopPropagation(); openContactsModal(b.getAttribute("data-contacts"), b.getAttribute("data-cname"));
+    }));
+    el.querySelectorAll("[data-entity]").forEach(d => d.addEventListener("click", (e) => {
+      if (e.target.closest("[data-co]")) return;
+      const [type, id] = d.dataset.entity.split("|");
+      if (type === "pipeline") { location.hash = "#/pipeline"; return; }
+      if (type && id) location.hash = `#/entity/${type}/${encodeURIComponent(id)}`;
+    }));
+  };
+
+  const renderAvenueChips = () => {
+    const el = document.getElementById("avenueChips"); if (!el) return;
+    const sel = filters.type || [];
+    const chip = (key, label) => {
+      const on = key === "" ? sel.length === 0 : sel.includes(key);
+      return `<button data-avchip="${key}" class="rounded-full px-2.5 py-1 text-[11px] font-semibold border ${on ? "bg-ink-900 text-white border-ink-900" : "border-black/15 text-black/60 hover:bg-black/5"}">${label}</button>`;
+    };
+    el.innerHTML = chip("", "All") + chip("pipeline", "Pipeline") + chip("project", "Projects") + chip("job", "Jobs");
+    el.querySelectorAll("[data-avchip]").forEach(b => b.addEventListener("click", () => {
+      const k = b.getAttribute("data-avchip");
+      filters.type = k ? [k] : [];
+      renderAvenueChips(); renderRows();
+    }));
+  };
+
   const renderRows = () => {
     const list = visible();
-    const tbody = document.getElementById("custRows");
-    if (!tbody) return;
-    if (!groupBy) {
-      tbody.innerHTML = list.map(r => `<tr class="border-b border-black/5 hover:bg-blue-50/60 cursor-pointer" data-entity="${escapeHtml(r.type)}|${escapeHtml(String(r.entity_id))}">${COLS.map(c => cell(r, c)).join("")}</tr>`).join("")
+    document.getElementById("custCards")?.classList.toggle("hidden", !groupBy);
+    document.getElementById("custTable")?.classList.toggle("hidden", !!groupBy);
+    document.getElementById("cardControls")?.classList.toggle("hidden", !groupBy);
+    if (groupBy) renderCards(list);
+    else {
+      const tbody = document.getElementById("custRows");
+      if (tbody) tbody.innerHTML = list.map(r => `<tr class="border-b border-black/5 hover:bg-blue-50/60 cursor-pointer" data-entity="${escapeHtml(r.type)}|${escapeHtml(String(r.entity_id))}">${COLS.map(c => cell(r, c)).join("")}</tr>`).join("")
         || `<tr><td colspan="${COLSPAN}" class="py-8 text-center text-black/40">No matches.</td></tr>`;
-    } else {
-      // group visible entities by customer; order customers by invoiced desc
-      const byCust = new Map();
-      list.forEach(r => { if (!byCust.has(r.customer_qbo_id)) byCust.set(r.customer_qbo_id, []); byCust.get(r.customer_qbo_id).push(r); });
-      const order = [...byCust.keys()].sort((a, b) => (custById[b]?.invoiced || 0) - (custById[a]?.invoiced || 0));
-      tbody.innerHTML = order.map(cid => {
-        const c = custById[cid] || { name: "(unknown)", invoiced: 0, open_ar: 0, pipeline_value: 0 };
-        const kids = byCust.get(cid);
-        const open = expanded.has(cid);
-        const chips = `<span class="text-[10px] text-black/45">${c.project_count || 0} proj · ${c.job_count || 0} job · ${c.estimate_count || 0} est</span>`;
-        const header = `<tr class="border-b border-black/10 bg-black/[0.025] cursor-pointer" data-cust="${escapeHtml(String(cid))}">
-          <td class="px-2 py-2 text-center"><span class="inline-flex text-black/40 ${open ? "rotate-90" : ""}" style="transition:transform .12s">${CHEV}</span></td>
-          <td class="px-3 py-2 font-extrabold text-ink-900 truncate" colspan="3">${escapeHtml(c.name)} <span class="ml-1">${chips}</span></td>
-          <td class="px-3 py-2 text-right text-[11px] text-black/50">${c.pipeline_value > 0 ? money(c.pipeline_value) + " pipeline" : ""}</td>
-          <td class="px-3 py-2 text-right font-bold text-ink-900 tabular-nums">${money(c.invoiced)}</td>
-          <td class="px-3 py-2 text-right tabular-nums ${c.open_ar > 0 ? "font-semibold text-amber-700" : "text-black/25"}">${c.open_ar > 0 ? money(c.open_ar) : "—"}</td>
-          <td class="px-3 py-2 text-right"><button data-contacts="${escapeHtml(String(cid))}" data-cname="${escapeHtml(c.name)}" class="text-[11px] font-semibold text-blue-600 hover:underline whitespace-nowrap">Contacts</button></td></tr>`;
-        const rows = open ? kids.map(r => `<tr class="border-b border-black/5 hover:bg-blue-50/60 cursor-pointer" data-entity="${escapeHtml(r.type)}|${escapeHtml(String(r.entity_id))}"><td class="px-2"></td>${COLS.map(c2 => c2.key === "customer_name" ? `<td></td>` : cell(r, c2)).join("")}</tr>`).join("") : "";
-        return header + rows;
-      }).join("") || `<tr><td colspan="${COLSPAN}" class="py-8 text-center text-black/40">No matches.</td></tr>`;
-      tbody.querySelectorAll("[data-cust]").forEach(tr => tr.addEventListener("click", () => {
-        const id = tr.dataset.cust; expanded.has(id) ? expanded.delete(id) : expanded.add(id); renderRows();
-      }));
-      tbody.querySelectorAll("[data-contacts]").forEach(btn => btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openContactsModal(btn.getAttribute("data-contacts"), btn.getAttribute("data-cname"));
-      }));
     }
     const cnt = document.getElementById("custCount");
-    if (cnt) cnt.textContent = `${list.length} item${list.length === 1 ? "" : "s"}${groupBy ? ` · ${new Set(list.map(r => r.customer_qbo_id)).size} customers` : ""}`;
+    if (cnt) cnt.textContent = `${list.length} item${list.length === 1 ? "" : "s"} · ${new Set(list.map(r => r.customer_qbo_id)).size} customers`;
   };
-  const renderAll = () => { renderHeader(); renderRows(); };
+  const renderAll = () => { renderHeader(); renderAvenueChips(); renderRows(); };
 
   mount(`
     <div class="w-full">
-      <div class="card flex flex-col overflow-hidden" style="height: calc(100vh - 130px); min-height: 420px;">
+      <div class="card flex flex-col overflow-hidden" style="height: calc(100vh - 190px); min-height: 420px;">
         <div class="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-black/10">
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
-              <div class="text-base font-extrabold text-ink-900">Customers</div>
               <div class="text-xs text-black/50">Every estimate, job &amp; project by customer. Sort &amp; filter columns · search · toggle grouping.</div>
             </div>
             <div class="flex items-center gap-2 flex-wrap">
               <input id="custSearch" class="input text-xs py-1.5 w-full sm:w-56" placeholder="Search customer, name, status…" value="${escapeHtml(search)}" />
-              <label class="flex items-center gap-1.5 text-xs text-black/60 whitespace-nowrap"><input type="checkbox" id="groupBy" class="h-4 w-4 rounded border-black/25" ${groupBy ? "checked" : ""}> Group by customer</label>
+              <label class="flex items-center gap-1.5 text-xs text-black/60 whitespace-nowrap"><input type="checkbox" id="groupBy" class="h-4 w-4 rounded border-black/25" ${groupBy ? "checked" : ""}> Card view</label>
               <button id="clearFilters" type="button" class="rounded-xl border border-black/10 bg-gray-100 px-3 py-1.5 text-xs font-semibold hover:bg-black/5 whitespace-nowrap">Clear filters</button>
             </div>
+          </div>
+          <div id="cardControls" class="flex items-center gap-2 flex-wrap mt-2 ${groupBy ? "" : "hidden"}">
+            <span class="text-[11px] font-semibold text-black/45">Avenue</span>
+            <div class="flex gap-1" id="avenueChips"></div>
+            <span class="text-[11px] font-semibold text-black/45 ml-2">Sort</span>
+            <select id="cardSort" class="text-xs border border-black/15 rounded-lg px-2 py-1 bg-white">
+              <option value="invoiced">Invoiced $</option>
+              <option value="pipeline_value">Pipeline $</option>
+              <option value="name">Name</option>
+              <option value="last_activity">Last activity</option>
+            </select>
           </div>
           <div id="custCount" class="text-xs font-semibold text-black/50 mt-1.5"></div>
         </div>
         <div id="custScroll" class="flex-1 overflow-auto">
-          <table class="text-xs w-full table-fixed" id="custTable" style="min-width:1000px;">
+          <div id="custCards" class="p-3 ${groupBy ? "" : "hidden"}"></div>
+          <table class="text-xs w-full table-fixed ${groupBy ? "hidden" : ""}" id="custTable" style="min-width:1000px;">
             ${colgroupHTML()}
             <thead id="custHead" class="text-left sticky top-0 z-20 bg-white"></thead>
             <tbody id="custRows"></tbody>
@@ -244,11 +342,14 @@ export async function customersPage(routeFn) {
 
   document.getElementById("custSearch").addEventListener("input", (e) => { search = e.target.value; saveUi(); renderRows(); });
   document.getElementById("groupBy").addEventListener("change", (e) => { groupBy = e.target.checked; saveUi(); restampColgroup(); renderAll(); });
+  const cardSortEl = document.getElementById("cardSort");
+  if (cardSortEl) { cardSortEl.value = cardSort; cardSortEl.addEventListener("change", (e) => { cardSort = e.target.value; saveUi(); renderRows(); }); }
   document.getElementById("clearFilters").addEventListener("click", () => { for (const k of Object.keys(filters)) delete filters[k]; closePortals(); renderAll(); });
   document.getElementById("custRows").addEventListener("click", (e) => {
     const tr = e.target.closest("[data-entity]");
     if (!tr) return;
     const [type, id] = tr.dataset.entity.split("|");
+    if (type === "pipeline") { location.hash = "#/pipeline"; return; }  // opportunities live on the Pipeline page
     if (type && id) location.hash = `#/entity/${type}/${encodeURIComponent(id)}`;
   });
   const scrollEl = document.getElementById("custScroll");
@@ -261,10 +362,9 @@ export async function customersPage(routeFn) {
 }
 
 function mount(bodyHtml, routeFn) {
-  setShell({ title: "", subtitle: "", bodyHtml, showLogout: true, routeFn });
-  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
-  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
-    pageTitleBlock.style.display = "none";
-    window.addEventListener("hashchange", () => { if (pageTitleBlock) pageTitleBlock.style.display = ""; }, { once: true });
-  }
+  setShell({
+    title: "Customers",
+    subtitle: "Each customer's pipeline and projects — historical and upcoming, with statuses and value.",
+    bodyHtml, showLogout: true, routeFn,
+  });
 }

@@ -76,27 +76,47 @@ def customers_entities(user=Depends(require_capability(PAGE_CUSTOMERS))):
             FROM qbo_transactions WHERE entity_type='Invoice' AND customer_qbo_id IS NOT NULL
             GROUP BY customer_qbo_id
         """)).mappings().all()
+        # Canonical project status = the FINAL assignment row's status (latest by
+        # start_date, then sort_order, then id), identical to the Projects page's
+        # operational_status. `end_date` (max) drives last-activity.
         psi_rows = conn.execute(text("""
-            SELECT qc.qbo_id AS project_qbo_id, psi.status AS status, MAX(psi.end_date) AS end_date
-            FROM myapp.projects p
-            JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id AND qc.is_project = 1
-            JOIN myapp.project_schedule_items psi ON psi.project_id = p.id
-            GROUP BY qc.qbo_id, psi.status
+            SELECT project_qbo_id, latest_status, end_date FROM (
+              SELECT qc.qbo_id AS project_qbo_id, psi.status AS latest_status,
+                     MAX(psi.end_date) OVER (PARTITION BY qc.qbo_id) AS end_date,
+                     ROW_NUMBER() OVER (PARTITION BY qc.qbo_id
+                       ORDER BY psi.start_date IS NULL, psi.start_date DESC, psi.sort_order DESC, psi.id DESC) AS rn
+              FROM myapp.projects p
+              JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id AND qc.is_project = 1
+              JOIN myapp.project_schedule_items psi ON psi.project_id = p.id
+            ) x WHERE rn = 1
         """)).mappings().all()
-        est_rows = conn.execute(text("""
-            SELECT t.qbo_id AS est_qbo_id, t.customer_qbo_id, t.doc_number AS est_no, t.txn_date,
-                   ROUND(t.total_amt) AS amount,
-                   JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) AS qbo_status,
-                   JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.CustomerMemo.value')) AS memo,
-                   et.status AS opi_status
-            FROM qbo_transactions t
-            LEFT JOIN estimate_tracking et ON et.qbo_estimate_id = t.qbo_id
-            WHERE t.entity_type='Estimate' AND (
-                (et.qbo_estimate_id IS NOT NULL AND et.status NOT LIKE '0%')
-                OR (et.qbo_estimate_id IS NULL
-                    AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Pending','Accepted')
-                    AND t.txn_date >= DATE_SUB(CURDATE(), INTERVAL 18 MONTH))
-            )
+        # PIPELINE avenue = opportunities (the Pipeline page's source) that have NOT
+        # been won → project. Won ones (status='won', or a project link) drop out
+        # here and appear under Projects instead — that's the supersession rule.
+        opp_rows = conn.execute(text("""
+            SELECT o.id AS opp_id, qc.qbo_id AS customer_qbo_id,
+                   o.title, o.quote_number, o.pipeline_status, o.status,
+                   COALESCE(o.contract_value, o.order_value, 0) AS value,
+                   COALESCE(ct.full_name, o.contact_name_raw) AS contact_name,
+                   o.last_contact_date, o.rfq_received_date, o.created_at
+            FROM opportunities o
+            JOIN qbo_customers qc ON qc.id = o.qbo_customer_id
+            LEFT JOIN contacts ct ON ct.id = o.contact_id
+            WHERE o.active = 1 AND o.project_qbo_id IS NULL
+              AND COALESCE(o.status,'') <> 'won'
+        """)).mappings().all()
+        # Change orders / pending estimates per project = every QBO Estimate tagged
+        # to the project (via line-level project tag), beyond the original contract.
+        co_rows = conn.execute(text("""
+            SELECT project_qbo_id, doc_number, txn_date, total_amt AS amount,
+                   JSON_UNQUOTE(JSON_EXTRACT(raw_json,'$.TxnStatus')) AS txn_status
+            FROM (
+              SELECT DISTINCT sl.project_customer_qbo_id AS project_qbo_id,
+                     t.qbo_id, t.doc_number, t.txn_date, t.total_amt, t.raw_json
+              FROM qbo_transactions t
+              JOIN qbo_sales_transaction_lines sl ON sl.transaction_id = t.id
+              WHERE t.entity_type = 'Estimate' AND sl.project_customer_qbo_id IS NOT NULL
+            ) e
         """)).mappings().all()
 
     by_qbo = {c["qbo_id"]: c for c in custs}
@@ -117,19 +137,38 @@ def customers_entities(user=Depends(require_capability(PAGE_CUSTOMERS))):
         "collected": float(r["collected"] or 0), "last_txn": str(r["last_txn"]) if r["last_txn"] else None,
     } for r in inv}
 
-    STATUS_PRI = ["in_progress", "needs_attention", "scheduled", "not_started", "completed", "canceled"]
-    proj_statuses, proj_end = defaultdict(set), {}
+    proj_latest, proj_end = {}, {}
     for r in psi_rows:
-        proj_statuses[r["project_qbo_id"]].add(r["status"])
-        if r["end_date"] and (r["project_qbo_id"] not in proj_end or str(r["end_date"]) > proj_end[r["project_qbo_id"]]):
+        proj_latest[r["project_qbo_id"]] = r["latest_status"]
+        if r["end_date"]:
             proj_end[r["project_qbo_id"]] = str(r["end_date"])
 
-    def proj_status(pq):
-        s = proj_statuses.get(pq, set())
-        for p in STATUS_PRI:
-            if p in s:
-                return p
-        return None
+    # Change orders / pending estimates per project: sort each project's tagged
+    # estimates by date; the oldest is the original contract (already in the
+    # project's value), the rest are change orders shown nested under the project.
+    def _co_status(ts):
+        ts = (ts or "").strip()
+        if ts in ("Converted", "Accepted", "Closed"):
+            return "approved"
+        if ts == "Pending":
+            return "pending"
+        if ts == "Rejected":
+            return "rejected"
+        return "open"
+
+    co_by_proj = defaultdict(list)
+    for r in co_rows:
+        co_by_proj[str(r["project_qbo_id"])].append(r)
+    co_summary = {}
+    for pq, ests in co_by_proj.items():
+        ests.sort(key=lambda e: str(e["txn_date"] or ""))
+        cos = ests[1:]  # everything beyond the original contract
+        items = [{"doc": e["doc_number"], "amount": round(float(e["amount"] or 0), 2),
+                  "status": _co_status(e["txn_status"]),
+                  "date": str(e["txn_date"]) if e["txn_date"] else None} for e in cos]
+        if items:
+            co_summary[pq] = {"items": items, "count": len(items),
+                              "pending": sum(1 for i in items if i["status"] == "pending")}
 
     entities = []
     for c in custs:
@@ -138,38 +177,46 @@ def customers_entities(user=Depends(require_capability(PAGE_CUSTOMERS))):
         root = root_of(c["qbo_id"])
         f = fin.get(c["qbo_id"]) or {"invoiced": 0, "open_ar": 0, "collected": 0, "last_txn": None}
         is_proj = bool(c["is_project"])
-        entities.append({
+        ent = {
             "customer_qbo_id": root, "customer_name": name_of.get(root) or "(unknown)",
+            "avenue": "project" if is_proj else "job",
             "type": "project" if is_proj else "job",
             "entity_id": c["qbo_id"], "name": c["display_name"],
-            "status": (proj_status(c["qbo_id"]) or ("active" if c["active"] else "inactive")) if is_proj
+            "status": proj_latest.get(c["qbo_id"], "needs_attention") if is_proj
                       else ("active" if c["active"] else "inactive"),
             "value": round(f["invoiced"], 2), "open_ar": round(f["open_ar"], 2),
-            "collected": round(f["collected"], 2),
+            "collected": round(f["collected"], 2), "contact_name": None,
             "last_activity": proj_end.get(c["qbo_id"]) or f["last_txn"],
-        })
-    for e in est_rows:
-        root = root_of(e["customer_qbo_id"])
+        }
+        if is_proj:
+            co = co_summary.get(str(c["qbo_id"]))
+            if co:
+                ent["co_count"] = co["count"]
+                ent["co_pending"] = co["pending"]
+                ent["change_orders"] = co["items"]
+        entities.append(ent)
+    for o in opp_rows:
+        root = root_of(o["customer_qbo_id"])
+        nm = (f"#{o['quote_number']} {o['title'] or ''}").strip() if o["quote_number"] else (o["title"] or "(opportunity)")
         entities.append({
             "customer_qbo_id": root, "customer_name": name_of.get(root) or "(unknown)",
-            "type": "estimate", "entity_id": e["est_qbo_id"],
-            "name": (f"#{e['est_no']} {e['memo'] or ''}").strip() if e["est_no"] else (e["memo"] or "(estimate)"),
-            "status": e["opi_status"] or e["qbo_status"] or "open",
-            "value": float(e["amount"] or 0), "open_ar": 0.0, "collected": 0.0,
-            "last_activity": str(e["txn_date"]) if e["txn_date"] else None,
+            "avenue": "pipeline", "type": "pipeline", "entity_id": o["opp_id"], "name": nm,
+            "status": o["pipeline_status"] or o["status"] or "open",
+            "value": float(o["value"] or 0), "open_ar": 0.0, "collected": 0.0,
+            "contact_name": o["contact_name"],
+            "last_activity": str(o["last_contact_date"] or o["rfq_received_date"] or o["created_at"] or "") or None,
         })
 
-    # Per-customer rollups for the group-by-customer view. Revenue (invoiced)
-    # comes from jobs/projects only — estimate face amounts are a separate
-    # "pipeline" figure, never mixed into actual revenue.
-    roll = defaultdict(lambda: {"name": "", "estimate_count": 0, "job_count": 0, "project_count": 0,
+    # Per-customer rollups for the group-by-customer view. Revenue (invoiced) comes
+    # from projects/jobs only — pipeline face value is a separate figure.
+    roll = defaultdict(lambda: {"name": "", "pipeline_count": 0, "job_count": 0, "project_count": 0,
                                 "invoiced": 0.0, "open_ar": 0.0, "collected": 0.0,
                                 "pipeline_value": 0.0, "last_activity": None})
     for e in entities:
         r = roll[e["customer_qbo_id"]]
         r["name"] = e["customer_name"]
-        r[e["type"] + "_count"] += 1
-        if e["type"] == "estimate":
+        r[e["avenue"] + "_count"] += 1
+        if e["avenue"] == "pipeline":
             r["pipeline_value"] += e["value"]
         else:
             r["invoiced"] += e["value"]; r["open_ar"] += e["open_ar"]; r["collected"] += e["collected"]
