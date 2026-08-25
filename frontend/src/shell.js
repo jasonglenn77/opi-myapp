@@ -202,26 +202,44 @@ function bindPasswordModal() {
   form.dataset.bound = "1";
 }
 
-function bindSidebarHover() {
+// Labeled sidebar that collapses to an icon rail on click (state persisted).
+function bindSidebarCollapse() {
   const sidebar = document.getElementById("sidebar");
-  if (!sidebar || sidebar.dataset.hoverBound) return;
-  sidebar.dataset.hoverBound = "1";
-
-  const COLLAPSED = "48px";
-  const EXPANDED  = "180px";
-
-  sidebar.addEventListener("mouseenter", () => {
-    sidebar.style.width = EXPANDED;
-    document.getElementById("navLabel").style.opacity = "1";
-    document.querySelectorAll(".nav-label").forEach(el => el.style.opacity = "1");
-  });
-
-  sidebar.addEventListener("mouseleave", () => {
-    sidebar.style.width = COLLAPSED;
-    document.getElementById("navLabel").style.opacity = "0";
-    document.querySelectorAll(".nav-label").forEach(el => el.style.opacity = "0");
-  });
+  if (!sidebar) return;
+  const btn = document.getElementById("navCollapseBtn");
+  const KEY = "opi_nav_collapsed";
+  const apply = (collapsed) => {
+    sidebar.classList.toggle("nav-collapsed", collapsed);
+    if (btn) btn.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+    window.setTimeout(updateStickyOffsets, 0);
+  };
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(KEY) === "1"; } catch (_) {}
+  apply(collapsed);
+  if (btn && !btn.dataset.bound) {
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const now = !sidebar.classList.contains("nav-collapsed");
+      apply(now);
+      try { localStorage.setItem(KEY, now ? "1" : "0"); } catch (_) {}
+    });
+  }
 }
+
+// Highlight the sidebar link for the current route (exact match, else longest prefix).
+function setActiveNav() {
+  const hash = (location.hash || "#/").split("?")[0];
+  const links = [...document.querySelectorAll("#sidebar a.nav-item")];
+  links.forEach((a) => a.classList.remove("active"));
+  let best = links.find((a) => a.getAttribute("href") === hash);
+  if (!best) {
+    best = links
+      .filter((a) => { const h = a.getAttribute("href") || ""; return h.length > 3 && hash.startsWith(h); })
+      .sort((a, b) => (b.getAttribute("href").length - a.getAttribute("href").length))[0];
+  }
+  if (best) best.classList.add("active");
+}
+window.addEventListener("hashchange", setActiveNav);
 
 function bindMobileNavDrawer() {
   const drawer = document.getElementById("mobileNavDrawer");
@@ -269,18 +287,12 @@ function updateStickyOffsets() {
   const topBar = document.getElementById("topBar");
   const topBarH = topBar ? topBar.getBoundingClientRect().height : 65;
 
-  // Sidebar only — assignment card/thead are no longer viewport-sticky.
+  // Sidebar sits flush under the header, full-height and sticky; its inner list
+  // (#navScroll) scrolls when the nav is taller than the viewport.
   const sidebar = document.getElementById("sidebar");
   if (sidebar) {
-    sidebar.style.top = (topBarH + 20) + "px";
-    // Cap the nav card to the space actually available from where it sits (below
-    // the page title), not a fixed 100vh offset — otherwise it runs past the
-    // bottom of the screen and forces the whole page to scroll.
-    const sbCard = sidebar.querySelector(".card");
-    if (sbCard) {
-      const t = sidebar.getBoundingClientRect().top;
-      sbCard.style.maxHeight = Math.max(200, window.innerHeight - t - 24) + "px";
-    }
+    sidebar.style.top = topBarH + "px";
+    sidebar.style.height = Math.max(240, window.innerHeight - topBarH) + "px";
   }
 
   // Dynamically size the assignment card to fill remaining viewport height.
@@ -313,10 +325,10 @@ export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout 
   // ✅ Inject page HTML FIRST
   if (pageBody) pageBody.innerHTML = bodyHtml;
 
-  bindSidebarHover();
+  bindSidebarCollapse();
   bindMobileNavDrawer();
   bindNavHandlers(routeFn);
-  bindNavCollapse();
+  setActiveNav();
 
   window.setTimeout(updateStickyOffsets, 0);
 

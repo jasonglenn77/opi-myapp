@@ -805,10 +805,144 @@ option {
 
 /* KPI grid that auto-wraps nicely */
 
-/* Sidebar nav links: match the Projects-page project-name size (text-sm / 14px). */
+/* ── Desktop sidebar: labeled, collapsible, dark chrome ──────────────── */
+
+#sidebar #navScroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.22) transparent;
+}
+
+#sidebar #navScroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+#sidebar #navScroll::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.18);
+  border-radius: 8px;
+}
+
+#sidebar #navScroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,.3);
+}
+
+#sidebar .nav-grouplabel {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,.35);
+  padding: 12px 12px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#sidebar .nav-group:first-child .nav-grouplabel {
+  padding-top: 4px;
+}
 
 #sidebar .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-radius: 10px;
+  padding: 7px 11px;
+  margin: 1px 0;
   font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: rgba(255,255,255,.82);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#sidebar a.nav-item:hover {
+  background: rgba(255,255,255,.06);
+  color: #fff;
+}
+
+#sidebar .nav-item.nav-soon {
+  opacity: .38;
+  cursor: default;
+}
+
+#sidebar .nav-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+#sidebar .nav-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+#sidebar a.nav-item.active {
+  background: rgba(79,127,97,.24);
+  color: #fff;
+  box-shadow: inset 3px 0 0 #4f7f61;
+}
+
+#sidebar a.nav-item.\!active {
+  background: rgba(79,127,97,.24) !important;
+  color: #fff !important;
+  box-shadow: inset 3px 0 0 #4f7f61 !important;
+}
+
+#sidebar .soon-badge {
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  background: rgba(255,255,255,.1);
+  color: rgba(255,255,255,.5);
+  border-radius: 4px;
+  padding: 1px 4px;
+  flex: none;
+}
+
+#navCollapseBtn {
+  color: rgba(255,255,255,.5);
+}
+
+#navCollapseBtn:hover {
+  color: #fff;
+  background: rgba(255,255,255,.06);
+}
+
+/* collapsed → icon rail (click the Collapse button) */
+
+#sidebar.nav-collapsed {
+  width: 62px !important;
+}
+
+#sidebar.nav-collapsed .nav-text,
+  #sidebar.nav-collapsed .nav-grouplabel {
+  display: none;
+}
+
+#sidebar.nav-collapsed .nav-item {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+  gap: 0;
+}
+
+#sidebar.nav-collapsed .nav-group + .nav-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+
+#sidebar.nav-collapsed #navCollapseBtn {
+  justify-content: center;
+}
+
+#sidebar.nav-collapsed #navCollapseIcon {
+  transform: rotate(180deg);
 }
 
 .sr-only {
@@ -2008,6 +2142,10 @@ option {
   overflow-y: auto;
 }
 
+.overflow-x-hidden {
+  overflow-x: hidden;
+}
+
 .overflow-y-hidden {
   overflow-y: hidden;
 }
@@ -3003,10 +3141,6 @@ option {
 .py-px {
   padding-top: 1px;
   padding-bottom: 1px;
-}
-
-.pb-0\.5 {
-  padding-bottom: 0.125rem;
 }
 
 .pb-1 {
@@ -4081,10 +4215,6 @@ option {
   color: rgb(0 0 0 / var(--tw-text-opacity, 1));
 }
 
-.hover\:text-black\/50:hover {
-  color: rgb(0 0 0 / 0.5);
-}
-
 .hover\:text-black\/55:hover {
   color: rgb(0 0 0 / 0.55);
 }
@@ -4441,6 +4571,10 @@ option {
 
   .lg\:inline {
     display: inline;
+  }
+
+  .lg\:flex {
+    display: flex;
   }
 
   .lg\:hidden {
