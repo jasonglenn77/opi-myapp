@@ -2,12 +2,23 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 
 export async function teamsPage(routeFn) {
-  const [pms, crews, vendorData] = await Promise.all([
+  const [pms, crews, vendorData, usersData] = await Promise.all([
     api("/project-managers"),
     api("/work-crews"),
     api("/crew/vendors").catch(() => ({ vendors: [] })),
+    api("/users").catch(() => []),
   ]);
   const vendors = vendorData.vendors || [];
+  const users = (Array.isArray(usersData) ? usersData : []).filter(u => u.is_active);
+  const userByPm = new Map();
+  users.forEach(u => { if (u.project_manager_id != null) userByPm.set(String(u.project_manager_id), u); });
+
+  // Shared inline-cell styles + a users dropdown builder (for the Linked-user column)
+  const CELL = "bg-transparent border border-transparent hover:border-black/15 focus:border-blue-400 focus:bg-white rounded px-1.5 py-1 outline-none text-sm";
+  const BTN = "rounded-lg border border-black/15 px-2.5 py-1 text-xs font-semibold text-ink-800 hover:bg-black/5 whitespace-nowrap";
+  const userOpts = (selId) => `<option value="">— none —</option>` +
+    users.map(u => `<option value="${u.id}" ${String(selId) === String(u.id) ? "selected" : ""}>${escOpt(u.email)}</option>`).join("");
+  const flashSaved = (el) => { el.classList.add("ring-1", "ring-emerald-400"); setTimeout(() => el.classList.remove("ring-1", "ring-emerald-400"), 700); };
   const escOpt = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   // ── split by active status ────────────────────────────────────────────────
@@ -54,24 +65,20 @@ export async function teamsPage(routeFn) {
 
   // ── row renderers ─────────────────────────────────────────────────────────
   function pmRow(pm) {
-    const isActive    = !!pm.is_active;
-    const toggleLabel = isActive ? "Disable" : "Enable";
-    const toggleAttr  = isActive ? `data-pm-disable="${pm.id}"` : `data-pm-enable="${pm.id}"`;
+    const isActive = !!pm.is_active;
+    const linked = userByPm.get(String(pm.id));
+    const toggle = isActive
+      ? `<button class="${BTN}" data-pm-disable="${pm.id}">Disable</button>`
+      : `<button class="${BTN}" data-pm-enable="${pm.id}">Enable</button>`;
     return `
       <tr class="border-b border-black/5">
-        <td class="py-2 pr-3">
-          <div class="flex items-center gap-2">
-            ${colorDot(pm.color)}
-            <div class="font-semibold">${(pm.first_name || "")} ${(pm.last_name || "")}</div>
-          </div>
-        </td>
-        <td class="py-2 pr-3">${pm.email || ""}</td>
-        <td class="py-2 pr-3">${pm.phone || ""}</td>
-        <td class="py-2 pr-3">${isActive ? "Active" : "Disabled"}</td>
-        <td class="py-2 text-right space-x-2">
-          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" data-pm-edit="${pm.id}">Edit</button>
-          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" ${toggleAttr}>${toggleLabel}</button>
-        </td>
+        <td class="py-1 pr-2"><input type="color" value="${pm.color || "#000000"}" data-pm-field="color" data-pm-id="${pm.id}" class="h-7 w-8 rounded border border-black/10 bg-white p-0.5 cursor-pointer align-middle" title="Color"></td>
+        <td class="py-1 pr-2"><input value="${esc(pm.first_name)}" data-pm-field="first_name" data-pm-id="${pm.id}" class="${CELL} w-28" placeholder="First"></td>
+        <td class="py-1 pr-2"><input value="${esc(pm.last_name)}" data-pm-field="last_name" data-pm-id="${pm.id}" class="${CELL} w-28" placeholder="Last"></td>
+        <td class="py-1 pr-2"><input value="${esc(pm.email)}" data-pm-field="email" data-pm-id="${pm.id}" type="email" class="${CELL} w-full min-w-[13rem]" placeholder="email@…"></td>
+        <td class="py-1 pr-2"><input value="${esc(pm.phone)}" data-pm-field="phone" data-pm-id="${pm.id}" class="${CELL} w-32" placeholder="Phone"></td>
+        <td class="py-1 pr-2"><select data-pm-link="${pm.id}" class="${CELL} w-full min-w-[12rem]">${userOpts(linked ? linked.id : "")}</select></td>
+        <td class="py-1 pl-2 text-right whitespace-nowrap">${toggle}</td>
       </tr>
     `;
   }
@@ -80,49 +87,55 @@ export async function teamsPage(routeFn) {
   const inactivePmRows = inactivePms.map(pmRow).join("");
 
   function pmCard(pm) {
-    const isActive    = !!pm.is_active;
-    const toggleLabel = isActive ? "Disable" : "Enable";
-    const toggleAttr  = isActive ? `data-pm-disable="${pm.id}"` : `data-pm-enable="${pm.id}"`;
-    const fullName    = `${pm.first_name || ""} ${pm.last_name || ""}`.trim();
+    const isActive = !!pm.is_active;
+    const linked = userByPm.get(String(pm.id));
+    const CINP = `${CELL} border-black/15 w-full`;
+    const toggle = isActive
+      ? `<button class="flex-1 text-center ${BTN}" data-pm-disable="${pm.id}">Disable</button>`
+      : `<button class="flex-1 text-center ${BTN}" data-pm-enable="${pm.id}">Enable</button>`;
     return `
       <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0 flex-1 flex items-center gap-2">
-            ${colorDot(pm.color)}
-            <div class="font-extrabold text-sm break-words">${esc(fullName || "—")}</div>
-          </div>
+        <div class="flex items-center gap-2">
+          <input type="color" value="${pm.color || "#000000"}" data-pm-field="color" data-pm-id="${pm.id}" class="h-8 w-9 rounded border border-black/10 bg-white p-0.5 cursor-pointer shrink-0" title="Color">
+          <input value="${esc(pm.first_name)}" data-pm-field="first_name" data-pm-id="${pm.id}" class="${CINP} min-w-0" placeholder="First">
+          <input value="${esc(pm.last_name)}" data-pm-field="last_name" data-pm-id="${pm.id}" class="${CINP} min-w-0" placeholder="Last">
           ${statusPill(isActive)}
         </div>
-        ${pm.email ? `<div class="text-xs text-black/60 break-all"><span class="text-black/40">Email:</span> ${esc(pm.email)}</div>` : ""}
-        ${pm.phone ? `<div class="text-xs text-black/60"><span class="text-black/40">Phone:</span> ${esc(pm.phone)}</div>` : ""}
-        <div class="flex items-center gap-2 pt-1">
-          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" data-pm-edit="${pm.id}">Edit</button>
-          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" ${toggleAttr}>${toggleLabel}</button>
+        <div><div class="text-[11px] text-black/45 mb-0.5">Email</div><input value="${esc(pm.email)}" data-pm-field="email" data-pm-id="${pm.id}" type="email" class="${CINP}" placeholder="email@…"></div>
+        <div class="grid grid-cols-2 gap-2">
+          <div><div class="text-[11px] text-black/45 mb-0.5">Phone</div><input value="${esc(pm.phone)}" data-pm-field="phone" data-pm-id="${pm.id}" class="${CINP}" placeholder="Phone"></div>
+          <div><div class="text-[11px] text-black/45 mb-0.5">Linked user</div><select data-pm-link="${pm.id}" class="${CINP}">${userOpts(linked ? linked.id : "")}</select></div>
         </div>
+        <div class="flex items-center gap-2 pt-1">${toggle}</div>
       </div>`;
   }
 
   const activePmCards   = activePms.map(pmCard).join("");
   const inactivePmCards = inactivePms.map(pmCard).join("");
 
+  function crewParentOpts(c) {
+    return `<option value="">(none)</option>` +
+      parents.filter(p => p.id !== c.id).map(p => `<option value="${p.id}" ${String(c.parent_id) === String(p.id) ? "selected" : ""}>${escOpt(p.name)}</option>`).join("");
+  }
+  function crewVendorCell(c) {
+    if (c.parent_id) return `<span class="text-black/30 text-xs pl-1">—</span>`;
+    return `<select data-crew-field="vendor_qbo_id" data-crew-id="${c.id}" class="${CELL} w-full min-w-[12rem]"><option value="">(not linked)</option>${
+      vendors.map(v => `<option value="${escOpt(v.vendor_qbo_id)}" ${String(c.vendor_qbo_id) === String(v.vendor_qbo_id) ? "selected" : ""}>${escOpt(v.name)}</option>`).join("")}</select>`;
+  }
   function crewRow(c, indent = 0) {
-    const isActive    = !!c.is_active;
-    const toggleLabel = isActive ? "Disable" : "Enable";
-    const toggleAttr  = isActive ? `data-crew-disable="${c.id}"` : `data-crew-enable="${c.id}"`;
+    const isActive = !!c.is_active;
+    const toggle = isActive
+      ? `<button class="${BTN}" data-crew-disable="${c.id}">Disable</button>`
+      : `<button class="${BTN}" data-crew-enable="${c.id}">Enable</button>`;
     return `
       <tr class="border-b border-black/5">
-        <td class="py-2 pr-3">
-          <div style="padding-left:${indent}px" class="flex items-center gap-2">
-            ${colorDot(c.color)}
-            <span class="font-semibold">${c.name}</span>
-          </div>
-        </td>
-        <td class="py-2 pr-3">${c.code || ""}</td>
-        <td class="py-2 pr-3">${isActive ? "Active" : "Disabled"}</td>
-        <td class="py-2 text-right space-x-2">
-          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" data-crew-edit="${c.id}">Edit</button>
-          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" ${toggleAttr}>${toggleLabel}</button>
-        </td>
+        <td class="py-1 pr-2"><input type="color" value="${c.color || "#000000"}" data-crew-field="color" data-crew-id="${c.id}" class="h-7 w-8 rounded border border-black/10 bg-white p-0.5 cursor-pointer align-middle" title="Color"></td>
+        <td class="py-1 pr-2"><div style="padding-left:${indent}px"><input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CELL} w-full min-w-[10rem]" placeholder="Name"></div></td>
+        <td class="py-1 pr-2"><input value="${esc(c.code)}" data-crew-field="code" data-crew-id="${c.id}" class="${CELL} w-24" placeholder="Code"></td>
+        <td class="py-1 pr-2"><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CELL} w-full min-w-[9rem]">${crewParentOpts(c)}</select></td>
+        <td class="py-1 pr-2">${crewVendorCell(c)}</td>
+        <td class="py-1 pr-2"><input type="number" value="${c.sort_order ?? 0}" data-crew-field="sort_order" data-crew-id="${c.id}" class="${CELL} w-16 text-right tabular-nums"></td>
+        <td class="py-1 pl-2 text-right whitespace-nowrap">${toggle}</td>
       </tr>
     `;
   }
@@ -143,25 +156,25 @@ export async function teamsPage(routeFn) {
     .join("");
 
   function crewCard(c, isChild = false) {
-    const isActive    = !!c.is_active;
-    const toggleLabel = isActive ? "Disable" : "Enable";
-    const toggleAttr  = isActive ? `data-crew-disable="${c.id}"` : `data-crew-enable="${c.id}"`;
-    // Child crews get a left accent border to preserve the parent/child hierarchy
+    const isActive = !!c.is_active;
+    const CINP = `${CELL} border-black/15 w-full`;
     const childWrap = isChild ? "ml-4 border-l-4 border-l-black/15" : "";
+    const toggle = isActive
+      ? `<button class="flex-1 text-center ${BTN}" data-crew-disable="${c.id}">Disable</button>`
+      : `<button class="flex-1 text-center ${BTN}" data-crew-enable="${c.id}">Enable</button>`;
     return `
       <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2 ${childWrap}">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0 flex-1 flex items-center gap-2">
-            ${colorDot(c.color)}
-            <div class="font-extrabold text-sm break-words">${esc(c.name || "—")}</div>
-          </div>
+        <div class="flex items-center gap-2">
+          <input type="color" value="${c.color || "#000000"}" data-crew-field="color" data-crew-id="${c.id}" class="h-8 w-9 rounded border border-black/10 bg-white p-0.5 cursor-pointer shrink-0" title="Color">
+          <input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CINP} min-w-0 font-semibold" placeholder="Name">
           ${statusPill(isActive)}
         </div>
-        ${c.code ? `<div class="text-xs text-black/60"><span class="text-black/40">Code:</span> ${esc(c.code)}</div>` : ""}
-        <div class="flex items-center gap-2 pt-1">
-          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" data-crew-edit="${c.id}">Edit</button>
-          <button class="flex-1 rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5 active:bg-black/10" ${toggleAttr}>${toggleLabel}</button>
+        <div class="grid grid-cols-2 gap-2">
+          <div><div class="text-[11px] text-black/45 mb-0.5">Code</div><input value="${esc(c.code)}" data-crew-field="code" data-crew-id="${c.id}" class="${CINP}" placeholder="Code"></div>
+          <div><div class="text-[11px] text-black/45 mb-0.5">Parent</div><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CINP}">${crewParentOpts(c)}</select></div>
         </div>
+        ${!c.parent_id ? `<div><div class="text-[11px] text-black/45 mb-0.5">QuickBooks Vendor</div>${crewVendorCell(c)}</div>` : ""}
+        <div class="flex items-center gap-2 pt-1">${toggle}</div>
       </div>`;
   }
 
@@ -182,7 +195,13 @@ export async function teamsPage(routeFn) {
 
   const bodyHtml = `
     <div class="grid grid-cols-1 gap-4 pb-6">
+      <div class="inline-flex items-center gap-1 rounded-xl bg-white/5 border border-white/10 p-1" role="tablist" aria-label="Teams">
+        <button type="button" data-teamtabbtn="pm" class="team-tab px-4 py-2 rounded-lg text-sm font-bold">Project Managers <span class="opacity-60 font-semibold">${activePms.length}</span></button>
+        <button type="button" data-teamtabbtn="crew" class="team-tab px-4 py-2 rounded-lg text-sm font-bold">Work Crews <span class="opacity-60 font-semibold">${activeCrews.length}</span></button>
+      </div>
+
       <!-- PMs -->
+      <div id="teamsPmPanel" data-teamtab="pm">
       <div class="card p-5">
         <div class="flex items-center justify-between mb-4">
           <div>
@@ -193,17 +212,19 @@ export async function teamsPage(routeFn) {
         </div>
         <div id="pmMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
         <div class="hidden lg:block overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead class="text-left text-black/60">
+          <table class="w-full text-sm" style="min-width:940px;">
+            <thead class="text-left text-black/50">
               <tr class="border-b border-black/10">
-                <th class="py-2 pr-3">Name</th>
-                <th class="py-2 pr-3">Email</th>
-                <th class="py-2 pr-3">Phone</th>
-                <th class="py-2 pr-3">Status</th>
-                <th class="py-2 text-right">Actions</th>
+                <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
+                <th class="py-2 pr-2 font-bold">First</th>
+                <th class="py-2 pr-2 font-bold">Last</th>
+                <th class="py-2 pr-2 font-bold">Email</th>
+                <th class="py-2 pr-2 font-bold">Phone</th>
+                <th class="py-2 pr-2 font-bold">Linked user</th>
+                <th class="py-2 pl-2 text-right font-bold"></th>
               </tr>
             </thead>
-            <tbody>${activePmRows || `<tr><td colspan="5" class="py-6 text-center text-black/40 text-sm">No active project managers.</td></tr>`}</tbody>
+            <tbody>${activePmRows || `<tr><td colspan="7" class="py-6 text-center text-black/40 text-sm">No active project managers.</td></tr>`}</tbody>
           </table>
         </div>
 
@@ -218,14 +239,16 @@ export async function teamsPage(routeFn) {
               Disabled project managers (${inactivePms.length})
             </summary>
             <div class="hidden lg:block overflow-x-auto mt-3">
-              <table class="w-full text-sm">
-                <thead class="text-left text-black/60">
+              <table class="w-full text-sm" style="min-width:940px;">
+                <thead class="text-left text-black/50">
                   <tr class="border-b border-black/10">
-                    <th class="py-2 pr-3">Name</th>
-                    <th class="py-2 pr-3">Email</th>
-                    <th class="py-2 pr-3">Phone</th>
-                    <th class="py-2 pr-3">Status</th>
-                    <th class="py-2 text-right">Actions</th>
+                    <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
+                    <th class="py-2 pr-2 font-bold">First</th>
+                    <th class="py-2 pr-2 font-bold">Last</th>
+                    <th class="py-2 pr-2 font-bold">Email</th>
+                    <th class="py-2 pr-2 font-bold">Phone</th>
+                    <th class="py-2 pr-2 font-bold">Linked user</th>
+                    <th class="py-2 pl-2 text-right font-bold"></th>
                   </tr>
                 </thead>
                 <tbody>${inactivePmRows}</tbody>
@@ -237,8 +260,10 @@ export async function teamsPage(routeFn) {
           </details>
         ` : ""}
       </div>
+      </div>
 
       <!-- Crews -->
+      <div id="teamsCrewPanel" data-teamtab="crew" class="hidden">
       <div class="card p-5">
         <div class="flex items-center justify-between mb-4">
           <div>
@@ -249,16 +274,19 @@ export async function teamsPage(routeFn) {
         </div>
         <div id="crewMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
         <div class="hidden lg:block overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead class="text-left text-black/60">
+          <table class="w-full text-sm" style="min-width:900px;">
+            <thead class="text-left text-black/50">
               <tr class="border-b border-black/10">
-                <th class="py-2 pr-3">Name</th>
-                <th class="py-2 pr-3">Code</th>
-                <th class="py-2 pr-3">Status</th>
-                <th class="py-2 text-right">Actions</th>
+                <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
+                <th class="py-2 pr-2 font-bold">Name</th>
+                <th class="py-2 pr-2 font-bold">Code</th>
+                <th class="py-2 pr-2 font-bold">Parent</th>
+                <th class="py-2 pr-2 font-bold">QuickBooks Vendor</th>
+                <th class="py-2 pr-2 font-bold">Sort</th>
+                <th class="py-2 pl-2 text-right font-bold"></th>
               </tr>
             </thead>
-            <tbody>${activeCrewRows || `<tr><td colspan="4" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
+            <tbody>${activeCrewRows || `<tr><td colspan="7" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
           </table>
         </div>
 
@@ -273,13 +301,16 @@ export async function teamsPage(routeFn) {
               Disabled crews (${inactiveCrews.length})
             </summary>
             <div class="hidden lg:block overflow-x-auto mt-3">
-              <table class="w-full text-sm">
-                <thead class="text-left text-black/60">
+              <table class="w-full text-sm" style="min-width:900px;">
+                <thead class="text-left text-black/50">
                   <tr class="border-b border-black/10">
-                    <th class="py-2 pr-3">Name</th>
-                    <th class="py-2 pr-3">Code</th>
-                    <th class="py-2 pr-3">Status</th>
-                    <th class="py-2 text-right">Actions</th>
+                    <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
+                    <th class="py-2 pr-2 font-bold">Name</th>
+                    <th class="py-2 pr-2 font-bold">Code</th>
+                    <th class="py-2 pr-2 font-bold">Parent</th>
+                    <th class="py-2 pr-2 font-bold">QuickBooks Vendor</th>
+                    <th class="py-2 pr-2 font-bold">Sort</th>
+                    <th class="py-2 pl-2 text-right font-bold"></th>
                   </tr>
                 </thead>
                 <tbody>${inactiveCrewRows}</tbody>
@@ -290,6 +321,7 @@ export async function teamsPage(routeFn) {
             </div>
           </details>
         ` : ""}
+      </div>
       </div>
     </div>
 
@@ -411,6 +443,77 @@ setShell({
     window.addEventListener("hashchange", () => {
       if (pageTitleBlock) pageTitleBlock.style.display = "";
     }, { once: true });
+  }
+
+  // --- Teams tabs: Project Managers | Work Crews (remembers last tab) ---
+  (function bindTeamTabs() {
+    const KEY = "opi_teams_tab";
+    const panels = { pm: document.getElementById("teamsPmPanel"), crew: document.getElementById("teamsCrewPanel") };
+    const btns = [...document.querySelectorAll("[data-teamtabbtn]")];
+    const show = (tab) => {
+      if (!panels[tab]) tab = "pm";
+      Object.entries(panels).forEach(([k, el]) => { if (el) el.classList.toggle("hidden", k !== tab); });
+      btns.forEach((b) => {
+        const on = b.getAttribute("data-teamtabbtn") === tab;
+        b.classList.toggle("bg-white", on);
+        b.classList.toggle("text-ink-900", on);
+        b.classList.toggle("shadow-sm", on);
+        b.classList.toggle("text-white/60", !on);
+        b.classList.toggle("hover:bg-white/10", !on);
+        b.classList.toggle("hover:text-white", !on);
+        b.setAttribute("aria-selected", String(on));
+      });
+      try { localStorage.setItem(KEY, tab); } catch (_) {}
+    };
+    btns.forEach((b) => b.addEventListener("click", () => show(b.getAttribute("data-teamtabbtn"))));
+    let saved = "pm";
+    try { saved = localStorage.getItem(KEY) || "pm"; } catch (_) {}
+    show(saved);
+  })();
+
+  // --- Inline editing: save each cell on change via the partial-update endpoints.
+  // Rebind on the persistent #pageBody each render so the closure (users/routeFn) stays fresh.
+  const teamsRoot = document.getElementById("pageBody");
+  if (teamsRoot) {
+    if (teamsRoot._teamsInlineHandler) teamsRoot.removeEventListener("change", teamsRoot._teamsInlineHandler);
+    const handler = async (e) => {
+      const t = e.target;
+      if (t.matches("[data-pm-field]")) {
+        const id = t.getAttribute("data-pm-id"), field = t.getAttribute("data-pm-field");
+        const val = field === "color" ? t.value : (t.value.trim() || null);
+        try { await api(`/project-managers/${id}`, { method: "PUT", body: JSON.stringify({ [field]: val }) }); flashSaved(t); }
+        catch (err) { alert("Save failed: " + (err.message || err)); }
+      } else if (t.matches("[data-pm-link]")) {
+        const pmId = Number(t.getAttribute("data-pm-link"));
+        const newUserId = t.value ? Number(t.value) : null;
+        try {
+          const fresh = await api("/users").catch(() => []);
+          const current = (Array.isArray(fresh) ? fresh : []).find(u => Number(u.project_manager_id) === pmId);
+          if (!newUserId) { if (current) await api(`/users/${current.id}`, { method: "PUT", body: JSON.stringify({ project_manager_id: null }) }); }
+          else {
+            if (current && current.id !== newUserId) await api(`/users/${current.id}`, { method: "PUT", body: JSON.stringify({ project_manager_id: null }) });
+            await api(`/users/${newUserId}`, { method: "PUT", body: JSON.stringify({ project_manager_id: pmId }) });
+          }
+          location.hash = "#/teams"; routeFn();
+        } catch (err) { alert("Failed to update linked user: " + (err.message || err)); }
+      } else if (t.matches("[data-crew-field]")) {
+        const id = t.getAttribute("data-crew-id"), field = t.getAttribute("data-crew-field");
+        let body, reload = false;
+        if (field === "parent_id") { body = { parent_id: t.value ? Number(t.value) : null }; reload = true; }
+        else if (field === "vendor_qbo_id") body = { vendor_qbo_id: t.value || null };
+        else if (field === "sort_order") body = { sort_order: Number(t.value) || 0 };
+        else if (field === "color") body = { color: t.value };
+        else {
+          const v = t.value.trim();
+          if (field === "name" && !v) { alert("Name cannot be empty."); return; }
+          body = { [field]: v || null };
+        }
+        try { await api(`/work-crews/${id}`, { method: "PUT", body: JSON.stringify(body) }); if (reload) { location.hash = "#/teams"; routeFn(); } else flashSaved(t); }
+        catch (err) { alert("Save failed: " + (err.message || err)); }
+      }
+    };
+    teamsRoot._teamsInlineHandler = handler;
+    teamsRoot.addEventListener("change", handler);
   }
 
   // --- Color controls (must be after setShell because DOM now exists) ---

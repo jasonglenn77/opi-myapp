@@ -1663,12 +1663,20 @@ option {
   min-width: 100px;
 }
 
+.min-w-\[10rem\] {
+  min-width: 10rem;
+}
+
 .min-w-\[120px\] {
   min-width: 120px;
 }
 
 .min-w-\[12rem\] {
   min-width: 12rem;
+}
+
+.min-w-\[13rem\] {
+  min-width: 13rem;
 }
 
 .min-w-\[14rem\] {
@@ -2060,12 +2068,6 @@ option {
 
 .gap-y-4 {
   row-gap: 1rem;
-}
-
-.space-x-2 > :not([hidden]) ~ :not([hidden]) {
-  --tw-space-x-reverse: 0;
-  margin-right: calc(0.5rem * var(--tw-space-x-reverse));
-  margin-left: calc(0.5rem * calc(1 - var(--tw-space-x-reverse)));
 }
 
 .space-y-1 > :not([hidden]) ~ :not([hidden]) {
@@ -2958,6 +2960,10 @@ option {
 
 .bg-white\/40 {
   background-color: rgb(255 255 255 / 0.4);
+}
+
+.bg-white\/5 {
+  background-color: rgb(255 255 255 / 0.05);
 }
 
 .bg-white\/60 {
@@ -3894,6 +3900,11 @@ option {
   --tw-ring-color: rgb(167 243 208 / var(--tw-ring-opacity, 1));
 }
 
+.ring-emerald-400 {
+  --tw-ring-opacity: 1;
+  --tw-ring-color: rgb(52 211 153 / var(--tw-ring-opacity, 1));
+}
+
 .ring-indigo-400 {
   --tw-ring-opacity: 1;
   --tw-ring-color: rgb(129 140 248 / var(--tw-ring-opacity, 1));
@@ -4202,6 +4213,10 @@ option {
   background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1));
 }
 
+.hover\:bg-white\/10:hover {
+  background-color: rgb(255 255 255 / 0.1);
+}
+
 .hover\:bg-white\/20:hover {
   background-color: rgb(255 255 255 / 0.2);
 }
@@ -4302,6 +4317,11 @@ option {
 
 .focus\:border-black\/30:focus {
   border-color: rgb(0 0 0 / 0.3);
+}
+
+.focus\:border-blue-400:focus {
+  --tw-border-opacity: 1;
+  border-color: rgb(96 165 250 / var(--tw-border-opacity, 1));
 }
 
 .focus\:border-blue-500:focus {
