@@ -65,7 +65,7 @@ export async function cashflowPage(routeFn) {
             <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
               <li><span class="font-semibold text-ink-900">Committed</span> — the firmest money, because it's already in QuickBooks. <em>In</em> = customer invoices you've already sent, placed on their due date. <em>Out</em> = bills you've already entered, on their due date.</li>
               <li><span class="font-semibold text-ink-900">Scheduled</span> — the plans from each project's <span class="font-semibold">Billing &amp; Schedule</span> tab that aren't in QuickBooks yet: invoices you're set to send, crew payments, and project expenses, each on its planned date. The forecast is the sum of every project's tab, so if you fix a project's schedule it updates here.</li>
-              <li><span class="font-semibold text-ink-900">Recurring</span> — your steady overhead: rent, insurance, payroll, loan payments. Each item's amount, cadence (weekly/monthly/…), and start date are <span class="font-semibold">auto-generated from your trailing-12-month spending and stay current</span> — they refresh with every QuickBooks sync. Override any line with the <span class="font-semibold">Overhead</span> button and it holds until you revert it (revert returns it to the live auto value). Deleted lines stay deleted until you restore them.</li>
+              <li><span class="font-semibold text-ink-900">Recurring</span> — your steady overhead: rent, insurance, payroll, loan payments. Most lines are auto-generated from your trailing-12-month spending and refresh with every QuickBooks sync; a few (payroll wages, bonus, payroll taxes) are kept by hand because they aren't in QuickBooks. Open the <span class="font-semibold">Overhead</span> button to view, add, or adjust any line — see <span class="font-semibold">The Overhead editor</span> below.</li>
             </ul>
           </div>
 
@@ -83,6 +83,7 @@ export async function cashflowPage(routeFn) {
           <div>
             <div class="font-bold text-ink-900">Actuals — what already happened</div>
             <p class="text-black/60">Same layout, for a date range you choose: real customer payments received <em>in</em>, and bill payments + card/check spend <em>out</em>, by the week the cash actually moved. Expand, toggle, and click through to projects the same way.</p>
+            <p class="text-black/60 mt-1.5">Your <span class="font-semibold">recurring overhead shows here too</span> — as the real posted spend, under <span class="font-semibold">Direct expenses</span> (by category — occupancy, owner draws, insurance…) and <span class="font-semibold">Bill payments</span> (by vendor). The only things you won't see are the hand-entered lines (wages, bonus, payroll taxes, miscellaneous): they never post to QuickBooks, so there's no actual to show.</p>
           </div>
 
           <div>
@@ -91,8 +92,20 @@ export async function cashflowPage(routeFn) {
           </div>
 
           <div>
-            <div class="font-bold text-ink-900">Opening balance &amp; Overhead</div>
-            <p class="text-black/60"><span class="font-semibold">Opening balance</span> auto-fills from your QuickBooks bank balance (editable). The <span class="font-semibold">Overhead</span> button opens the recurring cash-out schedule (rent, insurance, payroll, loan payments…), and you can edit the Recurring rows right in the Cash Outflow table for a live what-if.</p>
+            <div class="font-bold text-ink-900">Opening balance</div>
+            <p class="text-black/60">Auto-fills from your QuickBooks bank balance and is editable — override it to model a different starting point.</p>
+          </div>
+
+          <div>
+            <div class="font-bold text-ink-900">The Overhead editor — your recurring schedule</div>
+            <p class="text-black/60">The <span class="font-semibold">Overhead</span> button opens every recurring cash-out line, <span class="font-semibold">grouped by category</span> (Occupancy, Payroll, Travel…) with a weekly subtotal per group and a <span class="font-semibold">grand total</span> ($/wk and $/yr) at the top. A <span class="font-semibold">Per week</span> column normalizes each line, so a monthly rent and a weekly payroll are comparable at a glance. The column header stays pinned as you scroll, and you can <span class="font-semibold">collapse any category</span> by clicking its header. Add a line with the <span class="font-semibold">+ add</span> on a category header (files it there) or <span class="font-semibold">+ Add item</span> at the bottom, pick its <span class="font-semibold">Category</span> from the dropdown, and edit amount / cadence / dates inline. You can also edit Recurring cells right in the Cash Outflow grid for a live what-if.</p>
+            <p class="text-black/60 mt-2">Each line is tagged by <span class="font-semibold">where its number comes from</span>:</p>
+            <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
+              <li><span class="text-[10px] font-bold uppercase tracking-wide text-black/40 border border-black/15 rounded px-1 py-px">auto</span> — derived from your trailing-12-month QuickBooks spending, at the cadence detected from how often it posts. <span class="font-semibold">Refreshes on every sync.</span></li>
+              <li><span class="text-[10px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px">edited</span> — a QuickBooks line you've hand-adjusted (e.g. rent cleaned of one-off charges). It holds your value and shows <span class="font-semibold">↺ revert</span> back to the live auto figure.</li>
+              <li><span class="text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-100 border border-indigo-200 rounded px-1 py-px">manual</span> — <span class="font-semibold">not in QuickBooks</span>, so you maintain it by hand. These rows are <span class="text-indigo-700">shaded</span> so they stand out — W-2 wages, bonus / commission, employer payroll taxes, and miscellaneous, since payroll runs through an outside provider.</li>
+            </ul>
+            <p class="text-black/60 mt-1.5">Deleted lines stay deleted (they won't come back on a sync) until you restore them, and <span class="font-semibold">history</span> shows every change to a line.</p>
           </div>
         </div>
       </div>
@@ -111,13 +124,13 @@ export async function cashflowPage(routeFn) {
     </div>
 
     <div id="cfOverheadModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
-      <div class="card p-6 flex flex-col" style="width:100%;max-width:56rem;max-height:85vh;overflow:hidden;">
+      <div class="card p-6 flex flex-col" style="width:100%;max-width:88rem;max-height:85vh;overflow:hidden;">
         <div class="flex items-center justify-between mb-1">
           <div class="text-lg font-extrabold">Recurring overhead</div>
           <button id="cfOverheadClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
         </div>
         <div class="text-xs text-black/50 mb-3">The recurring cash going out — rent, insurance, payroll, loan payments. Each item lands in the forecast by its cadence from the reference date. Seeded from your trailing spend; edit into real items. Changes show in the forecast right away.</div>
-        <div id="cfOverheadBody" class="overflow-y-auto" style="flex:1 1 auto;min-height:0;">Loading…</div>
+        <div id="cfOverheadBody" class="overflow-y-auto overflow-x-auto" style="flex:1 1 auto;min-height:0;">Loading…</div>
         <div class="flex items-center justify-between gap-2 pt-3 border-t border-black/10 mt-2">
           <button id="cfOverheadAdd" class="text-sm font-semibold text-brand-700 hover:underline">+ Add item</button>
           <button id="cfOverheadDone" class="btn-primary">Done</button>
@@ -583,6 +596,7 @@ export async function cashflowPage(routeFn) {
   const ovBody = document.getElementById("cfOverheadBody");
   let ovCadences = ["weekly", "biweekly", "monthly", "quarterly", "annual"];
   let ovDirty = false; // did anything change → reload forecast on close
+  const ovCollapsed = new Set(); // category names collapsed in the editor (persists across re-renders)
   const closeOverhead = () => {
     ovModal.classList.add("hidden"); ovModal.classList.remove("flex");
     if (ovDirty) { ovDirty = false; load(); }  // recurring is live → reflect edits
@@ -611,6 +625,12 @@ export async function cashflowPage(routeFn) {
          || (i.cadence || "") !== (i.seed_cadence || "")
          || (i.anchor_date || "").slice(0, 10) !== (i.seed_anchor_date || "").slice(0, 10));
     const sourceCell = (i) => {
+      if (i.from_qbo === 0) {
+        return `<div class="flex items-center gap-2 justify-end whitespace-nowrap">
+          <span class="text-[9px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-100 border border-indigo-200 rounded px-1 py-px" title="Entered by hand — not from QuickBooks. You maintain this line.">manual</span>
+          <button data-ov-hist="${i.id}" class="text-[11px] font-semibold text-black/40 hover:text-black/70">history</button>
+        </div>`;
+      }
       if (isEdited(i)) {
         const canRevert = i.seed_amount != null;
         return `<div class="flex items-center gap-2 justify-end whitespace-nowrap">
@@ -624,17 +644,42 @@ export async function cashflowPage(routeFn) {
         <button data-ov-hist="${i.id}" class="text-[11px] font-semibold text-black/35 hover:text-black/70">history</button>
       </div>`;
     };
-    const rows = items.map(i => `
-      <tr class="border-b border-black/5" data-ov="${i.id}">
-        <td class="py-1 pr-2"><input data-f="name" value="${escapeHtml(i.name || "")}" class="${OV_IN} w-full"></td>
+    const PPY = { weekly: 52, biweekly: 26, monthly: 12, quarterly: 4, annual: 1 };
+    const perWeek = (i) => (Number(i.amount) || 0) * (PPY[i.cadence] || 0) / 52;
+    const catList = Array.from(new Set(items.map(i => i.category).filter(Boolean))).sort();
+    const rowHtml = (i, cat, collapsed) => `
+      <tr class="border-b border-black/5 ${i.from_qbo === 0 ? "bg-indigo-50/60" : ""}" data-ov="${i.id}" data-ovcat="${escapeHtml(cat)}"${collapsed ? " hidden" : ""}>
+        <td class="py-1 pr-2 pl-3"><input data-f="name" value="${escapeHtml(i.name || "")}" title="${escapeHtml(i.name || "")}" class="${OV_IN} w-full min-w-[15rem]"></td>
+        <td class="py-1 px-1"><input data-f="category" list="ovCatList" value="${escapeHtml(i.category || "")}" placeholder="—" class="${OV_IN} w-40"></td>
         <td class="py-1 px-1"><input data-f="amount" type="number" step="1" value="${Math.round(i.amount || 0)}" class="${OV_IN} w-24 text-right tabular-nums"></td>
         <td class="py-1 px-1"><select data-f="cadence" class="${OV_IN}">${cadOpts(i.cadence)}</select></td>
+        <td class="py-1 px-1 text-right tabular-nums text-black/45 whitespace-nowrap" title="Weekly-equivalent — the amount spread over its cadence">${money0(perWeek(i))}</td>
         <td class="py-1 px-1"><input data-f="anchor_date" type="date" value="${(i.anchor_date || "").slice(0, 10)}" class="${OV_IN} w-32 tabular-nums"></td>
         <td class="py-1 px-1"><input data-f="end_date" type="date" value="${(i.end_date || "").slice(0, 10)}" class="${OV_IN} w-32 tabular-nums"></td>
         <td class="py-1 px-1">${sourceCell(i)}</td>
         <td class="py-1 pl-1 text-right"><button data-ov-del="${i.id}" class="text-black/30 hover:text-red-600 text-[13px]" title="Remove">✕</button></td>
       </tr>
-      <tr class="ov-hist-row" data-ov-hist-row="${i.id}" hidden><td colspan="7" class="px-3 py-2 bg-black/[0.015] border-b border-black/10"></td></tr>`).join("");
+      <tr class="ov-hist-row" data-ov-hist-row="${i.id}" data-ovcat="${escapeHtml(cat)}" data-histrow="1" hidden><td colspan="9" class="px-3 py-2 bg-black/[0.015] border-b border-black/10"></td></tr>`;
+    const groups = {};
+    items.forEach(i => { const c = i.category || "Other"; (groups[c] = groups[c] || []).push(i); });
+    const subOf = (c) => groups[c].reduce((s, i) => s + perWeek(i), 0);
+    const catOrder = Object.keys(groups).sort((a, b) => subOf(b) - subOf(a));
+    let grandWk = 0;
+    const rows = catOrder.map(c => {
+      const sub = subOf(c); grandWk += sub;
+      const collapsed = ovCollapsed.has(c);
+      const head = `<tr class="bg-black/[0.03] cursor-pointer select-none hover:bg-black/5" data-ovcat-head="${escapeHtml(c)}">
+        <td colspan="9" class="pt-3 pb-1 px-2">
+          <div class="flex items-center justify-between gap-3">
+            <span class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-black/55">
+              <span data-chev class="inline-block w-3 text-black/40 text-[11px]">${collapsed ? "▸" : "▾"}</span>${escapeHtml(c)}
+              <button data-ov-catadd="${escapeHtml(c)}" title="Add a line to ${escapeHtml(c)}" class="ml-1 normal-case font-semibold text-brand-700 hover:underline text-[11px]">+ add</button>
+            </span>
+            <span class="tabular-nums font-bold text-black/60 whitespace-nowrap">${money0(sub)}<span class="text-black/40 font-normal">/wk</span></span>
+          </div>
+        </td></tr>`;
+      return head + groups[c].map(i => rowHtml(i, c, collapsed)).join("");
+    }).join("");
     const delSection = deleted.length ? `
       <div class="mt-4 pt-3 border-t border-black/10">
         <div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Deleted items (${deleted.length}) — restorable</div>
@@ -652,14 +697,26 @@ export async function cashflowPage(routeFn) {
         </tbody></table>
       </div>` : "";
     ovBody.innerHTML = `
+      <div class="flex items-baseline justify-between gap-3 mb-2 pb-2 border-b border-black/10">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-black/45">Total recurring cash-out</div>
+        <div class="tabular-nums whitespace-nowrap"><span class="text-base font-extrabold text-ink-900">${money0(grandWk)}</span><span class="text-black/40 text-[12px]">/wk</span><span class="mx-2 text-black/20">·</span><span class="font-bold text-black/60">${money0(grandWk * 52)}</span><span class="text-black/40 text-[12px]">/yr</span></div>
+      </div>
       <table class="w-full text-[12.5px]">
-        <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
-          <th class="py-1.5 pr-2 text-left">Item</th><th class="py-1.5 px-1 text-right">Amount</th>
-          <th class="py-1.5 px-1 text-left">Cadence</th><th class="py-1.5 px-1 text-left">Starting</th>
-          <th class="py-1.5 px-1 text-left">Ends (optional)</th><th class="py-1.5 px-1 text-right">Source</th><th class="py-1.5"></th>
+        <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40">
+          <th class="sticky top-0 z-10 bg-white py-1.5 pr-2 pl-2 text-left border-b border-black/10">Item</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-left border-b border-black/10">Category</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-right border-b border-black/10">Amount</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-left border-b border-black/10">Cadence</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-right border-b border-black/10">Per week</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-left border-b border-black/10">Starting</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-left border-b border-black/10">Ends (optional)</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 px-1 text-right border-b border-black/10">Source</th>
+          <th class="sticky top-0 z-10 bg-white py-1.5 border-b border-black/10"></th>
         </tr></thead>
-        <tbody>${rows || `<tr><td colspan="7" class="py-4 text-black/40">No overhead items.</td></tr>`}</tbody>
-      </table>${delSection}`;
+        <tbody>${rows || `<tr><td colspan="9" class="py-4 text-black/40">No overhead items.</td></tr>`}</tbody>
+      </table>
+      <datalist id="ovCatList">${catList.map(c => `<option value="${escapeHtml(c)}"></option>`).join("")}</datalist>
+      ${delSection}`;
     ovBody.querySelectorAll("[data-ov] [data-f]").forEach(el => {
       el.addEventListener("change", async () => {
         const id = el.closest("[data-ov]").getAttribute("data-ov");
@@ -682,6 +739,24 @@ export async function cashflowPage(routeFn) {
     ovBody.querySelectorAll("[data-ov-restore]").forEach(b => b.addEventListener("click", async () => {
       try { await api(`/cashflow/overhead/${b.getAttribute("data-ov-restore")}/restore`, { method: "POST" }); ovDirty = true; renderOverhead(); }
       catch (e) { alert("Failed to restore: " + (e.message || e)); }
+    }));
+    ovBody.querySelectorAll("[data-ovcat-head]").forEach(h => h.addEventListener("click", (e) => {
+      if (e.target.closest("[data-ov-catadd]")) return;   // the "+ add" button handles its own click
+      const c = h.getAttribute("data-ovcat-head");
+      const willCollapse = !ovCollapsed.has(c);
+      if (willCollapse) ovCollapsed.add(c); else ovCollapsed.delete(c);
+      const chev = h.querySelector("[data-chev]"); if (chev) chev.textContent = willCollapse ? "▸" : "▾";
+      ovBody.querySelectorAll(`[data-ovcat="${c}"]`).forEach(r => {
+        if (r.hasAttribute("data-histrow")) r.hidden = true;   // history sub-rows stay closed
+        else r.hidden = willCollapse;
+      });
+    }));
+    ovBody.querySelectorAll("[data-ov-catadd]").forEach(b => b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api("/cashflow/overhead", { method: "POST", body: JSON.stringify({ name: "New item", category: b.getAttribute("data-ov-catadd"), amount: 0, cadence: "monthly", anchor_date: (startEl.value || new Date().toISOString().slice(0, 10)) }) });
+        ovDirty = true; renderOverhead();
+      } catch (err) { alert("Failed to add: " + (err.message || err)); }
     }));
     const fmtChange = (h) => {
       const parts = [];

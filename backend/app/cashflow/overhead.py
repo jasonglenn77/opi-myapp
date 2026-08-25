@@ -33,6 +33,7 @@ def ensure_table():
               active TINYINT(1) NOT NULL DEFAULT 1,
               sort_order INT NOT NULL DEFAULT 0,
               edited TINYINT(1) NOT NULL DEFAULT 0,
+              from_qbo TINYINT(1) NOT NULL DEFAULT 1,
               deleted_at DATETIME NULL,
               created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -145,7 +146,7 @@ def list_overhead(active_only=False):
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
             SELECT id, name, category, amount, cadence, anchor_date, end_date,
-                   active, sort_order, edited,
+                   active, sort_order, edited, from_qbo,
                    seed_amount, seed_cadence, seed_anchor_date
             FROM cashflow_overhead {where}
             ORDER BY sort_order, id
@@ -363,9 +364,9 @@ def create(data: dict, actor: str | None = None) -> int:
         oid = conn.execute(text("""
             INSERT INTO cashflow_overhead
               (name, category, amount, seed_amount, cadence, seed_cadence,
-               anchor_date, seed_anchor_date, end_date, active, sort_order, edited)
+               anchor_date, seed_anchor_date, end_date, active, sort_order, edited, from_qbo)
             VALUES (:name, :category, :amount, :amount, :cadence, :cadence,
-               :anchor_date, :anchor_date, :end_date, 1, :so, 1)
+               :anchor_date, :anchor_date, :end_date, 1, :so, 1, 0)
         """), {
             "name": name, "category": data.get("category"),
             "amount": amount, "cadence": cadence,
