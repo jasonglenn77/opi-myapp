@@ -16,7 +16,7 @@ import secrets
 import hashlib
 
 from . import mailer
-from .auth import create_access_token, get_current_user, require_admin
+from .auth import create_access_token, get_current_user, require_admin, require_capability
 from .permissions import (
     valid_roles, filter_visible, permission_snapshot, ALL_CAPABILITIES,
     get_role_defaults, bump_roles_cache, BUILTIN_ROLE_META, ADMIN_ROLE,
@@ -336,6 +336,134 @@ def audit_log(limit: int = 200, _admin=Depends(require_admin)):
             except Exception: pass
         out.append(d)
     return out
+
+
+@app.get("/api/crew-hub")
+def crew_hub(_u=Depends(require_capability("page.assignment"))):
+    """Office crew-operations hub: upcoming/overdue crew payments + a total, and the
+    active projects that still have no crew assigned (with any offer's status)."""
+    from .db import engine
+    from datetime import date
+    today = date.today()
+    with engine.connect() as conn:
+        # 1) Actual crew cash PAID per project = Contract-Labor bill lines tagged to it
+        #    (the same signal the Billing tab burns down against — reliable even when
+        #    the installment 'status' field was never marked paid).
+        paid_by = {str(r[0]): float(r[1] or 0) for r in conn.execute(text("""
+            SELECT l.line_customer_qbo_id, ROUND(SUM(l.amount), 2)
+            FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
+            WHERE t.entity_type = 'Bill' AND l.line_customer_qbo_id IS NOT NULL
+              AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+            GROUP BY l.line_customer_qbo_id
+        """)).all()}
+        # All per-crew installments (non-rollup), ordered so we can burn down by date.
+        inst = conn.execute(text("""
+            SELECT s.entity_id, i.pay_date, i.amount,
+                   wc.name AS crew_name, pc.name AS crew_company, qc.display_name AS project
+            FROM project_payment_installments i
+            JOIN project_payment_schedules s ON s.id = i.schedule_id
+            LEFT JOIN work_crews wc ON wc.id = s.crew_id
+            LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+            LEFT JOIN qbo_customers qc ON qc.qbo_id = s.entity_id
+            WHERE s.is_rollup = 0
+            ORDER BY s.entity_id, i.pay_date, i.id
+        """)).mappings().all()
+        # Assignment schedule window per project (earliest start .. latest end).
+        win_by = {}
+        for r in conn.execute(text("""
+            SELECT qc.qbo_id, MIN(psi.start_date) AS s, MAX(psi.end_date) AS e
+            FROM project_schedule_items psi JOIN projects p ON p.id = psi.project_id
+            JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            GROUP BY qc.qbo_id
+        """)).mappings().all():
+            win_by[str(r["qbo_id"])] = {"start": str(r["s"]) if r["s"] else None,
+                                        "end": str(r["e"]) if r["e"] else None}
+
+        # 2) Canonical latest status per project (final assignment row).
+        status_by = {str(r["qbo_id"]): r["status"] for r in conn.execute(text("""
+            SELECT qc.qbo_id, x.status FROM (
+              SELECT p.qbo_customer_id, psi.status,
+                     ROW_NUMBER() OVER (PARTITION BY p.qbo_customer_id
+                       ORDER BY (psi.start_date IS NULL), psi.start_date DESC, psi.sort_order DESC, psi.id DESC) rn
+              FROM project_schedule_items psi JOIN projects p ON p.id = psi.project_id
+            ) x JOIN qbo_customers qc ON qc.id = x.qbo_customer_id WHERE x.rn = 1
+        """)).mappings().all()}
+        crewed = {str(r[0]) for r in conn.execute(text("""
+            SELECT DISTINCT qc.qbo_id
+            FROM project_schedule_item_work_crews swc
+            JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
+            JOIN projects p ON p.id = psi.project_id
+            JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            WHERE swc.unassigned_at IS NULL
+        """)).all()}
+        projects = conn.execute(text("""
+            SELECT qc.qbo_id, qc.display_name
+            FROM projects p JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            WHERE qc.is_project = 1
+        """)).mappings().all()
+        offer_by = {str(r["entity_id"]): r for r in conn.execute(text("""
+            SELECT o.entity_id, o.status, o.sent_at,
+                   TRIM(CONCAT(COALESCE(wc.name,''), CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (',pc.name,')') ELSE '' END)) AS crew_name
+            FROM work_offers o
+            LEFT JOIN work_crews wc ON wc.id = o.crew_id
+            LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+            JOIN (SELECT entity_id, MAX(id) mid FROM work_offers GROUP BY entity_id) latest
+              ON latest.entity_id = o.entity_id AND latest.mid = o.id
+        """)).mappings().all()}
+
+    # Burn each project's crew installments down against what was ACTUALLY paid to its
+    # crews (earliest dates fill first); only the unpaid remainder is still "owed".
+    from collections import defaultdict
+    EPS = 0.5
+    by_proj = defaultdict(list)
+    for r in inst:
+        by_proj[str(r["entity_id"])].append(r)
+    upcoming, overdue = [], []
+    for eid, rows in by_proj.items():
+        cum = 0.0
+        paid = paid_by.get(eid, 0.0)
+        for r in rows:
+            amt = float(r["amount"] or 0)
+            covered = min(amt, max(0.0, paid - cum))
+            cum += amt
+            owed = round(amt - covered, 2)
+            if owed <= EPS:
+                continue  # fully covered by actual crew payments
+            pd = r["pay_date"]
+            item = {"pay_date": str(pd) if pd else None, "amount": owed, "entity_id": eid,
+                    "project": r["project"] or "(unknown project)",
+                    "crew": (r["crew_name"] or "").strip() or "(crew TBD)", "company": r["crew_company"],
+                    "status": "partial" if covered > EPS else "scheduled",
+                    "schedule": win_by.get(eid)}
+            (overdue if (pd and pd < today) else upcoming).append(item)
+    upcoming.sort(key=lambda x: x["pay_date"] or "9999")
+    overdue.sort(key=lambda x: x["pay_date"] or "9999")
+
+    ACTIVE = {"needs_attention", "pending", "not_started", "in_progress"}
+    needs_crew = []
+    for p in projects:
+        qid = str(p["qbo_id"])
+        if qid in crewed:
+            continue
+        st = status_by.get(qid, "needs_attention")
+        if st not in ACTIVE:
+            continue
+        off = offer_by.get(qid)
+        needs_crew.append({
+            "entity_id": qid, "project": p["display_name"] or "(unnamed)", "status": st,
+            "schedule": win_by.get(qid),
+            "offer": None if not off else {
+                "status": off["status"], "sent_at": str(off["sent_at"]) if off["sent_at"] else None,
+                "crew": (off["crew_name"] or "").strip() or None},
+        })
+    needs_crew.sort(key=lambda x: (x["offer"] is not None, x["project"].lower()))
+
+    return {
+        "today": today.isoformat(),
+        "upcoming": upcoming, "upcoming_total": round(sum(x["amount"] for x in upcoming), 2),
+        "overdue": overdue, "overdue_total": round(sum(x["amount"] for x in overdue), 2),
+        "needs_crew": needs_crew, "needs_crew_count": len(needs_crew),
+    }
 
 
 @app.get("/api/config")

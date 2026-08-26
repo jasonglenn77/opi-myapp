@@ -105,18 +105,26 @@ def _project_events(conn, entity_id):
             else:                # undated (incl. partial start-only) -> all to backlog
                 backlog_in += remaining
 
-    # Outflow crew: scheduled (unpaid) installments on their pay date.
-    for i in crew["installments"]:
-        if i.get("tier") != "scheduled":
-            continue
+    # Outflow crew: burn the installments down against what's ACTUALLY been paid to
+    # the crews (earliest pay dates first) and forecast only the UNPAID remainder —
+    # so a partially-paid boundary installment contributes just its remaining balance
+    # (e.g. a $10k lump with $3k already paid adds $7k), matching the project
+    # workspace rather than the whole lump.
+    crew_paid = float(crew.get("paid_qbo") or 0)
+    ccum = 0.0
+    for i in sorted(crew["installments"],
+                    key=lambda x: (str(x.get("pay_date")) if x.get("pay_date") else "9999", x.get("id") or 0)):
         amt = float(i.get("amount") or 0)
-        if amt <= EPS:
+        covered = min(amt, max(0.0, crew_paid - ccum))
+        ccum += amt
+        owed = round(amt - covered, 2)
+        if owed <= EPS:
             continue
         d = _iso(i.get("pay_date"))
         if d and has_dates:
-            events.append({"date": d, "dir": "out", "amt": amt, "src": "crew"})
+            events.append({"date": d, "dir": "out", "amt": owed, "src": "crew"})
         else:
-            backlog_out += amt
+            backlog_out += owed
 
     # Outflow expenses: still-to-spend weekly installments on their week_of date.
     # Scheduled weeks contribute their full amount; a partially-spent boundary week
