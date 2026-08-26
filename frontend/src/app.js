@@ -1,6 +1,7 @@
 import { getToken, clearToken, fetchMe, getMe, hasCapability } from "./api.js";
 import { setShell, applyNavPermissions } from "./shell.js";
 import { loginPage } from "./pages/login.js";
+import { setPasswordPage } from "./pages/set-password.js";
 import { dashboardPage } from "./pages/dashboard.js";
 import { projectsHubPage } from "./pages/projects-hub.js";
 import { projectsPage } from "./pages/projects.js";
@@ -71,7 +72,7 @@ async function route() {
   // Auto-login UX: if token exists, validate via /me before rendering the landing page.
   // Only clear the token on genuine auth failures (401/403). Transient server errors
   // (500, 503, network blips) must NOT log the user out — those tokens are still valid.
-  if (hash !== "#/login") {
+  if (hash !== "#/login" && !hash.startsWith("#/set-password")) {
     const token = getToken();
     if (!token) {
       location.hash = "#/login";
@@ -126,6 +127,7 @@ async function route() {
   }
 
   if (hash === "#/login") return loginPage(route);
+  if (hash.startsWith("#/set-password")) return setPasswordPage(route);
   if (hash === "#/projects") return projectsHubPage(route);
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);

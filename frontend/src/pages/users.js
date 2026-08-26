@@ -98,6 +98,7 @@ export async function usersPage(routeFn) {
       <td class="py-1.5 pr-2">${toggle(u)}</td>
       <td class="py-1.5 text-right whitespace-nowrap">
         <span data-status="${u.id}" class="text-[11px] mr-2 align-middle"></span>
+        <button class="${BTN}" data-resend="${u.id}" title="Email a set-password link">Invite</button>
         <button class="${BTN}" data-resetpw="${u.id}">Reset pw</button>
         <button class="${BTN}" data-perms="${u.id}">Permissions</button>
       </td>
@@ -124,6 +125,7 @@ export async function usersPage(routeFn) {
         <div data-linkcell="${u.id}">${linkSelect(u)}</div>
       </div>
       <div class="flex items-center gap-2 pt-1">
+        <button class="${BTN} flex-1" data-resend="${u.id}" title="Email a set-password link">Invite</button>
         <button class="${BTN} flex-1" data-resetpw="${u.id}">Reset pw</button>
         <button class="${BTN} flex-1" data-perms="${u.id}">Permissions</button>
         <span data-status="${u.id}" class="text-[11px] shrink-0"></span>
@@ -137,7 +139,10 @@ export async function usersPage(routeFn) {
           <div class="text-lg font-extrabold">Users</div>
           <div class="text-sm text-black/60">Edit fields directly — changes save automatically.</div>
         </div>
-        <button id="newUserBtn" class="btn-primary">New user</button>
+        <div class="flex items-center gap-2">
+          <button id="auditLogBtn" class="rounded-xl border border-black/15 px-3 py-2 text-sm font-semibold text-ink-800 hover:bg-black/5">Activity log</button>
+          <button id="newUserBtn" class="btn-primary">New user</button>
+        </div>
       </div>
 
       <div id="usersMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
@@ -164,6 +169,7 @@ export async function usersPage(routeFn) {
     </div>
 
     ${newUserModalHtml()}
+    ${auditModalHtml()}
     ${resetPwModalHtml()}
     ${permsModalHtml()}
   `;
@@ -287,8 +293,14 @@ export async function usersPage(routeFn) {
     document.getElementById("userRole").value = "user";
     document.getElementById("userActive").checked = true;
     document.getElementById("userPassword").value = "";
+    const inv = document.getElementById("userInvite");
+    if (inv) { inv.checked = true; document.getElementById("pwWrap").classList.add("hidden"); }
     syncLinkPicker("user");
     openModal();
+  });
+  const inviteChk = document.getElementById("userInvite");
+  if (inviteChk) inviteChk.addEventListener("change", () => {
+    document.getElementById("pwWrap").classList.toggle("hidden", inviteChk.checked);
   });
 
   document.getElementById("userForm").addEventListener("submit", async (e) => {
@@ -302,14 +314,21 @@ export async function usersPage(routeFn) {
       last_name: document.getElementById("lastName").value.trim() || null,
       role,
       is_active: document.getElementById("userActive").checked,
-      password: document.getElementById("userPassword").value || null,
       project_manager_id: role === "pm" ? linkVal : null,
       work_crew_id: (role === "crew_lead" || role === "crew_foreman") ? linkVal : null,
     };
-    if (!payload.password) { modalMsg.textContent = "Password is required for new users."; return; }
+    const invite = document.getElementById("userInvite").checked;
+    if (invite) {
+      payload.send_invite = true;
+      payload.password = null;
+    } else {
+      payload.password = document.getElementById("userPassword").value || null;
+      if (!payload.password) { modalMsg.textContent = "Enter a password, or check “Email an invite.”"; return; }
+    }
     try {
-      await api("/users", { method: "POST", body: JSON.stringify(payload) });
+      const r = await api("/users", { method: "POST", body: JSON.stringify(payload) });
       closeModal();
+      if (r && r.invite_link) showInviteLink(payload.email, r.invite_link);
       routeFn();
     } catch (err) {
       modalMsg.textContent = "Save failed (check for duplicate email / permissions).";
@@ -333,6 +352,31 @@ export async function usersPage(routeFn) {
   rpModal.addEventListener("click", (e) => { if (e.target === rpModal) closeRp(); });
   document.getElementById("rpCancel").addEventListener("click", closeRp);
   document.querySelectorAll("[data-resetpw]").forEach(btn => btn.addEventListener("click", () => openRp(btn.dataset.resetpw)));
+
+  // Resend / send a set-password invite email to a user.
+  document.querySelectorAll("[data-resend]").forEach(btn => btn.addEventListener("click", async () => {
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const r = await api(`/users/${btn.dataset.resend}/resend-invite`, { method: "POST" });
+      if (r && r.link) { showInviteLink(r.email || "this user", r.link); btn.textContent = orig; }
+      else btn.textContent = "Sent ✓";
+    } catch (_) { btn.textContent = "Failed"; }
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 1800);
+  }));
+
+  // ---------- Activity log modal ----------
+  const auditModal = document.getElementById("auditModal");
+  const closeAudit = () => { auditModal.classList.add("hidden"); auditModal.classList.remove("flex"); };
+  document.getElementById("auditLogBtn").addEventListener("click", async () => {
+    auditModal.classList.remove("hidden"); auditModal.classList.add("flex");
+    const body = document.getElementById("auditBody");
+    body.innerHTML = `<div class="text-sm text-black/40 py-4">Loading…</div>`;
+    try { body.innerHTML = renderAuditRows(await api("/audit-log?limit=300")); }
+    catch (e) { body.innerHTML = `<div class="text-sm text-red-700 py-4">Failed to load activity log: ${e.message || e}</div>`; }
+  });
+  document.getElementById("auditCloseBtn").addEventListener("click", closeAudit);
+  auditModal.addEventListener("click", (e) => { if (e.target === auditModal) closeAudit(); });
   document.getElementById("rpForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const pw = document.getElementById("rpPassword").value;
@@ -418,6 +462,89 @@ export async function usersPage(routeFn) {
 }
 
 // ---------- modal markup ----------
+// Shown to the admin when email is off (or send failed): copy the invite/reset
+// link and hand it to the user directly.
+function showInviteLink(email, link) {
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const wrap = document.createElement("div");
+  wrap.className = "fixed inset-0 flex items-center justify-center bg-black/40 p-4";
+  wrap.style.zIndex = "80";
+  wrap.innerHTML = `
+    <div class="card p-6 w-full max-w-lg">
+      <div class="text-lg font-extrabold mb-1">Invite link ready</div>
+      <div class="text-sm text-black/60 mb-4">Email delivery isn't set up, so copy this link and send it to <span class="font-semibold text-ink-900">${esc(email)}</span> yourself. It lets them set a password and sign in (expires in 7 days).</div>
+      <div class="flex items-center gap-2">
+        <input readonly value="${esc(link)}" class="input flex-1 text-xs" id="ilInput" />
+        <button class="btn-primary whitespace-nowrap" id="ilCopy">Copy</button>
+      </div>
+      <div class="flex justify-end mt-4"><button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" id="ilDone">Done</button></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  wrap.querySelector("#ilDone").addEventListener("click", close);
+  const input = wrap.querySelector("#ilInput");
+  wrap.querySelector("#ilCopy").addEventListener("click", async () => {
+    input.select();
+    try { await navigator.clipboard.writeText(link); } catch (_) { try { document.execCommand("copy"); } catch (e) {} }
+    const b = wrap.querySelector("#ilCopy"); b.textContent = "Copied ✓"; setTimeout(() => { b.textContent = "Copy"; }, 1500);
+  });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+
+function auditModalHtml() {
+  return `
+    <div id="auditModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-6 w-full flex flex-col" style="max-width:60rem;max-height:85vh;overflow:hidden;">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="text-lg font-extrabold">Activity log</div>
+            <div class="text-sm text-black/60">Recent user, role &amp; permission changes — who did what, and when.</div>
+          </div>
+          <button id="auditCloseBtn" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
+        </div>
+        <div id="auditBody" class="overflow-y-auto" style="flex:1 1 auto;min-height:0;">Loading…</div>
+      </div>
+    </div>`;
+}
+
+function renderAuditRows(rows) {
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  if (!rows || !rows.length) return `<div class="text-sm text-black/40 py-6 text-center">No activity recorded yet.</div>`;
+  const ACT = {
+    "user.create": ["Created user", "bg-emerald-500"], "user.update": ["Updated user", "bg-blue-500"],
+    "user.disable": ["Disabled user", "bg-red-500"], "user.invite": ["Sent invite", "bg-indigo-500"],
+    "perms.update": ["Changed permissions", "bg-amber-500"], "role.create": ["Created role", "bg-emerald-500"],
+    "role.update": ["Updated role", "bg-blue-500"], "role.delete": ["Deleted role", "bg-red-500"],
+  };
+  const when = (s) => { try { return new Date(String(s).replace(" ", "T") + "Z").toLocaleString(); } catch (_) { return s; } };
+  const detail = (r) => {
+    const d = r.detail || {};
+    if (r.action === "user.update" && Array.isArray(d.fields)) return d.fields.join(", ") || "—";
+    if (r.action === "user.create") return `role ${d.role || "?"}${d.invited ? " · invited" : ""}`;
+    if (r.action === "perms.update") return `${d.overrides ?? 0} override(s)`;
+    if (r.action === "role.create") return `${d.capabilities ?? 0} capabilities`;
+    return "";
+  };
+  const body = rows.map(r => {
+    const m = ACT[r.action] || [r.action, "bg-black/40"];
+    return `<tr class="border-b border-black/5">
+      <td class="py-1.5 pr-3 text-xs text-black/50 whitespace-nowrap tabular-nums">${esc(when(r.created_at))}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap"><span class="inline-flex items-center gap-1.5 text-xs font-semibold text-black/80"><span class="w-1.5 h-1.5 rounded-full ${m[1]}"></span>${esc(m[0])}</span></td>
+      <td class="py-1.5 pr-3 text-black/80">${esc(r.target_label || r.target_id || "")}</td>
+      <td class="py-1.5 pr-3 text-xs text-black/50">${esc(detail(r))}</td>
+      <td class="py-1.5 text-xs text-black/50 whitespace-nowrap">${esc(r.actor_email || "—")}</td>
+    </tr>`;
+  }).join("");
+  return `<table class="w-full text-sm">
+    <thead class="text-left text-black/40 text-[11px] uppercase tracking-wide">
+      <tr class="border-b border-black/10">
+        <th class="py-1.5 pr-3 font-bold">When</th><th class="py-1.5 pr-3 font-bold">Action</th>
+        <th class="py-1.5 pr-3 font-bold">Target</th><th class="py-1.5 pr-3 font-bold">Details</th><th class="py-1.5 font-bold">By</th>
+      </tr>
+    </thead><tbody>${body}</tbody></table>`;
+}
+
 function newUserModalHtml() {
   return `
     <div id="userModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
@@ -452,7 +579,11 @@ function newUserModalHtml() {
             <select id="linkSelect" class="input"></select>
             <div class="text-xs text-black/50 mt-1" id="linkHint"></div>
           </div>
-          <div><div class="label mb-1">Password</div><input id="userPassword" class="input" type="password" /></div>
+          <label class="flex items-center gap-2 text-sm text-black/70">
+            <input id="userInvite" type="checkbox" class="h-4 w-4 rounded border-black/20" checked />
+            Invite them to set their own password (email it, or copy a link to share)
+          </label>
+          <div id="pwWrap" class="hidden"><div class="label mb-1">Password</div><input id="userPassword" class="input" type="password" placeholder="Min 8 characters" /></div>
           <div class="flex justify-end gap-2 pt-2">
             <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" type="button" id="cancelBtn">Cancel</button>
             <button class="btn-primary" type="submit">Create user</button>

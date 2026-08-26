@@ -11,7 +11,11 @@ import uuid
 from typing import Optional
 
 import os
+import json
+import secrets
+import hashlib
 
+from . import mailer
 from .auth import create_access_token, get_current_user, require_admin
 from .permissions import (
     valid_roles, filter_visible, permission_snapshot, ALL_CAPABILITIES,
@@ -93,9 +97,17 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str
+
 class UserCreateRequest(BaseModel):
     email: str
-    password: str
+    password: Optional[str] = None
+    send_invite: bool = False
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     role: str = "user"
@@ -237,6 +249,152 @@ def change_my_password(req: ChangePasswordRequest, user=Depends(get_current_user
             {"h": pwd_context.hash(new_pw), "id": user["id"]},
         )
     return {"ok": True}
+
+
+# --- Password policy + one-time tokens (invites / resets) --------------------
+def validate_password(pw: str):
+    """Enforce the password policy (env-configurable). Raises 400 if it fails."""
+    pw = pw or ""
+    min_len = int(os.getenv("PASSWORD_MIN_LENGTH", "8"))
+    if len(pw) < min_len:
+        raise HTTPException(status_code=400, detail=f"Password must be at least {min_len} characters.")
+    if os.getenv("PASSWORD_REQUIRE_COMPLEXITY", "false").lower() == "true":
+        if not (re.search(r"[A-Za-z]", pw) and re.search(r"\d", pw)):
+            raise HTTPException(status_code=400, detail="Password must include at least one letter and one number.")
+
+
+def _hash_token(raw: str) -> str:
+    return hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
+
+
+def _issue_auth_token(user_id: int, purpose: str, hours: int) -> str:
+    """Create a one-time token, store only its hash, return the raw token."""
+    from .db import engine
+    raw = secrets.token_urlsafe(32)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO user_auth_tokens (user_id, token_hash, purpose, expires_at)
+            VALUES (:uid, :h, :p, DATE_ADD(NOW(), INTERVAL :hrs HOUR))
+        """), {"uid": user_id, "h": _hash_token(raw), "p": purpose, "hrs": hours})
+    return raw
+
+
+def _token_link(raw: str) -> str:
+    return f"{mailer.app_base_url()}/#/set-password?token={raw}"
+
+
+def _lookup_token(raw: str):
+    """Return the valid (unused, unexpired) token row + user email, or None."""
+    if not raw:
+        return None
+    from .db import engine
+    with engine.connect() as conn:
+        return conn.execute(text("""
+            SELECT t.id, t.user_id, t.purpose, u.email
+            FROM user_auth_tokens t JOIN users u ON u.id = t.user_id
+            WHERE t.token_hash = :h AND t.used_at IS NULL AND t.expires_at > NOW() AND u.is_active = 1
+            LIMIT 1
+        """), {"h": _hash_token(raw)}).mappings().first()
+
+
+def record_audit(actor, action, target_type=None, target_id=None, target_label=None, detail=None):
+    """Best-effort audit trail. Auditing must never break the action it records."""
+    try:
+        from .db import engine
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO audit_log (actor_user_id, actor_email, action, target_type, target_id, target_label, detail)
+                VALUES (:aid, :aem, :act, :tt, :tid, :tl, :det)
+            """), {
+                "aid": (actor or {}).get("id"),
+                "aem": (actor or {}).get("email"),
+                "act": action,
+                "tt": target_type,
+                "tid": None if target_id is None else str(target_id),
+                "tl": target_label,
+                "det": json.dumps(detail) if detail is not None else None,
+            })
+    except Exception:
+        pass
+
+
+@app.get("/api/audit-log")
+def audit_log(limit: int = 200, _admin=Depends(require_admin)):
+    """Recent user/role/permission administration events (admins only)."""
+    from .db import engine
+    limit = max(1, min(int(limit or 200), 1000))
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, actor_email, action, target_type, target_id, target_label, detail, created_at
+            FROM audit_log ORDER BY id DESC LIMIT :lim
+        """), {"lim": limit}).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("detail"):
+            try: d["detail"] = json.loads(d["detail"])
+            except Exception: pass
+        out.append(d)
+    return out
+
+
+@app.get("/api/config")
+def public_config():
+    """Public: flags the frontend needs before login (e.g. whether email is enabled)."""
+    return {"email_enabled": mailer.is_configured()}
+
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(req: ForgotPasswordRequest):
+    """Public: email a reset link if the account exists. Always returns ok (no user enumeration)."""
+    email = (req.email or "").strip().lower()
+    user = get_user_by_email(email) if email else None
+    if user and int(user["is_active"]) == 1:
+        raw = _issue_auth_token(user["id"], "reset", hours=1)
+        mailer.send_reset_email(user["email"], _token_link(raw))
+    return {"ok": True}
+
+
+@app.get("/api/auth/token-info")
+def token_info(token: str = ""):
+    """Public: validate a set-password/reset token so the page can greet the user."""
+    row = _lookup_token(token)
+    if not row:
+        return {"valid": False}
+    return {"valid": True, "email": row["email"], "purpose": row["purpose"]}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(req: ResetPasswordRequest):
+    """Public: set a new password using an invite or reset token, then consume it (and any siblings)."""
+    row = _lookup_token(req.token)
+    if not row:
+        raise HTTPException(status_code=400, detail="This link is invalid or has expired. Please request a new one.")
+    validate_password(req.password)
+    from .db import engine
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE users SET password_hash = :h WHERE id = :id"),
+                     {"h": pwd_context.hash(req.password), "id": row["user_id"]})
+        conn.execute(text("UPDATE user_auth_tokens SET used_at = NOW() WHERE user_id = :uid AND used_at IS NULL"),
+                     {"uid": row["user_id"]})
+    return {"ok": True}
+
+
+@app.post("/api/users/{user_id}/resend-invite")
+def resend_invite(user_id: int, _admin=Depends(require_admin)):
+    """Admin: (re)send a set-password invite email to a user."""
+    from .db import engine
+    with engine.connect() as conn:
+        u = conn.execute(text("SELECT id, email, first_name FROM users WHERE id = :id LIMIT 1"),
+                         {"id": user_id}).mappings().first()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    raw = _issue_auth_token(u["id"], "invite", hours=24 * 7)
+    link = _token_link(raw)
+    sent = mailer.send_invite_email(u["email"], link, u.get("first_name"))
+    record_audit(_admin, "user.invite", "user", user_id, u["email"])
+    return {"ok": True, "sent": bool(sent), "link": (None if sent else link), "email": u["email"]}
+
 
 @app.get("/api/me")
 def me(user=Depends(get_current_user)):
@@ -500,6 +658,7 @@ def set_user_permissions(user_id: int, req: PermissionsUpdateRequest, _admin=Dep
                 VALUES (:uid, :cap, :effect)
             """), {"uid": user_id, "cap": c["cap"], "effect": c["effect"]})
 
+    record_audit(_admin, "perms.update", "user", user_id, exists["email"], {"overrides": len(cleaned)})
     return {"ok": True}
 
 
@@ -563,6 +722,7 @@ def create_role(req: RoleCreateRequest, _admin=Depends(require_admin)):
         raise
     except Exception:
         raise HTTPException(status_code=400, detail="Could not create role.")
+    record_audit(_admin, "role.create", "role", rid, name, {"capabilities": len(caps)})
     bump_roles_cache()
     return {"ok": True}
 
@@ -589,6 +749,7 @@ def update_role(role_id: int, req: RoleUpdateRequest, _admin=Depends(require_adm
             conn.execute(text("DELETE FROM role_capabilities WHERE role_id=:id"), {"id": role_id})
             for c in caps:
                 conn.execute(text("INSERT IGNORE INTO role_capabilities (role_id, capability) VALUES (:r,:c)"), {"r": role_id, "c": c})
+    record_audit(_admin, "role.update", "role", role_id, role["name"])
     bump_roles_cache()
     return {"ok": True}
 
@@ -607,6 +768,7 @@ def delete_role(role_id: int, _admin=Depends(require_admin)):
             raise HTTPException(status_code=400, detail=f"{int(n)} user(s) still have this role. Reassign them first.")
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM roles WHERE id=:id"), {"id": role_id})
+    record_audit(_admin, "role.delete", "role", role_id, role["name"])
     bump_roles_cache()
     return {"ok": True}
 
@@ -623,18 +785,25 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
     if role not in valid_roles():
         raise HTTPException(status_code=400, detail="Invalid role")
 
-    if not req.password or not req.password.strip():
-        raise HTTPException(status_code=400, detail="Password required")
+    has_pw = bool(req.password and req.password.strip())
+    if has_pw:
+        validate_password(req.password)
+        password_hash = pwd_context.hash(req.password)
+    else:
+        # Unusable placeholder — the account can't be logged into until the user
+        # sets a password via the invite link below.
+        password_hash = pwd_context.hash(secrets.token_urlsafe(24))
+    want_invite = bool(req.send_invite) or not has_pw
 
     user_uuid = str(uuid.uuid4())
-    password_hash = pwd_context.hash(req.password)
 
     first_name = (req.first_name or "").strip() or None
     last_name = (req.last_name or "").strip() or None
 
+    new_id = None
     try:
         with engine.begin() as conn:
-            conn.execute(text("""
+            res = conn.execute(text("""
                 INSERT INTO users (uuid, email, first_name, last_name, password_hash, role, is_active,
                                    project_manager_id, work_crew_id)
                 VALUES (:uuid, :email, :first_name, :last_name, :password_hash, :role, :is_active,
@@ -650,10 +819,21 @@ def create_user(req: UserCreateRequest, _admin=Depends(require_admin)):
                 "project_manager_id": req.project_manager_id,
                 "work_crew_id": req.work_crew_id,
             })
+            new_id = res.lastrowid
     except Exception:
         raise HTTPException(status_code=400, detail="Could not create user (email may already exist)")
 
-    return {"ok": True}
+    invite_sent = None
+    invite_link = None
+    if want_invite and new_id:
+        raw = _issue_auth_token(int(new_id), "invite", hours=24 * 7)
+        link = _token_link(raw)
+        invite_sent = mailer.send_invite_email(email, link, first_name)
+        if not invite_sent:
+            invite_link = link  # email off / failed — hand the link to the admin to share
+
+    record_audit(_admin, "user.create", "user", new_id, email, {"role": role, "invited": bool(want_invite)})
+    return {"ok": True, "invited": bool(want_invite), "invite_sent": bool(invite_sent), "invite_link": invite_link}
 
 
 @app.put("/api/users/{user_id}")
@@ -727,6 +907,10 @@ def update_user(user_id: int, req: UserUpdateRequest, _admin=Depends(require_adm
     except Exception:
         raise HTTPException(status_code=400, detail="Could not update user (email may already exist)")
 
+    changed = [f for f in ("email", "first_name", "last_name", "role", "is_active",
+                           "project_manager_id", "work_crew_id", "password")
+               if f in req.__fields_set__ and (f != "password" or (req.password and str(req.password).strip()))]
+    record_audit(_admin, "user.update", "user", user_id, (target[0] if target else None), {"fields": changed})
     return {"ok": True, "updated": True}
 
 
@@ -752,6 +936,7 @@ def disable_user(user_id: int, _admin=Depends(require_admin)):
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="User not found")
 
+    record_audit(_admin, "user.disable", "user", user_id, (target[0] if target else None))
     return {"ok": True}
 
 # -----------------------------

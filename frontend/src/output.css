@@ -3535,6 +3535,11 @@ option {
   color: rgb(30 58 138 / var(--tw-text-opacity, 1));
 }
 
+.text-brand-600 {
+  --tw-text-opacity: 1;
+  color: rgb(62 101 78 / var(--tw-text-opacity, 1));
+}
+
 .text-brand-700 {
   --tw-text-opacity: 1;
   color: rgb(50 82 65 / var(--tw-text-opacity, 1));
