@@ -6,9 +6,12 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from app.audit import record_audit
 from app.auth import get_current_user
 from app.db import engine
 from app.estimates.pdf import render_estimate_pdf
+from app.quoting.snapshot import (build_reference_snapshot, diff_snapshot_vs_live,
+                                  get_reference_snapshot, store_reference_snapshot)
 
 router = APIRouter(prefix="/api/estimates", tags=["estimates"])
 
@@ -69,6 +72,11 @@ _EST_COPY = [
     "breaking_out_mobilization", "rent_wire_guidance_equipment", "crew_count", "crew_size",
     "wire_guidance_profit_target", "rental_wire_profit_target", "lodging_cost_per_day", "mgmt_travel_multiplier",
     "price_adjustment",
+    # #2 packaging: a revision INHERITS the parent's frozen reference data, so
+    # a 10/6 revision prices exactly like the 9/5 send.
+    "reference_snapshot", "contact_snapshot", "snapshot_at",
+    # #1 sheet parity: typed-over cells carry into the revision as-is.
+    "cell_overrides",
 ]
 _SET_COPY = [
     "kind", "label", "sort_order", "is_enabled", "mobilizations", "estimate_type_override",
@@ -161,6 +169,136 @@ def lock_estimate(estimate_id: int, _user=Depends(get_current_user)):
     if not n:
         raise HTTPException(status_code=404, detail="Estimate not found")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# #2 packaging — the estimate's frozen reference data (see app/quoting/snapshot.py).
+# ---------------------------------------------------------------------------
+@router.get("/{estimate_id}/snapshot-info")
+def snapshot_info(estimate_id: int, _user=Depends(get_current_user)):
+    """When this estimate's rates/lookups were frozen + what differs from the
+    live tables today — powers the 'Update to current rates' confirm dialog."""
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT id, snapshot_at FROM estimates WHERE id=:id"),
+                           {"id": estimate_id}).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        snap = get_reference_snapshot(conn, estimate_id)   # lazily freezes legacy rows
+        changes = diff_snapshot_vs_live(conn, snap)
+        snapshot_at = conn.execute(text("SELECT snapshot_at FROM estimates WHERE id=:id"),
+                                   {"id": estimate_id}).scalar()
+    return {"snapshot_at": str(snapshot_at) if snapshot_at else None,
+            "captured_at": (snap or {}).get("captured_at"),
+            "changes": changes, "change_count": len(changes)}
+
+
+class RefreshSnapshot(BaseModel):
+    reason: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# #1 sheet parity — override-any-cell. A typed-over computed cell stores its
+# value here (like typing over a Sheets formula); revert deletes the key.
+# ---------------------------------------------------------------------------
+class CellOverride(BaseModel):
+    key: str                      # stable cell key, e.g. "H38" or "costing:ohp_rack"
+    value: Optional[float] = None # null = revert to the computed value
+
+
+@router.get("/{estimate_id}/cell-overrides")
+def get_cell_overrides(estimate_id: int, _user=Depends(get_current_user)):
+    import json as _json
+    with engine.connect() as conn:
+        raw = conn.execute(text("SELECT cell_overrides FROM estimates WHERE id=:id"),
+                           {"id": estimate_id}).scalar()
+    if raw is None:
+        return {"overrides": {}}
+    try:
+        return {"overrides": _json.loads(raw) if isinstance(raw, str) else (raw or {})}
+    except Exception:
+        return {"overrides": {}}
+
+
+@router.patch("/{estimate_id}/cell-overrides")
+def set_cell_override(estimate_id: int, body: CellOverride, user=Depends(get_current_user)):
+    import json as _json
+    key = (body.key or "").strip()
+    if not key or len(key) > 64:
+        raise HTTPException(status_code=400, detail="A cell key is required (max 64 chars).")
+    with engine.begin() as conn:
+        est = conn.execute(text("SELECT id, locked, quote_number, cell_overrides FROM estimates WHERE id=:id"),
+                           {"id": estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        if est["locked"]:
+            raise HTTPException(status_code=400, detail="This revision is locked.")
+        try:
+            cur = _json.loads(est["cell_overrides"]) if isinstance(est["cell_overrides"], str) \
+                else (est["cell_overrides"] or {})
+        except Exception:
+            cur = {}
+        old = cur.get(key)
+        if body.value is None:
+            cur.pop(key, None)
+        else:
+            cur[key] = body.value
+        conn.execute(text("UPDATE estimates SET cell_overrides=:o WHERE id=:id"),
+                     {"o": _json.dumps(cur), "id": estimate_id})
+    record_audit(user,
+                 "estimate.cell_override" if body.value is not None else "estimate.cell_override_cleared",
+                 "estimate", estimate_id, f"Quote #{est['quote_number'] or estimate_id}",
+                 {"cell": key, "changes": {key: [old, body.value]}})
+    return {"ok": True, "overrides": cur}
+
+
+@router.post("/{estimate_id}/refresh-snapshot")
+def refresh_snapshot(estimate_id: int, body: Optional[RefreshSnapshot] = None,
+                     user=Depends(get_current_user)):
+    """Deliberately re-freeze this estimate at TODAY'S rates/lookups and reprice
+    its rate-driven lines. Never automatic — the estimator clicks through a diff."""
+    with engine.begin() as conn:
+        est = conn.execute(text("SELECT id, locked, quote_number FROM estimates WHERE id=:id"),
+                           {"id": estimate_id}).mappings().first()
+        if not est:
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        if est["locked"]:
+            raise HTTPException(status_code=400, detail="This revision is locked. Unlock it or create a new revision first.")
+        old_snap = get_reference_snapshot(conn, estimate_id)
+        changes = diff_snapshot_vs_live(conn, old_snap)
+        new_snap = store_reference_snapshot(conn, estimate_id)
+
+        # Reprice every rate-driven line from the new snapshot.
+        prod_by = {r["id"]: r for r in new_snap["productivity_rates"]}
+        rent_by = {r["id"]: r for r in new_snap["rental_rates"]}
+        lines = conn.execute(text("""
+            SELECT l.id, l.line_kind, l.productivity_rate_id, l.rental_rate_id,
+                   CAST(l.qty AS DECIMAL(12,3)) AS qty
+            FROM quote_metric_lines l
+            JOIN quote_metric_sets s ON s.id = l.metric_set_id
+            WHERE s.estimate_id = :e
+        """), {"e": estimate_id}).mappings().all()
+        repriced = 0
+        for ln in lines:
+            if ln["qty"] is None:
+                continue
+            if ln["line_kind"] == "productivity" and ln["productivity_rate_id"] in prod_by:
+                r = prod_by[ln["productivity_rate_id"]]
+                std = round(float(ln["qty"]) / float(r["standard_per_day"]), 3) if r["standard_per_day"] else None
+                agg = round(float(ln["qty"]) / float(r["aggressive_per_day"]), 3) if r["aggressive_per_day"] else None
+                conn.execute(text("UPDATE quote_metric_lines SET std_total=:s, agg_total=:a WHERE id=:id"),
+                             {"s": std, "a": agg, "id": ln["id"]})
+                repriced += 1
+            elif ln["line_kind"] == "rental" and ln["rental_rate_id"] in rent_by:
+                r = rent_by[ln["rental_rate_id"]]
+                if r["price"] is not None:
+                    conn.execute(text("UPDATE quote_metric_lines SET ext_cost=:c WHERE id=:id"),
+                                 {"c": round(float(ln["qty"]) * float(r["price"]), 2), "id": ln["id"]})
+                    repriced += 1
+    record_audit(user, "estimate.rates_refreshed", "estimate", estimate_id,
+                 f"Quote #{est['quote_number'] or estimate_id}",
+                 {"changes_applied": len(changes), "lines_repriced": repriced,
+                  "reason": (body.reason if body else None) or None})
+    return {"ok": True, "changes_applied": len(changes), "lines_repriced": repriced}
 
 
 # NOTE: path is /quote-revisions, NOT /revisions — /{id}/revisions is already the
@@ -511,6 +649,8 @@ def create_estimate(req: EstimateCreate, _user=Depends(get_current_user)):
             VALUES (:cid, :qid, :contact, :desc, 'draft', {ESTIMATE_DEFAULT_VALS})
         """), {"cid": customer["id"], "qid": customer["qbo_id"], "contact": contact_id,
                "desc": (req.quote_description or None), **ESTIMATE_DEFAULTS})
+        # #2 packaging: freeze the reference data this quote will price from.
+        store_reference_snapshot(conn, result.lastrowid)
         return _load_estimate(conn, result.lastrowid)
 
 

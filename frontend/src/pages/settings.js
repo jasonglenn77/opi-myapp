@@ -374,12 +374,19 @@ async function showReference(mode) {
       tr.querySelector("[data-save]").addEventListener("click", async () => {
         const b = collect(tr, "data-f");
         if (missingRequired(b)) { setMsg("Please fill the required fields.", false); return; }
+        // Reference data drives every future quote — capture the "why" for the
+        // audit log (Cancel aborts the save; blank is allowed).
+        const reason = prompt("Why this change? (recorded in the audit log — OK to leave blank)", "");
+        if (reason === null) return;
+        b.reason = reason.trim() || null;
         try { await api(`${endpoint}/${id}`, { method: "PATCH", body: JSON.stringify(b) }); setMsg("Saved ✓", true); await reloadAll(); }
         catch (e) { setMsg(errDetail(e), false); }
       });
       tr.querySelector("[data-del]").addEventListener("click", async () => {
-        if (!confirm("Delete this row?")) return;
-        try { await api(`${endpoint}/${id}`, { method: "DELETE" }); await reloadAll(); }
+        const reason = prompt("Delete this row? Enter a reason for the audit log (or leave blank), or Cancel to keep it.", "");
+        if (reason === null) return;
+        const qs = reason.trim() ? `?reason=${encodeURIComponent(reason.trim())}` : "";
+        try { await api(`${endpoint}/${id}${qs}`, { method: "DELETE" }); await reloadAll(); }
         catch (e) { setMsg(errDetail(e), false); }
       });
     });

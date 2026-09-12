@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from app.audit import diff_fields, record_audit
 from app.db import engine
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_ESTIMATE
@@ -143,6 +144,9 @@ def create_contact(body: ContactIn, user=Depends(get_current_user)):
                "prim": 1 if body.is_primary else 0, "notes": body.notes, "uid": user.get("id")})
         new_id = res.lastrowid
         row = conn.execute(text(_SELECT + " WHERE c.id = :id"), {"id": new_id}).mappings().first()
+    record_audit(user, "contact.create", "contact", new_id, full or (body.email or "").strip(),
+                 {"customer": cust["display_name"],
+                  "values": {"email": body.email, "phone": body.phone, "title": body.title}})
     return {"contact": _row(row)}
 
 
@@ -162,8 +166,11 @@ def update_contact(contact_id: int, body: ContactPatch, user=Depends(get_current
     _require(user)
     fields = body.model_dump(exclude_unset=True)
     with engine.begin() as conn:
-        cur = conn.execute(text("SELECT qbo_customer_id, first_name, last_name FROM contacts WHERE id=:id"),
-                           {"id": contact_id}).mappings().first()
+        cur = conn.execute(text("""
+            SELECT qbo_customer_id, first_name, last_name, full_name, email, phone,
+                   title, is_primary, active, notes
+            FROM contacts WHERE id=:id
+        """), {"id": contact_id}).mappings().first()
         if not cur:
             raise HTTPException(status_code=404, detail="Contact not found")
         # keep full_name in sync when a name part changes
@@ -184,6 +191,12 @@ def update_contact(contact_id: int, body: ContactPatch, user=Depends(get_current
         if sets:
             conn.execute(text(f"UPDATE contacts SET {', '.join(sets)} WHERE id = :id"), params)
         row = conn.execute(text(_SELECT + " WHERE c.id = :id"), {"id": contact_id}).mappings().first()
+    changes = diff_fields(dict(cur), fields,
+                          [k for k in fields if k in ("first_name", "last_name", "full_name", "email",
+                                                      "phone", "title", "is_primary", "active", "notes")])
+    if changes:
+        record_audit(user, "contact.update", "contact", contact_id,
+                     (row or {}).get("full_name") or cur["full_name"], {"changes": changes})
     return {"contact": _row(row)}
 
 
@@ -191,10 +204,14 @@ def update_contact(contact_id: int, body: ContactPatch, user=Depends(get_current
 def delete_contact(contact_id: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
+        old = conn.execute(text("SELECT full_name, email, phone FROM contacts WHERE id=:id"),
+                           {"id": contact_id}).mappings().first()
         n = conn.execute(text("DELETE FROM contacts WHERE id=:id"), {"id": contact_id}).rowcount
         if not n:
             raise HTTPException(status_code=404, detail="Contact not found")
         # detach from any opportunities rather than leaving a dangling id
         conn.execute(text("UPDATE opportunities SET contact_id=NULL WHERE contact_id=:id"),
                      {"id": contact_id})
+    record_audit(user, "contact.delete", "contact", contact_id, (old or {}).get("full_name"),
+                 {"deleted": {"email": (old or {}).get("email"), "phone": (old or {}).get("phone")}})
     return {"ok": True}

@@ -208,9 +208,13 @@ def login(req: LoginRequest):
 
     # Keep error generic so we don't leak whether email exists
     if not user or int(user["is_active"]) != 1:
+        record_audit(None, "auth.login_failed", "user", None, (req.email or "").lower(),
+                     {"why": "unknown or inactive account"})
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not pwd_context.verify(req.password, user["password_hash"]):
+        record_audit(None, "auth.login_failed", "user", user["id"], user["email"],
+                     {"why": "wrong password"})
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # (optional) update last_login_at
@@ -221,6 +225,7 @@ def login(req: LoginRequest):
             {"id": user["id"]},
         )
 
+    record_audit({"id": user["id"], "email": user["email"]}, "auth.login", "user", user["id"], user["email"])
     token = create_access_token(sub=user["email"])
     return {"access_token": token, "token_type": "bearer", "role": user["role"]}
 
@@ -297,25 +302,9 @@ def _lookup_token(raw: str):
         """), {"h": _hash_token(raw)}).mappings().first()
 
 
-def record_audit(actor, action, target_type=None, target_id=None, target_label=None, detail=None):
-    """Best-effort audit trail. Auditing must never break the action it records."""
-    try:
-        from .db import engine
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO audit_log (actor_user_id, actor_email, action, target_type, target_id, target_label, detail)
-                VALUES (:aid, :aem, :act, :tt, :tid, :tl, :det)
-            """), {
-                "aid": (actor or {}).get("id"),
-                "aem": (actor or {}).get("email"),
-                "act": action,
-                "tt": target_type,
-                "tid": None if target_id is None else str(target_id),
-                "tl": target_label,
-                "det": json.dumps(detail) if detail is not None else None,
-            })
-    except Exception:
-        pass
+# Audit trail moved to app.audit so every router shares the same helper
+# (re-imported here to keep the existing main.py call sites unchanged).
+from .audit import record_audit  # noqa: E402
 
 
 @app.get("/api/audit-log")

@@ -499,7 +499,7 @@ function auditModalHtml() {
         <div class="flex items-center justify-between mb-3">
           <div>
             <div class="text-lg font-extrabold">Activity log</div>
-            <div class="text-sm text-black/60">Recent user, role &amp; permission changes — who did what, and when.</div>
+            <div class="text-sm text-black/60">Logins plus user, role, contact, rate-table &amp; lookup-value changes — who did what, when, and why.</div>
           </div>
           <button id="auditCloseBtn" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
         </div>
@@ -516,6 +516,13 @@ function renderAuditRows(rows) {
     "user.disable": ["Disabled user", "bg-red-500"], "user.invite": ["Sent invite", "bg-indigo-500"],
     "perms.update": ["Changed permissions", "bg-amber-500"], "role.create": ["Created role", "bg-emerald-500"],
     "role.update": ["Updated role", "bg-blue-500"], "role.delete": ["Deleted role", "bg-red-500"],
+    "auth.login": ["Logged in", "bg-black/25"], "auth.login_failed": ["Failed login", "bg-red-500"],
+    "contact.create": ["Created contact", "bg-emerald-500"], "contact.update": ["Updated contact", "bg-blue-500"],
+    "contact.delete": ["Deleted contact", "bg-red-500"],
+    "lookup.create": ["Added lookup value", "bg-emerald-500"], "lookup.update": ["Changed lookup value", "bg-amber-500"],
+    "lookup.delete": ["Deleted lookup value", "bg-red-500"],
+    "rate.create": ["Added rate", "bg-emerald-500"], "rate.update": ["Changed rate", "bg-amber-500"],
+    "rate.delete": ["Deleted rate", "bg-red-500"],
   };
   const when = (s) => { try { return new Date(String(s).replace(" ", "T") + "Z").toLocaleString(); } catch (_) { return s; } };
   const detail = (r) => {
@@ -524,7 +531,12 @@ function renderAuditRows(rows) {
     if (r.action === "user.create") return `role ${d.role || "?"}${d.invited ? " · invited" : ""}`;
     if (r.action === "perms.update") return `${d.overrides ?? 0} override(s)`;
     if (r.action === "role.create") return `${d.capabilities ?? 0} capabilities`;
-    return "";
+    // Generic old→new diff + reason (rates / lookups / contacts).
+    const parts = [];
+    if (d.changes) parts.push(Object.entries(d.changes).map(([k, v]) => `${k}: ${v[0] ?? "—"} → ${v[1] ?? "—"}`).join(", "));
+    if (d.why) parts.push(d.why);
+    if (d.reason) parts.push(`“${d.reason}”`);
+    return parts.join(" · ");
   };
   const body = rows.map(r => {
     const m = ACT[r.action] || [r.action, "bg-black/40"];

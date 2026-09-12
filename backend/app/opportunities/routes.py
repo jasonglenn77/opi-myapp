@@ -18,6 +18,7 @@ from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_ESTIMATE
 from app.estimates.routes import (ESTIMATE_DEFAULTS, ESTIMATE_DEFAULT_COLS,
                                   ESTIMATE_DEFAULT_VALS, next_quote_number)
+from app.quoting.snapshot import store_reference_snapshot
 
 router = APIRouter(prefix="/api/opportunities", tags=["opportunities"])
 
@@ -471,6 +472,9 @@ def start_quote(opp_id: int, user=Depends(get_current_user)):
                "req": o["rfq_received_date"], "start": o["target_start_date"],
                "qnum": qnum})
         est_id = res.lastrowid
+        # #2 packaging: freeze the lookup values + rate tables this quote will
+        # price from (the copied-workbook model — see app/quoting/snapshot.py).
+        store_reference_snapshot(conn, est_id)
         sets = ["app_estimate_id = :eid"]
         params = {"eid": est_id, "id": opp_id}
         if not o["quote_number"]:                     # write the minted number back to the opportunity
@@ -639,6 +643,16 @@ def sync_metrics_from_estimate(app_estimate_id: int, body: SyncMetrics, user=Dep
             WHERE id = :id
         """), {"cv": body.contract_value, "oa": body.ohp_amount, "op": body.ohp_pct,
                "ld": body.labor_days, "td": body.travel_days, "id": opp["id"]})
+        # #2 packaging: freeze the contact "as sent" — record who this quote went
+        # out under, immune to later edits on the Contacts page.
+        conn.execute(text("""
+            UPDATE estimates e
+            LEFT JOIN contacts c ON c.id = e.contact_id
+            SET e.contact_snapshot = IF(c.id IS NULL, e.contact_snapshot, JSON_OBJECT(
+                'contact_id', c.id, 'full_name', c.full_name, 'email', c.email,
+                'phone', c.phone, 'title', c.title, 'as_of', NOW()))
+            WHERE e.id = :eid
+        """), {"eid": app_estimate_id})
         # Mirror the summary onto the estimate itself so each revision row can
         # show its own last-synced Labor / Travel / OH&P / Value.
         conn.execute(text("""

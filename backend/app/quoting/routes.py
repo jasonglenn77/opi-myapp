@@ -6,25 +6,39 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from app.audit import diff_fields, record_audit
 from app.auth import get_current_user, require_capability
 from app.db import engine
+from app.quoting.snapshot import (estimate_id_for_set, get_reference_snapshot,
+                                  snapshot_maps)
 
 router = APIRouter(prefix="/api/quoting", tags=["quoting"])
 
 
 @router.get("/lookup-values")
-def list_lookup_values(_user=Depends(get_current_user)):
+def list_lookup_values(estimate_id: Optional[int] = None, _user=Depends(get_current_user)):
     """
     Reference values for the Estimate page dropdowns.
     Rows are grouped by `category` and ordered by `sort_order`.
     Response shape: { "<category>": [ { key, value_num, value_text, sort_order }, ... ], ... }
+
+    With `estimate_id`, serves that estimate's FROZEN snapshot instead of the
+    live table, so an open quote always prices off the values it was started
+    with (#2 packaging — see app/quoting/snapshot.py).
     """
     with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT category, lookup_key, value_num, value_text, sort_order
-            FROM lookup_values
-            ORDER BY category, sort_order, lookup_key
-        """)).mappings().all()
+        snap = None
+        if estimate_id:
+            with engine.begin() as wconn:      # may lazily freeze a legacy estimate
+                snap = get_reference_snapshot(wconn, estimate_id)
+        if snap is not None:
+            rows = snap.get("lookup_values", [])
+        else:
+            rows = conn.execute(text("""
+                SELECT category, lookup_key, value_num, value_text, sort_order
+                FROM lookup_values
+                ORDER BY category, sort_order, lookup_key
+            """)).mappings().all()
 
     grouped = defaultdict(list)
     for r in rows:
@@ -49,6 +63,7 @@ class LookupRow(BaseModel):
     value_num: Optional[float] = None
     value_text: Optional[str] = None
     sort_order: Optional[int] = 0
+    reason: Optional[str] = None        # audit-only: why the change was made
 
 
 @router.get("/lookup-values/admin")
@@ -70,7 +85,7 @@ def list_lookup_values_admin(_user=Depends(require_capability("page.settings")))
 
 
 @router.post("/lookup-values")
-def create_lookup_value(body: LookupRow, _user=Depends(require_capability("page.settings"))):
+def create_lookup_value(body: LookupRow, user=Depends(require_capability("page.settings"))):
     if not (body.category or "").strip():
         raise HTTPException(status_code=400, detail="category is required")
     if not (body.lookup_key or "").strip():
@@ -84,13 +99,19 @@ def create_lookup_value(body: LookupRow, _user=Depends(require_capability("page.
                    "n": body.value_num, "t": (body.value_text or None), "s": body.sort_order or 0})
     except IntegrityError:
         raise HTTPException(status_code=400, detail="That key already exists in this category.")
+    record_audit(user, "lookup.create", "lookup_value", res.lastrowid,
+                 f"{body.category.strip()} / {body.lookup_key.strip()}",
+                 {"values": {"value_num": body.value_num, "value_text": body.value_text},
+                  "reason": body.reason or None})
     return {"ok": True, "id": res.lastrowid}
 
 
 @router.patch("/lookup-values/{row_id}")
-def update_lookup_value(row_id: int, body: LookupRow, _user=Depends(require_capability("page.settings"))):
+def update_lookup_value(row_id: int, body: LookupRow, user=Depends(require_capability("page.settings"))):
     if not (body.lookup_key or "").strip():
         raise HTTPException(status_code=400, detail="key is required")
+    with engine.connect() as conn:
+        old = conn.execute(text("SELECT * FROM lookup_values WHERE id=:id"), {"id": row_id}).mappings().first()
     try:
         with engine.begin() as conn:
             res = conn.execute(text("""
@@ -102,13 +123,27 @@ def update_lookup_value(row_id: int, body: LookupRow, _user=Depends(require_capa
         raise HTTPException(status_code=400, detail="That key already exists in this category.")
     if res.rowcount == 0:
         raise HTTPException(status_code=404, detail="Lookup value not found")
+    changes = diff_fields(dict(old or {}), {"lookup_key": body.lookup_key.strip(), "value_num": body.value_num,
+                                            "value_text": body.value_text or None, "sort_order": body.sort_order or 0},
+                          ["lookup_key", "value_num", "value_text", "sort_order"])
+    if changes:
+        record_audit(user, "lookup.update", "lookup_value", row_id,
+                     f"{(old or {}).get('category', '?')} / {body.lookup_key.strip()}",
+                     {"changes": changes, "reason": body.reason or None})
     return {"ok": True}
 
 
 @router.delete("/lookup-values/{row_id}")
-def delete_lookup_value(row_id: int, _user=Depends(require_capability("page.settings"))):
+def delete_lookup_value(row_id: int, reason: Optional[str] = None,
+                        user=Depends(require_capability("page.settings"))):
     with engine.begin() as conn:
+        old = conn.execute(text("SELECT * FROM lookup_values WHERE id=:id"), {"id": row_id}).mappings().first()
         conn.execute(text("DELETE FROM lookup_values WHERE id=:id"), {"id": row_id})
+    if old:
+        record_audit(user, "lookup.delete", "lookup_value", row_id,
+                     f"{old['category']} / {old['lookup_key']}",
+                     {"deleted": {"value_num": old["value_num"], "value_text": old["value_text"]},
+                      "reason": reason or None})
     return {"ok": True}
 
 
@@ -119,8 +154,20 @@ def delete_lookup_value(row_id: int, _user=Depends(require_capability("page.sett
 @router.get("/productivity-rates")
 def list_productivity_rates(
     category: Optional[str] = None,
+    estimate_id: Optional[int] = None,
     _user=Depends(get_current_user),
 ):
+    # With estimate_id, the picker lists the estimate's FROZEN rate catalog —
+    # the frozen workbook-copy model: new lines on an old quote use its rates.
+    if estimate_id:
+        with engine.begin() as conn:
+            snap = get_reference_snapshot(conn, estimate_id)
+        if snap is not None:
+            rows = snap.get("productivity_rates", [])
+            if category:
+                rows = [r for r in rows if r.get("category") == category]
+            return sorted(rows, key=lambda r: (r.get("sort_order") or 0, r.get("item_name") or ""))
+
     sql = """
         SELECT id, category, item_name, standard_per_day,
                aggressive_multiplier, aggressive_per_day, unit, sort_order
@@ -143,7 +190,12 @@ def list_productivity_rates(
 # equipment_type × power_source × size_class × duration tuple.
 # ---------------------------------------------------------------------------
 @router.get("/rental-rates")
-def list_rental_rates(_user=Depends(get_current_user)):
+def list_rental_rates(estimate_id: Optional[int] = None, _user=Depends(get_current_user)):
+    if estimate_id:
+        with engine.begin() as conn:
+            snap = get_reference_snapshot(conn, estimate_id)
+        if snap is not None:
+            return snap.get("rental_rates", [])
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT id, equipment_type, power_source, size_class, duration,
@@ -167,6 +219,7 @@ class ProductivityRow(BaseModel):
     aggressive_multiplier: Optional[float] = 1.0
     unit: Optional[str] = None
     sort_order: Optional[int] = 0
+    reason: Optional[str] = None          # audit-only: why the change was made
 
 
 def _agg_per_day(std, mult):
@@ -194,7 +247,7 @@ def list_productivity_rates_admin(_user=Depends(require_capability("page.setting
 
 
 @router.post("/productivity-rates")
-def create_productivity_rate(body: ProductivityRow, _user=Depends(require_capability("page.settings"))):
+def create_productivity_rate(body: ProductivityRow, user=Depends(require_capability("page.settings"))):
     if not (body.category or "").strip():
         raise HTTPException(status_code=400, detail="category is required")
     if not (body.item_name or "").strip():
@@ -211,14 +264,20 @@ def create_productivity_rate(body: ProductivityRow, _user=Depends(require_capabi
                    "a": agg, "u": (body.unit or None), "o": body.sort_order or 0})
     except IntegrityError:
         raise HTTPException(status_code=400, detail="That item already exists in this category.")
+    record_audit(user, "rate.create", "productivity_rate", res.lastrowid,
+                 f"{body.category.strip()} / {body.item_name.strip()}",
+                 {"values": {"standard_per_day": body.standard_per_day, "aggressive_multiplier": body.aggressive_multiplier},
+                  "reason": body.reason or None})
     return {"ok": True, "id": res.lastrowid}
 
 
 @router.patch("/productivity-rates/{row_id}")
-def update_productivity_rate(row_id: int, body: ProductivityRow, _user=Depends(require_capability("page.settings"))):
+def update_productivity_rate(row_id: int, body: ProductivityRow, user=Depends(require_capability("page.settings"))):
     if not (body.item_name or "").strip():
         raise HTTPException(status_code=400, detail="item name is required")
     agg = _agg_per_day(body.standard_per_day, body.aggressive_multiplier)
+    with engine.connect() as conn:
+        old = conn.execute(text("SELECT * FROM productivity_rates WHERE id=:id"), {"id": row_id}).mappings().first()
     try:
         with engine.begin() as conn:
             res = conn.execute(text("""
@@ -232,13 +291,29 @@ def update_productivity_rate(row_id: int, body: ProductivityRow, _user=Depends(r
         raise HTTPException(status_code=400, detail="That item already exists in this category.")
     if res.rowcount == 0:
         raise HTTPException(status_code=404, detail="Productivity rate not found")
+    changes = diff_fields(dict(old or {}), {"item_name": body.item_name.strip(), "standard_per_day": body.standard_per_day or 0,
+                                            "aggressive_multiplier": body.aggressive_multiplier, "aggressive_per_day": agg,
+                                            "unit": body.unit or None, "sort_order": body.sort_order or 0},
+                          ["item_name", "standard_per_day", "aggressive_multiplier", "aggressive_per_day", "unit", "sort_order"])
+    if changes:
+        record_audit(user, "rate.update", "productivity_rate", row_id,
+                     f"{(old or {}).get('category', '?')} / {body.item_name.strip()}",
+                     {"changes": changes, "reason": body.reason or None})
     return {"ok": True}
 
 
 @router.delete("/productivity-rates/{row_id}")
-def delete_productivity_rate(row_id: int, _user=Depends(require_capability("page.settings"))):
+def delete_productivity_rate(row_id: int, reason: Optional[str] = None,
+                             user=Depends(require_capability("page.settings"))):
     with engine.begin() as conn:
+        old = conn.execute(text("SELECT * FROM productivity_rates WHERE id=:id"), {"id": row_id}).mappings().first()
         conn.execute(text("DELETE FROM productivity_rates WHERE id=:id"), {"id": row_id})
+    if old:
+        record_audit(user, "rate.delete", "productivity_rate", row_id,
+                     f"{old['category']} / {old['item_name']}",
+                     {"deleted": {"standard_per_day": old["standard_per_day"],
+                                  "aggressive_multiplier": old["aggressive_multiplier"]},
+                      "reason": reason or None})
     return {"ok": True}
 
 
@@ -254,6 +329,12 @@ class RentalRow(BaseModel):
     size_class: Optional[str] = None
     duration: str
     price: Optional[float] = 0
+    reason: Optional[str] = None          # audit-only: why the change was made
+
+
+def _rental_label(r):
+    return " / ".join(str(v) for v in (r.get("equipment_type"), r.get("power_source"),
+                                       r.get("size_class"), r.get("duration")) if v)
 
 
 @router.get("/rental-rates/admin")
@@ -270,7 +351,7 @@ def list_rental_rates_admin(_user=Depends(require_capability("page.settings"))):
 
 
 @router.post("/rental-rates")
-def create_rental_rate(body: RentalRow, _user=Depends(require_capability("page.settings"))):
+def create_rental_rate(body: RentalRow, user=Depends(require_capability("page.settings"))):
     if not (body.equipment_type or "").strip():
         raise HTTPException(status_code=400, detail="equipment type is required")
     if body.duration not in _DURATIONS:
@@ -284,15 +365,20 @@ def create_rental_rate(body: RentalRow, _user=Depends(require_capability("page.s
                    "s": (body.size_class or None), "d": body.duration, "pr": body.price or 0})
     except IntegrityError:
         raise HTTPException(status_code=400, detail="That equipment/power/size/duration combination already exists.")
+    record_audit(user, "rate.create", "rental_rate", res.lastrowid,
+                 _rental_label(body.model_dump()),
+                 {"values": {"price": body.price}, "reason": body.reason or None})
     return {"ok": True, "id": res.lastrowid}
 
 
 @router.patch("/rental-rates/{row_id}")
-def update_rental_rate(row_id: int, body: RentalRow, _user=Depends(require_capability("page.settings"))):
+def update_rental_rate(row_id: int, body: RentalRow, user=Depends(require_capability("page.settings"))):
     if not (body.equipment_type or "").strip():
         raise HTTPException(status_code=400, detail="equipment type is required")
     if body.duration not in _DURATIONS:
         raise HTTPException(status_code=400, detail="duration must be day, week or month")
+    with engine.connect() as conn:
+        old = conn.execute(text("SELECT * FROM rental_rates WHERE id=:id"), {"id": row_id}).mappings().first()
     try:
         with engine.begin() as conn:
             res = conn.execute(text("""
@@ -304,13 +390,28 @@ def update_rental_rate(row_id: int, body: RentalRow, _user=Depends(require_capab
         raise HTTPException(status_code=400, detail="That equipment/power/size/duration combination already exists.")
     if res.rowcount == 0:
         raise HTTPException(status_code=404, detail="Rental rate not found")
+    changes = diff_fields(dict(old or {}), {"equipment_type": body.equipment_type.strip(),
+                                            "power_source": body.power_source or None,
+                                            "size_class": body.size_class or None,
+                                            "duration": body.duration, "price": body.price or 0},
+                          ["equipment_type", "power_source", "size_class", "duration", "price"])
+    if changes:
+        record_audit(user, "rate.update", "rental_rate", row_id,
+                     _rental_label(body.model_dump()),
+                     {"changes": changes, "reason": body.reason or None})
     return {"ok": True}
 
 
 @router.delete("/rental-rates/{row_id}")
-def delete_rental_rate(row_id: int, _user=Depends(require_capability("page.settings"))):
+def delete_rental_rate(row_id: int, reason: Optional[str] = None,
+                       user=Depends(require_capability("page.settings"))):
     with engine.begin() as conn:
+        old = conn.execute(text("SELECT * FROM rental_rates WHERE id=:id"), {"id": row_id}).mappings().first()
         conn.execute(text("DELETE FROM rental_rates WHERE id=:id"), {"id": row_id})
+    if old:
+        record_audit(user, "rate.delete", "rental_rate", row_id,
+                     _rental_label(dict(old)),
+                     {"deleted": {"price": old["price"]}, "reason": reason or None})
     return {"ok": True}
 
 
@@ -625,6 +726,21 @@ class MetricLineWrite(BaseModel):
     notes: Optional[str] = None
 
 
+def _snapshot_rate(conn, payload: MetricLineWrite, kind: str):
+    """Resolve the rate row a line prices from — the estimate's frozen snapshot
+    first (#2 packaging), the live table only as a fallback (legacy paths)."""
+    eid = estimate_id_for_set(conn, payload.metric_set_id)
+    snap = get_reference_snapshot(conn, eid)
+    prod_by, rent_by = snapshot_maps(snap)
+    if kind == "productivity":
+        return prod_by.get(payload.productivity_rate_id) or conn.execute(text(
+            "SELECT standard_per_day, aggressive_per_day FROM productivity_rates WHERE id = :id"
+        ), {"id": payload.productivity_rate_id}).mappings().first()
+    return rent_by.get(payload.rental_rate_id) or conn.execute(text(
+        "SELECT price FROM rental_rates WHERE id = :id"
+    ), {"id": payload.rental_rate_id}).mappings().first()
+
+
 def _compute_line_totals(conn, payload: MetricLineWrite):
     """Returns (ext_cost, std_total, agg_total) based on line_kind + payload."""
     std_total = None
@@ -632,10 +748,7 @@ def _compute_line_totals(conn, payload: MetricLineWrite):
     ext_cost = None
 
     if payload.line_kind == "productivity" and payload.productivity_rate_id and payload.qty is not None:
-        rate = conn.execute(text("""
-            SELECT standard_per_day, aggressive_per_day
-            FROM productivity_rates WHERE id = :id
-        """), {"id": payload.productivity_rate_id}).mappings().first()
+        rate = _snapshot_rate(conn, payload, "productivity")
         if rate:
             if rate["standard_per_day"]:
                 std_total = round(float(payload.qty) / float(rate["standard_per_day"]), 3)
@@ -643,10 +756,8 @@ def _compute_line_totals(conn, payload: MetricLineWrite):
                 agg_total = round(float(payload.qty) / float(rate["aggressive_per_day"]), 3)
 
     elif payload.line_kind == "rental" and payload.rental_rate_id and payload.qty is not None:
-        rate = conn.execute(text("""
-            SELECT price FROM rental_rates WHERE id = :id
-        """), {"id": payload.rental_rate_id}).mappings().first()
-        if rate:
+        rate = _snapshot_rate(conn, payload, "rental")
+        if rate and rate["price"] is not None:
             ext_cost = round(float(payload.qty) * float(rate["price"]), 2)
 
     elif payload.line_kind in ("labor_fixed", "free_form") \
@@ -659,6 +770,32 @@ def _compute_line_totals(conn, payload: MetricLineWrite):
         ext_cost = round(float(payload.qty) * mobs * float(payload.unit_price), 2)
 
     return ext_cost, std_total, agg_total
+
+
+def _overlay_snapshot_values(rows, snap):
+    """Replace the live-joined rate columns with the estimate's frozen values.
+    The LEFT JOINs below stay as the fallback for rows a snapshot doesn't know."""
+    if not snap:
+        return [dict(r) for r in rows]
+    prod_by, rent_by = snapshot_maps(snap)
+    out = []
+    for r in rows:
+        d = dict(r)
+        p = prod_by.get(d.get("productivity_rate_id"))
+        if p:
+            d["productivity_item_name"] = p.get("item_name")
+            d["productivity_std_per_day"] = p.get("standard_per_day")
+            d["productivity_agg_per_day"] = p.get("aggressive_per_day")
+            d["productivity_unit"] = p.get("unit")
+        rr = rent_by.get(d.get("rental_rate_id"))
+        if rr:
+            d["rental_equipment_type"] = rr.get("equipment_type")
+            d["rental_power_source"] = rr.get("power_source")
+            d["rental_size_class"] = rr.get("size_class")
+            d["rental_duration"] = rr.get("duration")
+            d["rental_price"] = rr.get("price")
+        out.append(d)
+    return out
 
 
 def _fetch_line(conn, line_id: int):
@@ -742,7 +879,11 @@ def list_metric_lines(
 
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
-    return [dict(r) for r in rows]
+    # Serve rate values from the estimate's frozen snapshot, not the live join.
+    with engine.begin() as conn:
+        eid = estimate_id if estimate_id is not None else estimate_id_for_set(conn, metric_set_id)
+        snap = get_reference_snapshot(conn, eid)
+    return _overlay_snapshot_values(rows, snap)
 
 
 @router.post("/metric-lines")
@@ -766,7 +907,8 @@ def create_metric_line(req: MetricLineWrite, _user=Depends(get_current_user)):
             "agg_total": agg_total,
         })
         row = _fetch_line(conn, result.lastrowid)
-    return dict(row)
+        snap = get_reference_snapshot(conn, estimate_id_for_set(conn, row["metric_set_id"]))
+    return _overlay_snapshot_values([row], snap)[0]
 
 
 @router.put("/metric-lines/{line_id}")
@@ -804,7 +946,8 @@ def update_metric_line(line_id: int, req: MetricLineWrite, _user=Depends(get_cur
             "agg_total": agg_total,
         })
         row = _fetch_line(conn, line_id)
-    return dict(row)
+        snap = get_reference_snapshot(conn, estimate_id_for_set(conn, row["metric_set_id"]))
+    return _overlay_snapshot_values([row], snap)[0]
 
 
 @router.delete("/metric-lines/{line_id}")

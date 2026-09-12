@@ -9,9 +9,9 @@
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { api, hasCapability, getToken } from "../api.js";
-import { mountBaseQuotingMetrics } from "./base-quoting-metrics.js";
+import { mountBaseQuotingMetrics, createCellOverrideClient } from "./base-quoting-metrics.js";
 import { contactFormModal } from "./contacts.js";
-import { computeSetRollup, computeSetBundles } from "../utils/qm-rollup.js";
+import { computeSetRollup, computeSetBundles, applyLineOverrides } from "../utils/qm-rollup.js";
 
 // The blank quoting-metrics workbook's defaults (mirrors ESTIMATE_DEFAULTS on the
 // backend, which pre-fills them on a new quote). Any General Info field changed
@@ -67,7 +67,7 @@ function markChangedFields(root) {
 //   #/estimate/{id}/base                -> Base Quoting Metrics tab
 //   #/estimate/{id}/option/{n}          -> Option N tab (option metric set)
 //   #/estimate/{id}/project-rentals     -> Project Rentals tab (project_rentals set)
-//   #/estimate/{id}/review              -> Review / Rollup tab
+//   #/estimate/{id}/review              -> retired tab; redirects to /general
 //   #/base-quoting-metrics              -> legacy URL; redirected to the picker
 export async function estimatePage(routeFn) {
   const m = location.hash.match(/^#\/estimate\/(\d+)(?:\/(general|base|review|pdf|send-qbo|project-rentals|option\/(\d+)))?\/?$/);
@@ -77,8 +77,11 @@ export async function estimatePage(routeFn) {
   if (!m) { location.hash = "#/pipeline"; return; }
   const estimateId = Number(m[1]);
   const tabPath    = m[2] || "general";
-  const tab        = tabPath.split("/")[0];   // "general" | "base" | "review" | "project-rentals" | "option"
+  const tab        = tabPath.split("/")[0];   // "general" | "base" | "project-rentals" | "option" | …
   const optionN    = m[3] ? Number(m[3]) : null;
+  // The Review tab is retired — Save & Send lives in the workspace header and
+  // the ROLL UP tab computes the results. Old /review links land on ROLL UP.
+  if (tab === "review") { location.hash = `#/estimate/${estimateId}/general`; return; }
   return renderEstimateWorkspace(routeFn, estimateId, tab, optionN);
 }
 
@@ -422,12 +425,14 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
           ${isLocked
             ? `<span class="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold px-2 py-1">🔒 Locked</span>
                <button data-unlock class="rounded-lg border border-amber-300 text-amber-800 text-xs font-semibold px-3 py-1.5 hover:bg-amber-50">Unlock to edit</button>`
-            : ""}
+            : `<button data-savesend class="btn-primary text-xs font-semibold px-4 py-1.5">Save &amp; Send</button>`}
           <button data-new-revision class="rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-xs font-semibold px-3 py-1.5 hover:bg-blue-100">+ New revision</button>
           <button data-revisions class="rounded-lg border border-black/15 text-black/60 text-xs font-semibold px-3 py-1.5 hover:bg-black/5">Revisions</button>
         </div>
       </div>
       ${isLocked ? `<div class="mt-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">This is a superseded revision — read-only. Use <b>Unlock to edit</b> to reopen it, or <b>+ New revision</b> to duplicate the current quote.</div>` : ""}
+      <div data-savesend-msg hidden class="mt-2 text-[11px] font-semibold rounded-lg px-3 py-1.5" style="display:none"></div>
+      <div data-snapshot-bar></div>
     </div>`;
 
   const baseUrl = `#/estimate/${estimateId}`;
@@ -458,18 +463,18 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   const tabsHtml = `
     <div class="card px-3 py-2" data-workspace-tabs>
       <div class="flex items-center gap-1 overflow-x-auto">
-        ${tabBtn(`${baseUrl}/general`, "General Info", tab === "general")}
-        ${tabBtn(`${baseUrl}/base`,    "Base",         tab === "base")}
+        ${tabBtn(`${baseUrl}/general`, "0. ROLL UP Quoting Metrics", tab === "general")}
+        ${tabBtn(`${baseUrl}/base`,    "1.0 BASE Quoting Metrics",  tab === "base")}
         ${options.map(opt => deletableTabBtn(
           `${baseUrl}/option/${opt.sort_order}`,
-          opt.label || `Option ${opt.sort_order}`,
+          `1.${opt.sort_order} ${opt.label || `Option ${opt.sort_order}`} - Quoting Metrics`,
           tab === "option" && optionN === opt.sort_order,
           opt.id,
           opt.label || `Option ${opt.sort_order}`
         )).join("")}
         ${projectRentalsSet ? deletableTabBtn(
           `${baseUrl}/project-rentals`,
-          projectRentalsSet.label || "Project Rentals",
+          "1.10 PROJECT RENTALS",
           tab === "project-rentals",
           projectRentalsSet.id,
           projectRentalsSet.label || "Project Rentals"
@@ -486,7 +491,6 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
             + Project Rentals
           </button>` : ""}
         <div class="flex-1"></div>
-        ${tabBtn(`${baseUrl}/review`, "Review", tab === "review")}
         ${tabBtn(`${baseUrl}/pdf`, "Estimate PDF", tab === "pdf")}
         ${tabBtn(`${baseUrl}/send-qbo`, "QBO Lines", tab === "send-qbo")}
       </div>
@@ -510,6 +514,36 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     }, { once: true });
   }
 
+  // ── Save & Send (workspace header) ─────────────────────────────────────────
+  // Step 9 — one action from anywhere in the workspace: file the PDF into
+  // "4 Quotes", update the pipeline row, lock the quote. Same behavior the
+  // Estimate PDF tab's button had; saveAndSendEstimate() is the shared engine.
+  document.querySelector("[data-savesend]")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (!confirm("Save & Send this estimate?\n\nThis files the PDF into the “4 Quotes” folder, updates the pipeline row, and locks this quote (start a New revision or Unlock to edit later).")) return;
+    const msgEl = document.querySelector("[data-savesend-msg]");
+    const say = (text, ok) => {
+      if (!msgEl) return;
+      msgEl.textContent = text;
+      msgEl.hidden = false;
+      msgEl.style.display = "";
+      msgEl.className = `mt-2 text-[11px] font-semibold rounded-lg px-3 py-1.5 border ${ok
+        ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+        : "text-red-600 bg-red-50 border-red-200"}`;
+    };
+    btn.setAttribute("disabled", "true");
+    btn.textContent = "Saving…";
+    try {
+      const j = await saveAndSendEstimate(estimateId, metricSets, estimate);
+      say(`Saved ✓ filed to “4 Quotes” (${j.filename}), pipeline updated, quote locked.`, true);
+      setTimeout(() => location.reload(), 1000);   // reflect the locked read-only state
+    } catch (err) {
+      say("Save failed: " + (err?.message || err), false);
+      btn.removeAttribute("disabled");
+      btn.textContent = "Save & Send";
+    }
+  });
+
   // ── Revision controls (feedback #1) ────────────────────────────────────────
   document.querySelector("[data-new-revision]")?.addEventListener("click", async (e) => {
     const btn = e.currentTarget;
@@ -526,6 +560,39 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     catch (err) { alert(err?.message || "Failed to unlock"); }
   });
   document.querySelector("[data-revisions]")?.addEventListener("click", () => openRevisionsModal(estimateId));
+
+  // ── Frozen reference data (#2 packaging) ───────────────────────────────────
+  // This quote prices from the rates/lookups captured when it was started (or
+  // last refreshed). Show the freeze date; when the live tables have moved on,
+  // offer an EXPLICIT "Update to current rates" — never reprice silently.
+  (async () => {
+    const bar = document.querySelector("[data-snapshot-bar]");
+    if (!bar) return;
+    let info;
+    try { info = await api(`/estimates/${estimateId}/snapshot-info`); } catch (_) { return; }
+    const asOf = (info.captured_at || info.snapshot_at || "").slice(0, 10);
+    if (!asOf) return;
+    const n = info.change_count || 0;
+    bar.innerHTML = `
+      <div class="mt-2 flex items-center gap-2 text-[11px] ${n ? "text-indigo-800 bg-indigo-50 border border-indigo-200" : "text-black/45 bg-black/[0.02] border border-black/10"} rounded-lg px-3 py-1.5">
+        <span>📌 Priced from rates &amp; lookup values frozen <b>${escapeHtml(asOf)}</b>${n ? ` — <b>${n}</b> reference change${n > 1 ? "s" : ""} since` : " · up to date with today's tables"}</span>
+        ${n && !isLocked ? `<button data-refresh-rates class="ml-auto rounded-lg border border-indigo-300 text-indigo-800 font-semibold px-2.5 py-1 hover:bg-indigo-100 whitespace-nowrap">Update to current rates…</button>` : ""}
+      </div>`;
+    bar.querySelector("[data-refresh-rates]")?.addEventListener("click", async () => {
+      const list = (info.changes || []).slice(0, 15).map(c =>
+        c.change ? `• ${c.item} — ${c.change}`
+                 : `• ${c.item}: ${c.field} ${c.old ?? "—"} → ${c.new ?? "—"}`).join("\n");
+      const more = (info.changes || []).length > 15 ? `\n…and ${info.changes.length - 15} more` : "";
+      if (!confirm(`Re-freeze this quote at TODAY'S rates and reprice its lines?\n\nChanges since ${asOf}:\n${list}${more}\n\nThis cannot be undone (create a new revision first if you want to keep the old pricing).`)) return;
+      const reason = prompt("Why update the rates? (recorded in the audit log — OK to leave blank)", "");
+      if (reason === null) return;
+      try {
+        await api(`/estimates/${estimateId}/refresh-snapshot`, {
+          method: "POST", body: JSON.stringify({ reason: reason.trim() || null }) });
+        location.reload();
+      } catch (err) { alert(err?.message || "Failed to update rates"); }
+    });
+  })();
 
   // Locked revisions are read-only: disable data-entry controls in the tab body
   // (tabs re-render on navigation, so observe and re-apply).
@@ -649,9 +716,6 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     }
     return renderOptionTab(tabBody, estimateId, projectRentalsSet.id, !!estimate.locked);
   }
-  if (tab === "review") {
-    return renderReviewTab(tabBody, estimateId, metricSets, estimate);
-  }
   if (tab === "pdf") {
     return renderPdfTab(tabBody, estimateId, metricSets, estimate);
   }
@@ -691,35 +755,27 @@ async function openRevisionsModal(estimateId) {
   } catch (e) { body.innerHTML = `<div class="text-red-600 py-2">Couldn't load revisions.</div>`; }
 }
 
-// ── Estimate PDF tab ─────────────────────────────────────────────────────────
-// The customer-facing quote (step 7). Priced line items come from computeSetBundles
-// (the same validated engine as Send-to-QBO / Review, so the PDF ties out to the
-// workbook); standard blocks (Payment Terms, Stipulations, Dumpster, notes) prefill
-// from estimate_pdf_defaults. The estimator edits the customized areas (scope/BOM,
-// bill-to, stipulations clause) and previews the PDF. The whole editable model is
-// saved per estimate on the device; "Rebuild from metrics" re-pulls amounts.
-async function renderPdfTab(container, estimateId, initialMetricSets, estimateRow) {
-  container.innerHTML = `<div class="card px-5 py-4 text-sm text-black/50">Loading…</div>`;
-  let lookups, allLines, dfl;
-  try {
-    [lookups, allLines, dfl] = await Promise.all([
-      api("/quoting/lookup-values"),
-      api(`/quoting/metric-lines?estimate_id=${estimateId}`),
-      api("/estimates/pdf-defaults").catch(() => ({})),
-    ]);
-  } catch (err) {
-    container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">Failed to load: ${escapeHtml(err?.message || String(err))}</div>`;
-    return;
-  }
+// ── Shared PDF / Save & Send engine ─────────────────────────────────────────
+// The pieces the Estimate PDF tab AND the workspace-header Save & Send both
+// need: the priced line-item model built from computeSetBundles (the validated
+// engine, so the PDF ties out to the workbook), the per-estimate saved model,
+// the /pdf endpoint call, and the pipeline sync-metrics computation. One
+// implementation, two callers.
+function createPdfEngine({ estimateId, estimateRow, metricSets, lookups, allLines, dfl, cellOverrides = {} }) {
   let estimateState = {};
   try { const raw = localStorage.getItem("opi_estimate_state_v1"); if (raw) estimateState = JSON.parse(raw) || {}; } catch {}
 
+  // Typed-over cells (#1 sheet parity): per-line overrides transform the line
+  // data itself; the map + per-set key prefix rides every rollup/bundle call
+  // below so the PDF amounts + pipeline sync consume the SAME overridden
+  // values as the metrics tabs.
+  const ovLines = applyLineOverrides(allLines, cellOverrides);
   const linesBySet = new Map();
-  for (const l of allLines) { const s = l.metric_set_id; if (!linesBySet.has(s)) linesBySet.set(s, []); linesBySet.get(s).push(l); }
+  for (const l of ovLines) { const s = l.metric_set_id; if (!linesBySet.has(s)) linesBySet.set(s, []); linesBySet.get(s).push(l); }
   const orderedSets = [
-    ...(initialMetricSets || []).filter(s => s.kind === "base"),
-    ...(initialMetricSets || []).filter(s => s.kind === "option").sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
-    ...(initialMetricSets || []).filter(s => s.kind === "project_rentals"),
+    ...(metricSets || []).filter(s => s.kind === "base"),
+    ...(metricSets || []).filter(s => s.kind === "option").sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
+    ...(metricSets || []).filter(s => s.kind === "project_rentals"),
   ].filter(s => Number(s.is_enabled) === 1);
 
   const BUNDLE_ORDER = ["installation", "rentals", "wg_labor", "wg_additional", "mobilization", "remobilization", "downtime"];
@@ -747,7 +803,8 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
     const contact = [e.contact_first, e.contact_last].filter(Boolean).join(" ");
     const agg = new Map(); const order = [];
     for (const set of orderedSets) {
-      const bundles = computeSetBundles({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState });
+      const bundles = computeSetBundles({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState,
+                                          overrides: cellOverrides, keyPrefix: `s${set.id}:` });
       for (const bk of BUNDLE_ORDER) {
         const b = bundles[bk]; if (!b) continue;
         const total = (b.lines || []).reduce((s, [, v]) => s + (Number(v) || 0), 0);
@@ -773,18 +830,19 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
   }
 
   const MODEL_KEY = `opi_pdf_model_${estimateId}`;
-  let model;
-  try { model = JSON.parse(localStorage.getItem(MODEL_KEY) || "null"); } catch { model = null; }
-  if (!model || !Array.isArray(model.lines)) model = buildDefaultModel();
-  const save = () => localStorage.setItem(MODEL_KEY, JSON.stringify(model));
-  const totalOf = () => model.lines.reduce((s, l) => s + num(l.amount), 0);
-  const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
-  let msg = "";
+  // Saved per-estimate model from this device, or the metrics-built default.
+  function loadModel() {
+    let model;
+    try { model = JSON.parse(localStorage.getItem(MODEL_KEY) || "null"); } catch { model = null; }
+    return (model && Array.isArray(model.lines)) ? model : buildDefaultModel();
+  }
+  const saveModel = (model) => localStorage.setItem(MODEL_KEY, JSON.stringify(model));
+  const totalOf = (model) => model.lines.reduce((s, l) => s + num(l.amount), 0);
 
-  async function callPdf(saveMode) {
+  async function callPdf(model, saveMode) {
     const payload = {
       lines: model.lines.map(l => ({ label: l.label, description: l.description, qty: num(l.qty), rate: num(l.rate), amount: num(l.amount) })),
-      total: totalOf(), sales_rep: model.sales_rep, footer_title: model.footer_title,
+      total: totalOf(model), sales_rep: model.sales_rep, footer_title: model.footer_title,
       preparer: model.preparer, quote_date: model.quote_date,
       bill_to: String(model.bill_to || "").split("\n").map(s => s.trim()).filter(Boolean),
       save: !!saveMode,
@@ -797,12 +855,13 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
     if (saveMode) return resp.json();
     window.open(URL.createObjectURL(await resp.blob()), "_blank");
   }
-  const preview = () => callPdf(false).catch(e => { msg = "Preview failed: " + e.message; render(); });
 
-  // Pipeline sync metrics — same computation as the Review tab's "Update pipeline",
-  // but contract_value is the actual quoted PDF total (includes edited/material lines).
-  function computeSyncMetrics() {
-    const perSet = orderedSets.map(set => ({ set, rollup: computeSetRollup({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState }) }));
+  // Pipeline sync metrics — contract_value is the actual quoted PDF total
+  // (includes edited/material lines); OH&P/day counts come from the per-set
+  // rollup math across enabled sets.
+  function computeSyncMetrics(model) {
+    const perSet = orderedSets.map(set => ({ set, rollup: computeSetRollup({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState,
+                                                                             overrides: cellOverrides, keyPrefix: `s${set.id}:` }) }));
     const sumOf = (k) => perSet.reduce((s, r) => s + (Number(r.rollup[k]) || 0), 0);
     const pct = (v) => (Number(v ?? 0) || 0) / 100;
     const markUp = (cost, p) => (p > 0 && p < 1 ? cost / (1 - p) : cost);
@@ -812,8 +871,12 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
       + markUp(sumOf("H226"), pct(estimateState.rental_wire_profit_target))
       + sumOf("travel_costs_total") + sumOf("H248");
     const profit = price - sumOf("grand_total");
+    // A typed-over ROLL UP Price to Customer (r:D32) IS the quoted price —
+    // it wins over the PDF total so Save & Send pushes the overridden price
+    // to the pipeline.
+    const d32ovr = cellOverrides["r:D32"];
     return {
-      contract_value: totalOf(),
+      contract_value: (d32ovr != null && Number.isFinite(Number(d32ovr))) ? Number(d32ovr) : totalOf(model),
       ohp_amount: profit,
       ohp_pct: Math.round((price > 0 ? profit / price : 0) * 1000) / 10,
       labor_days: perSet.reduce((s, r) => s + (Number(r.rollup.D23) || 0) + (Number(r.rollup.D24) || 0), 0),
@@ -821,26 +884,63 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
     };
   }
 
-  // Step 9 — one action: file the PDF into "4 Quotes", update the pipeline, lock the quote.
-  async function saveAndSend() {
-    if (!confirm("Save & Send this estimate?\n\nThis files the PDF into the “4 Quotes” folder, updates the pipeline row, and locks this quote (start a New revision or Unlock to edit later).")) return;
-    const btn = container.querySelector("[data-savesend]");
-    if (btn) { btn.setAttribute("disabled", "true"); btn.textContent = "Saving…"; }
-    try {
-      const j = await callPdf(true);                                   // 1) file the PDF
-      if (estimateRow?.opportunity_id) {                              // 2) update the pipeline
-        try { await api(`/opportunities/by-estimate/${estimateId}/sync-metrics`, { method: "POST", body: JSON.stringify(computeSyncMetrics()) }); } catch (_) {}
-      }
-      await api(`/estimates/${estimateId}/lock`, { method: "POST" }); // 3) lock
-      msg = `Saved ✓ filed to “4 Quotes” (${j.filename}), pipeline updated, quote locked.`;
-      render();
-      setTimeout(() => location.reload(), 1000);                      // reflect the locked read-only state
-    } catch (err) {
-      msg = "Save failed: " + (err?.message || err);
-      if (btn) { btn.removeAttribute("disabled"); btn.textContent = "Save & Send"; }
-      render();
-    }
+  return { buildDefaultModel, loadModel, saveModel, totalOf, callPdf, computeSyncMetrics };
+}
+
+// ── Save & Send (shared handler) ─────────────────────────────────────────────
+// Step 9 — one action: file the PDF into "4 Quotes", update the pipeline, lock
+// the quote. Called from the workspace header button; self-sufficient (fetches
+// its own data) so it works from any tab. Returns the /pdf save response
+// ({ filename, … }) so the caller can surface the result message.
+async function saveAndSendEstimate(estimateId, metricSets, estimateRow) {
+  const [lookups, allLines, dfl, ovResp] = await Promise.all([
+    api(`/quoting/lookup-values?estimate_id=${estimateId}`),
+    api(`/quoting/metric-lines?estimate_id=${estimateId}`),
+    api("/estimates/pdf-defaults").catch(() => ({})),
+    api(`/estimates/${estimateId}/cell-overrides`).catch(() => ({ overrides: {} })),
+  ]);
+  const eng = createPdfEngine({ estimateId, estimateRow, metricSets, lookups, allLines, dfl,
+                                cellOverrides: (ovResp && ovResp.overrides) || {} });
+  const model = eng.loadModel();
+  const j = await eng.callPdf(model, true);                          // 1) file the PDF
+  if (estimateRow?.opportunity_id) {                                 // 2) update the pipeline
+    try { await api(`/opportunities/by-estimate/${estimateId}/sync-metrics`, { method: "POST", body: JSON.stringify(eng.computeSyncMetrics(model)) }); } catch (_) {}
   }
+  await api(`/estimates/${estimateId}/lock`, { method: "POST" });    // 3) lock
+  return j;
+}
+
+// ── Estimate PDF tab ─────────────────────────────────────────────────────────
+// The customer-facing quote (step 7). Priced line items come from computeSetBundles
+// via the shared createPdfEngine (the same validated engine as Send-to-QBO, so the
+// PDF ties out to the workbook); standard blocks (Payment Terms, Stipulations,
+// Dumpster, notes) prefill from estimate_pdf_defaults. The estimator edits the
+// customized areas (scope/BOM, bill-to, stipulations clause) and previews the PDF.
+// The whole editable model is saved per estimate on the device; "Rebuild from
+// metrics" re-pulls amounts. Save & Send lives in the workspace header bar.
+async function renderPdfTab(container, estimateId, initialMetricSets, estimateRow) {
+  container.innerHTML = `<div class="card px-5 py-4 text-sm text-black/50">Loading…</div>`;
+  let lookups, allLines, dfl, cellOverrides;
+  try {
+    [lookups, allLines, dfl, cellOverrides] = await Promise.all([
+      api(`/quoting/lookup-values?estimate_id=${estimateId}`),
+      api(`/quoting/metric-lines?estimate_id=${estimateId}`),
+      api("/estimates/pdf-defaults").catch(() => ({})),
+      api(`/estimates/${estimateId}/cell-overrides`).then(r => (r && r.overrides) || {}).catch(() => ({})),
+    ]);
+  } catch (err) {
+    container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">Failed to load: ${escapeHtml(err?.message || String(err))}</div>`;
+    return;
+  }
+  const eng = createPdfEngine({ estimateId, estimateRow, metricSets: initialMetricSets, lookups, allLines, dfl, cellOverrides });
+
+  let model = eng.loadModel();
+  const save = () => eng.saveModel(model);
+  const totalOf = () => eng.totalOf(model);
+  const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
+  let msg = "";
+
+  const preview = () => eng.callPdf(model, false).catch(e => { msg = "Preview failed: " + e.message; render(); });
 
   function render() {
     const inp = (val, attrs) => `<input value="${escapeHtml(val ?? "")}" ${attrs} class="w-full text-sm rounded border border-black/15 px-2 py-1">`;
@@ -888,12 +988,10 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
         </div>
         <div class="flex items-center justify-end gap-3 px-1">
           ${estimateRow?.locked
-            ? `<span class="text-[11px] text-amber-700 font-semibold">🔒 Locked — unlock or start a new revision to edit</span>
-               <button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>`
-            : `<button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
-               <button data-savesend class="btn-primary text-sm font-semibold px-5 py-2">Save &amp; Send</button>`}
+            ? `<span class="text-[11px] text-amber-700 font-semibold">🔒 Locked — unlock or start a new revision to edit</span>` : ""}
+          <button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
         </div>
-        <div class="text-[11px] text-black/45 px-1 text-right">Save &amp; Send files the PDF into “4 Quotes”, updates the pipeline, and locks the quote.</div>
+        <div class="text-[11px] text-black/45 px-1 text-right">When it's ready, <b>Save &amp; Send</b> (in the header above) files the PDF into “4 Quotes”, updates the pipeline, and locks the quote.</div>
       </div>`;
 
     container.querySelectorAll("[data-h]").forEach(el => el.addEventListener("input", () => { model[el.getAttribute("data-h")] = el.value; save(); }));
@@ -904,9 +1002,8 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
     }));
     container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => { model.lines.splice(Number(b.getAttribute("data-del")), 1); save(); render(); }));
     container.querySelector("[data-add]")?.addEventListener("click", () => { model.lines.push({ label: "", description: "", qty: 1, rate: 0, amount: 0 }); save(); render(); });
-    container.querySelector("[data-rebuild]")?.addEventListener("click", () => { if (confirm("Rebuild the line items + standard blocks from the current metrics? Your description edits on this quote will be replaced.")) { model = buildDefaultModel(); save(); render(); } });
+    container.querySelector("[data-rebuild]")?.addEventListener("click", () => { if (confirm("Rebuild the line items + standard blocks from the current metrics? Your description edits on this quote will be replaced.")) { model = eng.buildDefaultModel(); save(); render(); } });
     container.querySelector("[data-preview]")?.addEventListener("click", () => preview());
-    container.querySelector("[data-savesend]")?.addEventListener("click", saveAndSend);
   }
 
   render();
@@ -915,16 +1012,19 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
 // ── Send to QBO tab ──────────────────────────────────────────────────────────
 // Lays out the QuickBooks-shaped bundle lines (from computeSetBundles — validated
 // against OPI's workbooks) per enabled set, each line copy-to-clipboard, plus the
-// QBO header fields. Each line has a manual-override input (persisted per estimate
-// in localStorage) so an estimator can nudge a final number — the rare hand-typed
-// one-off — without leaving the app; the override drives the copy value + totals.
+// QBO header fields. Each line has a manual-override input so an estimator can
+// nudge a final number — the rare hand-typed one-off — without leaving the app;
+// the override drives the copy value + totals. Overrides live in the estimate's
+// server cell_overrides map under `qbo:` keys (they follow the estimate, not the
+// device); legacy device-local overrides migrate to the server on first open.
 async function renderSendToQboTab(container, estimateId, initialMetricSets, estimateRow) {
   container.innerHTML = `<div class="card px-5 py-4 text-sm text-black/50">Loading…</div>`;
-  let lookups, allLines;
+  let lookups, allLines, cellOverrides;
   try {
-    [lookups, allLines] = await Promise.all([
-      api("/quoting/lookup-values"),
+    [lookups, allLines, cellOverrides] = await Promise.all([
+      api(`/quoting/lookup-values?estimate_id=${estimateId}`),
       api(`/quoting/metric-lines?estimate_id=${estimateId}`),
+      api(`/estimates/${estimateId}/cell-overrides`).then(r => (r && r.overrides) || {}).catch(() => ({})),
     ]);
   } catch (err) {
     container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">Failed to load: ${escapeHtml(err?.message || String(err))}</div>`;
@@ -933,9 +1033,10 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
   let estimateState = {};
   try { const raw = localStorage.getItem("opi_estimate_state_v1"); if (raw) estimateState = JSON.parse(raw) || {}; } catch {}
 
+  const isLocked = !!(estimateRow && estimateRow.locked);
   const metricSets = [...(initialMetricSets || [])];
   const linesBySet = new Map();
-  for (const l of allLines) { const s = l.metric_set_id; if (!linesBySet.has(s)) linesBySet.set(s, []); linesBySet.get(s).push(l); }
+  for (const l of applyLineOverrides(allLines, cellOverrides)) { const s = l.metric_set_id; if (!linesBySet.has(s)) linesBySet.set(s, []); linesBySet.get(s).push(l); }
   const ordered = [
     ...metricSets.filter(s => s.kind === "base"),
     ...metricSets.filter(s => s.kind === "option").sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
@@ -945,11 +1046,47 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
   const BUNDLE_ORDER = ["installation", "rentals", "wg_labor", "wg_additional", "mobilization", "remobilization", "downtime"];
   const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
 
-  // Per-estimate manual overrides: { "setId|bundleKey|lineIdx": number }
-  const OVR_KEY = `opi_qbo_overrides_${estimateId}`;
-  let overrides = {}; try { overrides = JSON.parse(localStorage.getItem(OVR_KEY) || "{}") || {}; } catch {}
-  const saveOvr = () => localStorage.setItem(OVR_KEY, JSON.stringify(overrides));
-  const eff = (key, computed) => (key in overrides ? Number(overrides[key]) : Number(computed) || 0);
+  // Per-line manual overrides, SERVER-backed: cell_overrides key
+  // "qbo:<setId>|<bundleKey>|<lineIdx>". Optimistic update + debounced PATCH
+  // + rollback via the shared client; locked revisions render read-only.
+  const ovClient = createCellOverrideClient({
+    estimateId,
+    overrides: cellOverrides,
+    onError:   () => render(),
+  });
+  const qkey = (key) => `qbo:${key}`;
+  const hasOvr = (key) => qkey(key) in cellOverrides;
+  const eff = (key, computed) => (hasOvr(key) ? Number(cellOverrides[qkey(key)]) : Number(computed) || 0);
+
+  // One-time migration: device-local overrides (the old store) move to the
+  // server so they follow the estimate. Server-held keys win; the local copy
+  // is deleted only once every key made it up. Locked revision → merge into
+  // the in-memory view (read-only), keep the local copy untouched.
+  const LEGACY_OVR_KEY = `opi_qbo_overrides_${estimateId}`;
+  let legacyOvr = null;
+  try { legacyOvr = JSON.parse(localStorage.getItem(LEGACY_OVR_KEY) || "null"); } catch {}
+  if (legacyOvr && typeof legacyOvr === "object" && Object.keys(legacyOvr).length) {
+    let allMigrated = true;
+    for (const [k, v] of Object.entries(legacyOvr)) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      const sk = qkey(k);
+      if (sk in cellOverrides) continue;               // server already has it
+      if (isLocked) { cellOverrides[sk] = n; continue; }  // view-only merge
+      try {
+        await api(`/estimates/${estimateId}/cell-overrides`, {
+          method: "PATCH", body: JSON.stringify({ key: sk, value: n }),
+        });
+        cellOverrides[sk] = n;
+      } catch (err) {
+        allMigrated = false;
+        console.error("QBO override migration failed for", sk, err);
+      }
+    }
+    if (!isLocked && allMigrated) {
+      try { localStorage.removeItem(LEGACY_OVR_KEY); } catch {}
+    }
+  }
 
   let flash = null;
   const copy = (text, tag) => {
@@ -986,7 +1123,8 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
 
     const setCards = ordered.map(set => {
       const lines = linesBySet.get(set.id) || [];
-      const bundles = computeSetBundles({ set, lines, lookups, estimateState });
+      const bundles = computeSetBundles({ set, lines, lookups, estimateState,
+                                          overrides: cellOverrides, keyPrefix: `s${set.id}:` });
       const label = `${kindLabel(set.kind)}${set.label && set.kind !== "base" ? " · " + set.label : ""}`;
       let setTotal = 0;
       const bundleBlocks = BUNDLE_ORDER.map(bk => {
@@ -995,7 +1133,7 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
         const rows = b.lines.map(([lbl, val], idx) => {
           const key = `${set.id}|${bk}|${idx}`;
           const v = eff(key, val);
-          const overridden = key in overrides;
+          const overridden = hasOvr(key);
           return { lbl, key, v, overridden };
         });
         const btotal = rows.reduce((s, r) => s + r.v, 0);
@@ -1016,11 +1154,12 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
                 <tr class="border-t border-black/5">
                   <td class="px-3 py-1 text-black/70">${escapeHtml(r.lbl)}</td>
                   <td class="px-2 py-1 w-28">
-                    <input data-ovr="${r.key}" value="${Math.round(r.v)}" inputmode="numeric"
-                      class="w-24 text-right tabular-nums text-xs rounded border px-1.5 py-0.5 ${r.overridden ? "border-amber-400 bg-amber-50 text-amber-800 font-semibold" : "border-black/10"}">
+                    <input data-ovr="${r.key}" value="${Math.round(r.v)}" inputmode="numeric" ${isLocked ? "disabled" : ""}
+                      class="w-24 text-right tabular-nums text-xs rounded border px-1.5 py-0.5 ${r.overridden ? "border-amber-400 bg-amber-50 text-amber-800 font-semibold" : "border-black/10"}"
+                      ${r.overridden ? `title="Typed-over — saved with the estimate"` : ""}>
                   </td>
                   <td class="px-2 py-1 w-8 text-right">
-                    ${r.overridden ? `<button data-reset="${r.key}" title="Reset to computed" class="text-[10px] text-amber-600 hover:underline">↺</button>` : ""}
+                    ${r.overridden && !isLocked ? `<button data-reset="${r.key}" title="Reset to computed" class="text-[10px] text-amber-600 hover:underline">↺</button>` : ""}
                   </td>
                   <td class="px-2 py-1 w-10 text-right">
                     <button data-copy="${Math.round(r.v)}" data-tag="l:${r.key}" class="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-black/10 hover:bg-black/5">${flash === "l:" + r.key ? "✓" : "copy"}</button>
@@ -1062,20 +1201,26 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
       : `<div class="card px-4 py-3 text-xs text-black/50">No line descriptions yet — fill them in on the <b>Estimate PDF</b> tab and they'll show here to copy into QBO.</div>`;
 
     container.innerHTML = `<div class="grid gap-3">
-      <div class="text-[11px] text-black/50 px-1">Amounts come from the validated bundle calc. Edit any cell to override the exact number you'll type into QBO (saved on this device); ↺ resets it.</div>
+      <div class="text-[11px] text-black/50 px-1">Amounts come from the validated bundle calc. Edit any cell to override the exact number you'll type into QBO (saved with the estimate — overrides follow it to any device); ↺ resets it.${isLocked ? ` <span class="text-amber-700 font-semibold">🔒 Locked revision — overrides shown read-only.</span>` : ""}</div>
       ${header}${pdfPanel}${setCards || `<div class="card px-5 py-4 text-sm text-black/50">No enabled metric sets.</div>`}
     </div>`;
 
     container.querySelectorAll("[data-copydesc]").forEach(b => b.addEventListener("click", () => copy((pdfModel.lines[Number(b.getAttribute("data-copydesc"))] || {}).description || "", "d:" + b.getAttribute("data-copydesc"))));
     container.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => copy(b.getAttribute("data-copy"), b.getAttribute("data-tag"))));
     container.querySelectorAll("[data-copyblock]").forEach(b => b.addEventListener("click", () => copy(b.getAttribute("data-copyblock"), b.getAttribute("data-tag"))));
-    container.querySelectorAll("[data-reset]").forEach(b => b.addEventListener("click", () => { delete overrides[b.getAttribute("data-reset")]; saveOvr(); render(); }));
+    container.querySelectorAll("[data-reset]").forEach(b => b.addEventListener("click", () => {
+      if (isLocked) return;
+      ovClient.set(qkey(b.getAttribute("data-reset")), null);   // null = revert on the server
+      render();
+    }));
     container.querySelectorAll("[data-ovr]").forEach(inp => {
       inp.addEventListener("change", () => {
+        if (isLocked) return;
         const key = inp.getAttribute("data-ovr");
         const n = Number(String(inp.value).replace(/[^0-9.\-]/g, ""));
         if (!Number.isFinite(n)) { render(); return; }
-        overrides[key] = n; saveOvr(); render();
+        ovClient.set(qkey(key), n);                             // optimistic + debounced PATCH
+        render();
       });
     });
   }
@@ -1108,701 +1253,6 @@ function renderOptionTab(container, estimateId, metricSetId, locked = false) {
         Failed to load Option (metric set ${metricSetId}): ${escapeHtml(err?.message || String(err))}
       </div>`;
     });
-}
-
-// ── Review tab ──────────────────────────────────────────────────────────────
-// Cross-set rollup: per-set totals from computeSetRollup, plus a "Project
-// Total" that sums only enabled (is_enabled=1) sets. Includes is_enabled
-// toggles (PATCH /metric-sets/{id}) and a Save Revision button (POST
-// /estimates/{id}/revisions).
-async function renderReviewTab(container, estimateId, initialMetricSets, estimateRow) {
-  container.innerHTML = `<div class="card px-5 py-4 text-sm text-black/50">Loading review…</div>`;
-
-  let metricSets = [...(initialMetricSets || [])];
-  // Tracks which aggregate rollup rows are expanded (showing per-set
-  // contributions). Persists across re-renders so toggling a different row
-  // doesn't collapse the others.
-  const expandedRows = new Set();
-  let lookups, allLines;
-  try {
-    [lookups, allLines] = await Promise.all([
-      api("/quoting/lookup-values"),
-      api(`/quoting/metric-lines?estimate_id=${estimateId}`),
-    ]);
-  } catch (err) {
-    container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">
-      Failed to load review data: ${escapeHtml(err?.message || String(err))}
-    </div>`;
-    return;
-  }
-
-  // Estimate inputs needed by computeSetRollup. Until we persist these on
-  // the estimates row, the General Info tab publishes them to localStorage
-  // via opi_estimate_state_v1.
-  let estimateState = {};
-  try {
-    const raw = localStorage.getItem("opi_estimate_state_v1");
-    if (raw) estimateState = JSON.parse(raw) || {};
-  } catch {}
-
-  // The go-forward model: if this estimate feeds a pipeline row, offer to push
-  // its computed summary onto that row (contract value / OH&P / labor days).
-  let linkedOpp = null;
-  try { linkedOpp = (await api(`/opportunities/by-estimate/${estimateId}`)).opportunity; } catch {}
-
-  const fmtMoney = (n) => {
-    const v = Number(n);
-    if (!Number.isFinite(v)) return "$0";
-    return "$" + Math.round(v).toLocaleString("en-US");
-  };
-  const fmtDays = (n) => {
-    const v = Number(n);
-    if (!Number.isFinite(v)) return "0";
-    return v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 2 });
-  };
-
-  // Group all lines by metric_set_id once.
-  function groupLines(lines) {
-    const out = new Map();
-    for (const l of lines) {
-      const sid = l.metric_set_id;
-      if (!out.has(sid)) out.set(sid, []);
-      out.get(sid).push(l);
-    }
-    return out;
-  }
-
-  // Order sets: Base, Options (by sort_order), Project Rentals last.
-  function orderedSets(sets) {
-    const base = sets.filter(s => s.kind === "base");
-    const opts = sets.filter(s => s.kind === "option")
-                     .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
-    const pr   = sets.filter(s => s.kind === "project_rentals");
-    return [...base, ...opts, ...pr];
-  }
-
-  function kindLabel(kind) {
-    if (kind === "base") return "Base";
-    if (kind === "option") return "Option";
-    if (kind === "project_rentals") return "Project Rentals";
-    return kind || "—";
-  }
-
-  // Compute per-set rollups + cross-set rollup.
-  function computeAll() {
-    const linesBySet = groupLines(allLines);
-    const sets       = orderedSets(metricSets);
-    const perSet     = sets.map(set => {
-      const lines   = linesBySet.get(set.id) || [];
-      const rollup  = computeSetRollup({ set, lines, lookups, estimateState });
-      const bundles = computeSetBundles({ set, lines, lookups, estimateState });
-      return { set, rollup, bundles };
-    });
-    const enabled = perSet.filter(({ set }) => Number(set.is_enabled) === 1);
-    const sumOf = (k) => enabled.reduce((s, r) => s + (Number(r.rollup[k]) || 0), 0);
-    const cross = {
-      travel_costs_total: sumOf("travel_costs_total"),
-      H38:                sumOf("H38"),
-      H39:                sumOf("H39"),    // Materials (Rack)
-      H44:                sumOf("H44"),    // Contract Labor (Rack)
-      H187:               sumOf("H187"),
-      H213:               sumOf("H213"),
-      H214:               sumOf("H214"),   // Materials (WG)
-      H220:               sumOf("H220"),   // Contract Labor (WG)
-      H226:               sumOf("H226"),
-      H248:               sumOf("H248"),
-      lodging:            sumOf("lodging"),
-      mgmt_travel:        sumOf("mgmt_travel"),
-      travel_day_costs:   sumOf("travel_day_costs"),
-      grand_total:        sumOf("grand_total"),
-      // Cells migrated from the General Info "Output Variables" / "Results"
-      // cards. Need data from the metric sets, so they live here.
-      project_travel_days_cost: sumOf("travel_day_costs"),  // sum of G35
-      project_labor_days_cost:  enabled.reduce((s, r) => s + (Number(r.rollup.H44) || 0) + (Number(r.rollup.H220) || 0), 0),
-      project_duration_days:    enabled.reduce((s, r) => s + (Number(r.rollup.D22) || 0) + (Number(r.rollup.D23) || 0) + (Number(r.rollup.D24) || 0), 0),
-      buffer_days:              enabled.reduce((s, r) => s + (Number(r.rollup.M20) || 0) + (Number(r.rollup.M21) || 0), 0),
-      // Mobilizations split by which kind of work the set actually contains.
-      mob_count_rack:           enabled.reduce((s, r) => s + ((Number(r.rollup.rack_days) || 0) > 0 ? (Number(r.rollup.mobilizations) || 0) : 0), 0),
-      mob_count_wire:           enabled.reduce((s, r) => s + ((Number(r.rollup.wire_days) || 0) > 0 ? (Number(r.rollup.mobilizations) || 0) : 0), 0),
-    };
-
-    // Pricing: apply per-category profit targets to the bundled cost
-    // sections (price = cost / (1 - profit_pct)). Travel & WG add'l items
-    // pass through at cost — adjust if the workbook says otherwise.
-    const pct = (v) => {
-      const n = Number(v ?? 0);
-      return Number.isFinite(n) ? n / 100 : 0;
-    };
-    const r  = pct(estimateState.rack_install_profit_target);
-    const w  = pct(estimateState.wire_guidance_profit_target);
-    const rr = pct(estimateState.rental_rack_profit_target);
-    const rw = pct(estimateState.rental_wire_profit_target);
-    const markUp = (cost, p) => (p > 0 && p < 1 ? cost / (1 - p) : cost);
-    const computed_price =
-        markUp(cross.H38,  r)
-      + markUp(cross.H213, w)
-      + markUp(cross.H187, rr)
-      + markUp(cross.H226, rw)
-      + cross.travel_costs_total
-      + cross.H248;
-    // Final manual price nudge (round-up / discount) — the estimate-level
-    // override estimators make in the workbook. NULL/blank = 0.
-    const rawAdj = estimateState.price_adjustment ?? estimateRow?.price_adjustment ?? 0;
-    const price_adjustment = Number(rawAdj);
-    const adj = Number.isFinite(price_adjustment) ? price_adjustment : 0;
-    const price            = computed_price + adj;
-    const projected_cost   = cross.grand_total;
-    const projected_profit = price - projected_cost;
-    const margin           = price > 0 ? projected_profit / price : 0;
-    // labor_cost_per_day is the same across sets (it's derived from
-    // estimate-level inputs), so pull from any rollup. Falls back to 0 when
-    // no sets exist or the estimate inputs aren't filled in.
-    const labor_per_day    = Number(perSet[0]?.rollup?.labor_cost_per_day ?? 0);
-    cross.computed_price       = computed_price;
-    cross.price_adjustment     = adj;
-    cross.price_to_customer    = price;
-    cross.projected_cost       = projected_cost;
-    cross.projected_profit     = projected_profit;
-    cross.projected_margin     = margin;
-    cross.projected_buffer     = cross.buffer_days * labor_per_day;
-    cross.project_duration_wks = cross.project_duration_days / 7;
-
-    return { perSet, cross, enabledCount: enabled.length };
-  }
-
-  // Build the inner HTML — re-called on every toggle/save.
-  function render() {
-    const { perSet, cross, enabledCount } = computeAll();
-    const rev = Number(estimateRow?.revision_count ?? 0);
-
-    const lastRevDate = estimateRow?.latest_revision_date
-      ? String(estimateRow.latest_revision_date)
-      : null;
-    const revLine = rev > 0
-      ? `Revision ${rev}${lastRevDate ? ` · saved ${escapeHtml(lastRevDate)}` : ""}`
-      : "No revision saved yet";
-
-    const headerHtml = `
-      <div class="card px-5 py-4">
-        <div class="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <div class="text-xs font-extrabold uppercase tracking-wide text-black/60">Project Total</div>
-            <div class="text-2xl font-extrabold text-ink-900">${fmtMoney(cross.grand_total)}</div>
-            <div class="text-[11px] text-black/40">
-              ${enabledCount} of ${perSet.length} set${perSet.length === 1 ? "" : "s"} enabled · ${revLine}
-            </div>
-          </div>
-          <div class="flex items-center gap-3">
-            <span class="text-[11px] text-black/45">Finalize this quote on the</span>
-            <a href="#/estimate/${estimateId}/pdf" class="rounded-lg bg-brand-600 text-white text-sm px-4 py-2 font-semibold hover:bg-brand-700">Estimate PDF tab →</a>
-          </div>
-        </div>
-      </div>`;
-
-    const perSetRowsHtml = perSet.map(({ set, rollup }) => {
-      const enabled = Number(set.is_enabled) === 1;
-      const label   = set.label || kindLabel(set.kind);
-      const sub     = `${kindLabel(set.kind)}${set.kind === "option" ? ` · #${set.sort_order}` : ""}`;
-      return `
-        <tr class="border-t border-black/10 ${enabled ? "" : "opacity-50"}" data-set-row data-set-id="${set.id}">
-          <td class="py-2 px-3 align-middle">
-            <label class="inline-flex items-center cursor-pointer select-none">
-              <input type="checkbox" class="sr-only peer" data-set-toggle ${enabled ? "checked" : ""}/>
-              <span class="w-9 h-5 bg-black/20 rounded-full relative transition
-                           peer-checked:bg-emerald-500
-                           after:content-[''] after:absolute after:top-0.5 after:left-0.5
-                           after:bg-white after:rounded-full after:h-4 after:w-4 after:transition
-                           peer-checked:after:translate-x-4"></span>
-            </label>
-          </td>
-          <td class="py-2 px-3 align-middle">
-            <div class="text-sm font-semibold">${escapeHtml(label)}</div>
-            <div class="text-[11px] text-black/50">${escapeHtml(sub)}</div>
-          </td>
-          <td class="py-2 px-3 align-middle text-right tabular-nums text-sm">${fmtDays(rollup.D22)}</td>
-          <td class="py-2 px-3 align-middle text-right tabular-nums text-sm">${fmtDays(rollup.D23)}</td>
-          <td class="py-2 px-3 align-middle text-right tabular-nums text-sm">${fmtDays(rollup.D24)}</td>
-          <td class="py-2 px-3 align-middle text-right tabular-nums text-sm">${fmtMoney(rollup.travel_costs_total)}</td>
-          <td class="py-2 px-3 align-middle text-right tabular-nums text-sm font-semibold">${fmtMoney(rollup.grand_total)}</td>
-        </tr>`;
-    }).join("");
-
-    const perSetHtml = `
-      <div class="card px-5 py-4">
-        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10">
-          Sets
-        </div>
-        <div class="pt-3 overflow-x-auto">
-          <table class="min-w-full text-sm">
-            <thead>
-              <tr class="text-[11px] uppercase tracking-wide text-black/50">
-                <th class="py-1 px-3 text-left w-14">On</th>
-                <th class="py-1 px-3 text-left">Set</th>
-                <th class="py-1 px-3 text-right">Travel Days</th>
-                <th class="py-1 px-3 text-right">Rack Days</th>
-                <th class="py-1 px-3 text-right">WG Days</th>
-                <th class="py-1 px-3 text-right">Travel $</th>
-                <th class="py-1 px-3 text-right">Set Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${perSetRowsHtml || `<tr><td colspan="7" class="py-4 px-3 text-center text-black/40 text-sm">No metric sets.</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
-
-    // Only enabled sets contribute to the rollup. We use their labels in the
-    // per-row breakdowns when an aggregate row is expanded.
-    const enabledSets = perSet.filter(({ set }) => Number(set.is_enabled) === 1);
-    const setLabel = (set) => set.label || kindLabel(set.kind);
-
-    // Aggregate row with optional per-set expansion. `valueOf(rollup)` picks
-    // the per-set contribution to this row's total. `subRows` are an optional
-    // nested breakdown (e.g. Materials + Contract Labor under Rack Install).
-    // A rollup line rendered as a table row: label, one column per enabled set
-    // (Base, Option 1, …) showing that set's contribution, then the total — so
-    // the estimator can see how each total was derived instead of expanding rows.
-    const rollupRow = (label, amount, opts = {}) => {
-      const isBold   = opts.bold === true;
-      const isSubRow = opts.sub === true;
-      const valueOf  = opts.valueOf;
-      const subRows  = opts.subRows || [];
-
-      const labelClass = isBold
-        ? "font-extrabold uppercase tracking-wide text-black/70"
-        : (isSubRow ? "text-black/55 pl-6" : "text-black/70");
-      const valueClass = isBold ? "font-extrabold text-ink-900" : "";
-      const sizeClass  = isSubRow ? "text-xs" : "text-sm";
-
-      const setCells = enabledSets.map(({ rollup }) =>
-        `<td class="py-1.5 px-2 text-right tabular-nums text-black/50 ${isSubRow ? "text-[11px]" : "text-xs"}">${
-          valueOf ? fmtMoney(valueOf(rollup)) : ""
-        }</td>`).join("");
-
-      const row = `
-        <tr class="${isBold ? "border-t border-black/20" : ""}">
-          <td class="py-1.5 pr-3 whitespace-nowrap ${sizeClass} ${labelClass}">${escapeHtml(label)}</td>
-          ${setCells}
-          <td class="py-1.5 pl-3 text-right tabular-nums ${sizeClass} ${valueClass}">${fmtMoney(amount)}</td>
-        </tr>`;
-
-      const subRowsHtml = subRows.map(sr =>
-        rollupRow(sr.label, sr.amount, { sub: true, valueOf: sr.valueOf })
-      ).join("");
-
-      return row + subRowsHtml;
-    };
-
-    // Wraps rollup rows in a table with a per-set column header.
-    const rollupTable = (title, rowsHtml) => `
-      <div class="card px-5 py-4">
-        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10">
-          ${escapeHtml(title)}
-          <span class="text-[11px] italic text-black/40 font-normal normal-case tracking-normal">
-            (each enabled set, then the project total)
-          </span>
-        </div>
-        <div class="pt-2 overflow-x-auto">
-          <table class="w-full">
-            <thead><tr class="text-[10px] uppercase tracking-wide text-black/40 border-b border-black/5">
-              <th class="text-left py-1 pr-3"></th>
-              ${enabledSets.map(({ set }) => `<th class="py-1 px-2 text-right font-bold whitespace-nowrap">${escapeHtml(setLabel(set))}</th>`).join("")}
-              <th class="py-1 pl-3 text-right font-bold">Total</th>
-            </tr></thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </div>
-      </div>`;
-
-    const crossHtml = rollupTable("Cost Summary", `
-      ${rollupRow("Travel Costs", cross.travel_costs_total, { valueOf: (r) => r.travel_costs_total })}
-      ${rollupRow("Rack Install (Mat + Labor)", cross.H38, {
-        valueOf: (r) => r.H38,
-        subRows: [
-          { label: "Materials",      amount: cross.H39, valueOf: (r) => r.H39 },
-          { label: "Contract Labor", amount: cross.H44, valueOf: (r) => r.H44 },
-        ],
-      })}
-      ${rollupRow("Rentals — Rack Install", cross.H187, { valueOf: (r) => r.H187 })}
-      ${rollupRow("Wire Guidance (Mat + Labor)", cross.H213, {
-        valueOf: (r) => r.H213,
-        subRows: [
-          { label: "Materials",      amount: cross.H214, valueOf: (r) => r.H214 },
-          { label: "Contract Labor", amount: cross.H220, valueOf: (r) => r.H220 },
-        ],
-      })}
-      ${rollupRow("Rentals — Wire Guidance", cross.H226, { valueOf: (r) => r.H226 })}
-      ${rollupRow("Wire Guidance Add'l Items", cross.H248, { valueOf: (r) => r.H248 })}
-      ${rollupRow("Project Total", cross.grand_total, { bold: true, valueOf: (r) => r.grand_total })}
-    `);
-
-    // Travel Costs aggregate card — mirrors the per-set Travel Costs card
-    // that lives on Base/Option/PR tabs, but summed across enabled sets and
-    // expandable to show each set's contribution.
-    const travelCostsHtml = rollupTable("Travel Costs", `
-      ${rollupRow("Lodging",          cross.lodging,          { valueOf: (r) => r.lodging })}
-      ${rollupRow("Mgmt Travel",      cross.mgmt_travel,      { valueOf: (r) => r.mgmt_travel })}
-      ${rollupRow("Travel Day Costs", cross.travel_day_costs, { valueOf: (r) => r.travel_day_costs })}
-      ${rollupRow("Travel Costs Total", cross.travel_costs_total, { bold: true, valueOf: (r) => r.travel_costs_total })}
-    `);
-
-    // Cells migrated from the General Info "Output Variables" / "Results"
-    // cards. Pricing/profit uses a simple "price = cost / (1 - profit%)"
-    // markup model — refine as the workbook's blended logic gets pinned down.
-    const fmtPct = (v) => {
-      const n = Number(v);
-      if (!Number.isFinite(n)) return "—";
-      return (n * 100).toFixed(1) + "%";
-    };
-    // `opts.formula` shows the formula being used as a small italic tip below
-    // the value cell. Use for cells whose calc is an approximation we want
-    // documented while it's being verified against the workbook.
-    const readout = (label, valueHtml, opts = {}) => {
-      const formula = opts.formula
-        ? `<div class="text-[10px] italic text-black/45 leading-tight pt-0.5 px-0.5">
-             <span class="font-semibold not-italic text-black/55">ƒ</span> ${escapeHtml(opts.formula)}
-           </div>`
-        : "";
-      return `
-        <div class="flex flex-col gap-1">
-          <label class="text-[11px] font-semibold text-black/60">${escapeHtml(label)}</label>
-          <div class="text-sm font-semibold tabular-nums ${opts.color || "text-ink-900"} bg-black/[0.03] border border-black/10 rounded-lg px-3 py-1.5">
-            ${valueHtml}
-          </div>
-          ${formula}
-        </div>`;
-    };
-
-    const resultsHtml = `
-      <div class="card px-5 py-4">
-        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10">
-          Estimating Results
-          <span class="text-[11px] italic text-black/40 font-normal normal-case tracking-normal">
-            (cross-tab calcs — uses enabled sets + General Info inputs)
-          </span>
-        </div>
-        <div class="pt-3 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-3">
-          <div class="flex flex-col gap-3">
-            ${readout("Price to Customer", fmtMoney(cross.price_to_customer), {
-              color: cross.price_adjustment ? "text-amber-700" : undefined,
-              formula: cross.price_adjustment
-                ? `computed ${fmtMoney(cross.computed_price)} ${cross.price_adjustment >= 0 ? "+" : "−"} ${fmtMoney(Math.abs(cross.price_adjustment))} adjustment (set on General Info)`
-                : "Σ section_cost / (1 − profit% per category)",
-            })}
-            ${readout("Projected Profit", fmtMoney(cross.projected_profit), {
-              color: "text-emerald-700",
-              formula: "Price to Customer − Projected Cost",
-            })}
-            ${readout("Projected Cost", fmtMoney(cross.projected_cost), {
-              formula: "Project Total (sum of 6 sections across enabled sets)",
-            })}
-            ${readout("Projected Buffer", fmtMoney(cross.projected_buffer), {
-              formula: "(M20 + M21) buffer days × Labor Cost/Day — verify against workbook",
-            })}
-            ${readout("Projected Profit Margin", fmtPct(cross.projected_margin), {
-              formula: "Projected Profit ÷ Price to Customer",
-            })}
-          </div>
-          <div class="flex flex-col gap-3">
-            <div class="flex flex-col gap-1">
-              <label class="text-[11px] font-semibold text-black/60">Projected Project Duration</label>
-              <div class="flex items-center gap-2">
-                <div class="text-sm font-semibold tabular-nums bg-black/[0.03] border border-black/10 rounded-lg px-3 py-1.5 flex-1">
-                  ${fmtDays(cross.project_duration_days)} <span class="text-xs text-black/40">days</span>
-                </div>
-                <div class="text-sm font-semibold tabular-nums bg-black/[0.03] border border-black/10 rounded-lg px-3 py-1.5 flex-1">
-                  ${fmtDays(cross.project_duration_wks)} <span class="text-xs text-black/40">weeks</span>
-                </div>
-              </div>
-              <div class="text-[10px] italic text-black/45 leading-tight pt-0.5 px-0.5">
-                <span class="font-semibold not-italic text-black/55">ƒ</span> Σ (D22 + D23 + D24) across enabled sets · weeks = days ÷ 7 — workbook may use max() for parallel crews
-              </div>
-            </div>
-            ${readout("Expected Mobilization Count (Rack)", fmtDays(cross.mob_count_rack), {
-              formula: "Σ mobilizations from enabled sets where rack_days > 0",
-            })}
-            ${readout("Expected Mobilization Count (Wire)", fmtDays(cross.mob_count_wire), {
-              formula: "Σ mobilizations from enabled sets where wire_days > 0",
-            })}
-            ${readout("Project Travel Days — Cost", fmtMoney(cross.project_travel_days_cost), {
-              formula: "Σ travel_day_costs (G35 = labor_cost_per_travel_day × D22) across enabled sets",
-            })}
-            ${readout("Project Labor Days — Cost", fmtMoney(cross.project_labor_days_cost), {
-              formula: "Σ (H44 + H220) across enabled sets",
-            })}
-          </div>
-        </div>
-      </div>`;
-
-    // QuickBooks Bundle Output — aggregate across enabled sets, with per-set
-    // expansion per bundle. Each bundle's lines (Contract Labor, Materials,
-    // OH&P, etc.) are summed across enabled sets; clicking a bundle expands
-    // to show each set's total.
-    const BUNDLE_KINDS = [
-      { key: "installation",   title: "Installation (Labor Bundle)" },
-      { key: "rentals",        title: "Rentals (Bundle)" },
-      { key: "wg_labor",       title: "Wire Guidance (Labor Bundle)" },
-      { key: "wg_additional",  title: "Wire Guidance (Additional Items)" },
-      { key: "mobilization",   title: "Mobilization" },
-      { key: "remobilization", title: "Remobilization" },
-      { key: "downtime",       title: "Downtime" },
-    ];
-
-    // Build aggregate bundle = sum of corresponding lines across enabled sets.
-    function aggregateBundle(bundleKey) {
-      const sample = enabledSets[0]?.bundles?.[bundleKey];
-      if (!sample) return { title: BUNDLE_KINDS.find(b => b.key === bundleKey)?.title || bundleKey, total: 0, lines: [] };
-      // Sum lines element-wise. Preserve labels + opts from the first set.
-      const aggLines = sample.lines.map((entry, idx) => {
-        const [label, , opts] = entry;
-        let sum = 0;
-        for (const { bundles } of enabledSets) {
-          const line = bundles?.[bundleKey]?.lines?.[idx];
-          if (line && Number.isFinite(Number(line[1]))) sum += Number(line[1]);
-        }
-        return [label, sum, opts];
-      });
-      let total = 0;
-      for (const { bundles } of enabledSets) {
-        total += Number(bundles?.[bundleKey]?.total) || 0;
-      }
-      return { title: sample.title, total, lines: aggLines };
-    }
-
-    const renderBundle = (bundleKey) => {
-      const agg = aggregateBundle(bundleKey);
-      const expandKey = `bundle_${bundleKey}`;
-      const expanded  = expandedRows.has(expandKey);
-      const lineRows  = agg.lines.map(([label, value, opts = {}]) => `
-        <div class="grid grid-cols-[1fr_auto] gap-x-3 py-0.5 pl-5">
-          <span class="text-xs ${opts.stub ? "text-black/30 italic" : "text-black/60"}">${escapeHtml(label)}${opts.stub ? " *" : ""}</span>
-          <span class="text-xs tabular-nums ${opts.stub ? "text-black/30" : ""}">${fmtMoney(value)}</span>
-        </div>`).join("");
-      const perSetRows = enabledSets.length === 0
-        ? `<div class="text-[11px] italic text-black/40 pl-5 py-1">No enabled sets contribute.</div>`
-        : enabledSets.map(({ set, bundles }) => `
-            <div class="grid grid-cols-[1fr_auto] gap-x-3 py-0.5 pl-5 text-[11px] text-black/55">
-              <span>${escapeHtml(setLabel(set))}</span>
-              <span class="tabular-nums">${fmtMoney(bundles?.[bundleKey]?.total ?? 0)}</span>
-            </div>`).join("");
-      return `
-        <div class="pb-3">
-          <div class="grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2 py-1.5 border-b border-black/10 mb-1 cursor-pointer hover:bg-black/[0.02] -mx-2 px-2 rounded"
-               data-rollup-toggle="${expandKey}">
-            <svg class="w-3 h-3 text-black/40 transition-transform ${expanded ? "rotate-90" : ""}" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-              <path d="M9 6l6 6-6 6"/>
-            </svg>
-            <span class="text-sm font-bold text-black/80">${escapeHtml(agg.title)}</span>
-            <span class="text-sm tabular-nums font-bold">${fmtMoney(agg.total)}</span>
-          </div>
-          ${lineRows}
-          <div class="${expanded ? "" : "hidden"} mt-1 pt-1 border-t border-dashed border-black/10">
-            <div class="text-[10px] uppercase tracking-wider text-black/40 pl-5 pb-1">By Set</div>
-            ${perSetRows}
-          </div>
-        </div>`;
-    };
-
-    const bundleHtml = `
-      <div class="card px-5 py-4">
-        <div class="text-sm font-extrabold uppercase tracking-wide text-black/70 pb-2 border-b border-black/10">
-          QuickBooks Bundle Output
-          <span class="text-[11px] italic text-black/40 font-normal normal-case tracking-normal">
-            (aggregate across enabled sets · click a bundle for per-set totals · * = not yet modeled)
-          </span>
-        </div>
-        <div class="pt-3 grid grid-cols-1 lg:grid-cols-2 gap-x-8">
-          <div>
-            ${renderBundle("installation")}
-            ${renderBundle("rentals")}
-            ${renderBundle("wg_labor")}
-            ${renderBundle("wg_additional")}
-          </div>
-          <div>
-            ${renderBundle("mobilization")}
-            ${renderBundle("remobilization")}
-            ${renderBundle("downtime")}
-          </div>
-        </div>
-      </div>`;
-
-    container.innerHTML = `
-      <div class="grid grid-cols-1 gap-3">
-        ${headerHtml}
-        ${perSetHtml}
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
-          ${crossHtml}
-          ${travelCostsHtml}
-        </div>
-        ${bundleHtml}
-        ${resultsHtml}
-      </div>`;
-  }
-
-  render();
-
-  // Toggle clicks → PATCH is_enabled → recompute.
-  async function onToggleChange(e) {
-    const cb = e.target.closest("[data-set-toggle]");
-    if (!cb) return;
-    const row = cb.closest("[data-set-row]");
-    const sid = Number(row?.dataset?.setId);
-    const set = metricSets.find(s => s.id === sid);
-    if (!set) return;
-    const newVal = cb.checked ? 1 : 0;
-    cb.disabled = true;
-    try {
-      await api(`/quoting/metric-sets/${sid}`, {
-        method: "PATCH",
-        body:   JSON.stringify({ is_enabled: newVal }),
-      });
-      set.is_enabled = newVal;
-      render();
-    } catch (err) {
-      cb.checked = !cb.checked;
-      alert("Failed to toggle: " + (err?.message || err));
-    } finally {
-      cb.disabled = false;
-    }
-  }
-
-  // Reasons a customer-driven revision happens (fixed list → clean analytics).
-  const REVISION_REASONS = ["Initial estimate", "Price / budget", "Scope change",
-    "Added items", "Removed items", "Material / spec change", "Timeline change",
-    "Clarification / correction", "Other"];
-
-  // Ask WHY before snapshotting, so we can report who revises + why.
-  function openRevisionSaveModal(currentTotal, onConfirm) {
-    const overlay = document.createElement("div");
-    overlay.className = "fixed inset-0 z-[80] bg-black/40 flex items-center justify-center p-4";
-    overlay.innerHTML = `
-      <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
-        <div class="text-base font-bold text-ink-900 mb-1">Save revision</div>
-        <div class="text-xs text-black/50 mb-3">Snapshots the current numbers (${fmtMoney(currentTotal)}) and logs why, for revision analytics.</div>
-        <label class="block mb-3"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div>
-          <select data-reason class="input text-sm py-1.5 w-full">${REVISION_REASONS.map(r => `<option>${r}</option>`).join("")}</select></label>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Note (optional)</div>
-          <textarea data-note rows="2" class="input text-sm py-1.5 w-full" placeholder="Detail, e.g. which items changed"></textarea></label>
-        <div class="mt-4 flex items-center justify-end gap-2">
-          <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
-          <button data-save class="btn-primary text-sm px-4 py-1.5">Save revision</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-    const close = () => overlay.remove();
-    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
-    overlay.querySelector("[data-cancel]").addEventListener("click", close);
-    overlay.querySelector("[data-save]").addEventListener("click", () => {
-      const reason = overlay.querySelector("[data-reason]").value;
-      const note = overlay.querySelector("[data-note]").value.trim() || null;
-      close(); onConfirm({ reason, note });
-    });
-  }
-
-  async function openRevisionHistoryModal() {
-    const overlay = document.createElement("div");
-    overlay.className = "fixed inset-0 z-[80] bg-black/40 flex items-center justify-center p-4";
-    overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[85vh] overflow-auto" data-card><div class="text-sm text-black/40">Loading…</div></div>`;
-    document.body.appendChild(overlay);
-    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) overlay.remove(); });
-    const card = overlay.querySelector("[data-card]");
-    try {
-      const revs = (await api(`/estimates/${estimateId}/revisions`)).revisions || [];
-      card.innerHTML = `
-        <div class="flex items-center justify-between mb-3"><div class="text-base font-bold text-ink-900">Revision history</div>
-          <button data-close class="text-black/40 hover:text-black/70 text-xl leading-none">&times;</button></div>
-        ${revs.length ? `<div class="space-y-2">${revs.map(r => `
-          <div class="rounded-xl border border-black/10 px-3 py-2">
-            <div class="flex items-center justify-between gap-2">
-              <div class="text-sm font-semibold text-ink-900">Rev ${r.revision_number} <span class="text-black/40 font-normal">· ${escapeHtml(r.reason || "—")}</span></div>
-              <div class="text-xs tabular-nums text-black/60">${r.total_amount != null ? fmtMoney(r.total_amount) : ""}</div></div>
-            <div class="text-[11px] text-black/45">${escapeHtml((r.saved_at || "").slice(0, 10))}${r.saved_by ? " · " + escapeHtml(r.saved_by) : ""}${r.note ? " · " + escapeHtml(r.note) : ""}</div>
-          </div>`).join("")}</div>` : `<div class="text-sm text-black/45 py-4">No revisions saved yet.</div>`}`;
-      card.querySelector("[data-close]").addEventListener("click", () => overlay.remove());
-    } catch (e) { card.innerHTML = `<div class="text-sm text-red-700">Failed to load history.</div>`; }
-  }
-
-  // Save Revision button → capture reason → POST snapshot → bump header rev count.
-  async function onSaveRevisionClick(e) {
-    const btn = e.target.closest("[data-save-revision]");
-    if (!btn || btn.hasAttribute("disabled")) return;
-    const { cross } = computeAll();
-    openRevisionSaveModal(cross.grand_total, async ({ reason, note }) => {
-      btn.setAttribute("disabled", "true");
-      const origText = btn.textContent;
-      btn.textContent = "Saving…";
-      try {
-        const resp = await api(`/estimates/${estimateId}/revisions`, {
-          method: "POST", body: JSON.stringify({ reason, note, total_amount: cross.grand_total }),
-        });
-        const newRev = Number(resp?.revision_number ?? 0);
-        if (estimateRow) {
-          estimateRow.revision_count       = newRev;
-          estimateRow.latest_revision_date = resp?.latest_revision_date ?? estimateRow.latest_revision_date;
-        }
-        render();
-        const stamp = container.querySelector("[data-rev-saved-at]");
-        if (stamp) stamp.textContent = `Saved rev ${newRev}`;
-      } catch (err) {
-        alert("Save failed: " + (err?.message || err));
-      } finally {
-        btn.removeAttribute("disabled");
-        btn.textContent = origText;
-      }
-    });
-  }
-
-  function onRevHistoryClick(e) { if (e.target.closest("[data-rev-history]")) openRevisionHistoryModal(); }
-
-  // Update pipeline → push this quote's computed summary onto its linked row.
-  // labor/travel are DAY counts (D23+D24 on-site, D22 travel); OH&P $ = projected
-  // profit and OH&P % = margin, matching the Rolling-Revenue columns.
-  async function onSyncPipelineClick(e) {
-    const btn = e.target.closest("[data-sync-pipeline]");
-    if (!btn || btn.hasAttribute("disabled")) return;
-    const { perSet, cross } = computeAll();
-    const on = perSet.filter(({ set }) => Number(set.is_enabled) === 1);
-    const payload = {
-      contract_value: cross.price_to_customer,
-      ohp_amount:     cross.projected_profit,
-      ohp_pct:        Math.round((cross.projected_margin || 0) * 1000) / 10,
-      labor_days:     on.reduce((s, r) => s + (Number(r.rollup.D23) || 0) + (Number(r.rollup.D24) || 0), 0),
-      travel_days:    on.reduce((s, r) => s + (Number(r.rollup.D22) || 0), 0),
-    };
-    const msg = container.querySelector("[data-sync-msg]");
-    btn.setAttribute("disabled", "true"); const t = btn.textContent; btn.textContent = "Updating…";
-    try {
-      await api(`/opportunities/by-estimate/${estimateId}/sync-metrics`, { method: "POST", body: JSON.stringify(payload) });
-      if (msg) { msg.textContent = "Pipeline updated ✓"; msg.className = "text-[11px] font-semibold text-emerald-700"; }
-    } catch (err) {
-      let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch {}
-      if (msg) { msg.textContent = d; msg.className = "text-[11px] font-semibold text-red-600"; }
-    } finally { btn.removeAttribute("disabled"); btn.textContent = t; }
-  }
-
-  // Rollup-row chevron clicks → toggle the per-set expansion panel.
-  function onRollupToggleClick(e) {
-    const row = e.target.closest("[data-rollup-toggle]");
-    if (!row) return;
-    const key = row.getAttribute("data-rollup-toggle");
-    if (!key) return;
-    if (expandedRows.has(key)) expandedRows.delete(key);
-    else                       expandedRows.add(key);
-    render();
-  }
-
-  container.addEventListener("change", onToggleChange);
-  container.addEventListener("click", onSaveRevisionClick);
-  container.addEventListener("click", onRevHistoryClick);
-  container.addEventListener("click", onSyncPipelineClick);
-  container.addEventListener("click", onRollupToggleClick);
-  window.addEventListener("hashchange", () => {
-    container.removeEventListener("change", onToggleChange);
-    container.removeEventListener("click", onSaveRevisionClick);
-    container.removeEventListener("click", onRevHistoryClick);
-    container.removeEventListener("click", onRollupToggleClick);
-  }, { once: true });
 }
 
 // ── Customer picker ─────────────────────────────────────────────────────────
@@ -2684,9 +2134,9 @@ async function renderCustomerPicker(routeFn) {
 async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn) {
 
   // Local state. Only fields that are EITHER user-input on this tab OR
-  // calculated from inputs on this tab. Cross-tab results (per-set rollups,
-  // pricing, profit, duration) live on the Review tab where they have the
-  // metric set data needed to compute them.
+  // calculated from inputs on this tab. Cross-set results (pricing, profit,
+  // duration) are computed further down from the metric sets fetched here
+  // (computeRollupResults / updateResultsCells).
   const state = {
     // General Information — start blank; the user fills these in
     quote_number:          "",
@@ -2703,8 +2153,8 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     project_city:          "",
     project_state:         "",
     end_date:              "",   // calc — lands in a later phase
-    // revision_count + latest_revision_date are server-managed by the
-    // Save Revision button on the Review tab — not editable here.
+    // revision_count + latest_revision_date are server-managed — not
+    // editable here.
 
     // Key Estimating Inputs — what the user fills in to drive the rollup
     one_way_travel_hrs:    "",
@@ -2766,7 +2216,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     "lodging_cost_per_day", "mgmt_travel_multiplier",
     "price_adjustment",
     // revision_count + latest_revision_date are NOT patchable — they are
-    // server-managed by the Save Revision button on the Review tab.
+    // server-managed.
   ]);
 
   // Debounced PATCH — one timer per field so fast typing on different
@@ -2793,10 +2243,42 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   // fallbacks so the page still renders if the API call fails.
   let lookups = {};
   try {
-    lookups = await api("/quoting/lookup-values");
+    lookups = await api(`/quoting/lookup-values?estimate_id=${estimateId}`);
   } catch (err) {
     console.warn("Failed to load quoting lookup values; using static defaults.", err);
   }
+
+  // ── S3/S4/S5 data: metric sets + their lines ──────────────────────────────
+  // The OPTION SELECTOR (S3), flags row (S4) and Quick Books Outputs matrix
+  // (S5) are driven by the estimate's REAL metric sets. Forecast + bundle
+  // values reuse the shared pure math (computeSetRollup / computeSetBundles,
+  // utils/qm-rollup.js) with the data fetched here — no invented formulas.
+  let metricSets  = [];
+  let metricLines = [];
+  let cellOverrides = {};   // typed-over cells (#1 sheet parity — server map)
+  try {
+    [metricSets, metricLines, cellOverrides] = await Promise.all([
+      api(`/quoting/metric-sets?estimate_id=${estimateId}`),
+      api(`/quoting/metric-lines?estimate_id=${estimateId}`),
+      api(`/estimates/${estimateId}/cell-overrides`).then(r => (r && r.overrides) || {}).catch(() => ({})),
+    ]);
+  } catch (err) {
+    console.warn("Failed to load metric sets/lines; Option Selector renders empty.", err);
+  }
+  // Locked revisions render the S3 inputs disabled (read-only parity view).
+  const isLocked = !!(estimateRow && estimateRow.locked);
+
+  // Cell-override client (shared with the metrics tabs): optimistic local
+  // update, 300ms debounced PATCH, alert + rollback on failure. On this tab
+  // the EDITABLE overrides are the Estimating Results green cells (r:D32..
+  // r:D36, r:G32..r:G36); the S3 forecast columns + S5 matrix consume every
+  // set's s{setId}:* / l{lineId}:* overrides read-only.
+  const ovClient = createCellOverrideClient({
+    estimateId,
+    overrides: cellOverrides,
+    onError:   () => updateResultsCells(),
+  });
+  const R_OVR_REFS = ["D32", "D33", "D34", "D35", "D36", "G32", "G33", "G34", "G35", "G36"];
   const lookupKeys = (category, fallback) => {
     const rows = lookups[category];
     return Array.isArray(rows) && rows.length ? rows.map(r => r.key) : fallback;
@@ -2956,13 +2438,19 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     return String(v);
   }
 
-  // ── General Information helpers ────────────────────────────────────────────
-  // Each helper emits TWO grid cells — a label cell + a value cell — so the
-  // section's per-column grid lays them out as name | value pairs. The value
-  // cell can optionally include a row of inline "chips" beneath the input to
-  // surface self-contained derived values (e.g. Labor Cost/Day under Crew
-  // Size). Chips use data-est-calc so the existing setCalcCell() helper
-  // updates them on input change.
+  // ── ROLL UP grid helpers ───────────────────────────────────────────────────
+  // The tab mirrors the sheet's "0. ROLL UP" grid: banner blocks in sheet row
+  // order, each a 4-column spreadsheet grid (label | value | label | value)
+  // matching sheet cols C/D-E (left half) and F/G-H (right half). Each helper
+  // emits TWO grid cells — a label cell + a value cell. gap-px over a dark
+  // grid background paints the spreadsheet cell borders, so every cell must
+  // be opaque.
+  const DASH       = '<span class="text-black/30">—</span>';
+  const CELL_LABEL = "qm-cell-label";
+  const CELL_VALUE = "qm-cell-value";
+  // Filler for sheet rows whose left or right half is empty.
+  const EMPTY_PAIR = '<div class="qm-cell-label"></div><div class="qm-cell-value" style="background:#fff"></div>';
+
   // Small "i" info bubble with a native tooltip — explains how a field feeds
   // the calc. Accessible, zero-JS.
   function infoTip(text) {
@@ -2972,31 +2460,15 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   }
 
   function giLabel(text, tip) {
-    return `<div class="text-[11px] font-semibold text-black/60 leading-tight pt-1.5">${escapeHtml(text)}${infoTip(tip)}</div>`;
+    return `<div class="${CELL_LABEL}"><span>${escapeHtml(text)}${infoTip(tip)}</span></div>`;
   }
 
-  // A single chip — { label, calcKey, initialHtml }. Rendered as a small
-  // colored pill that shows a label + a live value.
-  function chip(label, calcKey, initialHtml) {
-    return `
-      <span class="inline-flex items-baseline gap-1.5 text-[11px] px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-100">
-        <span class="font-bold uppercase tracking-wider text-[10px] text-blue-700/80">${escapeHtml(label)}</span>
-        <span class="tabular-nums font-semibold" data-est-calc="${calcKey}">${initialHtml}</span>
-      </span>`;
-  }
-  // Wraps a list of chips in a flex row that sits below an input.
-  function chipsRow(chips) {
-    if (!chips || !chips.length) return "";
-    return `<div class="flex flex-wrap gap-1.5 mt-1.5">${chips.join("")}</div>`;
-  }
-  // Wraps a value cell so chips appear below the input.
-  function withChips(inputHtml, chips) {
-    const cr = chipsRow(chips);
-    return cr ? `<div class="flex flex-col">${inputHtml}${cr}</div>` : inputHtml;
-  }
-  // Sub-heading inside a card body — spans both columns of the label|value grid.
-  function subHead(text) {
-    return `<div class="col-span-2 text-[10px] font-bold uppercase tracking-widest text-black/45 pt-3 first:pt-0 pb-1 border-b border-black/10">${escapeHtml(text)}</div>`;
+  // Wraps input markup in an opaque value cell so the gap-px grid borders
+  // render around it. (The old inline "chips" were replaced by dedicated
+  // sheet rows in the "Key Estimating Output Variables" block — the same
+  // data-est-calc keys keep them live via setCalcCell.)
+  function withChips(inputHtml) {
+    return `<div class="${CELL_VALUE}">${inputHtml}</div>`;
   }
 
   function giText(label, key, opts = {}) {
@@ -3057,7 +2529,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
                value="${escapeHtml(String(state[keyPct] ?? ""))}"/>
         <span class="text-xs text-black/40">%</span>
       </div>`;
-    return giLabel(label, opts.tip) + input;
+    return giLabel(label, opts.tip) + withChips(input);
   }
 
   // Compound: Crew Count + Crew Size on the same line. Drives Labor Cost/Day.
@@ -3082,16 +2554,16 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   function giDate(label, key, opts = {}) {
     const placeholder = opts.placeholder || "Select Date";
     const hasVal = !!state[key];
-    return giLabel(label) + `
+    return giLabel(label) + withChips(`
       <input type="${hasVal ? "date" : "text"}" class="input text-sm py-1.5"
              data-est-input="${key}" data-est-date
              placeholder="${escapeHtml(placeholder)}"
-             value="${escapeHtml(state[key] ?? "")}"/>`;
+             value="${escapeHtml(state[key] ?? "")}"/>`);
   }
 
   // Compound value cell: contact first + last on the same line.
   function giContact(label) {
-    return giLabel(label) + `
+    return giLabel(label) + withChips(`
       <div class="flex items-center gap-2">
         <input type="text" class="input text-sm py-1.5 flex-1 min-w-0"
                data-est-input="contact_first"
@@ -3099,7 +2571,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
         <input type="text" class="input text-sm py-1.5 flex-1 min-w-0"
                data-est-input="contact_last"
                value="${escapeHtml(state.contact_last)}" placeholder="Last Name"/>
-      </div>`;
+      </div>`);
   }
 
   // Compound value cell: city + state select on the same line. The select
@@ -3108,7 +2580,7 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     const stateOptions =
       `<option value="" ${!state.project_state ? "selected" : ""}>State</option>` +
       US_STATES.map(s => `<option value="${s}" ${state.project_state === s ? "selected" : ""}>${s}</option>`).join("");
-    return giLabel(label) + `
+    return giLabel(label) + withChips(`
       <div class="flex items-center gap-2">
         <input type="text" class="input text-sm py-1.5 flex-1 min-w-0"
                data-est-input="project_city"
@@ -3116,54 +2588,59 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
         <select class="input text-sm py-1.5 w-20" data-est-input="project_state">
           ${stateOptions}
         </select>
-      </div>`;
+      </div>`);
   }
 
-  // Read-only calculated value cell (Start Date, Quote Submittal Date, End
-  // Date). Tagged with data-est-calc so it can be refreshed live.
-  function giCalc(label, key) {
+  // Read-only calculated value cell (Customer, Quote Submittal Date, Labor
+  // Cost Per Day, …). Tagged with data-est-calc so it can be refreshed live.
+  // `htmlOverride` supplies pre-formatted HTML (money, error labels) instead
+  // of the raw state value.
+  function giCalc(label, key, htmlOverride, opts = {}) {
     const v = state[key];
-    return giLabel(label) + `
+    const html = htmlOverride != null ? htmlOverride : (v ? escapeHtml(v) : DASH);
+    return giLabel(label, opts.tip) + `
       <div data-est-calc="${key}"
-           class="text-sm tabular-nums bg-black/[0.03] border border-black/10 rounded-xl px-3 py-1.5 text-black/70">
-        ${v ? escapeHtml(v) : '<span class="text-black/30">—</span>'}
+           class="${CELL_VALUE} text-sm tabular-nums text-black/70">
+        ${html}
       </div>`;
   }
 
-  // ── section card ───────────────────────────────────────────────────────────
-  // A collapsible card: clicking the header toggles its body open/closed.
-  // `opts.resetKey` adds a small "Reset" button next to the chevron that fires
-  // a data-reset-card="<key>" click — wired below to clear that card's fields.
-  function section(title, contentHtml, opts = {}) {
-    const note = opts.note
-      ? `<span class="text-[11px] italic text-black/40">${escapeHtml(opts.note)}</span>`
-      : "";
-    const resetBtn = opts.resetKey
-      ? `<button type="button" data-reset-card="${escapeHtml(opts.resetKey)}"
-                 class="text-[11px] font-semibold text-red-600 hover:text-red-800 px-2 py-0.5 rounded hover:bg-red-50 whitespace-nowrap"
-                 title="Clear every input in this card">
-           Reset
-         </button>`
-      : "";
+  // Read-only display cell for values NOT tracked in this tab's state —
+  // server-managed columns (Revision Count, Latest Revision Date). No
+  // data-est-calc hook, so it never gets live-updated here.
+  function giReadOnly(label, html, opts = {}) {
+    return giLabel(label, opts.tip) +
+      `<div class="${CELL_VALUE} text-sm tabular-nums text-black/70">${html}</div>`;
+  }
+
+  // Green computed result cell (the sheet's read-only green). Tagged with
+  // data-result="<sheet cell>" and refreshed live by updateResultsCells()
+  // whenever the per-set math changes. Inline colors per the prebuilt-CSS
+  // constraint (green #d9ead3, explicit #111 text).
+  const RESULT_STYLE = "background:#d9ead3;color:#111";
+  function giResult(label, cellRef, opts = {}) {
+    const extra = opts.extraHtml ? ` ${opts.extraHtml}` : "";
+    return giLabel(label, opts.tip) + `
+      <div class="${CELL_VALUE} text-sm tabular-nums" style="${RESULT_STYLE}"><span data-result="${cellRef}">${DASH}</span>${extra}</div>`;
+  }
+
+  // ── banner block ───────────────────────────────────────────────────────────
+  // A sheet banner row (dark full-width header, white uppercase text — the
+  // sheet's col-B section banners) + its 4-column label|value grid.
+  const GRID4 = "qm-grid4";
+  function resetBtn(key) {
+    return `<button type="button" data-reset-card="${escapeHtml(key)}"
+                    class="text-[10px] font-semibold uppercase tracking-wide text-white/70 hover:text-white px-1.5 py-0.5 rounded hover:bg-white/10 whitespace-nowrap"
+                    title="Clear every input in this block">Reset</button>`;
+  }
+  function block(title, cellsHtml, opts = {}) {
     return `
-      <div class="card px-5 py-4" data-section>
-        <div class="w-full flex items-center justify-between gap-3 pb-2 border-b border-black/10">
-          <button type="button" data-section-toggle
-                  class="flex-1 flex items-center justify-between gap-3 text-left cursor-pointer select-none">
-            <span class="flex items-baseline gap-3">
-              <span class="text-sm font-extrabold uppercase tracking-wide text-black/70">${escapeHtml(title)}</span>
-              ${note}
-            </span>
-            <svg class="w-4 h-4 text-black/40 shrink-0 transition-transform" data-section-chevron
-                 fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-              <path d="M6 9l6 6 6-6"/>
-            </svg>
-          </button>
-          ${resetBtn}
+      <div class="qm-sheet border border-black/25 rounded-sm overflow-hidden" style="background:#fff">
+        <div class="qm-banner">
+          <span class="text-xs font-extrabold uppercase tracking-wider">${escapeHtml(title)}</span>
+          ${opts.bannerExtra || ""}
         </div>
-        <div class="pt-3" data-section-body>
-          ${contentHtml}
-        </div>
+        <div class="${GRID4}">${cellsHtml}</div>
       </div>`;
   }
 
@@ -3210,78 +2687,776 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   publishEstimateState();   // initial publish on mount
 
   // ── page HTML ──────────────────────────────────────────────────────────────
-  // Pure data-entry tab: 2 cards side-by-side on wide screens. Self-contained
-  // calcs (Labor Cost/Day, Travel Days/Mob, Downtime Target) appear as small
-  // inline chips under the input that drives them. Cross-tab results
-  // (per-set rollups, pricing, profit, duration) live on the Review tab.
+  // Sheet-parity layout: the ROLL UP tab's banner blocks in sheet row order
+  // (GENERAL INFORMATION r8-16, Key Estimating Inputs r17-24, Key Estimating
+  // Output Variables r25-30, Estimating Results r31-36, Forcasting Outputs
+  // r37-39). Each block is a 4-column grid mirroring sheet cols C/D-E (left
+  // half) and F/G-H (right half); labels are VERBATIM from the workbook.
+  // Cross-set results (pricing, profit, duration, forecast columns) render
+  // LIVE via computeRollupResults / updateResultsCells below.
 
-  const generalCols = "grid grid-cols-[44%_1fr] gap-x-3 gap-y-1.5 items-start content-start";
-  const inputsCols  = "grid grid-cols-[44%_1fr] gap-x-3 gap-y-1.5 items-start content-start";
+  // Server-managed columns.
+  const revisionCountHtml = (estimateRow && estimateRow.revision_count != null && estimateRow.revision_count !== "")
+    ? escapeHtml(String(estimateRow.revision_count))
+    : DASH;
+  const latestRevisionHtml = (estimateRow && estimateRow.latest_revision_date)
+    ? escapeHtml(toUSDate(estimateRow.latest_revision_date) || String(estimateRow.latest_revision_date))
+    : DASH;
+  const endDateHtml = state.end_date
+    ? escapeHtml(toUSDate(state.end_date) || String(state.end_date))
+    : DASH;
 
-  const generalInfoHtml = `
-    <div class="${generalCols}">
-      ${subHead("Project")}
-      ${giText("Quote #", "quote_number", { placeholder: "Enter quote number" })}
-      ${giText("Quote Description (Short)", "quote_description", { placeholder: "Enter short description" })}
-      ${giCalc("Customer", "customer")}
-      ${giText("End User", "end_user", { placeholder: "Enter end user" })}
+  // GENERAL INFORMATION — sheet rows 8-16.
+  const generalInfoCells = `
+    ${giText("Quote #:", "quote_number", { placeholder: "Enter quote number" })}
+    ${giText("Quote Description (Short)", "quote_description", { placeholder: "Enter short description" })}
+    ${giContact("Contact")}
+    ${EMPTY_PAIR}
+    ${giCalc("Customer", "customer")}
+    ${giText("End User", "end_user", { placeholder: "<Enter text>" })}
+    ${giText("Quoted By (First and Last Initials)", "quoted_by", { placeholder: "First and Last Initials" })}
+    ${giText("Quote Notes", "quote_notes", { placeholder: "<Enter text>" })}
+    ${giDate("Date of Request - ORIGINAL", "date_of_request")}
+    ${EMPTY_PAIR}
+    ${giDate("Start Date", "start_date")}
+    ${EMPTY_PAIR}
+    ${giCalc("Quote Submittal Date", "quote_submittal_date")}
+    ${EMPTY_PAIR}
+    ${giCityState("Project Location")}
+    ${giReadOnly("Revision Count", revisionCountHtml, { tip: "Server-managed revision-history counter." })}
+    ${giCalc("End Date (7-Days a week)", "end_date", endDateHtml)}
+    ${giReadOnly("Latest Revision Date", latestRevisionHtml, { tip: "Server-managed — the date of the most recent saved revision." })}
+  `;
 
-      ${subHead("Contact")}
-      ${giContact("Contact (First, Last)")}
-      ${giText("Quoted By (Initials)", "quoted_by", { placeholder: "First and Last Initials" })}
+  // Key Estimating Inputs — sheet rows 18-24.
+  const keyInputsCells = `
+    ${giNumber("One-Way Travel time from Houston or Dallas, TX to Job Site (Hrs.)", "one_way_travel_hrs", {
+      step: "0.5", suffix: "(hrs)", placeholder: "Enter hours",
+      tip: "One-way drive time. >1 hr flips the job to out-of-town (higher labor rate, lodging applies, Downtime target $3,500 vs $3,000) and sets the travel-day count. Local (≤1 hr) = no lodging/mgmt travel.",
+    })}
+    ${giSelect("Estimate Type", "estimate_type", ESTIMATE_TYPES, { placeholder: "Select Type", tip: "Standard vs Aggressive daily production. Aggressive assumes higher output → fewer labor days → lower price. Each metric set can override this." })}
+    ${giSelect("Equipment Requirement (Electric vs. LP)", "equipment_requirement", EQUIPMENT_REQS, { placeholder: "Select Equipment", tip: "Electric vs LP (Liquid Propane). Electric forces Liquid Propane rental to $0 in the metrics; LP drives the propane charge by rental period." })}
+    ${giSelect("Breaking Out Mobilization?", "breaking_out_mobilization", YES_NO, { placeholder: "Select", tip: 'Yes = mobilization/travel priced as its own line the customer sees. No = travel folded into the labor bundles (blended OH&P). Changes how S4/S16/S9 are built.' })}
+    ${giSelect("Rack Height (Tall Equipment vs Short Equipment)", "rack_height", RACK_HEIGHTS, { placeholder: "Select Rack Height", tip: "Taller than 25' selects the taller-lift rental rates in the metrics." })}
+    ${giSelect("Rent Wire Guidance Equipment?", "rent_wire_guidance_equipment", YES_NO, { placeholder: "Select" })}
+    ${giYesNoPct("Project Time Budget Adder? - Yes/No & Percent", "project_time_budget_adder", "project_time_budget_pct", { tip: "Yes + % adds a schedule buffer = %×labor days. It creates the Buffer bundle line (marked up at the rack profit target), NOT extra on-site labor." })}
+    ${giCrew("Crew Count - Size")}
+    ${giNumber("Rack Install Profit % (TARGET)", "rack_install_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target profit MARGIN on rack install labor. OH&P = cost/(1−margin) − cost. Typically 42%." })}
+    ${giNumber("Wire Guidance Profit % (TARGET)", "wire_guidance_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance labor. Typically 42%." })}
+    ${giNumber("Rental Equipment RACK Profit % (TARGET)", "rental_rack_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on rack rental equipment (lifts, propane, dumpster). Typically 25–30%." })}
+    ${giNumber("Rental Equipment WIRE Profit % (TARGET)", "rental_wire_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance rental equipment (floor scrubber)." })}
+    ${giNumber("Mobilization Profit % (TARGET)", "mobilization_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Margin on the Mobilization bundle. Can be a small NEGATIVE value in the workbook (competitive travel pricing). Feeds S35/S9." })}
+    ${giCalc("Downtime Day Price (TARGET)", "downtime_day_price_target", downtimePriceHtml())}
+  `;
 
-      ${subHead("Dates")}
-      ${giDate("Date of Request — Original", "date_of_request", { placeholder: "Select Date" })}
-      ${giDate("Start Date", "start_date", { placeholder: "Select Date" })}
-      ${giCalc("Quote Submittal Date", "quote_submittal_date")}
+  // Key Estimating Output Variables — sheet rows 26-30. Left half = derived
+  // values computed on this tab (live via data-est-calc) + the editable Mgmt
+  // Travel Multiplier; right half = LIVE computed cells fed by the Option
+  // Selector's per-set forecast totals (sheet: G26/G27 =L11, G28 =Q9,
+  // G29 =sum(O9:P9), G30 =T9) via updateResultsCells().
+  const outputVarsCells = `
+    ${giCalc("Labor Cost Per Day (Local or Out of Town)", "labor_cost_per_day", laborCostPerDayHtml())}
+    ${giResult("Expected / Estimated Mobilization Count (RACK)", "G26", { tip: "Sheet G26 = L11 — the Base row's Mobilizations Per Option in the Option Selector below." })}
+    ${giCalc("Labor Cost Per TRAVEL Day", "labor_cost_per_travel_day", laborCostPerDayHtml())}
+    ${giResult("Expected / Estimated Mobilization Count (WIRE GUIDE)", "G27", { tip: "Sheet G27 = L11 — the Base row's Mobilizations Per Option in the Option Selector below." })}
+    ${giCalc("Lodging Cost Per Day (<6 Days Hotel, >6 AB&B)", "lodging_cost_per_day", lodgingCostPerDayHtml())}
+    ${giResult("Project Travel Days - Cost", "G28", { tip: "Sheet G28 = Q9 — total Projected Travel Days across enabled Base/Option rows." })}
+    ${giNumber("Mgmt Travel Multiplier", "mgmt_travel_multiplier", { step: "0.00001", suffix: "%", placeholder: "Enter %", tip: "Management travel/oversight as a % of (labor + materials + lodging + travel). Auto-zero for local jobs (labor $1,400/day). Feeds the Mgmt Travel bundle line." })}
+    ${giResult("Project Labor Days - Cost", "G29", { tip: "Sheet G29 = sum(O9:P9) — total Projected Labor Days (rack + wire) across enabled Base/Option rows." })}
+    ${giCalc("Travel Days Per Crew, Per Mobilization", "travel_days_per_crew_per_mob", travelDaysPerCrewPerMobHtml())}
+    ${giResult("Project Downtime Days - Cost", "G30", { tip: "Sheet G30 = T9 — total Projected Downtime Days across enabled Base/Option rows." })}
+  `;
 
-      ${subHead("Location & Notes")}
-      ${giCityState("Project Location")}
-      ${giText("Quote Notes", "quote_notes", { placeholder: "<Enter text>" })}
+  // Estimating Results - Pricing & Schedule — sheet rows 32-36, LIVE. The
+  // values come from computeRollupResults() (sheet formulas verbatim over the
+  // same per-set bundle math S5 renders) and refresh with every input /
+  // selector change via updateResultsCells(). Sheet fallback texts verbatim.
+  const unitHint = (u) => `<span class="text-xs" style="color:rgba(0,0,0,.45)">${u}</span>`;
+  const resultsCells = `
+    ${giResult("Price to Customer", "D32", { tip: "Sheet D32 = sum of the 7 bundle totals (B45,B52,B57,B66,B72,B78,B84) across enabled sets." })}
+    ${giResult("Projected Project Duration", "G32", { extraHtml: unitHint("Days"), tip: "Sheet G32 = U9 — the Option Selector's Duration Calculator total." })}
+    ${giResult("Projected Profit", "D33", { tip: "Sheet D33 = sum of the bundles' OH&P rows (B51,B56,B65,B71,B77,B83,B89)." })}
+    ${giResult("", "G33", { extraHtml: unitHint("Weeks"), tip: "Sheet G33 = ceiling(G32/7, 0.5)." })}
+    ${giResult("Projected Cost", "D34", { tip: "Sheet D34 = D32 − D33 − D35." })}
+    ${giResult("Downtime Day Price", "G34", { tip: 'Sheet G34 = if(B86=0,"NO DOWNTIME INCLUDED",B86/T9) — Downtime contract labor ÷ total downtime days.' })}
+    ${giResult("Projected Buffer", "D35", { tip: "Sheet D35 = sum of the Buffer rows (B49,B62)." })}
+    ${giResult("Wire Guidance Price / LF (RESULT)", "G35", { tip: 'Sheet G35 = iferror(B57/N9,"NO WIRE GUIDANCE QUOTED") — WG bundle total ÷ total projected WG LF.' })}
+    ${giResult("Projected Profit Margin", "D36", { tip: "Sheet D36 = D33 / sum(D33,D34)." })}
+    ${giResult("Wire Guidance Margin", "G36", { tip: 'Sheet G36 = iferror(B65/(B57−B62−B63−B64),"N/A").' })}
+  `;
+
+  // Price Adjustment is not a ROLL UP grid row in the sheet (estimators type
+  // over the price cell there); the existing input is preserved as its own
+  // slim row so its save path keeps working until the override-any-cell phase
+  // absorbs it. (The sheet's D32 formula does NOT include it, so the live
+  // Price to Customer above follows the sheet and leaves it out.)
+  const priceAdjHtml = `
+    <div class="border border-black/25 rounded-sm overflow-hidden">
+      <div class="${GRID4}">
+        ${giNumber("Price Adjustment (+/−)", "price_adjustment", { step: "1", suffix: "$", placeholder: "0", tip: "Manual nudge to the final Price to Customer, the same override estimators make in the workbook (typed over the price cell). Positive rounds UP (e.g. +2,404 to a clean number); negative DISCOUNTS to win the job (e.g. −950). Not part of the sheet's D32 formula — the override-any-cell phase will absorb it. Leave blank for none." })}
+        ${EMPTY_PAIR}
+      </div>
     </div>`;
 
-  const keyInputsHtml = `
-    <div class="${inputsCols}">
-      ${subHead("Travel & Crew")}
-      ${giNumber("One-Way Travel (Houston/Dallas → Site)", "one_way_travel_hrs", {
-        step: "0.5", suffix: "hrs", placeholder: "Enter hours",
-        tip: "One-way drive time. >1 hr flips the job to out-of-town (higher labor rate, lodging applies, Downtime target $3,500 vs $3,000) and sets the travel-day count. Local (≤1 hr) = no lodging/mgmt travel.",
-        chips: [
-          chip("Travel Days/Mob", "travel_days_per_crew_per_mob", travelDaysPerCrewPerMobHtml()),
-          chip("Downtime Target", "downtime_day_price_target",   downtimePriceHtml()),
-        ],
-      })}
-      ${giSelect("Equipment Requirement", "equipment_requirement", EQUIPMENT_REQS, { placeholder: "Select Equipment", tip: "Electric vs LP (Liquid Propane). Electric forces Liquid Propane rental to $0 in the metrics; LP drives the propane charge by rental period." })}
-      ${giSelect("Rack Height", "rack_height", RACK_HEIGHTS, { placeholder: "Select Rack Height", tip: "Taller than 25' selects the taller-lift rental rates in the metrics." })}
-      ${giCrew("Crew Count & Size", [
-        chip("Labor Cost/Day", "labor_cost_per_day", laborCostPerDayHtml()),
-      ])}
-
-      ${subHead("Project Setup")}
-      ${giSelect("Estimate Type", "estimate_type", ESTIMATE_TYPES, { placeholder: "Select Type", tip: "Standard vs Aggressive daily production. Aggressive assumes higher output → fewer labor days → lower price. Each metric set can override this." })}
-      ${giSelect("Breaking Out Mobilization?", "breaking_out_mobilization", YES_NO, { placeholder: "Select", tip: 'Yes = mobilization/travel priced as its own line the customer sees. No = travel folded into the labor bundles (blended OH&P). Changes how S4/S16/S9 are built.' })}
-      ${giSelect("Rent Wire Guidance Equipment?", "rent_wire_guidance_equipment", YES_NO, { placeholder: "Select" })}
-      ${giYesNoPct("Project Time Budget Adder?", "project_time_budget_adder", "project_time_budget_pct", { tip: "Yes + % adds a schedule buffer = %×labor days. It creates the Buffer bundle line (marked up at the rack profit target), NOT extra on-site labor." })}
-
-      ${subHead("Operating Costs")}
-      ${giCalc("Lodging Cost / Day", "lodging_cost_per_day")}
-      ${giNumber("Mgmt Travel Multiplier", "mgmt_travel_multiplier", { step: "0.00001", suffix: "%", placeholder: "Enter %", tip: "Management travel/oversight as a % of (labor + materials + lodging + travel). Auto-zero for local jobs (labor $1,400/day). Feeds the Mgmt Travel bundle line." })}
-
-      ${subHead("Profit Targets")}
-      ${giNumber("Rack Install %", "rack_install_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target profit MARGIN on rack install labor. OH&P = cost/(1−margin) − cost. Typically 42%." })}
-      ${giNumber("Rental Equipment — Rack %", "rental_rack_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on rack rental equipment (lifts, propane, dumpster). Typically 25–30%." })}
-      ${giNumber("Wire Guidance %", "wire_guidance_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance labor. Typically 42%." })}
-      ${giNumber("Rental Equipment — Wire %", "rental_wire_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Target margin on wire-guidance rental equipment (floor scrubber)." })}
-      ${giNumber("Mobilization %", "mobilization_profit_target", { step: "0.1", suffix: "%", placeholder: "%", tip: "Margin on the Mobilization bundle. Can be a small NEGATIVE value in the workbook (competitive travel pricing). Feeds S35/S9." })}
-
-      ${subHead("Final Price")}
-      ${giNumber("Price Adjustment (+/−)", "price_adjustment", { step: "1", suffix: "$", placeholder: "0", tip: "Manual nudge to the final Price to Customer, the same override estimators make in the workbook. Positive rounds UP (e.g. +2,404 to a clean number); negative DISCOUNTS to win the job (e.g. −950). The Review tab applies it and re-derives profit/margin. Leave blank for none." })}
+  // Forcasting Outputs for Pipeline Sheet — sheet rows 37-39 (sheet's
+  // "Forcasting" typo kept verbatim). One readout line mirroring this tab's
+  // fields; the computed columns (Labor/Travel Days, OH&P $/%, Total Price)
+  // are LIVE — sheet H39 =sum(O9:P9), I39 =Q9, L39 =D33, M39 =L39/D32,
+  // N39 =D32 — refreshed by updateResultsCells().
+  function forecastValues() {
+    const contact = `${state.contact_first || ""} ${state.contact_last || ""}`.trim();
+    const loc = `${state.project_city || ""} ${state.project_state || ""}`.trim();
+    const descBase = state.end_user || state.customer || "";
+    const desc = [descBase, loc, state.quote_description].filter(Boolean).join("-");
+    return {
+      fc_quote_number: state.quote_number,
+      fc_quoted_by:    state.quoted_by,
+      fc_contact:      contact,
+      fc_customer:     state.customer,
+      fc_description:  desc,
+      fc_start_date:   toUSDate(state.start_date),
+      fc_end_date:     toUSDate(state.end_date),
+    };
+  }
+  function refreshForecastLine() {
+    const vals = forecastValues();
+    for (const [key, v] of Object.entries(vals)) {
+      setCalcCell(key, v ? escapeHtml(String(v)) : DASH);
+    }
+  }
+  const FC_HEADERS = ["Quote #", "Quoted By", "Contact", "Customer", "Quote Description",
+                      "Labor Days", "Travel Days", "Start Date", "End Date",
+                      "OH&P $'s", "OH&P %", "Total Price"];
+  const fv = forecastValues();
+  const fcVal  = (key) => `<div class="bg-white px-2 py-1 text-xs text-black/70 tabular-nums whitespace-nowrap" data-est-calc="${key}">${fv[key] ? escapeHtml(String(fv[key])) : DASH}</div>`;
+  const fcResult = (cellRef) => `<div style="${RESULT_STYLE}" class="px-2 py-1 text-xs tabular-nums whitespace-nowrap" data-result="${cellRef}">${DASH}</div>`;
+  const forecastHtml = `
+    <div class="border border-black/25 rounded-sm overflow-hidden">
+      <div class="qm-banner">
+        <span class="text-xs font-extrabold uppercase tracking-wider">Forcasting Outputs for Pipeline Sheet</span>
+      </div>
+      <div class="overflow-x-auto">
+        <div style="display:grid;grid-template-columns:repeat(13,minmax(88px,1fr));gap:1px;background:#b7b7b7;min-width:1200px">
+          <div class="${CELL_LABEL}">ROLL UP FORECAST LINE</div>
+          ${FC_HEADERS.map(h => `<div class="${CELL_LABEL}">${escapeHtml(h)}</div>`).join("")}
+          <div class="bg-white"></div>
+          ${fcVal("fc_quote_number")}
+          ${fcVal("fc_quoted_by")}
+          ${fcVal("fc_contact")}
+          ${fcVal("fc_customer")}
+          ${fcVal("fc_description")}
+          ${fcResult("H39")}
+          ${fcResult("I39")}
+          ${fcVal("fc_start_date")}
+          ${fcVal("fc_end_date")}
+          ${fcResult("L39")}
+          ${fcResult("M39")}
+          ${fcResult("N39")}
+        </div>
+      </div>
     </div>`;
+
+  // ── S3 OPTION SELECTOR FOR FORECASTING / MOBILIZATION QTYS (sheet J7:Z26) ──
+  // Rows = the estimate's REAL metric sets (Base + existing options + Project
+  // Rentals). The sheet's remaining option slots render as dimmed empty rows
+  // for visual parity only. Selector / Mobilizations / WG LF live-save via
+  // PATCH /quoting/metric-sets/{id}; forecast columns O-W are computed live
+  // with the shared per-set rollup math (utils/qm-rollup.js).
+  const ceilHalfNum = (x) => Math.ceil((Number(x) || 0) * 2) / 2;
+
+  const linesBySetId = (() => {
+    const m = new Map();
+    // Per-line typed-over cells (l{lineId}:*) transform the line data itself,
+    // so every rollup/bundle consumer on this tab sees them.
+    for (const l of applyLineOverrides(metricLines, cellOverrides)) {
+      if (!m.has(l.metric_set_id)) m.set(l.metric_set_id, []);
+      m.get(l.metric_set_id).push(l);
+    }
+    return m;
+  })();
+
+  function orderedMetricSets() {
+    const base = metricSets.filter(s => s.kind === "base");
+    const opts = metricSets.filter(s => s.kind === "option")
+                           .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+    const pr   = metricSets.filter(s => s.kind === "project_rentals");
+    return [...base, ...opts, ...pr];
+  }
+  function setScopeLabel(set) {
+    if (set.kind === "base") return "Base";
+    if (set.kind === "project_rentals") return "PROJECT RENTALS";
+    return set.label || `Option ${set.sort_order}`;
+  }
+  // Tab (For Reference) — the sheet's tab-name column, matching our tab strip.
+  function setTabName(set) {
+    if (set.kind === "base") return "1.0 BASE Quoting Metrics";
+    if (set.kind === "project_rentals") return "1.10 PROJECT RENTALS";
+    return `1.${set.sort_order} ${set.label || `Option ${set.sort_order}`} - Quoting Metrics`;
+  }
+  const hasProjectRentalsSet = () => metricSets.some(s => s.kind === "project_rentals");
+
+  // Per-set forecast values — the sheet's O-W columns (rows 11-21). Disabled
+  // sets contribute 0, exactly like the sheet's =if($J..=TRUE, …, 0) gating;
+  // the W column (WG Footage) is NOT gated (sheet W = plain INDIRECT).
+  //   O = tab D23 (rack Tab Labor Days)     P = tab D24 (wire Tab Labor Days)
+  //   Q = tab D22 (travel days)             R = O+P+Q
+  //   S = tab G22 (crew count)              T = ceiling(tab K22, 0.5) (downtime)
+  //   U = IFERROR((O+T)/S+P, 0)             V = tab G185 (rack production days)
+  function setForecast(set) {
+    const rollup = computeSetRollup({
+      set, lines: linesBySetId.get(set.id) || [], lookups, estimateState: state,
+      overrides: cellOverrides, keyPrefix: `s${set.id}:`,
+    });
+    const en = Number(set.is_enabled) === 1;
+    const O = en ? (Number(rollup.D23) || 0) : 0;
+    const P = en ? (Number(rollup.D24) || 0) : 0;
+    const Q = en ? (Number(rollup.D22) || 0) : 0;
+    const R = O + P + Q;
+    const S = en ? (Number(state.crew_count) || 0) : 0;
+    const T = en ? ceilHalfNum(set.downtime_labor_day_override) : 0;
+    const U = S > 0 ? (O + T) / S + P : 0;
+    const V = en ? (Number(rollup.rack_days) || 0) : 0;
+    const W = Number(set.wire_guidance_linear_footage) || 0;
+    return { O, P, Q, R, S, T, U, V, W };
+  }
+  const fmtFc = (n) => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "0";
+    return v.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  };
+
+  // Inline cell styles (hard rule: qm-* classes or inline style only — the
+  // prebuilt output.css silently ignores new Tailwind utilities).
+  const S3_TH  = "color:#111;background:#efefef;border:1px solid #b7b7b7;padding:3px 6px;font-size:10px;font-weight:700;text-align:center;min-width:84px;line-height:1.2";
+  const S3_TD  = "color:#111;border:1px solid #b7b7b7;padding:3px 6px;font-size:12px;background:#fff;white-space:nowrap";
+  const S3_GRN = "color:#111;border:1px solid #b7b7b7;padding:3px 6px;font-size:12px;background:#d9ead3;text-align:right;white-space:nowrap";
+  const S3_BLU = "color:#111;border:1px solid #b7b7b7;padding:0;background:#cfe2f3";
+  const S3_INP = "color:#111;background:transparent;border:0;width:100%;min-width:70px;padding:3px 6px;font-size:12px;text-align:right";
+
+  const S3_FC_COLS  = ["O", "P", "Q", "R", "S", "T", "U", "V", "W"];
+  const S3_HEADERS  = ["Selector", "Scope", "Mobilizations Per Option", "Tab (For Reference)",
+                       "Total Projected Wire Guidance LF",
+                       "Projected Labor Days", "Projected Labor Days Wire",
+                       "Projected Travel Days PER CREW", "Projected Project Days", "Crew Count",
+                       "Projected Downtime Days TOTAL", "Duration Calculator",
+                       "Rack Labor Days Per Metrics", "Total Projected Wire Guidance LF"];
+  const S3_SUBHEADS = ["", "", "", "", "Wire Guidance Footage",
+                       "Labor Days Rack", "Labor Days Wire Guidance", "Travel Days",
+                       "Project Days", "Crew Count Per Tab", "Downtime Days", "Duration Days",
+                       "Rack Labor Days Per Metrics", "Wire Guidance Footage"];
+
+  function s3RealRowHtml(set) {
+    const dis     = isLocked ? "disabled" : "";
+    const checked = Number(set.is_enabled) === 1 ? "checked" : "";
+    const numVal  = (v) => (v == null ? "" : String(v));
+    const fcCells = S3_FC_COLS.map(c =>
+      `<td data-s3-cell="${set.id}:${c}" style="${S3_GRN}"></td>`).join("");
+    return `
+      <tr data-s3-row="${set.id}">
+        <td style="${S3_TD};text-align:center">
+          <input type="checkbox" data-ms-toggle="${set.id}" ${checked} ${dis}
+                 style="width:14px;height:14px;accent-color:#1a73e8"/>
+        </td>
+        <td style="${S3_TD};font-weight:600">${escapeHtml(setScopeLabel(set))}</td>
+        <td style="${S3_BLU}">
+          <input type="number" step="1" min="0" data-ms-num="${set.id}:mobilizations" ${dis}
+                 value="${escapeHtml(numVal(set.mobilizations))}" style="${S3_INP}"/>
+        </td>
+        <td style="${S3_TD};color:rgba(0,0,0,.6)">${escapeHtml(setTabName(set))}</td>
+        <td style="${S3_BLU}">
+          <input type="number" step="1" min="0" data-ms-num="${set.id}:wire_guidance_linear_footage" ${dis}
+                 value="${escapeHtml(numVal(set.wire_guidance_linear_footage))}" style="${S3_INP}"/>
+        </td>
+        ${fcCells}
+      </tr>`;
+  }
+  // Sheet option slot with no matching set — visual parity only, no wiring.
+  function s3GhostRowHtml(scope, tabName) {
+    const blank = `<td style="${S3_TD}"></td>`;
+    return `
+      <tr style="opacity:.4">
+        <td style="${S3_TD};text-align:center">
+          <input type="checkbox" disabled style="width:14px;height:14px"/>
+        </td>
+        <td style="${S3_TD};font-weight:600">${escapeHtml(scope)}</td>
+        ${blank}
+        <td style="${S3_TD};color:rgba(0,0,0,.6)">${escapeHtml(tabName)}</td>
+        ${blank}${blank.repeat(9)}
+      </tr>`;
+  }
+
+  function s3SectionHtml() {
+    const sets     = orderedMetricSets();
+    const baseRows = sets.filter(s => s.kind === "base").map(s3RealRowHtml).join("");
+    const optRows  = sets.filter(s => s.kind === "option").map(s3RealRowHtml).join("");
+    const maxOpt   = Math.max(0, ...metricSets.filter(s => s.kind === "option")
+                                              .map(s => Number(s.sort_order) || 0));
+    let ghostRows = "";
+    for (let n = maxOpt + 1; n <= 9; n++) {
+      ghostRows += s3GhostRowHtml(`Option ${n}`, `1.${n} Option ${n} - Quoting Metrics`);
+    }
+    const prSet = sets.find(s => s.kind === "project_rentals");
+    const prRow = prSet ? s3RealRowHtml(prSet)
+                        : s3GhostRowHtml("PROJECT RENTALS", "1.10 PROJECT RENTALS");
+    // Sheet row 9 — TOTAL row above the sub-header row. J9-M9 are blank; the
+    // Crew Count total is the sheet's literal "N/A".
+    const totalCell = (c) => (c === "S"
+      ? `<td style="${S3_GRN};text-align:center">N/A</td>`
+      : `<td data-s3-total="${c}" style="${S3_GRN};font-weight:700"></td>`);
+    const totalsRow = `
+      <tr>
+        <td style="${S3_TD}"></td><td style="${S3_TD};font-weight:700">TOTAL</td>
+        <td style="${S3_TD}"></td><td style="${S3_TD}"></td>
+        <td data-s3-total="N" style="${S3_GRN};font-weight:700"></td>
+        ${S3_FC_COLS.map(totalCell).join("")}
+      </tr>`;
+    const subheadRow = `
+      <tr>${S3_SUBHEADS.map(h => `<th style="${S3_TH};background:#f8f8f8;font-weight:600">${escapeHtml(h)}</th>`).join("")}</tr>`;
+    return `
+      <div class="qm-sheet border border-black/25 rounded-sm overflow-hidden" style="background:#fff">
+        <div class="qm-banner">
+          <span class="text-xs font-extrabold uppercase tracking-wider">OPTION SELECTOR FOR FORECASTING / MOBILIZATION QTYS</span>
+          ${isLocked ? '<span class="text-[10px] italic font-normal normal-case text-white/60 whitespace-nowrap">locked revision — read-only</span>' : ""}
+        </div>
+        <div style="overflow-x:auto">
+          <table class="qm-sheet" style="border-collapse:collapse;width:100%;min-width:1560px">
+            <thead>
+              <tr>${S3_HEADERS.map(h => `<th style="${S3_TH}">${escapeHtml(h)}</th>`).join("")}</tr>
+              ${totalsRow}
+              ${subheadRow}
+            </thead>
+            <tbody>
+              ${baseRows}${optRows}${ghostRows}${prRow}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // Refresh every computed S3 cell + the TOTAL row. Sheet sum ranges kept
+  // verbatim: rows 11:20 (Base + Options, NOT Project Rentals) — except V9,
+  // which sums through row 21 (includes PR) — and R9 = sum(R11:R20) + T9.
+  function updateS3Computed() {
+    const totals = { N: 0, O: 0, P: 0, Q: 0, R: 0, T: 0, U: 0, V: 0, W: 0 };
+    for (const set of orderedMetricSets()) {
+      const fc = setForecast(set);
+      for (const c of S3_FC_COLS) {
+        const cell = container.querySelector(`[data-s3-cell="${set.id}:${c}"]`);
+        if (cell) cell.textContent = fmtFc(fc[c]);
+      }
+      if (set.kind !== "project_rentals") {
+        totals.N += Number(set.wire_guidance_linear_footage) || 0;
+        totals.O += fc.O; totals.P += fc.P; totals.Q += fc.Q;
+        totals.T += fc.T; totals.U += fc.U; totals.W += fc.W;
+      }
+      totals.V += fc.V;
+    }
+    totals.R = totals.O + totals.P + totals.Q + totals.T;
+    for (const [c, v] of Object.entries(totals)) {
+      const cell = container.querySelector(`[data-s3-total="${c}"]`);
+      if (cell) cell.textContent = fmtFc(v);
+    }
+  }
+
+  // ── S4 Partial Crew Warning + "Use Project Rentals?" flag (sheet J29:M36) ──
+  // Warning mirrors J30: =if(H21="Full","","SHOULD ONLY USE MANUAL DAY COUNTS")
+  // — reuses this tab's crew_size state. "Use Project Rentals?" is the sheet's
+  // K31 Yes/No dropdown: Yes creates the 1.10 PROJECT RENTALS set (or re-enables
+  // it), No unchecks its Selector — data is never deleted from here.
+  function s4SectionHtml() {
+    const partial = state.crew_size !== "Full";
+    const prSet   = metricSets.find(s => s.kind === "project_rentals") || null;
+    const usePR   = !!(prSet && Number(prSet.is_enabled) === 1);
+    const warnCell = partial
+      ? `<div style="grid-column:span 3;background:#ffe599;color:#7f6000;padding:3px 8px;font-size:11.5px;font-weight:700;display:flex;align-items:center">SHOULD ONLY USE MANUAL DAY COUNTS</div>`
+      : `<div style="grid-column:span 3;background:#fff"></div>`;
+    const prWarnings = usePR ? [
+      "MAKE SURE TO CHECK ALL BOXES ABOVE - J11-J21",
+      "THIS ONLY WORKS FOR FORKLIFTS & SCISSOR LIFTS",
+      "THIS FEATURE IS BEST USED FOR SINGLE MOBILIZATION PROJECTS WHERE CUSTOMER IS ASKING FOR PRICE BREAKOUTS",
+      "TOGGLE THIS ON AND OFF TO CHECK FOR POTENTIAL ERRORS",
+    ].map(t => `<div style="grid-column:span 4;background:#fff;color:#b45309;padding:2px 8px;font-size:10.5px;font-weight:600">${escapeHtml(t)}</div>`).join("") : "";
+    return `
+      <div class="qm-sheet border border-black/25 rounded-sm overflow-hidden" style="background:#fff">
+        <div class="${GRID4}">
+          <div class="${CELL_LABEL}"><span>Partial Crew Warning</span></div>
+          ${warnCell}
+          <div class="${CELL_LABEL}"><span>Use Project Rentals?${infoTip("Sheet K31. Yes creates the 1.10 PROJECT RENTALS tab (or re-enables it in the Option Selector); No unchecks its Selector so it's excluded from totals — its data is kept.")}</span></div>
+          <div style="background:#cfe2f3;padding:0">
+            <select data-use-pr ${isLocked ? "disabled" : ""}
+                    style="color:#111;background:#cfe2f3;border:0;width:100%;padding:3px 8px;font-size:12px;font-weight:600">
+              <option value="No"  ${usePR ? "" : "selected"}>No</option>
+              <option value="Yes" ${usePR ? "selected" : ""}>Yes</option>
+            </select>
+          </div>
+          <div class="${CELL_LABEL}"></div>
+          <div style="background:#fff"></div>
+          ${prWarnings}
+        </div>
+      </div>`;
+  }
+
+  // ── S5 Quick Books Outputs (Bundles) — FORECASTED TOTALS (sheet B41:N103) ──
+  // Rows = the sheet's FULL COSTING TABLE bundle lines verbatim, incl. the
+  // indented "(hidden)" children; columns = one per EXISTING set; first col =
+  // the sheet's col-B total (sums ENABLED sets only, like B's gated P:Z sum).
+  // Per-set cells show the set's computed value regardless of the selector
+  // (like the sheet's ungated INDIRECT columns D-N). Values come straight
+  // from computeSetBundles — the same validated math the PDF/QBO tabs use.
+  // (The sheet's blank spare rows 90-103 are omitted — no labels, no values.)
+  const S5_ROWS = [
+    { label: "Installation (Labor Bundle)",      b: "installation",   i: null },
+    { label: "     Contract Labor (hidden)",     b: "installation",   i: 0 },
+    { label: "     Materials (hidden)",          b: "installation",   i: 1 },
+    { label: "     Mgmt Travel (hidden)",        b: "installation",   i: 2 },
+    { label: "     Buffer",                      b: "installation",   i: 3 },
+    { label: "     Lodging (hidden)",            b: "installation",   i: 4 },
+    { label: "     OH&P (hidden)",               b: "installation",   i: 5 },
+    { label: "Rentals (Bundle)",                 b: "rentals",        i: null },
+    { label: "     Equipment - Lifts",           b: "rentals",        i: 0 },
+    { label: "     Dumpsters / Site Rentals",    b: "rentals",        i: 1 },
+    { label: "     Propane",                     b: "rentals",        i: 2 },
+    { label: "     OH&P (hidden)",               b: "rentals",        i: 3 },
+    { label: "Wire Guidance (Labor Bundle)",     b: "wg_labor",       i: null },
+    { label: "     Contract Labor (hidden)",     b: "wg_labor",       i: 0 },
+    { label: "     Materials (hidden)",          b: "wg_labor",       i: 1 },
+    { label: "     Mgmt Travel (hidden)",        b: "wg_labor",       i: 2 },
+    { label: "     Lodging (hidden)",            b: "wg_labor",       i: 3 },
+    { label: "     Buffer",                      b: "wg_labor",       i: 4 },
+    { label: "     Floor Scrubber",              b: "wg_labor",       i: 5 },
+    { label: "     Propane",                     b: "wg_labor",       i: 6 },
+    { label: "     OH&P (hidden)",               b: "wg_labor",       i: 7 },
+    { label: "Wire Guidance (Additional Items)", b: "wg_additional",  i: null },
+    { label: "     Slurry Tank - NOT OPTIONAL",  b: "wg_additional",  i: 0 },
+    { label: "     Line Drivers - OPTIONAL - Usually by Customer", b: "wg_additional", i: 1 },
+    { label: "     Magnets - OPTIONAL",          b: "wg_additional",  i: 2 },
+    { label: "     RFID Tags - OPTIONAL",        b: "wg_additional",  i: 3 },
+    { label: "     OH&P (hidden)",               b: "wg_additional",  i: 4 },
+    { label: "Mobilization",                     b: "mobilization",   i: null },
+    { label: "     Materials (hidden)",          b: "mobilization",   i: 0 },
+    { label: "     Contract Labor - Travel (hidden)", b: "mobilization", i: 1 },
+    { label: "     Mgmt Travel (hidden)",        b: "mobilization",   i: 2 },
+    { label: "     Lodging (hidden)",            b: "mobilization",   i: 3 },
+    { label: "     OH&P (hidden)",               b: "mobilization",   i: 4 },
+    { label: "Remobilization",                   b: "remobilization", i: null },
+    { label: "     Materials (hidden)",          b: "remobilization", i: 0 },
+    { label: "     Contract Labor (hidden)",     b: "remobilization", i: 1 },
+    { label: "     Mgmt Travel (hidden)",        b: "remobilization", i: 2 },
+    { label: "     Lodging (hidden)",            b: "remobilization", i: 3 },
+    { label: "     OH&P (hidden)",               b: "remobilization", i: 4 },
+    { label: "Downtime",                         b: "downtime",       i: null },
+    { label: "     Materials (hidden)",          b: "downtime",       i: 0 },
+    { label: "     Contract Labor (hidden)",     b: "downtime",       i: 1 },
+    { label: "     Mgmt Travel (hidden)",        b: "downtime",       i: 2 },
+    { label: "     Lodging (hidden)",            b: "downtime",       i: 3 },
+    { label: "     OH&P (hidden)",               b: "downtime",       i: 4 },
+  ];
+
+  function s5BodyHtml() {
+    const sets = orderedMetricSets();
+    const perSet = sets.map(set => ({
+      set,
+      bundles: computeSetBundles({
+        set, lines: linesBySetId.get(set.id) || [], lookups, estimateState: state,
+        overrides: cellOverrides, keyPrefix: `s${set.id}:`,
+      }),
+    }));
+    const val = (bundles, row) => {
+      const bundle = bundles?.[row.b];
+      if (!bundle) return 0;
+      return row.i == null
+        ? (Number(bundle.total) || 0)
+        : (Number(bundle.lines?.[row.i]?.[1]) || 0);
+    };
+    const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
+    const TH  = "color:#111;background:#efefef;border:1px solid #b7b7b7;padding:3px 8px;font-size:10.5px;font-weight:700;text-align:center;white-space:nowrap;min-width:110px";
+    const LBL = "border:1px solid #b7b7b7;padding:3px 8px;font-size:11.5px;background:#fff;white-space:pre;text-align:left";
+    const GRN = "border:1px solid #b7b7b7;padding:3px 8px;font-size:12px;background:#d9ead3;text-align:right;white-space:nowrap";
+    const headTabs = `
+      <tr>
+        <th style="${TH}">FORECASTED TOTALS</th>
+        <th style="${TH}">FULL COSTING TABLE</th>
+        ${perSet.map(p => `<th style="${TH}">${escapeHtml(setTabName(p.set))}</th>`).join("")}
+      </tr>`;
+    const headFlags = `
+      <tr>
+        <th style="${TH};background:#f8f8f8"></th>
+        <th style="${TH};background:#f8f8f8"></th>
+        ${perSet.map(p => `<th style="${TH};background:#f8f8f8;font-weight:600">${Number(p.set.is_enabled) === 1 ? 1 : 0}</th>`).join("")}
+      </tr>`;
+    const headScopes = `
+      <tr>
+        <th style="${TH};background:#f8f8f8"></th>
+        <th style="${TH};background:#f8f8f8"></th>
+        ${perSet.map(p => `<th style="${TH};background:#f8f8f8;font-weight:600">${escapeHtml(setScopeLabel(p.set))}</th>`).join("")}
+      </tr>`;
+    const bodyRows = S5_ROWS.map(row => {
+      const isParent = row.i == null;
+      const total = perSet.reduce((s, p) =>
+        s + (Number(p.set.is_enabled) === 1 ? val(p.bundles, row) : 0), 0);
+      const setCells = perSet.map(p =>
+        `<td style="${GRN}${isParent ? ";font-weight:700" : ""}">${money(val(p.bundles, row))}</td>`).join("");
+      return `
+        <tr>
+          <td style="${GRN};font-weight:700">${money(total)}</td>
+          <td style="${LBL}${isParent ? ";font-weight:700" : ";color:rgba(0,0,0,.65)"}">${escapeHtml(row.label)}</td>
+          ${setCells}
+        </tr>`;
+    }).join("");
+    return `
+      <table class="qm-sheet" style="border-collapse:collapse;min-width:${360 + perSet.length * 120}px">
+        <thead>${headTabs}${headFlags}${headScopes}</thead>
+        <tbody>${bodyRows}</tbody>
+      </table>`;
+  }
+
+  function s5SectionHtml() {
+    return `
+      <div class="qm-sheet border border-black/25 rounded-sm overflow-hidden" style="background:#fff">
+        <div class="qm-banner">
+          <span class="text-xs font-extrabold uppercase tracking-wider">Quick Books Outputs (Bundles)</span>
+          <span class="text-[10px] italic font-normal normal-case text-white/60 whitespace-nowrap">first column sums ENABLED sets only</span>
+        </div>
+        <div style="overflow-x:auto">
+          <div data-s5-body>${s5BodyHtml()}</div>
+        </div>
+      </div>`;
+  }
+
+  // ── Estimating Results (sheet r32-36) + Output Variables right half +
+  //    forecast-line computed cells — LIVE ─────────────────────────────────
+  // Sheet formulas verbatim (rollup-tab-spec.txt). The ROLL UP's col-B bundle
+  // rows sum the flag-gated =sum(P..:Z..) — i.e. ENABLED sets only — over the
+  // SAME per-set computeSetBundles math S5 renders; the forecast totals
+  // (O9/P9/Q9/T9/U9/N9) sum rows 11:20 (Base + Options, NOT Project Rentals),
+  // exactly like updateS3Computed's TOTAL row.
+  // `useROverrides = false` skips the r:* typed-over cells (the per-set
+  // s:/l: overrides still apply) — the pure formula values shown in the
+  // "Calculated: …" tooltips of overridden result cells.
+  function computeRollupResults(useROverrides = true) {
+    const rv = (ref, computed) => {
+      if (!useROverrides) return computed;
+      const k = "r:" + ref;
+      return (k in cellOverrides) ? Number(cellOverrides[k]) : computed;
+    };
+    const sets = orderedMetricSets();
+    const perSet = sets.map(set => ({
+      set,
+      en: Number(set.is_enabled) === 1,
+      bundles: computeSetBundles({
+        set, lines: linesBySetId.get(set.id) || [], lookups, estimateState: state,
+        overrides: cellOverrides, keyPrefix: `s${set.id}:`,
+      }),
+    }));
+    // Sheet col-B rollup row: a bundle total (idx null) or one child line,
+    // summed across ENABLED sets.
+    const B = (bKey, idx) => perSet.reduce((s, p) => {
+      if (!p.en) return s;
+      const b = p.bundles?.[bKey];
+      if (!b) return s;
+      return s + (idx == null ? (Number(b.total) || 0) : (Number(b.lines?.[idx]?.[1]) || 0));
+    }, 0);
+    let O9 = 0, P9 = 0, Q9 = 0, T9 = 0, U9 = 0, N9 = 0;
+    for (const p of perSet) {
+      if (p.set.kind === "project_rentals") continue;   // sheet ranges 11:20
+      const fc = setForecast(p.set);
+      O9 += fc.O; P9 += fc.P; Q9 += fc.Q; T9 += fc.T; U9 += fc.U;
+      N9 += Number(p.set.wire_guidance_linear_footage) || 0;
+    }
+    // B-row map (bundle lines are qm-rollup's fixed order — same as S5_ROWS):
+    const B45 = B("installation", null),   B49 = B("installation", 3),  B51 = B("installation", 5);
+    const B52 = B("rentals", null),        B56 = B("rentals", 3);
+    const B57 = B("wg_labor", null),       B62 = B("wg_labor", 4);
+    const B63 = B("wg_labor", 5),          B64 = B("wg_labor", 6),      B65 = B("wg_labor", 7);
+    const B66 = B("wg_additional", null),  B71 = B("wg_additional", 4);
+    const B72 = B("mobilization", null),   B77 = B("mobilization", 4);
+    const B78 = B("remobilization", null), B83 = B("remobilization", 4);
+    const B84 = B("downtime", null),       B86 = B("downtime", 1),      B89 = B("downtime", 4);
+
+    // Each result cell runs through rv() — a typed-over cell replaces the
+    // formula AND flows into the cells that reference it (e.g. r:D32 →
+    // D34/D36/M39/N39), exactly like the sheet.
+    const D32 = rv("D32", B45 + B52 + B57 + B66 + B72 + B78 + B84);   // =sum(B45,B52,B57,B66,B72,B78,B84)
+    const D33 = rv("D33", B51 + B56 + B65 + B71 + B77 + B83 + B89);   // =sum(B51,B56,B65,B71,B77,B83,B89)
+    const D35 = rv("D35", B49 + B62);                                  // =sum(B49,B62)
+    const D34 = rv("D34", D32 - D33 - D35);                            // =D32-D33-D35
+    const D36 = rv("D36", (D33 + D34) !== 0 ? D33 / (D33 + D34) : NaN);  // =D33/sum(D33,D34)
+    const G32 = rv("G32", U9);                                         // =U9
+    const G33 = rv("G33", Math.ceil((G32 / 7) * 2) / 2);               // =ceiling(G32/7,0.5)
+    const G34 = rv("G34", B86 === 0 ? null : (T9 !== 0 ? B86 / T9 : NaN));  // =if(B86=0,"NO DOWNTIME INCLUDED",B86/T9)
+    const G35 = rv("G35", N9 !== 0 ? B57 / N9 : null);                 // =iferror(B57/N9,"NO WIRE GUIDANCE QUOTED")
+    const wgDen = B57 - B62 - B63 - B64;
+    const G36 = rv("G36", wgDen !== 0 ? B65 / wgDen : null);           // =iferror(B65/(B57-B62-B63-B64),"N/A")
+    const baseSet = sets.find(s => s.kind === "base");
+    const L11 = Number(baseSet?.mobilizations) || 0;
+    return {
+      D32, D33, D34, D35, D36, G32, G33, G34, G35, G36,
+      // Output Variables right half: G26/G27 =L11, G28 =Q9, G29 =sum(O9:P9), G30 =T9.
+      G26: L11, G27: L11, G28: Q9, G29: O9 + P9, G30: T9,
+      // Forecast line: H39 =sum(O9:P9), I39 =Q9 (L39/M39/N39 derive from D32/D33).
+      H39: O9 + P9, I39: Q9,
+    };
+  }
+
+  // Push computeRollupResults() into every data-result cell. NaN → "—";
+  // null → the sheet's literal fallback text. The ten Estimating Results
+  // cells (r:D32..r:D36, r:G32..r:G36) are override-enabled: typed-over
+  // values render indigo with a ✎ marker + ↺ revert, the hover title shows
+  // the calculated (formula) value, and clicking a cell types over it
+  // (locked revisions are read-only).
+  function updateResultsCells() {
+    const r = computeRollupResults();
+    const hasR = R_OVR_REFS.some(ref => ("r:" + ref) in cellOverrides);
+    const raw = hasR ? computeRollupResults(false) : r;
+    const put = (cellRef, html) => {
+      const el = container.querySelector(`[data-result="${cellRef}"]`);
+      if (el) el.innerHTML = html;
+    };
+    const pctHtml = (v) => (v == null || !Number.isFinite(v)) ? DASH : (v * 100).toFixed(1) + "%";
+    const moneyFine = (v) => (v == null || !Number.isFinite(v))
+      ? DASH
+      : "$" + Number(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
+    const stripTags = (h) => String(h ?? "").replace(/<[^>]*>/g, "");
+
+    // Override-enabled result cell painter. effHtml/effNum come from the
+    // override-aware pass, calcHtml from the raw (formula) pass.
+    const putR = (cellRef, effHtml, effNum, calcHtml) => {
+      const el = container.querySelector(`[data-result="${cellRef}"]`);
+      if (!el) return;
+      const box = el.closest("div");
+      const key = "r:" + cellRef;
+      const fmtOvr = R_OVR_FMT[cellRef] || String;
+      if (box) box.setAttribute("data-r-ovr", cellRef);
+      if (key in cellOverrides) {
+        const rb = isLocked ? "" :
+          `<button type="button" data-r-revert="${escapeHtml(key)}" title="Revert to calculated value"
+                   style="border:0;background:transparent;cursor:pointer;color:#1e1b4b;font-weight:700;font-size:11px;line-height:1;padding:0 2px">↺</button>`;
+        el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:4px">` +
+          `<span aria-hidden="true" style="font-size:10px">✎</span><span>${fmtOvr(Number(cellOverrides[key]))}</span>${rb}</span>`;
+        if (box) {
+          box.style.background = "#c7d2fe";
+          box.style.color = "#1e1b4b";
+          box.title = `Calculated: ${stripTags(calcHtml)} — typed-over`;
+          box.setAttribute("data-r-num", "");
+        }
+      } else {
+        el.innerHTML = effHtml;
+        if (box) {
+          // Restore the green computed look (RESULT_STYLE is inline).
+          box.style.background = "#d9ead3";
+          box.style.color = "#111";
+          box.title = isLocked ? "" : "Click to type over the calculated value";
+          box.setAttribute("data-r-num",
+            (effNum == null || !Number.isFinite(Number(effNum))) ? "" : String(Number(effNum)));
+        }
+      }
+    };
+    // Formatter used for the typed-over value of each result cell (matches
+    // the computed formatting; the % cells hold fractions, e.g. 0.42).
+    const R_OVR_FMT = {
+      D32: fmtMoney, D33: fmtMoney, D34: fmtMoney, D35: fmtMoney, D36: pctHtml,
+      G32: fmtFc, G33: fmtFc, G34: fmtMoney, G35: moneyFine, G36: pctHtml,
+    };
+
+    putR("D32", fmtMoney(r.D32), r.D32, fmtMoney(raw.D32));
+    putR("D33", fmtMoney(r.D33), r.D33, fmtMoney(raw.D33));
+    putR("D34", fmtMoney(r.D34), r.D34, fmtMoney(raw.D34));
+    putR("D35", fmtMoney(r.D35), r.D35, fmtMoney(raw.D35));
+    putR("D36", pctHtml(r.D36), r.D36, pctHtml(raw.D36));
+    putR("G32", fmtFc(r.G32), r.G32, fmtFc(raw.G32));
+    putR("G33", fmtFc(r.G33), r.G33, fmtFc(raw.G33));
+    putR("G34", r.G34 == null ? '<span class="text-xs">NO DOWNTIME INCLUDED</span>' : fmtMoney(r.G34), r.G34,
+         raw.G34 == null ? "NO DOWNTIME INCLUDED" : fmtMoney(raw.G34));
+    putR("G35", r.G35 == null ? '<span class="text-xs">NO WIRE GUIDANCE QUOTED</span>' : moneyFine(r.G35), r.G35,
+         raw.G35 == null ? "NO WIRE GUIDANCE QUOTED" : moneyFine(raw.G35));
+    putR("G36", r.G36 == null ? "N/A" : pctHtml(r.G36), r.G36,
+         raw.G36 == null ? "N/A" : pctHtml(raw.G36));
+    put("G26", fmtFc(r.G26));
+    put("G27", fmtFc(r.G27));
+    put("G28", fmtFc(r.G28));
+    put("G29", fmtFc(r.G29));
+    put("G30", fmtFc(r.G30));
+    put("H39", fmtFc(r.H39));
+    put("I39", fmtFc(r.I39));
+    put("L39", fmtMoney(r.D33));                                   // =D33
+    put("M39", r.D32 > 0 ? pctHtml(r.D33 / r.D32) : DASH);         // =L39/D32
+    put("N39", fmtMoney(r.D32));                                   // =D32
+  }
+
+  // ── Estimating Results override editing (click-to-type-over) ─────────────
+  function setResultOverride(key, value) {
+    if (isLocked) return;
+    if (value == null && !(key in cellOverrides)) { updateResultsCells(); return; }
+    ovClient.set(key, value);
+    updateResultsCells();
+  }
+  function beginResultEdit(box) {
+    if (isLocked || !box) return;
+    const ref = box.getAttribute("data-r-ovr");
+    if (!ref) return;
+    const key = "r:" + ref;
+    const el = box.querySelector("[data-result]") || box;
+    if (el.querySelector("input[data-r-input]")) return;   // already editing
+    const numAttr = box.getAttribute("data-r-num");
+    const cur = (key in cellOverrides)
+      ? cellOverrides[key]
+      : (numAttr === "" || numAttr == null ? "" : Number(numAttr));
+    el.innerHTML = `<input type="number" step="any" data-r-input
+        value="${cur === "" || cur == null ? "" : cur}"
+        style="width:100%;min-width:90px;border:0;background:#fff;outline:2px solid #4f46e5;outline-offset:-2px;padding:1px 4px;font-size:13px;text-align:right;color:#111;box-sizing:border-box">`;
+    const inp = el.querySelector("input[data-r-input]");
+    inp.focus();
+    inp.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      if (commit) {
+        const rawv = String(inp.value).trim();
+        if (rawv === "") setResultOverride(key, null);      // empty commit = revert
+        else {
+          const n = Number(rawv);
+          if (Number.isFinite(n)) setResultOverride(key, n);
+          else updateResultsCells();
+        }
+      } else {
+        updateResultsCells();
+      }
+    };
+    inp.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+      else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+      ev.stopPropagation();
+    });
+    inp.addEventListener("blur", () => finish(true));
+  }
+
+  // Re-render the metric-set-driven sections after any input that feeds the
+  // per-set math (selector toggles, mobs, WG LF, or estimate-level inputs).
+  // S3 keeps its input elements (only computed cells update, so typing focus
+  // is never lost); S4/S5 are input-free and re-render wholesale. The
+  // Estimating Results / Output Variables / forecast-line computed cells ride
+  // the same refresh.
+  function refreshMetricSections() {
+    updateS3Computed();
+    updateResultsCells();
+    const s4slot = container.querySelector("[data-s4-slot]");
+    if (s4slot) s4slot.innerHTML = s4SectionHtml();
+    const s5body = container.querySelector("[data-s5-body]");
+    if (s5body) s5body.innerHTML = s5BodyHtml();
+  }
 
   const bodyHtml = `
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 pb-3 items-start">
-      ${section("General Information", generalInfoHtml, { resetKey: "general_info" })}
-      ${section("Key Estimating Inputs", keyInputsHtml, { note: "Drives calculations across all tabs", resetKey: "key_inputs" })}
+    <div class="flex flex-col gap-3 pb-3">
+      ${block("GENERAL INFORMATION", generalInfoCells, { bannerExtra: resetBtn("general_info") })}
+      ${block("Key Estimating Inputs", keyInputsCells, { bannerExtra: resetBtn("key_inputs") })}
+      ${block("Key Estimating Output Variables", outputVarsCells)}
+      ${block("Estimating Results - Pricing & Schedule", resultsCells)}
+      ${priceAdjHtml}
+      ${forecastHtml}
+      ${s3SectionHtml()}
+      <div data-s4-slot>${s4SectionHtml()}</div>
+      ${s5SectionHtml()}
     </div>
   `;
 
@@ -3289,6 +3464,57 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   // (No setShell here — the shell + tab strip + page-title hiding are
   // already in place from renderEstimateWorkspace.)
   container.innerHTML = bodyHtml;
+
+  // Initial fill of the S3 computed forecast cells + TOTAL row, and the
+  // Estimating Results / Output Variables / forecast-line computed cells.
+  updateS3Computed();
+  updateResultsCells();
+
+  // Estimating Results override cells — ↺ revert + click-to-type-over.
+  // Delegated on the container so repaints via updateResultsCells keep working.
+  container.addEventListener("click", (e) => {
+    const rvBtn = e.target.closest("[data-r-revert]");
+    if (rvBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      setResultOverride(rvBtn.getAttribute("data-r-revert"), null);
+      return;
+    }
+    const box = e.target.closest("[data-r-ovr]");
+    if (box) beginResultEdit(box);
+  });
+
+  // "Use Project Rentals?" (sheet K31) — delegated so it survives S4's
+  // wholesale re-renders. Yes creates the 1.10 set (or re-enables it);
+  // No unchecks its Selector. Never deletes data.
+  container.addEventListener("change", async (e) => {
+    const sel = e.target.closest && e.target.closest("[data-use-pr]");
+    if (!sel) return;
+    const wantYes = sel.value === "Yes";
+    const prSet = metricSets.find(s => s.kind === "project_rentals") || null;
+    try {
+      if (wantYes && !prSet) {
+        const created = await api(`/quoting/metric-sets`, {
+          method: "POST",
+          body:   JSON.stringify({ estimate_id: estimateId, kind: "project_rentals" }),
+        });
+        metricSets.push(created);
+        // New set = new S3 row + new tab in the strip — re-render the page.
+        if (typeof routeFn === "function") { routeFn(); return; }
+      } else if (prSet) {
+        await api(`/quoting/metric-sets/${prSet.id}`, {
+          method: "PATCH",
+          body:   JSON.stringify({ is_enabled: wantYes }),
+        });
+        prSet.is_enabled = wantYes ? 1 : 0;
+        const cb = container.querySelector(`[data-ms-toggle="${prSet.id}"]`);
+        if (cb) cb.checked = wantYes;
+      }
+    } catch (err) {
+      alert(err?.message || "Failed to update Project Rentals");
+    }
+    refreshMetricSections();
+  });
 
   // ── input wiring ───────────────────────────────────────────────────────────
   // Mirror form values into state. For Phase 1 nothing reads most of these —
@@ -3359,8 +3585,13 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       setCalcCell("lodging_cost_per_day", lodgingCostPerDayHtml());
     }
 
+    // Mirror this tab's fields into the ROLL UP FORECAST LINE readout.
+    refreshForecastLine();
     // Bridge any state change relevant to the Quoting Metrics page.
     publishEstimateState();
+    // Estimate-level inputs feed the per-set forecast/bundle math — keep the
+    // Option Selector, flags row, and QB Outputs matrix live.
+    refreshMetricSections();
     // Persist to /api/estimates (debounced per field).
     patchEstimateField(key, state[key]);
   }
@@ -3392,17 +3623,54 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
     if (el && !el.value) el.type = "text";
   });
 
-  // Collapsible sections: clicking a section header toggles its body.
-  container.addEventListener("click", (e) => {
-    const toggle = e.target.closest("[data-section-toggle]");
-    if (!toggle) return;
-    const card = toggle.closest("[data-section]");
-    const body = card?.querySelector("[data-section-body]");
-    if (!body) return;
-    const collapsed = body.classList.toggle("hidden");
-    const chevron = toggle.querySelector("[data-section-chevron]");
-    if (chevron) chevron.classList.toggle("-rotate-90", collapsed);
+  // ── S3 Option Selector wiring ──────────────────────────────────────────────
+  // Selector checkbox → PATCH {is_enabled}; Mobilizations Per Option → PATCH
+  // {mobilizations}; Total Projected WG LF → PATCH {wire_guidance_linear_footage}.
+  // All three are accepted by the metric-sets PATCH endpoint. Local state
+  // updates optimistically so the computed columns react instantly.
+  const _msTimers = new Map();
+  container.addEventListener("change", async (e) => {
+    const cb = e.target.closest("[data-ms-toggle]");
+    if (!cb || isLocked) return;
+    const setId = Number(cb.getAttribute("data-ms-toggle"));
+    const set = metricSets.find(s => s.id === setId);
+    if (set) set.is_enabled = cb.checked ? 1 : 0;
+    refreshMetricSections();
+    try {
+      await api(`/quoting/metric-sets/${setId}`, {
+        method: "PATCH",
+        body:   JSON.stringify({ is_enabled: cb.checked ? 1 : 0 }),
+      });
+    } catch (err) {
+      console.error("Failed to save selector toggle", err);
+    }
   });
+  container.addEventListener("input", (e) => {
+    const el = e.target.closest("[data-ms-num]");
+    if (!el || isLocked) return;
+    const [idStr, field] = el.getAttribute("data-ms-num").split(":");
+    const setId = Number(idStr);
+    const set = metricSets.find(s => s.id === setId);
+    const v = el.value === "" ? 0 : Number(el.value);
+    if (set) set[field] = v;
+    refreshMetricSections();
+    const tkey = `${setId}:${field}`;
+    if (_msTimers.has(tkey)) clearTimeout(_msTimers.get(tkey));
+    _msTimers.set(tkey, setTimeout(async () => {
+      _msTimers.delete(tkey);
+      try {
+        await api(`/quoting/metric-sets/${setId}`, {
+          method: "PATCH",
+          body:   JSON.stringify({ [field]: v }),
+        });
+      } catch (err) {
+        console.error("Failed to save metric set field", field, err);
+      }
+    }, 300));
+  });
+
+  // (Collapsible card sections removed — the ROLL UP blocks are plain
+  //  spreadsheet-style grids like the sheet, no chevrons.)
 
   // ── Reset card ─────────────────────────────────────────────────────────────
   // Clears every user-editable input in a card by setting each element's value

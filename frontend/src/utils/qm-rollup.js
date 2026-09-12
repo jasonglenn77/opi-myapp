@@ -41,6 +41,42 @@ function computeBufferDays(override, adder, baseDays, envFactor) {
   return ceilHalf((base + a) * env) - ceilHalf(base * env);
 }
 
+// ---------------------------------------------------------------------------
+// Override-any-cell (#1 sheet parity, plan step 3). `overrides` is a plain
+// {key: number} map from /api/estimates/{id}/cell-overrides; `keyPrefix`
+// scopes the sheet refs to a metric set (e.g. "s12:" → "s12:S4", "s12:D23").
+// An overridden cell behaves EXACTLY like a typed-over sheet formula: the
+// override replaces the computed value at that cell, and every downstream
+// formula that references the cell consumes the override. With no overrides
+// passed, results are bit-identical to the pre-override math.
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply per-line cell overrides (`l{lineId}:std_total|agg_total|ext_cost`)
+ * onto a lines array BEFORE the rollup/bundle math — the line-cell analogue
+ * of typing over a computed sheet cell. Returns the same array when nothing
+ * applies; never mutates the input rows.
+ */
+export function applyLineOverrides(lines, overrides) {
+  if (!overrides || !Array.isArray(lines) || lines.length === 0) return lines || [];
+  let any = false;
+  for (const k in overrides) { if (k[0] === "l") { any = true; break; } }
+  if (!any) return lines;
+  return lines.map(l => {
+    if (l == null || l.id == null) return l;
+    const p = `l${l.id}:`;
+    let out = l;
+    for (const f of ["std_total", "agg_total", "ext_cost"]) {
+      const k = p + f;
+      if (k in overrides) {
+        if (out === l) out = { ...l };
+        out[f] = Number(overrides[k]);
+      }
+    }
+    return out;
+  });
+}
+
 // Section codes that contribute to "Rack Contract Labor" totals.
 const RACK_LABOR_SECTIONS = [
   "teardrop_racking", "bolted_racking", "wire_decking", "anchors",
@@ -71,15 +107,25 @@ const RACK_LABOR_SECTIONS = [
  *    grand_total,               // sum of the 6 top-level sections
  * }
  */
-export function computeSetRollup({ set, lines, lookups, estimateState }) {
+export function computeSetRollup({ set, lines, lookups, estimateState, overrides = null, keyPrefix = "" }) {
   const est = estimateState || {};
+
+  // Typed-over cell hook: return the override for `keyPrefix+ref` when one
+  // exists, else the computed value. No overrides → pure pass-through.
+  const ov = (ref, computed) => {
+    if (!overrides) return computed;
+    const k = keyPrefix + ref;
+    return (k in overrides) ? Number(overrides[k]) : computed;
+  };
 
   // Estimate inputs
   const travel_hrs        = Number(est.one_way_travel_hrs ?? 0) || 0;
   const crew_count        = Number(est.crew_count ?? 0) || 0;
   const crew_size_key     = est.crew_size || "";
   const mgmt_pct_pts      = Number(est.mgmt_travel_multiplier ?? 0) || 0;
-  const mgmt_pct          = mgmt_pct_pts / 100;
+  // D16 (Mgmt Travel Multiplier mirror, pct points) is a green computed cell
+  // on the scope tabs — typed-over values flow into the mgmt-travel formula.
+  const mgmt_pct          = ov("D16", mgmt_pct_pts) / 100;
   const rack_profit_pct   = (Number(est.rack_install_profit_target  ?? 0) || 0) / 100;
   const mob_profit_pct    = (Number(est.mobilization_profit_target  ?? 0) || 0) / 100;
   const breakOutMob       = est.breaking_out_mobilization;
@@ -89,18 +135,23 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
   const local = lookupValueNum(lookups, "labor_crew_cost", "Local");
   const crew_size_num = lookupValueNum(lookups, "crew_size", crew_size_key);
   let labor_cost_per_day = 0;
-  if (travel_hrs > 0 && crew_size_num != null && oot != null && local != null) {
+  // Sheet parity: D26 = if(hrs > 1, OOT, local) — the LOCAL rate applies even
+  // at 0/blank travel hours (replay finding: app used to give $0 there).
+  if (crew_size_num != null && oot != null && local != null) {
     labor_cost_per_day = ((travel_hrs > 1 ? oot : local) / 5) * crew_size_num;
   }
-  const labor_cost_per_travel_day = labor_cost_per_day;
+  labor_cost_per_day = ov("D13", labor_cost_per_day);
+  // Sheet D14 references D13, so an overridden D13 flows into D14 unless
+  // D14 itself is typed over.
+  const labor_cost_per_travel_day = ov("D14", labor_cost_per_day);
 
   // Lodging/day is DERIVED like labor: (Hotel/AB&B base ÷ 5) × crew size, and 0
   // for local jobs (travel ≤ 1 hr). Matches the ROLL UP lodging formula
   // =IF(D18>1, IF(days>6, Hotel, AB&B), 0)/5 × crew-size. Hotel & AB&B are both
   // $425 today, so the >6-day switch is currently a no-op.
   const lodging_base = lookupValueNum(lookups, "lodging", "Hotel");
-  const lodging_per_day = (travel_hrs > 1 && crew_size_num != null && lodging_base != null)
-    ? (lodging_base / 5) * crew_size_num : 0;
+  const lodging_per_day = ov("D15", (travel_hrs > 1 && crew_size_num != null && lodging_base != null)
+    ? (lodging_base / 5) * crew_size_num : 0);
 
   const travel_days_per_crew = travelDaysFromHrs(lookups, travel_hrs);
 
@@ -187,15 +238,20 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
   const wire_adder = hasNum(set?.wire_guidance_project_time_adder)
     ? Number(set.wire_guidance_project_time_adder) : base_wire * budget_pct;
 
-  const D22 = travel_override != null
+  const D22 = ov("D22", travel_override != null
     ? travel_override
-    : travel_days_per_crew * crew_count * mobilizations;
+    : travel_days_per_crew * crew_count * mobilizations);
   // Tab Labor Days — includes the time-adder, rounded up to the half-day.
-  const D23 = ceilHalf((base_rack + rack_adder) * env_factor);
-  const D24 = ceilHalf((base_wire + wire_adder) * env_factor);
+  // The buffer counters (M20/M21) re-derive from the base like the sheet
+  // formulas do — they do NOT reference the D23/D24 cells, so a typed-over
+  // D23/D24 changes H44/H220/lodging/G23 but never the buffer.
+  const D23_calc = ceilHalf((base_rack + rack_adder) * env_factor);
+  const D24_calc = ceilHalf((base_wire + wire_adder) * env_factor);
   // Buffer counter = Tab Labor Days − ceilHalf(base).
-  const M20 = D23 - ceilHalf(base_rack * env_factor);
-  const M21 = D24 - ceilHalf(base_wire * env_factor);
+  const M20 = D23_calc - ceilHalf(base_rack * env_factor);
+  const M21 = D24_calc - ceilHalf(base_wire * env_factor);
+  const D23 = ov("D23", D23_calc);
+  const D24 = ov("D24", D24_calc);
 
   // Top-level section dollar totals. Contract labor uses Tab Labor Days (D23/D24).
   const H44  = D23 * labor_cost_per_day;                  // Rack Contract Labor $
@@ -243,9 +299,26 @@ export function computeSetRollup({ set, lines, lookups, estimateState }) {
 // Mirrors the per-set math previously embedded in base-quoting-metrics.js
 // (computeAllBundles). Pure function — same input → same output.
 // ---------------------------------------------------------------------------
-export function computeSetBundles({ set, lines, lookups, estimateState }) {
-  const rollup = computeSetRollup({ set, lines, lookups, estimateState });
+export function computeSetBundles({ set, lines, lookups, estimateState, overrides = null, keyPrefix = "" }) {
+  const rollup = computeSetRollup({ set, lines, lookups, estimateState, overrides, keyPrefix });
   const est = estimateState || {};
+
+  // Typed-over cell hook (same contract as computeSetRollup's): every S-row
+  // assignment below runs through ov(), so an override at any row flows into
+  // the subtotal/OH&P/total formulas that reference it — exactly like the
+  // sheet. No overrides → pure pass-through (bit-identical results).
+  const ov = (ref, computed) => {
+    if (!overrides) return computed;
+    const k = keyPrefix + ref;
+    return (k in overrides) ? Number(overrides[k]) : computed;
+  };
+
+  // Sheet parity: the workbook's 1.10 PROJECT RENTALS tab multiplies its
+  // labor-side costing rows by G30 ("Multiplier", 0 in every observed book):
+  // S4/S5/S9, S16/S19, S32/S33/S34 — the PR tab prices RENTALS only, so its
+  // auto travel/labor days must not leak labor bundles (found by the 4-workbook
+  // fidelity replay: +$4,250 phantom WG labor on quote 7668).
+  const prGate = set?.kind === "project_rentals" ? 0 : 1;
 
   // Group lines by section_code so the helpers can look them up cheaply.
   const linesBySection = lines.reduce((acc, l) => {
@@ -325,15 +398,15 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   if (H44 > 0) {
     S4_raw = isYes(breakOutMob) ? (H44 - M20 * D13) : (H44 - M20 * D13 + G35);
   }
-  const S4 = ceil10(S4_raw);
-  const S5 = ceil10(H39);
-  const S6 = ceil10(S4 === 0 ? 0 : G34);
-  const S7 = ceil10(M20 * D13 / (1 - rack_profit_pct || 1));
-  const S8 = ceil10(
+  const S4 = ov("S4", ceil10(S4_raw) * prGate);
+  const S5 = ov("S5", ceil10(H39) * prGate);
+  const S6 = ov("S6", ceil10(S4 === 0 ? 0 : G34));
+  const S7 = ov("S7", ceil10(M20 * D13 / (1 - rack_profit_pct || 1)));
+  const S8 = ov("S8", ceil10(
     S4 !== 0 && D21 > 1
       ? (isNo(breakOutMob) ? (D22 + D23) * D15 : D23 * D15)
       : 0
-  );
+  ));
   const U4 = ceil10(D23 * D13 - M20 * D13);
   const T4 = ceil10(U4 === 0 ? 0 : G35);
   const U8 = ceil10(D23 * D15);
@@ -341,15 +414,16 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   const ilb_sub = S4 + S5 + S6 + S8;
   let S9;
   if (isYes(breakOutMob)) {
-    S9 = ceil10(markup(ilb_sub, rack_profit_pct));
+    S9 = prGate * ceil10(markup(ilb_sub, rack_profit_pct));
   } else {
-    S9 = ceil10(
+    S9 = prGate * ceil10(
       ((ilb_sub - T4 - T8) / (1 - rack_profit_pct || 1))
         + ((T4 + T8) / (1 - mob_profit_pct || 1))
         - ilb_sub
     );
   }
-  const ilb_total = S4 + S5 + S6 + S7 + S8 + S9;
+  S9 = ov("S9", S9);
+  const ilb_total = ov("S3", S4 + S5 + S6 + S7 + S8 + S9);
 
   // ── Rentals Bundle (S10–S14) ────────────────────────────────────────────
   const otherRackDumpster = sumOtherRentalsByLabel("other_rentals_rack_install", "dumpster");
@@ -358,11 +432,11 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   // Equipment-Lifts = the base rack rentals + the "everything else" other-rentals.
   // (Fix: was H187, which already folds in propane/dumpster — those are split into
   // their own lines S12/S13, so using H187 double-counted them.)
-  const S11 = ceil10(sumSectionExtCosts("rentals_rack_install") + otherRackRest);
-  const S12 = ceil10(otherRackDumpster);
-  const S13 = ceil10(otherRackPropane);
-  const S14 = ceil10((S11 + S12) / (1 - rent_rack_pct || 1) + S13 - (S11 + S12 + S13));
-  const rentals_total = S11 + S12 + S13 + S14;
+  const S11 = ov("S11", ceil10(sumSectionExtCosts("rentals_rack_install") + otherRackRest));
+  const S12 = ov("S12", ceil10(otherRackDumpster));
+  const S13 = ov("S13", ceil10(otherRackPropane));
+  const S14 = ov("S14", ceil10((S11 + S12) / (1 - rent_rack_pct || 1) + S13 - (S11 + S12 + S13)));
+  const rentals_total = ov("S10", S11 + S12 + S13 + S14);
 
   // ── Wire Guidance Labor Bundle (S15–S23) ────────────────────────────────
   let S16_raw;
@@ -371,21 +445,21 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
   } else {
     S16_raw = H220 - M21 * D13;
   }
-  const S16 = ceil10(S16_raw);
-  const S17 = ceil10(H214);
+  const S16 = ov("S16", ceil10(S16_raw) * prGate);
+  const S17 = ov("S17", ceil10(H214));
   let S18_raw = 0;
   if (S4 === 0 && S16 !== 0) S18_raw = G34;
-  const S18 = ceil10(S18_raw);
-  const T16 = (isNo(breakOutMob) && D23 === 0) ? G35 : 0;
+  const S18 = ov("S18", ceil10(S18_raw));
+  const T16 = prGate * ((isNo(breakOutMob) && D23 === 0) ? G35 : 0);
   const T19 = T16 > 0 ? ((D22 + D23) * D15 - U8) : 0;
   const U19 = ceil10(D24 * D15);
-  const S19 = ceil10(T19 + U19);
-  const S20 = ceil10(M21 * D13 / (1 - rack_profit_pct || 1));
+  const S19 = ov("S19", ceil10(T19 + U19) * prGate);
+  const S20 = ov("S20", ceil10(M21 * D13 / (1 - rack_profit_pct || 1)));
   const otherWgPropane = sumOtherRentalsByLabel("other_rentals_wire_guidance", "propane");
   const otherWgRest    = sumSectionExtCosts("other_rentals_wire_guidance") - otherWgPropane;
   // Floor Scrubber = base WG rentals + "everything else" (propane split to S22).
-  const S21 = ceil10(sumSectionExtCosts("rentals_wire_guidance") + otherWgRest);
-  const S22 = ceil10(otherWgPropane);
+  const S21 = ov("S21", ceil10(sumSectionExtCosts("rentals_wire_guidance") + otherWgRest));
+  const S22 = ov("S22", ceil10(otherWgPropane));
   const wglb_sub = S16 + S17 + S18 + S19;
   let S23;
   if (isYes(breakOutMob)) {
@@ -400,55 +474,56 @@ export function computeSetBundles({ set, lines, lookups, estimateState }) {
         + markup(S21, rent_wire_pct)
     );
   }
-  const wglb_total = S16 + S17 + S18 + S19 + S20 + S21 + S22 + S23;
+  S23 = ov("S23", S23);
+  const wglb_total = ov("S15", S16 + S17 + S18 + S19 + S20 + S21 + S22 + S23);
 
   // ── Wire Guidance Additional Items (S24–S29) ────────────────────────────
   const slurry  = wgAdditionalLine("slurry");
   const lineDrv = wgAdditionalLine("line driver");
   const magnet  = wgAdditionalLine("magnet");
   const rfid    = wgAdditionalLine("rfid");
-  const S25 = ceil10(slurry);
-  const S26 = ceil10(lineDrv);
-  const S27 = ceil10(magnet);
-  const S28 = ceil10(rfid);
+  const S25 = ov("S25", ceil10(slurry));
+  const S26 = ov("S26", ceil10(lineDrv));
+  const S27 = ov("S27", ceil10(magnet));
+  const S28 = ov("S28", ceil10(rfid));
   const wga_sub = S25 + S26 + S27 + S28;
   // Workbook quirk: if the sub equals exactly 600 the OH&P is forced to 400.
-  const S29 = ceil10(
+  const S29 = ov("S29", ceil10(
     wga_sub === 600 ? 400 : (wga_sub / (1 - 0.40) - wga_sub)
-  );
-  const wga_total = S25 + S26 + S27 + S28 + S29;
+  ));
+  const wga_total = ov("S24", S25 + S26 + S27 + S28 + S29);
 
   // ── Mobilization (S30–S35) ──────────────────────────────────────────────
   const avg_mobs = mobs > 0 ? mobs : 0;
   const has_mobs = avg_mobs > 0;
-  const S31 = 0;   // Materials — static 0 in workbook
-  const S32 = has_mobs && isYes(breakOutMob) ? ceil10(G35 / avg_mobs) : 0;
-  const S33 = (S18 + S6 === 0) ? ceil10(G34) : 0;
-  const S34 = has_mobs && isYes(breakOutMob) ? ceil10((D22 / avg_mobs) * D15) : 0;
+  const S31 = ov("S31", 0);   // Materials — static 0 in workbook
+  const S32 = ov("S32", prGate * (has_mobs && isYes(breakOutMob) ? ceil10(G35 / avg_mobs) : 0));
+  const S33 = ov("S33", prGate * ((S18 + S6 === 0) ? ceil10(G34) : 0));
+  const S34 = ov("S34", prGate * (has_mobs && isYes(breakOutMob) ? ceil10((D22 / avg_mobs) * D15) : 0));
   const mob_sub = S31 + S32 + S33 + S34;
-  const S35 = ceil10(markup(mob_sub, mob_profit_pct));
-  const mob_total = S31 + S32 + S33 + S34 + S35;
+  const S35 = ov("S35", ceil10(markup(mob_sub, mob_profit_pct)));
+  const mob_total = ov("S30", S31 + S32 + S33 + S34 + S35);
 
   // ── Remobilization (S36–S41) ────────────────────────────────────────────
   const extra = Math.max(0, avg_mobs - 1);
   const has_extra = extra > 0;
-  const S37 = has_extra ? ceil10(S31 * extra) : 0;
-  const S38 = has_extra ? ceil10(S32 * extra) : 0;
-  const S39 = has_extra ? ceil10(S33 * extra) : 0;
-  const S40 = has_extra ? ceil10(S34 * extra) : 0;
-  const S41 = has_extra ? ceil10(S35 * extra) : 0;
-  const remob_total = S37 + S38 + S39 + S40 + S41;
+  const S37 = ov("S37", has_extra ? ceil10(S31 * extra) : 0);
+  const S38 = ov("S38", has_extra ? ceil10(S32 * extra) : 0);
+  const S39 = ov("S39", has_extra ? ceil10(S33 * extra) : 0);
+  const S40 = ov("S40", has_extra ? ceil10(S34 * extra) : 0);
+  const S41 = ov("S41", has_extra ? ceil10(S35 * extra) : 0);
+  const remob_total = ov("S36", S37 + S38 + S39 + S40 + S41);
 
   // ── Downtime (S42–S47) ──────────────────────────────────────────────────
   const K22 = Number(set?.downtime_labor_day_override ?? 0) || 0;
-  const S43 = 0;   // Materials — static in workbook
-  const S44 = ceil10(ceilHalf(K22) * D13);
-  const S45 = 0;   // Mgmt Travel — static in workbook
-  const S46 = S44 > 0 ? ceil10(Math.ceil(K22) * D15) : 0;
-  const S47 = S44 > 0
+  const S43 = ov("S43", 0);   // Materials — static in workbook
+  const S44 = ov("S44", ceil10(ceilHalf(K22) * D13));
+  const S45 = ov("S45", 0);   // Mgmt Travel — static in workbook
+  const S46 = ov("S46", S44 > 0 ? ceil10(Math.ceil(K22) * D15) : 0);
+  const S47 = ov("S47", S44 > 0
     ? ceil10(ceilHalf(K22) * downtime_target - (S43 + S44 + S45 + S46))
-    : 0;
-  const downtime_total = S43 + S44 + S45 + S46 + S47;
+    : 0);
+  const downtime_total = ov("S42", S43 + S44 + S45 + S46 + S47);
 
   return {
     installation: {
