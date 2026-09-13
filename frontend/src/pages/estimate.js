@@ -460,14 +460,18 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
               title="Delete ${escapeHtml(deleteLabel)}">×</button>
     </span>`;
 
+  // ROLL UP + BASE pinned left; only Option/PR pills live in the scrollable
+  // middle strip (min-width:0 lets IT shrink and scroll while everything
+  // else stays put); the add-buttons + PDF/QBO tabs pinned right.
   const tabsHtml = `
     <div class="card px-3 py-2" data-workspace-tabs>
-      <div class="flex items-center gap-1 overflow-x-auto">
-        ${tabBtn(`${baseUrl}/general`, "0. ROLL UP Quoting Metrics", tab === "general")}
-        ${tabBtn(`${baseUrl}/base`,    "1.0 BASE Quoting Metrics",  tab === "base")}
+      <div class="flex items-center gap-1">
+        ${tabBtn(`${baseUrl}/general`, "0. ROLL UP", tab === "general")}
+        ${tabBtn(`${baseUrl}/base`,    "1.0 BASE",   tab === "base")}
+        <div class="flex items-center gap-1 overflow-x-auto" style="min-width:0">
         ${options.map(opt => deletableTabBtn(
           `${baseUrl}/option/${opt.sort_order}`,
-          `1.${opt.sort_order} ${opt.label || `Option ${opt.sort_order}`} - Quoting Metrics`,
+          `1.${opt.sort_order} ${opt.label || `Option ${opt.sort_order}`}`,
           tab === "option" && optionN === opt.sort_order,
           opt.id,
           opt.label || `Option ${opt.sort_order}`
@@ -479,6 +483,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
           projectRentalsSet.id,
           projectRentalsSet.label || "Project Rentals"
         ) : ""}
+        </div>
         <button type="button"
                 class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
                 data-add-option>
