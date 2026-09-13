@@ -438,14 +438,14 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   const baseUrl = `#/estimate/${estimateId}`;
   const tabBtn = (href, label, active) => `
     <a href="${href}"
-       class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition
+       class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition
               ${active ? "bg-ink-900 text-white" : "text-black/70 hover:bg-black/5"}">
       ${escapeHtml(label)}
     </a>`;
   // Deletable tab (Option/PR): tab link + trailing × button, grouped so the
   // pair reads as one chip but each half is independently clickable.
   const deletableTabBtn = (href, label, active, setId, deleteLabel) => `
-    <span class="inline-flex items-center rounded-lg overflow-hidden transition
+    <span class="shrink-0 inline-flex items-center rounded-lg overflow-hidden transition
                  ${active ? "bg-ink-900" : "hover:bg-black/5"}">
       <a href="${href}"
          class="pl-3 pr-2 py-2 text-xs font-semibold whitespace-nowrap
@@ -480,13 +480,13 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
           projectRentalsSet.label || "Project Rentals"
         ) : ""}
         <button type="button"
-                class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
+                class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
                 data-add-option>
           + Add Option
         </button>
         ${!projectRentalsSet ? `
           <button type="button"
-                  class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
+                  class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
                   data-add-project-rentals>
             + Project Rentals
           </button>` : ""}
@@ -683,6 +683,11 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   // Dispatch to the active tab's body renderer.
   const tabBody = document.querySelector("[data-tab-body]");
   if (!tabBody) return;
+  // The ROLL UP's Option Selector rows carry data-delete-set buttons too —
+  // same handler, so an option squeezed out of the tab strip is still
+  // deletable from the selector table. (tab body node is recreated per
+  // workspace render, so this never double-binds.)
+  tabBody.addEventListener("click", onShellClick);
   if (tab === "general") {
     return renderGeneralInfoTab(tabBody, estimate, estimateId, routeFn);
   }
@@ -2957,7 +2962,11 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
           <input type="checkbox" data-ms-toggle="${set.id}" ${checked} ${dis}
                  style="width:14px;height:14px;accent-color:#1a73e8"/>
         </td>
-        <td style="${S3_TD};font-weight:600">${escapeHtml(setScopeLabel(set))}</td>
+        <td style="${S3_TD};font-weight:600">${escapeHtml(setScopeLabel(set))}${set.kind !== "base" && !isLocked
+          ? `<button type="button" data-delete-set="${set.id}" data-delete-label="${escapeHtml(setTabName(set))}"
+                     title="Delete ${escapeHtml(setTabName(set))} — removes the tab and all of its rows"
+                     style="margin-left:6px;color:#b91c1c;background:none;border:0;cursor:pointer;font-size:12px;font-weight:700;padding:0 2px">✕</button>`
+          : ""}</td>
         <td style="${S3_BLU}">
           <input type="number" step="1" min="0" data-ms-num="${set.id}:mobilizations" ${dis}
                  value="${escapeHtml(numVal(set.mobilizations))}" style="${S3_INP}"/>
