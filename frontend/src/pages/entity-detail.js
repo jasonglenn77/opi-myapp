@@ -104,7 +104,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     const fileBadge = deep ? `<span class="ml-1.5 inline-flex rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-black/55">${deep} file${deep === 1 ? "" : "s"}</span>` : "";
     return `
       <div data-node="${escapeHtml(node.key)}">
-        <div class="flex items-center gap-2 border-b border-black/5 py-2 hover:bg-black/[0.015]" style="padding-left:${pad}px;padding-right:8px">
+        <div class="flex items-center gap-2 border-b border-black/5 py-2 hover:bg-black/[0.015]" data-drop="${escapeHtml(node.key)}" data-drop-label="${escapeHtml(node.label)}" style="padding-left:${pad}px;padding-right:8px">
           <button type="button" data-toggle="${escapeHtml(node.key)}" class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-black/40 hover:bg-black/5">
             <span class="inline-flex transition-transform ${open ? "rotate-90" : ""}">${CHEV}</span>
           </button>
@@ -165,6 +165,62 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
   }
 
   // ── documents tab ───────────────────────────────────────────────────────────
+  // Drag & drop into a folder row: validate, then the SAME upload POST the
+  // Upload button uses, one file at a time with a per-file corner toast.
+  function docToast() {
+    const t = document.createElement("div");
+    t.className = "doc-toast";
+    document.body.appendChild(t);
+    return { set(html) { t.innerHTML = html; }, done(ms) { setTimeout(() => t.remove(), ms || 2600); } };
+  }
+  async function handleDocDrop(fileList, folder, folderLabel) {
+    const all = [...(fileList || [])];
+    if (!all.length) return;
+    const bad = [], good = [];
+    for (const f of all) {
+      if (f.size > 100 * 1024 * 1024) bad.push(`${f.name} — over the 100 MB limit`);
+      else if (f.size === 0 && !f.type) bad.push(`${f.name} — empty file (folders can't be dropped)`);
+      else good.push(f);
+    }
+    const toast = docToast();
+    let ok = 0; const fail = [];
+    for (let i = 0; i < good.length; i++) {
+      toast.set(`<b>Uploading to ${escapeHtml(folderLabel)}…</b><br>${escapeHtml(good[i].name)} · file ${i + 1} of ${good.length}`);
+      try {
+        const fd = new FormData();
+        fd.append("file", good[i]);
+        await api(`/documents/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}?folder=${encodeURIComponent(folder)}`, { method: "POST", body: fd });
+        ok++;
+      } catch (err) { fail.push(`${good[i].name} — ${err?.message || "upload failed"}`); }
+    }
+    const bits = [];
+    if (ok) bits.push(`✓ ${ok} file${ok === 1 ? "" : "s"} uploaded to ${escapeHtml(folderLabel)}`);
+    for (const b of [...fail, ...bad]) bits.push(`✕ ${escapeHtml(b)}`);
+    toast.set(bits.join("<br>") || "Nothing to upload.");
+    toast.done(bad.length || fail.length ? 7000 : 2600);
+    if (ok) { expanded.add(folder); try { await refetch(); } catch (_) {} }
+  }
+  function attachDocDropTargets(host) {
+    let hover = null;
+    const clear = () => { if (hover) { hover.classList.remove("doc-drop-hover"); hover = null; } };
+    host.addEventListener("dragover", (e) => {
+      const row = e.target.closest("[data-drop]");
+      if (!row) { clear(); return; }
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      if (hover !== row) { clear(); row.classList.add("doc-drop-hover"); hover = row; }
+    });
+    host.addEventListener("dragleave", (e) => { if (hover && !hover.contains(e.relatedTarget)) clear(); });
+    host.addEventListener("drop", (e) => {
+      const row = e.target.closest("[data-drop]");
+      clear();
+      if (!row) return;
+      e.preventDefault();
+      handleDocDrop(e.dataTransfer && e.dataTransfer.files,
+                    row.getAttribute("data-drop"),
+                    row.getAttribute("data-drop-label") || row.getAttribute("data-drop"));
+    });
+  }
   function attachDocHandlers() {
     const host = document.getElementById("docTree");
     if (!host) return;
@@ -222,18 +278,22 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     body.innerHTML = `<div id="docTree"></div>`;
     renderTree();
     attachDocHandlers();
+    const host = document.getElementById("docTree");
+    if (host) attachDocDropTargets(host);
   }
 
+  // Kickoff & Process and the Daily Log are MANAGED in the PM Portal (#/pm)
+  // now — the office workspace keeps these tabs as read-only views.
   function showKickoff() {
     const body = document.getElementById("tabBody");
     body.innerHTML = "";
-    mountKickoffPanel(body, entityId);
+    mountKickoffPanel(body, entityId, { readOnly: true });
   }
 
   function showDaily() {
     const body = document.getElementById("tabBody");
     body.innerHTML = "";
-    mountDailyPanel(body, entityId);
+    mountDailyPanel(body, entityId, { readOnly: true });
   }
 
   function showBilling() {
@@ -299,7 +359,12 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         <div class="text-sm font-semibold ${opts.color || "text-ink-900"} mt-0.5">${val}</div>
       </div>`;
     const dash = (s) => (s == null || s === "" ? "—" : escapeHtml(String(s)));
-    const value = f ? (Number(f.invoice_line_amt) || Number(f.estimate_line_amt) || 0) : null;
+    // Contract value = QBO estimate lines (matches All Projects + PM Portal);
+    // invoiced-to-date is its own fact — the two were conflated before
+    // (invoice_line_amt || estimate_line_amt) and read as three different
+    // "values" across pages.
+    const contractValue = f ? (Number(f.estimate_line_amt) || 0) : null;
+    const invoicedToDate = f ? (Number(f.invoice_line_amt) || 0) : null;
     const quote = p.linked_quote_number
       ? `<button data-view-quote="${escapeHtml(String(p.linked_quote_number))}" class="text-blue-700 hover:underline font-semibold">#${escapeHtml(String(p.linked_quote_number))} →</button>`
       : `<span class="text-black/40">— not linked</span>`;
@@ -316,7 +381,8 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
           ${fact("Project Manager", dash(p.all_project_managers || p.primary_project_manager))}
           ${fact("Work Crew", dash(p.all_work_crews || p.primary_work_crew))}
           ${fact("Documents", `${p.file_count || 0} file${(p.file_count || 0) === 1 ? "" : "s"}`)}
-          ${fact("Contract / Value", fmtMoney(value))}
+          ${fact("Contract value", fmtMoney(contractValue))}
+          ${fact("Invoiced to date", fmtMoney(invoicedToDate))}
           ${fact("Actual profit", fmtMoney(f?.actual_profit), { color: (Number(f?.actual_profit) || 0) >= 0 ? "text-emerald-700" : "text-red-600" })}
           ${fact("Actual margin", fmtPct(f?.actual_profit_pct))}
         </div>

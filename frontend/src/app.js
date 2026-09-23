@@ -13,7 +13,9 @@ import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
 import { cashflowPage } from "./pages/cashflow.js";
 import { crewPortalPage } from "./pages/crew.js";
+import { crewFormsPage } from "./pages/crew-forms.js";
 import { crewOpsPage } from "./pages/crew-ops.js";
+import { pmPage } from "./pages/pm.js";
 import { customersPage } from "./pages/customers.js";
 import { contactsPage } from "./pages/contacts.js";
 import { pipelinePage } from "./pages/opportunities.js";
@@ -35,6 +37,7 @@ const ROUTE_CAPS = {
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
   "#/crew-ops":   "page.assignment",
+  "#/pm":         "page.pm_portal",
   "#/teams":      "page.teams",
   "#/users":      "page.users",
   "#/quickbooks": "page.quickbooks",
@@ -45,13 +48,14 @@ const ROUTE_CAPS = {
 // Preference order for choosing a landing page the user is actually allowed to see.
 const ROUTE_ORDER = [
   "#/projects", "#/financials", "#/cashflow", "#/customers", "#/estimate", "#/schedule",
-  "#/assignment", "#/crew-ops", "#/crew", "#/teams", "#/users", "#/settings", "#/quickbooks",
+  "#/assignment", "#/crew-ops", "#/pm", "#/crew", "#/teams", "#/users", "#/settings", "#/quickbooks",
 ];
 
 function requiredCapForHash(hash) {
   if (hash.startsWith("#/entity/")) return "page.customers";
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return "page.estimate";
   if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops")) return "page.crew_portal";
+  if (hash === "#/pm" || hash.startsWith("#/pm/")) return "page.pm_portal";
   return ROUTE_CAPS[hash] || null;
 }
 
@@ -70,6 +74,10 @@ function renderNoAccess() {
 
 async function route() {
   const hash = location.hash || "#/projects";
+
+  // PUBLIC route: crew field forms (#/field) are passcode-gated inside the
+  // page itself (crew tokens, not user tokens) — same pattern as #/set-password.
+  if (hash.startsWith("#/field")) return crewFormsPage(route);
 
   // Auto-login UX: if token exists, validate via /me before rendering the landing page.
   // Only clear the token on genuine auth failures (401/403). Transient server errors
@@ -145,6 +153,11 @@ async function route() {
   if (hash === "#/settings/lookups") return lookupValuesPage(route);
   if (hash === "#/settings/rates") return rateTablesPage(route);
   if (hash === "#/settings" || hash.startsWith("#/settings/")) return settingsPage(route);
+  if (hash === "#/pm" || hash.startsWith("#/pm/")) {
+    const pmMatch = hash.match(/^#\/pm\/project\/(.+)$/);
+    if (pmMatch) return pmPage(route, { projectId: decodeURIComponent(pmMatch[1]) });
+    return pmPage(route, null);
+  }
   if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops")) {
     const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);
     if (cm) return crewPortalPage(route, { childId: decodeURIComponent(cm[1]), projectId: cm[2] ? decodeURIComponent(cm[2]) : null });

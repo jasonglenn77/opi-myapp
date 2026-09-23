@@ -1,0 +1,21 @@
+-- 0053 Per-form requirement + cadence (PM Portal Design v3, Milestone C).
+--
+-- project_form_settings.forms JSON semantics — a map keyed by form_code:
+--   {"kickoff_update": {"required": true,  "cadence": "one_time"},
+--    "daily_update":   {"required": true,  "cadence": "daily"}, ...}
+--   required: bool  — false = the PM marked this form not applicable for the
+--                     project (the crew still SEES it, de-emphasized; status
+--                     engine reports "not_required").
+--   cadence:  "one_time" | "daily" | "every_other_day" | "weekly"
+--             — drives the due / overdue status computation
+--             (app/forms/status.py).
+--
+-- Defaults when a form_code is ABSENT from the map (applied at serve time by
+-- forms/routes.py, so the client always receives a complete map):
+--   required = true
+--   cadence  = "one_time" for kickoff_update and completion,
+--              "daily"    for daily_update,
+--              "one_time" for any future form code.
+-- NULL / empty column = all defaults (no settings row is ever required).
+
+ALTER TABLE project_form_settings ADD COLUMN forms JSON NULL;

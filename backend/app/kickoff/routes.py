@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.auth import get_current_user
-from app.permissions import has_capability, PAGE_CUSTOMERS
+from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_PM_PORTAL
 
 router = APIRouter(prefix="/api/kickoff", tags=["kickoff"])
 
@@ -192,7 +192,9 @@ HELD_KEY = "_held_date"
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 def _require(user):
-    if not has_capability(user, PAGE_CUSTOMERS):
+    # Office project workspace (page.customers, now read-only there) and the
+    # PM portal (page.pm_portal, the editing surface) both reach kickoff data.
+    if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_PM_PORTAL)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
 

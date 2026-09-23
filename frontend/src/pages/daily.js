@@ -12,6 +12,9 @@ const shiftDay = (ymd, n) => { const [y, m, d] = ymd.split("-").map(Number); con
 const niceDate = (ymd) => { const [y, m, d] = ymd.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }); };
 
 export async function mountDailyPanel(container, entityId, opts = {}) {
+  // readOnly = the office project workspace view: the daily log is MANAGED in
+  // the PM Portal (and by the crew) — office keeps a look-don't-touch copy.
+  const ro = !!opts.readOnly;
   let data, logDate = opts.date || localToday();
   const noteOpen = new Set();
 
@@ -23,7 +26,7 @@ export async function mountDailyPanel(container, entityId, opts = {}) {
     const editing = noteOpen.has(it.key);
     return `
       <div class="flex items-start gap-3 py-2 px-1 border-b border-black/5 last:border-b-0">
-        <button type="button" data-toggle="${it.key}" class="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${it.done ? "bg-kpi-completed-text border-kpi-completed-text text-white" : "border-black/25 bg-white text-transparent hover:border-black/40"}">${CHECK}</button>
+        <button type="button" data-toggle="${it.key}" ${ro ? "disabled" : ""} class="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${it.done ? "bg-kpi-completed-text border-kpi-completed-text text-white" : "border-black/25 bg-white text-transparent" + (ro ? "" : " hover:border-black/40")}">${CHECK}</button>
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-xs font-semibold ${it.done ? "text-black/45 line-through" : "text-ink-900"}">${escapeHtml(it.label)}</span>
@@ -31,7 +34,7 @@ export async function mountDailyPanel(container, entityId, opts = {}) {
           </div>
           <div class="mt-0.5 flex items-center gap-2 flex-wrap">
             ${it.done && it.done_by ? `<span class="text-[10px] text-black/40">${escapeHtml(it.done_by)}${it.done_at ? " · " + escapeHtml(fmtDT(it.done_at)) : ""}</span>` : ""}
-            <button type="button" data-note="${it.key}" class="text-[11px] font-medium text-black/40 hover:text-black/70">${it.note ? "✎ note" : "+ note"}</button>
+            ${ro ? "" : `<button type="button" data-note="${it.key}" class="text-[11px] font-medium text-black/40 hover:text-black/70">${it.note ? "✎ note" : "+ note"}</button>`}
           </div>
           ${it.note && !editing ? `<div class="mt-1 rounded-lg bg-black/[0.03] px-2 py-1 text-[11px] text-black/60 whitespace-pre-wrap">${escapeHtml(it.note)}</div>` : ""}
           ${editing ? `
@@ -67,6 +70,7 @@ export async function mountDailyPanel(container, entityId, opts = {}) {
 
     container.innerHTML = `
       <div class="p-4 sm:p-5">
+        ${ro ? `<div class="pm-ro-note mb-3">Read-only view — the Daily Log is managed in the PM Portal.</div>` : ""}
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
           <div>
             <div class="text-sm font-extrabold text-ink-900">Daily Requirements</div>
@@ -113,6 +117,7 @@ export async function mountDailyPanel(container, entityId, opts = {}) {
     if (e.target.closest("[data-today]")) { logDate = localToday(); await reload(); return; }
     const hist = e.target.closest("[data-hist]");
     if (hist) { logDate = hist.getAttribute("data-hist"); await reload(); return; }
+    if (ro) return;   // read-only: date navigation above stays; writes below don't
 
     const tog = e.target.closest("[data-toggle]");
     if (tog) {

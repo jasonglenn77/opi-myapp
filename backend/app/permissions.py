@@ -38,6 +38,7 @@ PAGE_CASHFLOW   = "page.cashflow"
 PAGE_CREW_PORTAL = "page.crew_portal"   # crew hierarchy drill-down (parents → children → projects → foreman)
 PAGE_CUSTOMERS  = "page.customers"      # customers → legacy jobs drill-down (revenue not tied to QBO Projects)
 PAGE_SETTINGS   = "page.settings"       # manage roles & their default permissions (admin)
+PAGE_PM_PORTAL  = "page.pm_portal"      # PM portal: my projects + kickoff/daily/documents (mobile-first)
 
 # Action capabilities
 PROJECT_VIEW_ALL    = "project.view_all"      # see every project (vs. only assigned)
@@ -51,7 +52,7 @@ PROJECTS_ADMIN      = "projects.admin_tools"  # refresh financials, reset status
 ALL_CAPABILITIES: List[str] = [
     PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
     PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS, PAGE_CASHFLOW,
-    PAGE_CREW_PORTAL, PAGE_CUSTOMERS, PAGE_SETTINGS,
+    PAGE_CREW_PORTAL, PAGE_CUSTOMERS, PAGE_SETTINGS, PAGE_PM_PORTAL,
     PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, ASSIGNMENT_EDIT_OWN,
     USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN,
 ]
@@ -77,8 +78,8 @@ FALLBACK_ROLE_DEFAULTS: Dict[str, Set[str]] = {
         PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, TEAMS_MANAGE, PROJECTS_ADMIN,
     },
 
-    "pm": {  # project manager: scoped to own projects; Projects, Financials, Estimate
-        PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE,
+    "pm": {  # project manager: scoped to own projects; Projects, Financials, Estimate + PM portal
+        PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_PM_PORTAL,
     },
 
     "crew_lead": {  # parent crew (boss): enters the portal at their subtree (children → projects → foreman)

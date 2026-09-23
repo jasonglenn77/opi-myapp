@@ -4719,3 +4719,335 @@ option {
    text on all their cells so an inline style that forgets `color` can't go
    white-on-light again. */
 .qm-sheet, .qm-sheet th, .qm-sheet td, .qm-sheet input, .qm-sheet select { color:#111; }
+
+/* ── PM Portal (Phase 1) ────────────────────────────────────────────────────
+   Real CSS (not Tailwind utilities) because output.css is prebuilt. Mobile-
+   first cards for the PM's project lists + the read-only note the office's
+   kickoff/daily tabs show now that those live in the PM Portal. */
+.pm-card { display:flex; align-items:center; gap:10px; background:#fff;
+           border:1px solid rgba(0,0,0,.10); border-radius:14px;
+           padding:12px 14px; text-decoration:none; min-width:0;
+           transition:border-color .12s, background .12s; }
+.pm-card:hover { border-color:rgba(37,99,235,.45); background:rgba(37,99,235,.03); }
+.pm-pill { display:inline-flex; align-items:center; gap:6px;
+           border:1px solid rgba(0,0,0,.12); background:#fff;
+           border-radius:9999px; padding:5px 14px; font-size:12px;
+           font-weight:600; color:rgba(0,0,0,.65); }
+.pm-pill-muted { opacity:.5; cursor:default; }
+.pm-ro-note { display:flex; align-items:center; gap:8px;
+              background:#fdf6e3; border:1px solid #ecd9a0; color:#8a6d1a;
+              border-radius:10px; padding:6px 10px; font-size:11px;
+              font-weight:600; }
+
+/* PM portal on the dark shell: hover states must stay OPAQUE (a translucent
+   tint lets the dark background bleed through = "goes black on hover"). */
+.pm-card:hover { border-color:rgba(37,99,235,.45); background:#eef4ff !important; }
+.pm-btn { display:inline-flex; align-items:center; gap:8px; background:#fff;
+          border:1px solid rgba(0,0,0,.15); border-radius:10px; padding:6px 12px;
+          font-size:12px; font-weight:600; color:rgba(0,0,0,.7); cursor:pointer; }
+.pm-btn:hover { background:#eef2f7; }
+.pm-filter { background:#fff; border:1px solid rgba(0,0,0,.15); border-radius:10px;
+             padding:6px 10px; font-size:12px; color:#111; min-width:0; }
+.pm-filter:focus { outline:2px solid #2563eb; outline-offset:-1px; }
+
+/* ── Crew Field Forms (Phase 2, #/field) ────────────────────────────────────
+   Public passcode-gated crew surface + PM review modal/switches. Real CSS
+   (output.css is prebuilt). Rules baked in from earlier lessons: hover states
+   on light surfaces are OPAQUE colors only (translucent tints let the dark
+   shell bleed through = "goes black"), and every light surface sets explicit
+   dark text so the shell's white text can't leak in. Mobile-first: big touch
+   targets, 16px inputs (no iOS zoom). */
+.ff-wrap { width:100%; max-width:560px; margin:0 auto; align-self:flex-start;
+           padding:20px 0 56px; color:#111; }
+.ff-card { background:#fff; color:#111; border:1px solid rgba(0,0,0,.10);
+           border-radius:16px; padding:16px; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+.ff-h1 { font-size:20px; font-weight:800; color:#111; line-height:1.25; }
+.ff-muted { color:rgba(0,0,0,.55); }
+.ff-code-input { width:100%; text-align:center; letter-spacing:.35em;
+                 font-size:28px; font-weight:800; color:#111; background:#fff;
+                 border:2px solid rgba(0,0,0,.2); border-radius:14px;
+                 padding:14px 10px; }
+.ff-code-input:focus { outline:none; border-color:#2563eb; }
+.ff-btn { display:flex; width:100%; align-items:center; justify-content:center;
+          gap:8px; background:#2563eb; color:#fff; border:0; border-radius:14px;
+          padding:14px 16px; font-size:16px; font-weight:800; cursor:pointer; }
+.ff-btn:hover { background:#1d4ed8; }
+.ff-btn:disabled { background:#93c5fd; cursor:default; }
+.ff-btn2 { display:inline-flex; align-items:center; justify-content:center; gap:6px;
+           background:#fff; color:#1f2937; border:1px solid rgba(0,0,0,.18);
+           border-radius:12px; padding:10px 14px; font-size:14px; font-weight:700;
+           cursor:pointer; }
+.ff-btn2:hover { background:#eef2f7; }
+.ff-row { display:flex; align-items:center; gap:10px; width:100%; text-align:left;
+          background:#fff; color:#111; border:1px solid rgba(0,0,0,.12);
+          border-radius:14px; padding:14px; cursor:pointer;
+          transition:border-color .12s, background .12s; }
+.ff-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
+.ff-label { font-size:14px; font-weight:700; color:#111; line-height:1.35; }
+.ff-hint { font-size:12px; color:rgba(0,0,0,.5); }
+.ff-input, .ff-textarea, .ff-select {
+  width:100%; background:#fff; color:#111; border:1px solid rgba(0,0,0,.2);
+  border-radius:12px; padding:12px; font-size:16px; }
+.ff-input:focus, .ff-textarea:focus, .ff-select:focus {
+  outline:2px solid #2563eb; outline-offset:-1px; }
+.ff-section { background:#f3f4f6; color:#111; border-radius:10px;
+              padding:8px 12px; font-size:13px; font-weight:800;
+              text-transform:uppercase; letter-spacing:.04em; margin:18px 0 10px; }
+.ff-q { margin-bottom:16px; }
+.ff-q.ff-missing .ff-label { color:#b91c1c; }
+.ff-q.ff-missing .ff-input, .ff-q.ff-missing .ff-textarea,
+.ff-q.ff-missing .ff-select { border-color:#dc2626; }
+.ff-q.ff-missing .ff-filebtn, .ff-q.ff-missing .ff-yn button { border-color:#dc2626; }
+.ff-yn { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.ff-yn button { background:#fff; color:#111; border:2px solid rgba(0,0,0,.18);
+                border-radius:14px; padding:14px; font-size:16px; font-weight:800;
+                cursor:pointer; }
+.ff-yn button:hover { background:#eef2f7; }
+.ff-yn button.on { background:#2563eb; border-color:#2563eb; color:#fff; }
+.ff-yn button.on:hover { background:#1d4ed8; }
+.ff-branch { border-left:3px solid #bfdbfe; margin:10px 0 0 6px; padding-left:12px; }
+.ff-filebtn { display:flex; align-items:center; justify-content:center; gap:8px;
+              width:100%; border:2px dashed rgba(0,0,0,.25); border-radius:14px;
+              background:#fafafa; color:#374151; padding:16px; font-size:14px;
+              font-weight:700; cursor:pointer; }
+.ff-filebtn:hover { background:#eef2f7; }
+.ff-file { display:flex; align-items:center; gap:10px; background:#f8fafc;
+           border:1px solid rgba(0,0,0,.1); border-radius:12px; padding:8px 10px;
+           margin-top:8px; color:#111; font-size:13px; }
+.ff-file img { width:44px; height:44px; object-fit:cover; border-radius:8px;
+               background:#e5e7eb; flex:none; }
+.ff-x { margin-left:auto; background:#fff; border:1px solid rgba(0,0,0,.15);
+        color:#b91c1c; border-radius:8px; padding:4px 9px; font-size:12px;
+        font-weight:800; cursor:pointer; flex:none; }
+.ff-x:hover { background:#fee2e2; }
+.ff-prog { height:6px; border-radius:3px; background:#e5e7eb; overflow:hidden;
+           flex:1; min-width:60px; }
+.ff-prog > div { height:100%; background:#2563eb; width:0%; transition:width .15s; }
+.ff-err { background:#fef2f2; border:1px solid #fecaca; color:#b91c1c;
+          border-radius:12px; padding:10px 12px; font-size:14px; font-weight:600; }
+.ff-flag { background:#fef2f2; border:1px solid #fca5a5; color:#991b1b;
+           border-radius:14px; padding:14px; font-size:15px; font-weight:700; }
+.ff-ok { background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46;
+         border-radius:14px; padding:14px; font-size:15px; font-weight:700; }
+.ff-note { background:#f3f4f6; border:1px dashed rgba(0,0,0,.25); color:rgba(0,0,0,.55);
+           border-radius:12px; padding:10px 12px; font-size:13px; }
+.ff-chip { display:inline-flex; align-items:center; border-radius:9999px;
+           padding:3px 10px; font-size:11px; font-weight:800; }
+.ff-chip-on { background:#dbeafe; color:#1e40af; }
+.ff-chip-off { background:#f3f4f6; color:rgba(0,0,0,.45); }
+
+/* PM review modal + per-project form-settings switches */
+.pm-modal-card { background:#fff; color:#111; border-radius:16px; width:100%;
+                 max-width:640px; max-height:85vh; display:flex;
+                 flex-direction:column; overflow:hidden; }
+.pm-modal-body { overflow-y:auto; padding:14px 18px 18px; }
+.pm-switch { position:relative; display:inline-flex; width:42px; height:24px;
+             border-radius:9999px; background:#d1d5db; border:0; cursor:pointer;
+             transition:background .15s; flex:none; padding:0; }
+.pm-switch::after { content:""; position:absolute; top:2px; left:2px; width:20px;
+                    height:20px; border-radius:9999px; background:#fff;
+                    box-shadow:0 1px 2px rgba(0,0,0,.25); transition:left .15s; }
+.pm-switch.on { background:#2563eb; }
+.pm-switch.on::after { left:20px; }
+.pm-flagchip { display:inline-flex; align-items:center; gap:4px; border-radius:9999px;
+               background:#fee2e2; color:#991b1b; padding:2px 8px; font-size:10px;
+               font-weight:800; text-transform:uppercase; letter-spacing:.03em; }
+
+/* ── PM Portal Design v3 (Milestones A+B): full-width home + Overview tab ──
+   Real CSS (output.css is prebuilt). Same standing rules: opaque hovers and
+   surfaces only (translucent goes black on the dark shell), explicit dark
+   text on light surfaces. */
+.pm-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+           gap:10px; }
+.pm-filterbar { position:sticky; top:64px; z-index:30; background:#0b0f14;
+                display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+                margin:0 0 16px; padding:10px 0;
+                border-bottom:1px solid rgba(255,255,255,.08); }
+.pm-chip { display:inline-flex; align-items:center; gap:4px; border-radius:9999px;
+           padding:2px 8px; font-size:10px; font-weight:800; white-space:nowrap; }
+.pm-chip-review { background:#fef3c7; color:#92400e; }
+.pm-chip-flag { background:#fee2e2; color:#991b1b; }
+.pm-chip-ok { background:#d1fae5; color:#065f46; }
+.pm-chip-muted { background:#f3f4f6; color:rgba(0,0,0,.5); }
+.pm-chip-lane-pm { background:#dbeafe; color:#1e40af; }
+.pm-chip-lane-crew { background:#ffedd5; color:#9a3412; }
+/* Overview: two-column label/value grid, stacks to one column on phones */
+.pm-ov-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+              gap:0 28px; }
+@media (max-width:640px) { .pm-ov-grid { grid-template-columns:1fr; } }
+.pm-ov-row { display:flex; gap:10px; padding:7px 0;
+             border-bottom:1px solid rgba(0,0,0,.06); font-size:12px; min-width:0; }
+.pm-ov-label { flex:0 0 118px; font-weight:700; color:rgba(0,0,0,.5); }
+.pm-ov-value { color:#111; min-width:0; overflow-wrap:anywhere; flex:1; }
+/* Compact burndown bar: neutral opaque track, single-hue fill, rounded data
+   end (fully rounded once it reaches 100%); $ labels always in dark ink. */
+.pm-bar { height:10px; border-radius:5px; background:#e5e7eb; overflow:hidden; }
+.pm-bar > div { height:100%; background:#2563eb; border-radius:0 5px 5px 0;
+                transition:width .2s; }
+.pm-bar > div.full { border-radius:5px; }
+/* Tracking list rows (Overview): opaque hover, links into the working tabs */
+.pm-track-row { display:flex; align-items:center; gap:10px; width:100%;
+                text-align:left; background:#fff; color:#111;
+                border:1px solid rgba(0,0,0,.10); border-radius:12px;
+                padding:10px 12px; cursor:pointer;
+                transition:border-color .12s, background .12s; }
+.pm-track-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
+
+/* ── PM form preview (Design v3 Milestone C): the shared crew renderer
+   (utils/form-render.js) inside the PM modal. Inputs are disabled and file
+   buttons inert — read-only look; Yes/No stays live to explore branches. */
+.ff-preview .ff-filebtn { opacity:.55; cursor:default; }
+.ff-preview .ff-filebtn:hover { background:#fafafa; }
+.ff-preview .ff-input[disabled], .ff-preview .ff-textarea[disabled],
+.ff-preview .ff-select[disabled] { background:#f3f4f6; color:rgba(0,0,0,.6); }
+
+/* ── PM Portal Milestone C2: unified Forms list + form editor ──────────────
+   Real CSS (output.css is prebuilt). Standing rules kept: opaque hovers and
+   surfaces only (translucent goes black on the dark shell), explicit dark
+   text on light surfaces, big touch targets. */
+/* mini progress "12 of 17" next to a status chip */
+.pm-progress { display:inline-flex; align-items:center; gap:6px; }
+.pm-minibar { width:72px; height:8px; border-radius:4px; background:#e5e7eb;
+              overflow:hidden; display:inline-block; flex:none; }
+.pm-minibar > i { display:block; height:100%; background:#2563eb; }
+/* weekday chips (Mon..Sun; .off = excluded, never expected) */
+.pm-wd { display:inline-flex; gap:4px; }
+.pm-wd button { width:28px; height:26px; border-radius:8px;
+                border:1px solid rgba(37,99,235,.5); background:#dbeafe;
+                color:#1e40af; font-size:10px; font-weight:800; cursor:pointer; }
+.pm-wd button:hover { background:#bfdbfe; }
+.pm-wd button.off { background:#f3f4f6; border-color:rgba(0,0,0,.15);
+                    color:rgba(0,0,0,.35); text-decoration:line-through; }
+.pm-wd button.off:hover { background:#e5e7eb; }
+/* skipped-day chip with its un-skip ✕ */
+.pm-skip { display:inline-flex; align-items:center; gap:4px; background:#f3f4f6;
+           color:#111; border:1px solid rgba(0,0,0,.1); border-radius:9999px;
+           padding:2px 4px 2px 9px; font-size:10px; font-weight:700; }
+.pm-skip button { border:0; background:transparent; color:#b91c1c;
+                  font-weight:800; cursor:pointer; padding:0 4px; font-size:11px; }
+.pm-skip button:hover { color:#7f1d1d; }
+/* collapsible submissions-by-form group header */
+.pm-group-head { display:flex; align-items:center; gap:8px; width:100%;
+                 text-align:left; background:#f8fafc; color:#111;
+                 border:1px solid rgba(0,0,0,.10); border-radius:12px;
+                 padding:10px 12px; cursor:pointer;
+                 transition:border-color .12s, background .12s; }
+.pm-group-head:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
+/* form editor (shared renderer, editor mode) */
+.ff-qhead { display:flex; align-items:flex-start; gap:8px; }
+.ff-qx { background:#fff; border:1px solid rgba(0,0,0,.15); color:#b91c1c;
+         border-radius:8px; padding:2px 9px; font-size:12px; font-weight:800;
+         cursor:pointer; flex:none; }
+.ff-qx:hover:not(:disabled) { background:#fee2e2; }
+.ff-qx:disabled { color:rgba(0,0,0,.25); cursor:default; }
+.ff-restore { background:#fff; border:1px solid rgba(0,0,0,.15); color:#1d4ed8;
+              border-radius:8px; padding:2px 9px; font-size:12px; font-weight:800;
+              cursor:pointer; flex:none; }
+.ff-restore:hover { background:#dbeafe; }
+.ff-flagmark { color:#b91c1c; font-weight:800; font-size:13px; flex:none;
+               align-self:center; }
+.ff-q-removed .ff-label { text-decoration:line-through; color:rgba(0,0,0,.4); }
+.ff-addq { display:block; width:100%; border:1px dashed rgba(0,0,0,.25);
+           border-radius:10px; background:#fafafa; color:#1d4ed8; font-size:12px;
+           font-weight:700; padding:8px; cursor:pointer; margin:4px 0 14px; }
+.ff-addq:hover { background:#eef2f7; }
+.ff-addq-form { display:flex; align-items:center; gap:6px; margin:4px 0 14px; }
+.ff-addq-form input { flex:1; min-width:0; }
+.ff-sec-off { opacity:.55; }
+
+/* ── Crew Portal (2026-09-22): assigned-project home + docs + read-only ──── */
+.ff-sechead { font-size:12px; font-weight:800; text-transform:uppercase;
+              letter-spacing:.05em; color:rgba(0,0,0,.45); margin:14px 0 8px; }
+.ff-sechead:first-of-type { margin-top:0; }
+.ff-past { opacity:.6; }
+.ff-past:hover { opacity:.85; background:#f3f4f6; border-color:rgba(0,0,0,.2); }
+.ff-badge { display:inline-block; vertical-align:1px; background:#e5e7eb;
+            color:rgba(0,0,0,.55); border-radius:9999px; padding:1px 8px;
+            font-size:10px; font-weight:800; text-transform:uppercase;
+            letter-spacing:.04em; }
+.ff-banner { background:#fffbeb; border:1px solid #fcd34d; color:#92400e;
+             border-radius:10px; padding:10px 12px; font-size:13px;
+             font-weight:800; }
+.ff-doc { display:flex; align-items:center; gap:10px; width:100%;
+          background:#fff; color:#111; border:1px solid rgba(0,0,0,.12);
+          border-radius:12px; padding:12px; text-decoration:none; }
+.ff-doc:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
+.ff-tile-soon { opacity:.55; }
+.ff-tile-soon:hover { opacity:.55; }
+/* ── Crew Portal steps 3+4 (2026-09-22): PM Crew tab + Receipts flow ───────
+   Real CSS (output.css is prebuilt). Standing rules kept: opaque hovers and
+   surfaces only (translucent goes black on the dark shell), explicit dark
+   text on light surfaces, big touch targets. */
+/* crew receipt list row (#/field): whole row opens the file */
+.ff-rc-row { display:flex; align-items:center; gap:10px; width:100%;
+             background:#fff; color:#111; border:1px solid rgba(0,0,0,.12);
+             border-radius:12px; padding:10px 12px; text-decoration:none; }
+a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
+.ff-rc-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px;
+               background:#e5e7eb; flex:none; }
+/* PM Receipts tab row (not clickable itself — thumbnail/file link is) */
+.pm-rc-row { display:flex; align-items:flex-start; gap:10px; background:#fff;
+             color:#111; border:1px solid rgba(0,0,0,.10); border-radius:12px;
+             padding:10px 12px; }
+.pm-rc-thumb { width:52px; height:52px; object-fit:cover; border-radius:8px;
+               background:#e5e7eb; flex:none; }
+/* soft receipts overlay on the Overview expense burndown — clearly
+   unofficial (amber note chip), opaque hover, jumps to the Receipts tab */
+.pm-softnote { display:inline-flex; align-items:center; gap:4px; margin-top:3px;
+               background:#fef3c7; color:#92400e; border:1px dashed #f59e0b;
+               border-radius:8px; padding:2px 8px; font-size:10px;
+               font-weight:800; cursor:pointer; }
+.pm-softnote:hover { background:#fde68a; }
+/* per-category totals strip on the PM Receipts tab */
+.pm-rc-tot { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+             gap:8px; }
+.pm-rc-tot-card { background:#fff; border:1px solid rgba(0,0,0,.10);
+                  border-radius:12px; padding:10px 12px; color:#111; }
+
+/* ── PM Financials tab + drag&drop/camera batch (2026-09-22) ───────────────
+   Real CSS (output.css is prebuilt). Standing rules kept: opaque hovers and
+   surfaces only (translucent goes black on the dark shell), explicit dark
+   text on light surfaces, big touch targets. */
+/* Overview financial rows link into the Financials tab (whole row clickable) */
+.pm-finlink { display:block; background:#fff; border:1px solid rgba(255,255,255,0);
+              border-radius:10px; padding:6px 8px; cursor:pointer;
+              transition:background .12s, border-color .12s; }
+.pm-finlink:hover, .pm-finlink:focus-visible { background:#eef4ff;
+              border-color:rgba(37,99,235,.45); outline:none; }
+/* Financials tab: one card per section (anchors match the Overview links) */
+.pm-fin-sec { background:#fff; border:1px solid rgba(0,0,0,.10);
+              border-radius:14px; padding:14px; margin-bottom:14px; color:#111;
+              scroll-margin-top:72px; }
+.pm-fin-hilite { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.25); }
+.pm-fin-row { display:flex; align-items:center; gap:10px; padding:6px 0;
+              border-bottom:1px solid rgba(0,0,0,.06); }
+.pm-fin-row:last-child { border-bottom:0; }
+.pm-fin-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+               gap:8px; }
+.pm-fin-kpis > div { background:#f8fafc; border:1px solid rgba(0,0,0,.08);
+                     border-radius:10px; padding:8px 10px; }
+.pm-fin-kpi-l { font-size:10px; font-weight:800; text-transform:uppercase;
+                letter-spacing:.03em; color:rgba(0,0,0,.45); }
+.pm-fin-kpi-v { font-size:14px; font-weight:800; color:#111;
+                font-variant-numeric:tabular-nums; }
+.pm-fin-card { border:1px solid rgba(0,0,0,.10); border-radius:12px;
+               padding:10px 12px; margin-bottom:10px; background:#fff;
+               scroll-margin-top:72px; }
+/* documents drag & drop: folder-row highlight + corner upload toast */
+.doc-drop-hover { background:#dbeafe !important; outline:2px dashed #2563eb;
+                  outline-offset:-2px; }
+.doc-toast { position:fixed; right:16px; bottom:16px; z-index:70;
+             max-width:min(340px, calc(100vw - 32px)); background:#111827;
+             color:#fff; border-radius:12px; padding:10px 14px; font-size:12px;
+             line-height:1.5; box-shadow:0 8px 24px rgba(0,0,0,.35);
+             overflow-wrap:anywhere; }
+/* receipt dropzones (PM modal + crew #/field add screen) */
+.pm-dropzone { border:2px dashed rgba(0,0,0,.22); border-radius:12px;
+               background:#fafafa; padding:12px; text-align:center; color:#111;
+               transition:background .12s, border-color .12s; }
+.pm-dropzone.drag { background:#dbeafe; border-color:#2563eb; }
+.ff-dropzone { border:2px dashed rgba(0,0,0,.22); border-radius:14px;
+               background:#fafafa; padding:12px;
+               transition:background .12s, border-color .12s; }
+.ff-dropzone.drag { background:#dbeafe; border-color:#2563eb; }
+.ff-dropzone .ff-filebtn { margin-bottom:8px; }

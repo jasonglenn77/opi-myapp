@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.auth import get_current_user
-from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_CREW_PORTAL
+from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_CREW_PORTAL, PAGE_PM_PORTAL
 
 router = APIRouter(prefix="/api/daily", tags=["daily"])
 
@@ -86,7 +86,8 @@ ITEM_COUNT = len(ALL_KEYS)
 
 
 def _require(user):
-    if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_CREW_PORTAL)):
+    if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_CREW_PORTAL)
+            or has_capability(user, PAGE_PM_PORTAL)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
 

@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.auth import get_current_user
-from app.permissions import has_capability, PAGE_CUSTOMERS
+from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_PM_PORTAL
 from app.s3 import s3_client, AWS_BUCKET, build_document_key, signed_file_url
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -41,6 +41,9 @@ FOLDER_TREE = [
         {"key": "8_receipts/travel",    "label": "Travel"},
     ]},
     {"key": "9_marketing", "label": "9 Marketing", "stage": "project"},
+    # Crew Portal (2026-09-22): the ONLY folder crews can see. The PM curates
+    # it; the crew portal lists it read-only via /api/crew-portal/documents.
+    {"key": "10_crew_documents", "label": "10 Crew Documents", "stage": "project"},
 ]
 
 VALID_TYPES = ("estimate", "job", "project", "opportunity")
@@ -104,7 +107,9 @@ def _all_keys(nodes):
 
 
 def _require(user):
-    if not has_capability(user, PAGE_CUSTOMERS):
+    # page.customers = office document workspace; page.pm_portal = the PM
+    # portal's Documents tab (same S3 folder tree, same endpoints).
+    if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_PM_PORTAL)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
 

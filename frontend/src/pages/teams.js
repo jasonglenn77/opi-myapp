@@ -2,13 +2,23 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 
 export async function teamsPage(routeFn) {
-  const [pms, crews, vendorData, usersData] = await Promise.all([
+  const [pms, crews, vendorData, usersData, passcodeData] = await Promise.all([
     api("/project-managers"),
     api("/work-crews"),
     api("/crew/vendors").catch(() => ({ vendors: [] })),
     api("/users").catch(() => []),
+    api("/crew-auth/passcodes").catch(() => ({ passcodes: [] })),
   ]);
   const vendors = vendorData.vendors || [];
+  // Field-forms passcodes (Phase 2): one active lead code per crew + one boss
+  // master code (crew_id null). Codes are write-only — never retrievable.
+  const passcodes = passcodeData.passcodes || [];
+  const leadCodeByCrew = new Map();
+  passcodes.forEach(p => {
+    if (p.active && p.role === "lead" && p.crew_id != null) leadCodeByCrew.set(String(p.crew_id), p);
+  });
+  const bossCode = passcodes.find(p => p.active && p.role === "boss" && p.crew_id == null) || null;
+  const fmtLastUsed = (p) => p.last_used_at ? `last used ${String(p.last_used_at).slice(0, 10)}` : "never used";
   const users = (Array.isArray(usersData) ? usersData : []).filter(u => u.is_active);
   const userByPm = new Map();
   users.forEach(u => { if (u.project_manager_id != null) userByPm.set(String(u.project_manager_id), u); });
@@ -122,6 +132,23 @@ export async function teamsPage(routeFn) {
     return `<select data-crew-field="vendor_qbo_id" data-crew-id="${c.id}" class="${CELL} w-full min-w-[12rem]"><option value="">(not linked)</option>${
       vendors.map(v => `<option value="${escOpt(v.vendor_qbo_id)}" ${String(c.vendor_qbo_id) === String(v.vendor_qbo_id) ? "selected" : ""}>${escOpt(v.name)}</option>`).join("")}</select>`;
   }
+  // Field-forms lead passcode control (Phase 2). Codes are set/rotated here,
+  // read aloud to the lead, and never shown again.
+  function crewPasscodeCell(c) {
+    const pc = leadCodeByCrew.get(String(c.id));
+    if (!pc) return `<button class="${BTN}" data-pc-set="${c.id}" data-pc-default="${escOpt(c.name)} lead">Set code</button>`;
+    return `
+      <div class="whitespace-nowrap">
+        <div class="flex items-center gap-1.5">
+          <span class="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-200">Active</span>
+          <span class="text-xs text-black/70 truncate" style="max-width:8rem" title="${escOpt(pc.label)}">${escOpt(pc.label)}</span>
+          <button class="${BTN}" data-pc-set="${c.id}" data-pc-default="${escOpt(pc.label)}">Rotate</button>
+          <button class="${BTN}" data-pc-deact="${pc.id}" data-pc-who="${escOpt(pc.label)}">Deactivate</button>
+        </div>
+        <div class="text-[10px] text-black/40 mt-0.5">${fmtLastUsed(pc)}</div>
+      </div>`;
+  }
+
   function crewRow(c, indent = 0) {
     const isActive = !!c.is_active;
     const toggle = isActive
@@ -135,6 +162,7 @@ export async function teamsPage(routeFn) {
         <td class="py-1 pr-2"><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CELL} w-full min-w-[9rem]">${crewParentOpts(c)}</select></td>
         <td class="py-1 pr-2">${crewVendorCell(c)}</td>
         <td class="py-1 pr-2"><input type="number" value="${c.sort_order ?? 0}" data-crew-field="sort_order" data-crew-id="${c.id}" class="${CELL} w-16 text-right tabular-nums"></td>
+        <td class="py-1 pr-2">${crewPasscodeCell(c)}</td>
         <td class="py-1 pl-2 text-right whitespace-nowrap">${toggle}</td>
       </tr>
     `;
@@ -174,6 +202,7 @@ export async function teamsPage(routeFn) {
           <div><div class="text-[11px] text-black/45 mb-0.5">Parent</div><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CINP}">${crewParentOpts(c)}</select></div>
         </div>
         ${!c.parent_id ? `<div><div class="text-[11px] text-black/45 mb-0.5">QuickBooks Vendor</div>${crewVendorCell(c)}</div>` : ""}
+        <div><div class="text-[11px] text-black/45 mb-0.5">Field-forms passcode</div>${crewPasscodeCell(c)}</div>
         <div class="flex items-center gap-2 pt-1">${toggle}</div>
       </div>`;
   }
@@ -273,8 +302,23 @@ export async function teamsPage(routeFn) {
           <button id="newCrewBtn" class="btn-primary">New crew</button>
         </div>
         <div id="crewMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
+
+        <!-- Crew boss master code (field forms): crew_id null + role boss -->
+        <div class="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2.5 mb-4 flex items-center gap-3 flex-wrap">
+          <div class="min-w-0 flex-1">
+            <div class="text-xs font-bold text-ink-900">Crew boss master code</div>
+            <div class="text-[11px] text-black/45">${bossCode
+              ? `Active — ${escOpt(bossCode.label)} · ${fmtLastUsed(bossCode)}`
+              : `Not set. One master code lets the crew boss open any project's field forms.`} Crews sign in at <span class="font-semibold">/#/field</span>.</div>
+          </div>
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button class="${BTN}" data-pc-set="boss" data-pc-default="${escOpt(bossCode ? bossCode.label : "Crew boss")}">${bossCode ? "Rotate" : "Set code"}</button>
+            ${bossCode ? `<button class="${BTN}" data-pc-deact="${bossCode.id}" data-pc-who="${escOpt(bossCode.label)}">Deactivate</button>` : ""}
+          </div>
+        </div>
+
         <div class="hidden lg:block overflow-x-auto">
-          <table class="w-full text-sm" style="min-width:900px;">
+          <table class="w-full text-sm" style="min-width:1100px;">
             <thead class="text-left text-black/50">
               <tr class="border-b border-black/10">
                 <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
@@ -283,10 +327,11 @@ export async function teamsPage(routeFn) {
                 <th class="py-2 pr-2 font-bold">Parent</th>
                 <th class="py-2 pr-2 font-bold">QuickBooks Vendor</th>
                 <th class="py-2 pr-2 font-bold">Sort</th>
+                <th class="py-2 pr-2 font-bold">Passcode</th>
                 <th class="py-2 pl-2 text-right font-bold"></th>
               </tr>
             </thead>
-            <tbody>${activeCrewRows || `<tr><td colspan="7" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
+            <tbody>${activeCrewRows || `<tr><td colspan="8" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
           </table>
         </div>
 
@@ -301,7 +346,7 @@ export async function teamsPage(routeFn) {
               Disabled crews (${inactiveCrews.length})
             </summary>
             <div class="hidden lg:block overflow-x-auto mt-3">
-              <table class="w-full text-sm" style="min-width:900px;">
+              <table class="w-full text-sm" style="min-width:1100px;">
                 <thead class="text-left text-black/50">
                   <tr class="border-b border-black/10">
                     <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
@@ -310,6 +355,7 @@ export async function teamsPage(routeFn) {
                     <th class="py-2 pr-2 font-bold">Parent</th>
                     <th class="py-2 pr-2 font-bold">QuickBooks Vendor</th>
                     <th class="py-2 pr-2 font-bold">Sort</th>
+                    <th class="py-2 pr-2 font-bold">Passcode</th>
                     <th class="py-2 pl-2 text-right font-bold"></th>
                   </tr>
                 </thead>
@@ -515,6 +561,53 @@ setShell({
     teamsRoot._teamsInlineHandler = handler;
     teamsRoot.addEventListener("change", handler);
   }
+
+  // --- Field-forms passcodes: set/rotate + deactivate (Teams → Work Crews) ---
+  // The code is typed once, sent hashed to the server, and can NEVER be read
+  // back — the office reads it aloud to the lead/boss when setting it.
+  async function setFieldPasscode(crewId, role, defaultLabel) {
+    const who = role === "boss" ? "the crew boss" : "this crew's lead";
+    const label = prompt(`Name for this code (who carries it — ${who})?`, defaultLabel || "");
+    if (label === null) return;
+    const lbl = label.trim();
+    if (!lbl) { alert("A name/label is required."); return; }
+    const code = prompt(`New 4-6 digit code for ${lbl}:`);
+    if (code === null) return;
+    const c = code.trim();
+    if (!/^\d{4,6}$/.test(c)) { alert("The code must be 4-6 digits."); return; }
+    try {
+      await api("/crew-auth/passcodes", {
+        method: "POST",
+        body: JSON.stringify({ crew_id: crewId, role, label: lbl, code: c }),
+      });
+      alert(`Code set for ${lbl}.\n\nRead it aloud to them now — it cannot be shown again later.\nThey sign in at ${location.origin}/#/field`);
+      location.hash = "#/teams"; routeFn();
+    } catch (err) {
+      let detail = err?.message || "Failed to set the code.";
+      try { const o = JSON.parse(detail); if (o && o.detail) detail = o.detail; } catch (_) {}
+      alert("Failed to set the code: " + detail);
+    }
+  }
+  document.querySelectorAll("[data-pc-set]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const v = btn.getAttribute("data-pc-set");
+      const def = btn.getAttribute("data-pc-default") || "";
+      if (v === "boss") setFieldPasscode(null, "boss", def);
+      else setFieldPasscode(Number(v), "lead", def);
+    });
+  });
+  document.querySelectorAll("[data-pc-deact]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const who = btn.getAttribute("data-pc-who") || "this code";
+      if (!confirm(`Deactivate the field-forms code for ${who}? Their signed-in devices stop working immediately.`)) return;
+      try {
+        await api(`/crew-auth/passcodes/${btn.getAttribute("data-pc-deact")}/deactivate`, { method: "POST" });
+        location.hash = "#/teams"; routeFn();
+      } catch (err) {
+        alert("Failed to deactivate: " + (err?.message || err));
+      }
+    });
+  });
 
   // --- Color controls (must be after setShell because DOM now exists) ---
   const pmColorEl = document.getElementById("pmColor");
