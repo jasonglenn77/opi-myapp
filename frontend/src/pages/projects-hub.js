@@ -57,6 +57,8 @@ const FLAG_LEGEND = [
   ["warn", "◷", "Crew offer awaiting response / no crew sourced"],
   ["good", "✓", "Crew offer accepted"],
   ["bad", "$", "Margin negative or below plan"],
+  ["bad", "≠", "Crew mismatch — assigned / billed / offered crews disagree"],
+  ["warn", "≠", "Contract-Labor bill from a vendor not linked to a crew company"],
   ["warn", "▦", "No schedule dates set"],
   ["mut", "⑂", "Multiple separate date ranges"],
   ["mut", "☑", "Kick-off & process incomplete"],
@@ -141,6 +143,15 @@ function deriveFlags(p, fin, att) {
   if (!settled && !crews.length && !offerLive)
     flags.push({ c: "warn", i: "◷", card: "offer", t: "No crew assigned and no offer sent" });
 
+  // CR5 B3: crew-consistency — assigned vs billed (Contract-Labor vendors →
+  // company via work_crews.vendor_qbo_id) vs accepted offer. Computed in bulk
+  // by /projects/attention (only non-ok verdicts ship). Opens the Billing tab.
+  const ccx = att && att.crew_consistency;
+  if (ccx && ccx.status === "mismatch")
+    flags.push({ c: "bad", i: "≠", card: "offer", t: `Crew mismatch — ${ccx.summary || "assigned and billed crews disagree"}` });
+  else if (ccx && ccx.status === "unmapped_vendor")
+    flags.push({ c: "warn", i: "≠", card: "offer", t: `Crew check — ${ccx.summary || "billed vendor not linked to a crew company"}` });
+
   // Overdue A/R — a sent invoice past its due date.
   const aro = att && att.ar_overdue;
   if (aro && aro.days > 0)
@@ -195,11 +206,29 @@ export async function projectsHubPage(routeFn) {
     } catch (_) {}
   };
 
+  // Initial skeleton mirrors the loaded layout (chip bar + header + rows) at
+  // roughly the same height, so the card doesn't jump from a short "Loading…"
+  // sliver to the full table when data lands.
+  const skelRow = `
+    <div style="display:flex;gap:18px;align-items:center;padding:14px 8px;border-bottom:1px solid rgba(0,0,0,.05)">
+      <span class="ph-skel-bar" style="width:72px;margin:0"></span>
+      <span class="ph-skel-bar" style="width:220px;margin:0"></span>
+      <span class="ph-skel-bar" style="width:130px;margin:0"></span>
+      <span class="ph-skel-bar" style="width:110px;margin:0"></span>
+      <span class="ph-skel-bar" style="width:160px;margin:0"></span>
+      <span class="ph-skel-bar" style="width:70px;margin:0;margin-left:auto"></span>
+      <span class="ph-skel-bar" style="width:60px;margin:0"></span>
+    </div>`;
   const body = `
     <div class="w-full">
       <div class="card p-3 flex flex-col overflow-hidden" id="phCard" style="min-height:340px;">
         <div class="flex items-center gap-2 mb-2 flex-wrap shrink-0" id="phFilters"></div>
-        <div id="phList" class="flex-1 overflow-auto text-sm text-black/40">Loading…</div>
+        <div id="phList" class="flex-1 overflow-auto text-sm text-black/40">
+          <div style="display:flex;gap:8px;padding:4px 8px 12px">
+            ${'<span class="ph-skel-bar" style="width:92px;height:26px;border-radius:9999px;margin:0"></span>'.repeat(7)}
+          </div>
+          ${skelRow.repeat(12)}
+        </div>
       </div>
     </div>`;
   setShell({
@@ -332,12 +361,26 @@ export async function projectsHubPage(routeFn) {
   };
 
   // ── collapsed row cells ──
+  // CR3: show the scheduled end AND the TRUE end (end + overage days) — they
+  // only differ when overage > 0; the true end renders bold with a "+N od" tag.
+  const dayDiff = (a, b) => {
+    const pa = String(a).slice(0, 10).split("-").map(Number), pb = String(b).slice(0, 10).split("-").map(Number);
+    if (pa.length !== 3 || pb.length !== 3) return 0;
+    return Math.round((Date.UTC(pb[0], pb[1] - 1, pb[2]) - Date.UTC(pa[0], pa[1] - 1, pa[2])) / 864e5);
+  };
   const scheduleCell = (p) => {
     const starts = csvList(p.all_start_dates);
     if (!starts.length) return `<span class="text-black/35">${p.operational_status === "pending" ? "Dates TBD" : "Not scheduled"}</span>`;
     const label = rangeShort(p.start_date, p.end_date);
     const more = starts.length > 1 ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-blue-700 bg-blue-50 rounded px-1 py-px align-middle">+${starts.length - 1} dates</span>` : "";
-    return `<span class="text-ink-900 font-medium">${escapeHtml(label)}</span>${more}`;
+    let trueEnd = "";
+    if (p.true_end_date && p.end_date) {
+      const od = dayDiff(p.end_date, p.true_end_date);
+      if (od > 0) {
+        trueEnd = `<div class="text-[11.5px] mt-0.5"><span class="text-black/45">true end</span> <b class="text-ink-900">${escapeHtml(shortDate(p.true_end_date))}</b> <span class="inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 rounded px-1 py-px align-middle" title="${od} overage day${od === 1 ? "" : "s"} past the scheduled end">+${od} od</span></div>`;
+      }
+    }
+    return `<span class="text-ink-900 font-medium">${escapeHtml(label)}</span>${more}${trueEnd}`;
   };
   const _teamChip = (n) => n > 1 ? `<span class="ml-1 inline-flex items-center text-[10px] font-bold text-blue-700 bg-blue-50 rounded px-1 py-px align-middle">+${n - 1}</span>` : "";
   const pmCell = (p) => {
@@ -427,9 +470,32 @@ export async function projectsHubPage(routeFn) {
       </tr>
       <tr class="ph-detail" data-qid="${escapeHtml(String(p.project_qbo_id))}" ${open ? "" : "hidden"}>
         <td colspan="10" class="bg-black/[0.015] border-b border-black/10 px-3 py-3">
-          <div class="ph-detail-body" data-qid="${escapeHtml(String(p.project_qbo_id))}">${open && cardCache.has(String(p.project_qbo_id)) ? detailHtml(p, cardCache.get(String(p.project_qbo_id))) : `<div class="text-black/40 text-xs py-4">Loading…</div>`}</div>
+          <div class="ph-detail-body" data-qid="${escapeHtml(String(p.project_qbo_id))}">${open && cardCache.has(String(p.project_qbo_id)) ? detailHtml(p, cardCache.get(String(p.project_qbo_id))) : skeletonHtml()}</div>
         </td>
       </tr>`;
+  };
+
+  // CR5 A5: the loading placeholder mirrors the LOADED detail layout — the
+  // action row + the same auto-fit card grid, with skeleton cards close to a
+  // real card's height — so the expanded row doesn't jump from one short
+  // "Loading…" line to a tall grid when the data lands.
+  const skeletonHtml = () => {
+    const card = `
+      <div class="ph-card ph-skel">
+        <div class="ph-skel-bar" style="width:45%;height:10px;margin-bottom:12px;"></div>
+        <div class="ph-skel-bar" style="width:90%;"></div>
+        <div class="ph-skel-bar" style="width:75%;"></div>
+        <div class="ph-skel-bar" style="width:85%;"></div>
+        <div class="ph-skel-bar" style="width:60%;"></div>
+        <div class="ph-skel-bar" style="width:70%;margin-bottom:0;"></div>
+      </div>`;
+    return `
+      <div class="flex items-center gap-2 mb-2">
+        <span class="ph-skel-bar" style="width:190px;height:30px;border-radius:8px;margin:0;"></span>
+      </div>
+      <div class="grid gap-2.5" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
+        ${card.repeat(9)}
+      </div>`;
   };
 
   // ── expanded detail cards ──
@@ -445,7 +511,7 @@ export async function projectsHubPage(routeFn) {
   const kv = (k, v) => `<div class="flex justify-between gap-3 py-0.5 text-[12.5px] border-b border-black/[0.05] last:border-0"><span class="text-black/55">${k}</span><span class="font-semibold text-ink-900 text-right">${v}</span></div>`;
 
   const detailHtml = (p, c) => {
-    if (!c) return `<div class="text-black/40 text-xs py-4">Loading…</div>`;
+    if (!c) return skeletonHtml();
     const flags = deriveFlags(p, finById.get(p.qbo_customer_id), attById.get(String(p.project_qbo_id)));
     const fb = {}; flags.forEach((f) => { if (f.card && !fb[f.card]) fb[f.card] = f; });
 

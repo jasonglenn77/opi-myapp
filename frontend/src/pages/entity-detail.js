@@ -32,7 +32,6 @@ function fmtBytes(bytes) {
 }
 function fmtDate(v) { return v ? String(v).slice(0, 10) : ""; }
 const fmtMoney = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)).toLocaleString());
-const fmtPct = (n) => (n == null || n === "" ? "—" : Math.round(Number(n) * 100) + "%");
 
 // Operational status → label + pill (mirrors the Projects hub).
 const OP_STATUS = {
@@ -309,7 +308,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
   }
 
   // ── overview tab (Projects-hub Phase 2: the project's operational snapshot) ──
-  let _ovProj = null, _ovFin = null;   // cached across tab switches
+  let _ovProj = null, _ovFin = null, _ovBundle = null;   // cached across tab switches
   async function ensureProjectData() {
     if (_ovProj === null) {
       const [pb, ff] = await Promise.all([
@@ -321,13 +320,26 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     }
     return _ovProj;
   }
+  // CR5 B2: the Work Crew two-column block (Company · Boss | Lead) needs the
+  // company/boss/lead split, which /projects/basic's "Company · Lead" strings
+  // don't carry — the assignment bundle (same feed the Assignment tab uses)
+  // does. Fetched once, invalidated together with _ovProj on assignment edits.
+  // false = fetch failed (render falls back to the all_work_crews strings).
+  async function ensureOvBundle() {
+    if (_ovBundle === null && _ovProj && _ovProj.qbo_customer_id) {
+      try { _ovBundle = await api(`/assignment/bundle?qbo_customer_id=${encodeURIComponent(_ovProj.qbo_customer_id)}`); }
+      catch (_) { _ovBundle = false; }
+    }
+    return _ovBundle;
+  }
   async function showOverview() {
     const body = document.getElementById("tabBody");
     body.innerHTML = `<div class="p-4 text-sm text-black/40">Loading…</div>`;
     try {
       await ensureProjectData();
+      await ensureOvBundle();
       if (activeTab !== "overview") return; // user switched tabs while loading — don't clobber
-      body.innerHTML = overviewHtml(_ovProj, _ovFin);
+      body.innerHTML = overviewHtml(_ovProj, _ovFin, _ovBundle);
       wireOverview();
     } catch (e) {
       if (activeTab !== "overview") return;
@@ -347,27 +359,148 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
       body.innerHTML = "";
       // On any assignment change, invalidate the overview cache so its
       // operational status / PM / crew refresh when revisited.
-      mountAssignmentPanel(body, proj.qbo_customer_id, () => { _ovProj = null; });
+      mountAssignmentPanel(body, proj.qbo_customer_id, () => { _ovProj = null; _ovBundle = null; });
     } catch (e) {
       body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load assignment: ${escapeHtml(e?.message || String(e))}</div>`;
     }
   }
-  function overviewHtml(p, f) {
+  // ── CR5 B2 helpers: local-date math + M/D/YY for the timeline + true end ──
+  const ovDayDiff = (a, b) => {
+    const pa = String(a).slice(0, 10).split("-").map(Number), pb = String(b).slice(0, 10).split("-").map(Number);
+    if (pa.length !== 3 || pb.length !== 3 || !pa[0] || !pb[0]) return null;
+    return Math.round((Date.UTC(pb[0], pb[1] - 1, pb[2]) - Date.UTC(pa[0], pa[1] - 1, pa[2])) / 864e5);
+  };
+  const fmtMDY = (s) => {
+    if (!s) return "—";
+    const [y, m, d] = String(s).slice(0, 10).split("-");
+    return (y && m && d) ? `${Number(m)}/${Number(d)}/${String(y).slice(-2)}` : "—";
+  };
+  const todayYmd = () => {
+    const t = new Date();
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  };
+
+  // Timeline: start → scheduled end (solid) → true end (hatched overage
+  // segment), a TODAY marker (clamped to an edge when outside the range) and
+  // a calculator line ("starts in N days" / "N days remaining (M with
+  // overage)" / "ended N days ago"). Text labels always; real CSS (.ovtl-*).
+  function timelineHtml(p) {
+    const s = p.start_date && String(p.start_date).slice(0, 10);
+    const e = p.end_date && String(p.end_date).slice(0, 10);
+    if (!s || !e) return "";
+    let te = p.true_end_date ? String(p.true_end_date).slice(0, 10) : e;
+    if (ovDayDiff(e, te) < 0) te = e;                    // never earlier than the end
+    const od = ovDayDiff(e, te) || 0;
+    const total = Math.max(1, ovDayDiff(s, te));
+    const mainPct = Math.max(0, Math.min(100, ((ovDayDiff(s, e) || 0) / total) * 100));
+    const today = todayYmd();
+    const tPos = ovDayDiff(s, today);
+    const tPct = Math.max(0, Math.min(100, (tPos / total) * 100));
+    let calc;
+    if (tPos < 0) calc = `starts in ${-tPos} day${tPos === -1 ? "" : "s"}`;
+    else if (ovDayDiff(today, te) >= 0) {
+      const rem = Math.max(0, ovDayDiff(today, e));
+      const remOd = Math.max(0, ovDayDiff(today, te));
+      calc = `${rem} day${rem === 1 ? "" : "s"} remaining${od > 0 ? ` (${remOd} with overage)` : ""}`;
+    } else {
+      const ago = ovDayDiff(te, today);
+      calc = `ended ${ago} day${ago === 1 ? "" : "s"} ago`;
+    }
+    const outside = tPos < 0 || ovDayDiff(today, te) < 0;
+    return `
+      <div class="ovtl-wrap">
+        <div class="ovtl-track">
+          <div class="ovtl-main" style="width:${mainPct}%"></div>
+          ${od > 0 ? `<div class="ovtl-od" style="left:${mainPct}%;width:${100 - mainPct}%" title="${od} overage day${od === 1 ? "" : "s"}"></div>` : ""}
+          <div class="ovtl-today ${outside ? "ovtl-today-out" : ""}" style="left:${tPct}%"><span class="ovtl-today-lbl">today</span></div>
+        </div>
+        <div class="ovtl-ends">
+          <span>start ${escapeHtml(fmtMDY(s))}</span>
+          <span>${od > 0
+            ? `end ${escapeHtml(fmtMDY(e))} · <b>true end ${escapeHtml(fmtMDY(te))}</b> <span class="ovtl-odchip">+${od} od</span>`
+            : `end ${escapeHtml(fmtMDY(e))}`}</span>
+        </div>
+        <div class="ovtl-calc">${escapeHtml(calc)}</div>
+      </div>`;
+  }
+
+  // Work Crew two columns: "Company · Boss" | "Lead" ("lead TBD" when unset),
+  // from the assignment bundle (companies carry boss_name; schedule items carry
+  // company_id/lead_crew_id). Falls back to the "Company · Lead" strings from
+  // /projects/basic when the bundle isn't available.
+  function workCrewRows(p, bundle) {
+    const rows = [];
+    if (bundle && bundle.schedule_items) {
+      const companies = bundle.companies || [];
+      const crews = bundle.work_crews || [];
+      const nameOf = (id) => {
+        const c = crews.find((x) => String(x.id) === String(id));
+        return c ? c.name : null;
+      };
+      const seen = new Set();
+      for (const it of bundle.schedule_items) {
+        for (const e of (it.active_work_crews || [])) {
+          const co = companies.find((c) => String(c.id) === String(e.company_id));
+          const coLabel = co ? `${co.name}${co.boss_name ? ` · ${co.boss_name}` : ""}`
+                             : (e.company_id != null ? (nameOf(e.company_id) || `Company #${e.company_id}`) : "—");
+          const lead = e.lead_crew_id != null ? (nameOf(e.lead_crew_id) || `Crew #${e.lead_crew_id}`) : null;
+          const key = `${coLabel}|${lead || ""}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          rows.push({ company: coLabel, lead });
+        }
+      }
+    }
+    if (!rows.length) {
+      // fallback: "Company · Lead" csv strings (no boss info available)
+      for (const s of String(p.all_work_crews || "").split(",").map((x) => x.trim()).filter(Boolean)) {
+        const parts = s.split("·").map((x) => x.trim());
+        rows.push({ company: parts[0] || s, lead: parts[1] && parts[1] !== "lead TBD" ? parts[1] : null });
+      }
+    }
+    return rows;
+  }
+
+  function overviewHtml(p, f, bundle) {
     const fact = (label, val, opts = {}) => `
       <div>
         <div class="text-[10px] font-bold uppercase tracking-wide text-black/40">${escapeHtml(label)}</div>
         <div class="text-sm font-semibold ${opts.color || "text-ink-900"} mt-0.5">${val}</div>
       </div>`;
     const dash = (s) => (s == null || s === "" ? "—" : escapeHtml(String(s)));
-    // Contract value = QBO estimate lines (matches All Projects + PM Portal);
-    // invoiced-to-date is its own fact — the two were conflated before
-    // (invoice_line_amt || estimate_line_amt) and read as three different
-    // "values" across pages.
+    // CR5 B2 facts: Contract value (estimate_line_amt) · Est. expenses
+    // (estimate_cost_amt, actual = expense_line_amt in parens) · Est. profit
+    // (line − cost, actual = actual_profit in parens). Actual-in-parens reads
+    // red when worse than the estimate (expenses over / profit under), green
+    // when better — with a text label always ("actual …").
     const contractValue = f ? (Number(f.estimate_line_amt) || 0) : null;
-    const invoicedToDate = f ? (Number(f.invoice_line_amt) || 0) : null;
+    const estExp = f ? (Number(f.estimate_cost_amt) || 0) : null;
+    const actExp = f ? (Number(f.expense_line_amt) || 0) : null;
+    const estProfit = (contractValue != null && estExp != null) ? contractValue - estExp : null;
+    const actProfit = f && f.actual_profit != null ? Number(f.actual_profit) : null;
+    const paren = (act, worse) => act == null ? ""
+      : ` <span class="text-xs font-semibold ${worse ? "text-red-600" : "text-emerald-700"}">(actual ${fmtMoney(act)})</span>`;
+    const expFact = estExp == null ? "—"
+      : `${fmtMoney(estExp)}${paren(actExp, actExp != null && actExp > estExp + 0.5)}`;
+    const profitFact = estProfit == null ? "—"
+      : `${fmtMoney(estProfit)}${paren(actProfit, actProfit != null && actProfit < estProfit - 0.5)}`;
+    // True end (end + overage) — only shown when overage pushes past the end.
+    const od = (p.true_end_date && p.end_date) ? (ovDayDiff(p.end_date, p.true_end_date) || 0) : 0;
     const quote = p.linked_quote_number
       ? `<button data-view-quote="${escapeHtml(String(p.linked_quote_number))}" class="text-blue-700 hover:underline font-semibold">#${escapeHtml(String(p.linked_quote_number))} →</button>`
       : `<span class="text-black/40">— not linked</span>`;
+    const crewRows = workCrewRows(p, bundle);
+    const crewBlock = `
+      <div class="mt-5 pt-4 border-t border-black/10">
+        <div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Work Crew</div>
+        ${crewRows.length ? `
+          <div class="ovcrew">
+            <div class="ovcrew-h">Company · Boss</div><div class="ovcrew-h">Lead</div>
+            ${crewRows.map((r) => `
+              <div class="ovcrew-c">${escapeHtml(r.company)}</div>
+              <div class="ovcrew-c">${r.lead ? escapeHtml(r.lead) : `<span class="ovcrew-tbd">lead TBD</span>`}</div>`).join("")}
+          </div>` : `<div class="text-sm text-black/40">No crew assigned yet.</div>`}
+      </div>`;
     return `
       <div class="p-4 sm:p-5 max-w-4xl">
         <div class="flex items-center gap-3 mb-4">
@@ -377,15 +510,16 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-4">
           ${fact("Start", dash(fmtDate(p.start_date)))}
           ${fact("End", dash(fmtDate(p.end_date)))}
+          ${od > 0 ? fact("True end", `${escapeHtml(fmtMDY(p.true_end_date))} <span class="ovtl-odchip">+${od} od</span>`) : ""}
           ${fact("Linked quote", quote)}
           ${fact("Project Manager", dash(p.all_project_managers || p.primary_project_manager))}
-          ${fact("Work Crew", dash(p.all_work_crews || p.primary_work_crew))}
           ${fact("Documents", `${p.file_count || 0} file${(p.file_count || 0) === 1 ? "" : "s"}`)}
           ${fact("Contract value", fmtMoney(contractValue))}
-          ${fact("Invoiced to date", fmtMoney(invoicedToDate))}
-          ${fact("Actual profit", fmtMoney(f?.actual_profit), { color: (Number(f?.actual_profit) || 0) >= 0 ? "text-emerald-700" : "text-red-600" })}
-          ${fact("Actual margin", fmtPct(f?.actual_profit_pct))}
+          ${fact("Est. expenses", expFact)}
+          ${fact("Est. profit", profitFact, { color: (estProfit ?? 0) >= 0 ? "text-ink-900" : "text-red-600" })}
         </div>
+        ${timelineHtml(p)}
+        ${crewBlock}
         <div class="mt-5 pt-4 border-t border-black/10 flex flex-wrap gap-2">
           <button type="button" data-goto="financials" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">Financials →</button>
           <button type="button" data-goto="billing" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">Schedule →</button>

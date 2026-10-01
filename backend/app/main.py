@@ -176,6 +176,8 @@ class WorkCrewCreateRequest(BaseModel):
     color: Optional[str] = None
     is_active: bool = True
     sort_order: int = 0
+    boss_name: Optional[str] = None       # Crew Model v2: company boss/owner (parents)
+    crew_capacity: Optional[int] = None   # Crew Model v2: how many crews the company fields (0-99)
 
 class WorkCrewUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -185,6 +187,21 @@ class WorkCrewUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
     vendor_qbo_id: Optional[str] = None   # QBO vendor for crew-earnings (parent crews)
+    boss_name: Optional[str] = None       # Crew Model v2 (parents)
+    crew_capacity: Optional[int] = None   # Crew Model v2 (parents, 0-99)
+
+
+def validate_crew_capacity(v):
+    """crew_capacity must be an int 0-99 (None = not set, e.g. child rows)."""
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="crew_capacity must be a whole number 0-99")
+    if n < 0 or n > 99:
+        raise HTTPException(status_code=400, detail="crew_capacity must be between 0 and 99")
+    return n
 
 
 @app.get("/api/health")
@@ -314,7 +331,7 @@ def _lookup_token(raw: str):
 
 # Audit trail moved to app.audit so every router shares the same helper
 # (re-imported here to keep the existing main.py call sites unchanged).
-from .audit import record_audit  # noqa: E402
+from .audit import record_audit, diff_fields  # noqa: E402
 
 
 @app.get("/api/audit-log")
@@ -356,9 +373,14 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
             GROUP BY l.line_customer_qbo_id
         """)).all()}
         # All per-crew installments (non-rollup), ordered so we can burn down by date.
+        # Crew Model v2 (CR3): label = "Company · Lead" ("Company · lead TBD"
+        # when the schedule points straight at the company). Math unchanged.
         inst = conn.execute(text("""
             SELECT s.entity_id, i.pay_date, i.amount,
-                   wc.name AS crew_name, pc.name AS crew_company, qc.display_name AS project
+                   TRIM(CASE WHEN wc.id IS NULL THEN ''
+                             WHEN pc.id IS NULL THEN CONCAT(wc.name, ' · lead TBD')
+                             ELSE CONCAT(pc.name, ' · ', wc.name) END) AS crew_name,
+                   NULL AS crew_company, qc.display_name AS project
             FROM project_payment_installments i
             JOIN project_payment_schedules s ON s.id = i.schedule_id
             LEFT JOIN work_crews wc ON wc.id = s.crew_id
@@ -400,9 +422,13 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
             FROM projects p JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
             WHERE qc.is_project = 1
         """)).mappings().all()
+        # Offers target COMPANIES (CR3): label the company (parent lookup for
+        # legacy child-crew offers) + the boss name when set.
         offer_by = {str(r["entity_id"]): r for r in conn.execute(text("""
             SELECT o.entity_id, o.status, o.sent_at,
-                   TRIM(CONCAT(COALESCE(wc.name,''), CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (',pc.name,')') ELSE '' END)) AS crew_name
+                   TRIM(CONCAT(COALESCE(pc.name, wc.name, ''),
+                        CASE WHEN COALESCE(pc.boss_name, wc.boss_name) IS NOT NULL
+                             THEN CONCAT(' · ', COALESCE(pc.boss_name, wc.boss_name)) ELSE '' END)) AS crew_name
             FROM work_offers o
             LEFT JOIN work_crews wc ON wc.id = o.crew_id
             LEFT JOIN work_crews pc ON pc.id = wc.parent_id
@@ -1184,19 +1210,38 @@ def disable_project_manager(pm_id: int, _admin=Depends(require_admin)):
 
 @app.get("/api/work-crews")
 def list_work_crews(_admin=Depends(require_admin)):
+    """CR5 A1 — capacity is auto-by-default: crew_capacity NULL means the
+    company's capacity tracks its live ACTIVE lead count; a value is an
+    explicit override. Every row ships raw (crew_capacity) + the live
+    active_lead_count + the effective_capacity readers should display."""
     from .db import engine
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, name, code, parent_id, color, is_active, sort_order,
-                   vendor_qbo_id, created_at, updated_at
-            FROM work_crews
-            ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, sort_order, id
+            SELECT wc.id, wc.name, wc.code, wc.parent_id, wc.color, wc.is_active,
+                   wc.sort_order, wc.vendor_qbo_id, wc.boss_name, wc.crew_capacity,
+                   wc.created_at, wc.updated_at,
+                   (SELECT COUNT(*) FROM work_crews c
+                     WHERE c.parent_id = wc.id AND c.is_active = 1) AS active_lead_count
+            FROM work_crews wc
+            ORDER BY COALESCE(wc.parent_id, wc.id), wc.parent_id IS NOT NULL, wc.sort_order, wc.id
         """)).mappings().all()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["active_lead_count"] = int(d.get("active_lead_count") or 0)
+        # effective capacity is a company (parent-row) concept
+        if d.get("parent_id") is None:
+            d["effective_capacity"] = (int(d["crew_capacity"])
+                                       if d.get("crew_capacity") is not None
+                                       else d["active_lead_count"])
+        else:
+            d["effective_capacity"] = None
+        out.append(d)
+    return out
 
 
 @app.post("/api/work-crews")
-def create_work_crew(req: WorkCrewCreateRequest, _admin=Depends(require_admin)):
+def create_work_crew(req: WorkCrewCreateRequest, admin=Depends(require_admin)):
     from .db import engine
 
     name = (req.name or "").strip()
@@ -1206,6 +1251,8 @@ def create_work_crew(req: WorkCrewCreateRequest, _admin=Depends(require_admin)):
     code = (req.code or "").strip() or None
     parent_id = req.parent_id
     color = validate_hex_color(req.color)
+    boss_name = (req.boss_name or "").strip() or None
+    crew_capacity = validate_crew_capacity(req.crew_capacity)
 
     if parent_id is not None:
         with engine.connect() as conn:
@@ -1217,9 +1264,11 @@ def create_work_crew(req: WorkCrewCreateRequest, _admin=Depends(require_admin)):
 
     try:
         with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO work_crews (name, code, parent_id, color, is_active, sort_order)
-                VALUES (:name, :code, :parent_id, :color, :is_active, :sort_order)
+            new_id = conn.execute(text("""
+                INSERT INTO work_crews (name, code, parent_id, color, is_active, sort_order,
+                                        boss_name, crew_capacity)
+                VALUES (:name, :code, :parent_id, :color, :is_active, :sort_order,
+                        :boss_name, :crew_capacity)
             """), {
                 "name": name,
                 "code": code,
@@ -1227,19 +1276,34 @@ def create_work_crew(req: WorkCrewCreateRequest, _admin=Depends(require_admin)):
                 "color": color,
                 "is_active": 1 if req.is_active else 0,
                 "sort_order": int(req.sort_order or 0),
-            })
+                "boss_name": boss_name,
+                "crew_capacity": crew_capacity,
+            }).lastrowid
     except Exception:
         raise HTTPException(status_code=400, detail="Could not create work crew (code may already exist)")
 
-    return {"ok": True}
+    record_audit(admin, "crew.create", "work_crew", new_id, name,
+                 {"parent_id": parent_id, "code": code, "boss_name": boss_name,
+                  "crew_capacity": crew_capacity})
+    return {"ok": True, "id": new_id}
 
 
 @app.put("/api/work-crews/{crew_id}")
-def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(require_admin)):
+def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, admin=Depends(require_admin)):
     from .db import engine
 
     updates = []
     params = {"id": crew_id}
+
+    # Snapshot BEFORE the write so the audit row records old -> new.
+    with engine.connect() as conn:
+        old = conn.execute(text("""
+            SELECT id, name, code, parent_id, color, is_active, sort_order,
+                   vendor_qbo_id, boss_name, crew_capacity
+            FROM work_crews WHERE id = :id
+        """), {"id": crew_id}).mappings().first()
+    if not old:
+        raise HTTPException(status_code=404, detail="Work crew not found")
 
     if req.name is not None:
         name = req.name.strip()
@@ -1268,6 +1332,15 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(re
     if "vendor_qbo_id" in req.__fields_set__:
         updates.append("vendor_qbo_id = :vendor_qbo_id")
         params["vendor_qbo_id"] = (req.vendor_qbo_id or "").strip() or None
+
+    # Crew Model v2 company fields (meaningful on parent rows)
+    if "boss_name" in req.__fields_set__:
+        updates.append("boss_name = :boss_name")
+        params["boss_name"] = (req.boss_name or "").strip() or None
+
+    if "crew_capacity" in req.__fields_set__:
+        updates.append("crew_capacity = :crew_capacity")
+        params["crew_capacity"] = validate_crew_capacity(req.crew_capacity)
 
     # parent_id: allow clearing when client sends null
     if "parent_id" in req.__fields_set__:
@@ -1304,11 +1377,23 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, _admin=Depends(re
     except Exception:
         raise HTTPException(status_code=400, detail="Could not update work crew (code may already exist)")
 
+    # Audit old -> new for exactly the fields this request touched.
+    new_vals = dict(params)
+    if "parent_id = NULL" in updates:
+        new_vals["parent_id"] = None
+    touched = [f for f in ("name", "code", "parent_id", "color", "is_active",
+                           "sort_order", "vendor_qbo_id", "boss_name", "crew_capacity")
+               if f in new_vals]
+    changes = diff_fields(dict(old), new_vals, touched)
+    if changes:
+        record_audit(admin, "crew.update", "work_crew", crew_id,
+                     new_vals.get("name") or old["name"], {"changes": changes})
+
     return {"ok": True, "updated": True}
 
 
 @app.delete("/api/work-crews/{crew_id}")
-def disable_work_crew(crew_id: int, _admin=Depends(require_admin)):
+def disable_work_crew(crew_id: int, admin=Depends(require_admin)):
     """
     Disable a crew. Safer: block if it has active sub crews.
     """
@@ -1325,6 +1410,8 @@ def disable_work_crew(crew_id: int, _admin=Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Cannot disable: crew has active sub crews")
 
     with engine.begin() as conn:
+        crew_name = conn.execute(text("SELECT name FROM work_crews WHERE id = :id"),
+                                 {"id": crew_id}).scalar()
         result = conn.execute(text("""
             UPDATE work_crews
             SET is_active = 0
@@ -1334,4 +1421,6 @@ def disable_work_crew(crew_id: int, _admin=Depends(require_admin)):
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Work crew not found")
 
+    record_audit(admin, "crew.update", "work_crew", crew_id, crew_name,
+                 {"changes": {"is_active": [1, 0]}})
     return {"ok": True}

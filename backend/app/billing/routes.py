@@ -257,6 +257,32 @@ def _estimates_for_billing(conn, entity_id):
     return out
 
 
+def _crew_choices(conn):
+    """Crew Model v2 (CR3): the Billing tab's crew list. Assignable choices are
+    COMPANIES (is_company=1, label "MTY · Jesse Rosales Jr."); active leads are
+    included with is_company=0 (label "MTY · Gustavo Ramirez") so legacy
+    child-crew assignments keep resolving to a readable name — the UI offers
+    only companies in the select."""
+    rows = conn.execute(text("""
+        SELECT wc.id, wc.name, wc.parent_id, wc.boss_name,
+               pc.name AS parent_name
+        FROM work_crews wc LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+        WHERE (wc.is_active = 1 OR wc.is_active IS NULL)
+        ORDER BY COALESCE(wc.parent_id, wc.id), wc.parent_id IS NOT NULL, wc.sort_order, wc.name
+    """)).mappings().all()
+    out = []
+    for r in rows:
+        if r["parent_id"] is None:
+            label = r["name"] + (f" · {r['boss_name']}" if r["boss_name"] else "")
+            out.append({"id": r["id"], "name": r["name"], "parent_name": None,
+                        "label": label, "is_company": True, "company_id": r["id"]})
+        else:
+            label = f"{r['parent_name'] or ''} · {r['name']}".strip(" ·")
+            out.append({"id": r["id"], "name": r["name"], "parent_name": r["parent_name"],
+                        "label": label, "is_company": False, "company_id": r["parent_id"]})
+    return out
+
+
 def _default_crew_for_project(conn, entity_id, meta):
     """Crew to seed a new estimate's assignment: whatever crew is already on the
     project's payment schedules, else the suggested crew from the assignment."""
@@ -821,6 +847,11 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
     vendor_name = {str(r["vid"]): (r["vendor"] or "—") for r in paid_rows}
     offers = _offer_rows(conn, "o.entity_id = :e", {"e": entity_id})
 
+    # CR3: offers point at COMPANIES — match a rollup's offer at the company
+    # level so legacy child-keyed rollups still find their (re-targeted) offer.
+    parent_of = {int(r["id"]): (int(r["parent_id"]) if r["parent_id"] is not None else int(r["id"]))
+                 for r in conn.execute(text("SELECT id, parent_id FROM work_crews")).mappings().all()}
+
     groups = {}
     for eq, (s, insts) in sched_map.items():
         if not s:
@@ -847,7 +878,11 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
         paid = paid_by_vid.get(g["vid"], 0.0) if g["vid"] else 0.0
         if cid is None:               # unassigned rollup absorbs the unmatched cash
             paid = round(paid + unmatched_total, 2)
-        crew_offer = next((o for o in offers if o["crew_id"] == cid and o["status"] in ("accepted", "sent")), None)
+        g_company = parent_of.get(int(cid)) if cid else None
+        crew_offer = next((o for o in offers
+                           if o.get("company_id") is not None and g_company is not None
+                           and int(o["company_id"]) == g_company
+                           and o["status"] in ("accepted", "sent")), None)
         out.append({
             "crew_id": cid, "crew_name": g["crew_name"],
             "estimates": sorted(g["estimates"], key=lambda x: x["doc"] or ""),
@@ -1045,9 +1080,17 @@ def mark_complete(entity_id: str, user=Depends(get_current_user)):
     which flips the canonical status to 'complete' and closes the books (figures
     reconcile to actuals). Reachable from the "appears complete" review banner."""
     _require(user)
+    from app.projects.history import record_item_history
     with engine.begin() as conn:
         if not _project_ctx(conn, entity_id):
             raise HTTPException(status_code=404, detail="Project not found")
+        before = conn.execute(text("""
+            SELECT psi.id, psi.status
+            FROM project_schedule_items psi
+            JOIN projects p ON p.id = psi.project_id
+            JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            WHERE qc.qbo_id = :e
+        """), {"e": entity_id}).mappings().all()
         conn.execute(text("""
             UPDATE project_schedule_items psi
             JOIN projects p ON p.id = psi.project_id
@@ -1055,6 +1098,11 @@ def mark_complete(entity_id: str, user=Depends(get_current_user)):
             SET psi.status = 'completed'
             WHERE qc.qbo_id = :e
         """), {"e": entity_id})
+        # Assignment-line history (CR1): record each item's status flip.
+        for it in before:
+            if it["status"] != "completed":
+                record_item_history(conn, int(it["id"]), "updated", int(user["id"]),
+                                    {"status": [it["status"], "completed"]})
     return get_bundle(entity_id, user)
 
 
@@ -1164,7 +1212,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
                                 _pd(ctx.get("start_date")), _pd(ctx.get("end_date")))
         estimates = _compose_estimates(conn, entity_id)
         crew_rollups = _compose_crew_rollups(conn, entity_id, books_closed)
-        crews = _crew_options(conn)
+        crews = _crew_choices(conn)
         drift = _drift_reasons(conn, entity_id, ctx, inv)
         offer_scope = _offer_scope(conn, entity_id)
 

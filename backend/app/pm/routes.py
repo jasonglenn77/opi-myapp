@@ -241,13 +241,24 @@ def pm_project_overview(qbo_id: str, user=Depends(require_capability(PAGE_PM_POR
             GROUP BY m.id ORDER BY is_primary DESC, name
         """), {"e": qbo_id}).mappings().all()
 
+        # company_* = the crew's parent (or itself when the assignment points
+        # straight at a parent row) — Crew Model v2: the PM Crew tab shows a
+        # per-company Boss-code control next to the per-lead codes.
         crews = conn.execute(text("""
-            SELECT wc.id, wc.name, MAX(swc.is_primary) AS is_primary, MIN(swc.created_at) AS assigned_at
+            SELECT wc.id, wc.name, MAX(swc.is_primary) AS is_primary, MIN(swc.created_at) AS assigned_at,
+                   MAX(COALESCE(pc.id, wc.id)) AS company_id,
+                   MAX(COALESCE(pc.name, wc.name)) AS company_name,
+                   MAX(COALESCE(pc.boss_name, wc.boss_name)) AS company_boss,
+                   -- CR3: the lead's name (NULL = lead TBD, i.e. the assignment
+                   -- points straight at the company) + the project slot code.
+                   MAX(CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END) AS lead_name,
+                   MAX(swc.slot_code) AS slot_code
             FROM projects p
             JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
             JOIN project_schedule_items psi ON psi.project_id = p.id
             JOIN project_schedule_item_work_crews swc ON swc.schedule_item_id = psi.id
             JOIN work_crews wc ON wc.id = swc.work_crew_id
+            LEFT JOIN work_crews pc ON pc.id = wc.parent_id
             WHERE qc.qbo_id = :e AND swc.unassigned_at IS NULL
             GROUP BY wc.id ORDER BY is_primary DESC, wc.name
         """), {"e": qbo_id}).mappings().all()
@@ -296,7 +307,10 @@ def pm_project_overview(qbo_id: str, user=Depends(require_capability(PAGE_PM_POR
                      "assigned_at": str(r["assigned_at"]) if r["assigned_at"] else None}
                     for r in pms],
             "crews": [{"id": r["id"], "name": r["name"], "is_primary": bool(r["is_primary"]),
-                       "assigned_at": str(r["assigned_at"]) if r["assigned_at"] else None}
+                       "assigned_at": str(r["assigned_at"]) if r["assigned_at"] else None,
+                       "lead_name": r["lead_name"], "slot_code": r["slot_code"],
+                       "company": {"id": r["company_id"], "name": r["company_name"],
+                                   "boss_name": r["company_boss"]}}
                       for r in crews],
             "start_date": ctx.get("start_date"), "end_date": ctx.get("end_date"),
             "wire_guidance": bool(item["wire_guidance"]) if item else False,

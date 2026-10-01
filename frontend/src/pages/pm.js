@@ -334,6 +334,15 @@ async function mountPmOverview(container, qboId, switchTab) {
 
   // ── assignment block ────────────────────────────────────────────────────
   const person = (p) => `<div>${escapeHtml(p.name || "—")}${p.is_primary ? ` <span class="text-[10px] font-bold text-blue-700">primary</span>` : ""}${p.assigned_at ? ` <span class="text-black/40">· assigned ${escapeHtml(fmtDate(p.assigned_at))}</span>` : ""}</div>`;
+  // Crew Model v2 (CR3): "Company · Boss · Lead" ("… · lead TBD" lead-less).
+  const crewLabel = (c) => {
+    const co = c.company || {};
+    const bits = [co.name || c.name || "—"];
+    if (co.boss_name) bits.push(co.boss_name);
+    bits.push(c.lead_name || (co.id != null && String(co.id) === String(c.id) ? null : c.name) || "lead TBD");
+    return bits.join(" · ");
+  };
+  const crewPerson = (c) => `<div>${escapeHtml(crewLabel(c))}${c.slot_code ? ` <span class="text-[10px] font-bold text-black/45">${escapeHtml(c.slot_code)}</span>` : ""}${c.is_primary ? ` <span class="text-[10px] font-bold text-blue-700">primary</span>` : ""}${c.assigned_at ? ` <span class="text-black/40">· assigned ${escapeHtml(fmtDate(c.assigned_at))}</span>` : ""}</div>`;
   const ovRow = (label, valueHtml) => `
     <div class="pm-ov-row">
       <div class="pm-ov-label">${label}</div>
@@ -343,7 +352,7 @@ async function mountPmOverview(container, qboId, switchTab) {
   const assignmentHtml = `
     <div class="pm-ov-grid">
       ${ovRow("Project manager", (a.pms || []).length ? a.pms.map(person).join("") : dash)}
-      ${ovRow("Work crew", (a.crews || []).length ? a.crews.map(person).join("") : dash)}
+      ${ovRow("Work crew", (a.crews || []).length ? a.crews.map(crewPerson).join("") : dash)}
       ${ovRow("Schedule", (a.start_date || a.end_date)
         ? `<span class="tabular-nums">${escapeHtml(fmtDate(a.start_date) || "—")} → ${escapeHtml(fmtDate(a.end_date) || "—")}</span>` : "Dates TBD")}
       ${ovRow("Wire guidance", a.wire_guidance ? `<span class="font-bold">Yes</span>` : "No")}
@@ -1516,6 +1525,21 @@ async function mountPmCrewTab(container, qboId) {
   const passcodes = (pcs && pcs.passcodes) || [];
   const activeLeadCode = (crewId) =>
     passcodes.find((p) => p.active && p.role === "lead" && String(p.crew_id) === String(crewId)) || null;
+  const activeBossCode = (companyId) =>
+    passcodes.find((p) => p.active && p.role === "boss" && String(p.crew_id) === String(companyId)) || null;
+
+  // Companies of the assigned crews (Crew Model v2 CR2): each gets a BOSS
+  // code control — a passcode row pointing at the PARENT crew, scoped
+  // server-side to ALL of that company's projects (lead-less lines included).
+  const companies = [];
+  const seenCompanies = new Set();
+  crews.forEach((c) => {
+    const co = c.company;
+    if (co && co.id != null && !seenCompanies.has(String(co.id))) {
+      seenCompanies.add(String(co.id));
+      companies.push(co);
+    }
+  });
 
   // Invite text is built CLIENT-SIDE and NEVER contains the code — the PM
   // texts it themselves and reads the code aloud separately.
@@ -1526,6 +1550,10 @@ async function mountPmCrewTab(container, qboId) {
     `Open your project here: ${fieldLink}`,
     `Your passcode: (your PM will give it to you)`,
   ].join("\n");
+
+  // Lead-code rows only make sense for crew LEADS (child rows); an assignment
+  // pointing straight at a company (lead-less line) is covered by the boss row.
+  const leadCrews = crews.filter((c) => !c.company || String(c.company.id) !== String(c.id));
 
   const crewRow = (c) => {
     const code = activeLeadCode(c.id);
@@ -1548,9 +1576,40 @@ async function mountPmCrewTab(container, qboId) {
         </div>
         <div class="mt-1">${codeBit}</div>
         <div class="mt-2 flex items-center gap-2 flex-wrap">
-          <button type="button" class="pm-btn" data-pc-set="${c.id}" data-pc-name="${escapeHtml(c.name || "")}"
+          <button type="button" class="pm-btn" data-pc-set="${c.id}" data-pc-role="lead" data-pc-name="${escapeHtml(c.name || "")}"
                   data-pc-label="${escapeHtml(code?.label || "")}">${code ? "Rotate code" : "Set code"}</button>
           ${code ? `<button type="button" class="pm-btn" style="color:#b91c1c" data-pc-deact="${code.id}" data-pc-name="${escapeHtml(c.name || "")}">Deactivate</button>` : ""}
+        </div>
+      </div>`;
+  };
+
+  // Per-company boss code (points at the PARENT crew row, role 'boss'):
+  // opens EVERY project of the company — not just this one.
+  const bossRow = (co) => {
+    const code = activeBossCode(co.id);
+    const codeBit = code
+      ? `<div class="text-[11px] text-black/55">
+           <span class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold bg-blue-100 text-blue-800">Boss code active</span>
+           <span class="font-semibold">${escapeHtml(code.label || "")}</span>
+           ${code.last_used_at ? ` · last used ${escapeHtml(fmtWhen(code.last_used_at))}` : " · never used yet"}
+         </div>`
+      : `<div class="text-[11px] text-black/45">
+           <span class="inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-800">No boss code</span>
+           The boss/owner can't sign in until a code is set.
+         </div>`;
+    return `
+      <div class="px-3 py-2.5">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-xs font-bold text-ink-900">${escapeHtml(co.name || "Company")}</span>
+          <span class="pm-chip pm-chip-lane-crew">boss code</span>
+          ${co.boss_name ? `<span class="text-[11px] text-black/45">${escapeHtml(co.boss_name)}</span>` : ""}
+          <span class="text-[11px] text-black/45">· sees ALL ${escapeHtml(co.name || "company")} projects</span>
+        </div>
+        <div class="mt-1">${codeBit}</div>
+        <div class="mt-2 flex items-center gap-2 flex-wrap">
+          <button type="button" class="pm-btn" data-pc-set="${co.id}" data-pc-role="boss" data-pc-name="${escapeHtml(co.name || "")}"
+                  data-pc-label="${escapeHtml(code?.label || co.boss_name || "")}">${code ? "Rotate boss code" : "Set boss code"}</button>
+          ${code ? `<button type="button" class="pm-btn" style="color:#b91c1c" data-pc-deact="${code.id}" data-pc-name="${escapeHtml(co.name || "")}">Deactivate</button>` : ""}
         </div>
       </div>`;
   };
@@ -1559,20 +1618,26 @@ async function mountPmCrewTab(container, qboId) {
     <div class="p-4 sm:p-5">
       <div class="text-sm font-extrabold text-ink-900 mb-2">Crew assignment</div>
       ${crews.length
-        ? `<div class="pm-ov-grid">${crews.map((c) => `
+        ? `<div class="pm-ov-grid">${crews.map((c) => {
+            // CR3: "Company · Boss · Lead" ("… · lead TBD" when lead-less)
+            const co = c.company || {};
+            const bits = [co.name || c.name || "—"];
+            if (co.boss_name) bits.push(co.boss_name);
+            bits.push(c.lead_name || (co.id != null && String(co.id) === String(c.id) ? null : c.name) || "lead TBD");
+            return `
             <div class="pm-ov-row">
               <div class="pm-ov-label">Work crew</div>
-              <div class="pm-ov-value">${escapeHtml(c.name || "—")}${c.is_primary ? ` <span class="text-[10px] font-bold text-blue-700">primary</span>` : ""}${c.assigned_at ? ` <span class="text-black/40">· assigned ${escapeHtml(fmtDate(c.assigned_at))}</span>` : ""}</div>
-            </div>`).join("")}
+              <div class="pm-ov-value">${escapeHtml(bits.join(" · "))}${c.slot_code ? ` <span class="text-[10px] font-bold text-black/45">${escapeHtml(c.slot_code)}</span>` : ""}${c.is_primary ? ` <span class="text-[10px] font-bold text-blue-700">primary</span>` : ""}${c.assigned_at ? ` <span class="text-black/40">· assigned ${escapeHtml(fmtDate(c.assigned_at))}</span>` : ""}</div>
+            </div>`; }).join("")}
            </div>`
         : `<div class="rounded-xl border border-dashed border-black/15 px-4 py-4 text-center text-xs text-black/40">No crew assigned yet — the office assigns crews on the Assignment page.</div>`}
 
       <div class="text-sm font-extrabold text-ink-900 mt-5 mb-1">Field passcodes</div>
-      <div class="text-[11px] text-black/45 mb-2">One 4-6 digit code per crew opens #/field on their phones. The code is typed once and can never be shown again — read it aloud to the lead. Setting a new code rotates (kills) the old one everywhere.</div>
+      <div class="text-[11px] text-black/45 mb-2">One 4-6 digit code per crew lead opens #/field on their phones (their projects only); the company's Boss code opens ALL of that company's projects. A code is typed once and can never be shown again — read it aloud. Setting a new code rotates (kills) the old one everywhere.</div>
       ${pcErr
         ? `<div class="text-xs text-red-700 mb-2">Couldn't load passcodes: ${escapeHtml(pcErr.message || String(pcErr))}</div>`
-        : crews.length
-          ? `<div class="rounded-xl border border-black/10 divide-y divide-black/5 mb-2">${crews.map(crewRow).join("")}</div>`
+        : (leadCrews.length || companies.length)
+          ? `<div class="rounded-xl border border-black/10 divide-y divide-black/5 mb-2">${leadCrews.map(crewRow).join("")}${companies.map(bossRow).join("")}</div>`
           : `<div class="text-[11px] text-black/40 mb-2">Passcodes appear here once a crew is assigned.</div>`}
       <div id="pmCrewMsg" class="text-xs min-h-[1rem]"></div>
 
@@ -1597,8 +1662,9 @@ async function mountPmCrewTab(container, qboId) {
 
   container.querySelectorAll("[data-pc-set]").forEach((b) => b.addEventListener("click", async () => {
     const crewId = Number(b.getAttribute("data-pc-set"));
+    const role = b.getAttribute("data-pc-role") || "lead";
     const crewName = b.getAttribute("data-pc-name") || "";
-    const label = prompt("Name for this code (who carries it — the crew lead)?",
+    const label = prompt(`Name for this code (who carries it — ${role === "boss" ? "the company's boss/owner" : "the crew lead"})?`,
                          b.getAttribute("data-pc-label") || crewName);
     if (label === null) return;
     const lbl = label.trim();
@@ -1610,7 +1676,7 @@ async function mountPmCrewTab(container, qboId) {
     try {
       await api("/crew-auth/passcodes", {
         method: "POST",
-        body: JSON.stringify({ crew_id: crewId, role: "lead", label: lbl, code: c }),
+        body: JSON.stringify({ crew_id: crewId, role, label: lbl, code: c }),
       });
       alert(`Code set for ${lbl}.\n\nRead it aloud to them now — it cannot be shown again later.\nThey sign in at ${location.origin}${location.pathname}#/field`);
       mountPmCrewTab(container, qboId);

@@ -155,7 +155,11 @@ def _load_schedules(conn, entity_id):
     """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
     scheds = conn.execute(text("""
         SELECT s.id, s.estimate_qbo_id, s.estimate_doc_number, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
-               TRIM(CONCAT(COALESCE(wc.name,''), CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (', pc.name, ')') ELSE '' END)) AS crew_name
+               -- Crew Model v2 (CR3): "Company · Lead" (company-pointing rows
+               -- show "Company · lead TBD")
+               TRIM(CASE WHEN wc.id IS NULL THEN ''
+                         WHEN pc.id IS NULL THEN CONCAT(wc.name, ' · lead TBD')
+                         ELSE CONCAT(pc.name, ' · ', wc.name) END) AS crew_name
         FROM project_payment_schedules s
         LEFT JOIN work_crews wc ON wc.id = s.crew_id LEFT JOIN work_crews pc ON pc.id = wc.parent_id
         WHERE s.entity_id = :id

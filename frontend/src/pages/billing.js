@@ -6,6 +6,7 @@
 // (est-vs-actual by category + a weekly cash-out schedule).
 import { api } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
+import { mountConsistencyChip } from "../utils/crew-consistency.js";
 
 const money = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)).toLocaleString("en-US"));
 const money2 = (n) => (n == null || n === "" ? "—" : "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 }));
@@ -117,8 +118,15 @@ function render(container, entityId, d) {
   const inv = d.invoices, crew = d.crew, exp = d.expenses;
   const crews = d.crews || [];
   const [stLabel, stCls] = STATUS_PILL[p.operational_status] || [p.operational_status || "—", "text-slate-700 bg-slate-100 border-slate-300"];
-  const crewName = (id) => { const c = crews.find((x) => String(x.id) === String(id)); return c ? (c.parent_name ? c.parent_name + " — " : "") + c.name : null; };
-  const crewOpts = (sel) => `<option value="">Unassigned</option>` + crews.map((c) => `<option value="${c.id}" ${String(c.id) === String(sel) ? "selected" : ""}>${escapeHtml((c.parent_name ? c.parent_name + " — " : "") + c.name)}</option>`).join("");
+  // Crew Model v2 (CR3): assignable choices are COMPANIES ("MTY · Jesse
+  // Rosales Jr."); leads stay in the list only so legacy child assignments
+  // resolve to a readable "MTY · Gustavo Ramirez" label.
+  const crewName = (id) => { const c = crews.find((x) => String(x.id) === String(id)); return c ? (c.label || c.name) : null; };
+  const crewOpts = (sel) => {
+    const selected = crews.find((c) => String(c.id) === String(sel));
+    const opts = crews.filter((c) => c.is_company || (selected && String(c.id) === String(sel)));
+    return `<option value="">Unassigned</option>` + opts.map((c) => `<option value="${c.id}" ${String(c.id) === String(sel) ? "selected" : ""}>${escapeHtml((c.label || c.name) + (c.is_company ? "" : " (legacy lead)"))}</option>`).join("");
+  };
   // Crew "paid" = ALL actual Contract-Labor bills (any vendor, incl. crews not
   // registered/assigned in the app) — not just the assigned rollups.
   const crewPaid = crew.paid_qbo != null ? crew.paid_qbo : roll.total_paid;
@@ -417,6 +425,7 @@ function render(container, entityId, d) {
           <span class="ml-auto text-[12px] tabular-nums text-black/55"><b class="text-ink-900">${money(crewLaborEst)}</b> labor</span>
         </summary>
         <div class="p-3">
+          <div class="px-1 pb-2" data-ccx-slot></div>
           ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
           ${est.accepted.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}</div></div>` : ""}
         </div>
@@ -437,6 +446,11 @@ function render(container, entityId, d) {
       ${pendingTray}
       ${contribHtml}
     </div>`;
+
+  // CR5 B3: crew-consistency chip near the crew section (fetched lazily so the
+  // tab renders without waiting on it; re-fetched on every re-render so crew
+  // reassignments move the chip).
+  mountConsistencyChip(container, entityId);
 
   const post = async (url, label, btn) => {
     const orig = btn ? btn.textContent : null;
@@ -645,16 +659,19 @@ function openOfferScriptModal(text) {
   });
 }
 
-// Crew-availability slide-over — pick a crew from an informed panel (availability
-// for the project dates + jobs done + $ paid, last 365 days), grouped by company.
+// Crew Model v2 (CR3) browse-crews slide-over — ONE CARD PER COMPANY:
+// "MTY · Jesse Rosales Jr. · 2 of 3 crews available" + the occupied-slot list
+// ("JR1 · Gustavo Ramirez — 6304 DHL thru 10/09"; lead-less = "JR1 · lead
+// TBD"). Assign = COMPANY assign with an optional lead pick — onPick gets the
+// lead's crew id when one is chosen, else the company id (same backend path).
 function openCrewRoster(entityId, start, end, onPick) {
   const wrap = document.createElement("div");
   wrap.className = "fixed inset-0 z-[100]";
   wrap.innerHTML = `<div data-backdrop class="absolute inset-0 bg-black/30"></div>
     <div class="absolute top-0 right-0 h-full w-full max-w-md bg-white shadow-xl overflow-y-auto">
       <div class="sticky top-0 bg-white border-b border-black/10 px-4 py-3 flex items-center justify-between z-10">
-        <div><div class="text-sm font-bold text-ink-900">Work crews</div>
-          <div class="text-[11px] text-black/45">${start && end ? "availability " + shortDate(start) + "–" + shortDate(end) + " · " : ""}jobs &amp; $ paid, last 365 days</div></div>
+        <div><div class="text-sm font-bold text-ink-900">Crew companies</div>
+          <div class="text-[11px] text-black/45">${start && end ? "availability " + shortDate(start) + "–" + shortDate(end) + " · " : ""}$ paid &amp; jobs, last 365 days</div></div>
         <button data-close class="text-black/40 hover:text-black/70 text-lg leading-none">✕</button>
       </div>
       <div data-roster class="p-3 text-sm text-black/50">Loading…</div>
@@ -669,24 +686,43 @@ function openCrewRoster(entityId, start, end, onPick) {
       const q = start && end ? `&start=${start.slice(0, 10)}&end=${end.slice(0, 10)}` : "";
       d = await api(`/offers/crew-roster?project_qbo_id=${encodeURIComponent(entityId)}${q}`);
     } catch (e) { wrap.querySelector("[data-roster]").innerHTML = `<div class="text-red-600 p-2">Failed to load crews.</div>`; return; }
-    const byCo = {};
-    (d.crews || []).forEach((c) => { (byCo[c.company || "—"] ||= []).push(c); });
-    const badge = (a) => a === null ? "" : a
-      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">✓ free</span>`
-      : `<span class="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">⚠ busy</span>`;
-    wrap.querySelector("[data-roster]").innerHTML = Object.keys(byCo).sort().map((co) => {
-      const list = byCo[co];
-      return `<div class="mb-3">
-        <div class="flex justify-between items-baseline px-2 py-1.5 bg-black/[0.03] rounded-lg mb-1">
-          <span class="font-bold text-[13px] text-ink-900">${escapeHtml(co)}</span>
-          <span class="text-[11px] text-black/50 tabular-nums">${money(list[0]?.earned_365 || 0)} · 365d</span></div>
-        ${list.map((c) => `<button data-pick="${c.id}" data-name="${escapeHtml(c.name)}" class="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-blue-50">
-          <span class="flex-1 font-semibold text-[13px]">${escapeHtml(c.name)}</span>
-          <span class="text-[11px] text-black/45 tabular-nums">${c.jobs_365} job${c.jobs_365 === 1 ? "" : "s"}</span>${badge(c.available)}
-        </button>`).join("")}
+    const availBadge = (co) => co.available === null
+      ? `<span class="text-[10px] font-bold text-black/45 bg-black/[0.04] border border-black/10 rounded-full px-2 py-0.5">${co.capacity} crew${co.capacity === 1 ? "" : "s"} · add dates for availability</span>`
+      : co.available > 0
+        ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">${co.available} of ${co.capacity} crews available</span>`
+        : `<span class="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">0 of ${co.capacity} crews available</span>`;
+    const thruShort = (s) => { if (!s) return "—"; const p = String(s).slice(0, 10).split("-"); return `${Number(p[1])}/${Number(p[2])}`; };
+    wrap.querySelector("[data-roster]").innerHTML = (d.companies || []).map((co, i) => {
+      const occ = (co.occupied || []).map((o) => `
+        <div class="flex items-baseline gap-1.5 px-2 py-1 text-[12px] border-t border-black/[0.05]">
+          <span class="font-bold tabular-nums text-ink-900">${escapeHtml(o.slot || "—")}</span>
+          <span class="${o.lead ? "text-black/70" : "text-amber-700 font-semibold"}">· ${escapeHtml(o.lead || "lead TBD")}</span>
+          <span class="text-black/45 truncate ml-auto text-right">— ${escapeHtml(o.project || "")} thru ${thruShort(o.thru)}</span>
+        </div>`).join("");
+      const leadOpts = `<option value="">— lead TBD —</option>` + (co.leads || []).map((l) =>
+        `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+      return `<div class="mb-3 rounded-xl border border-black/10 overflow-hidden">
+        <div class="flex justify-between items-center gap-2 px-3 py-2 bg-black/[0.03] flex-wrap">
+          <span class="font-bold text-[13px] text-ink-900">${escapeHtml(co.name)}${co.boss_name ? ` <span class="font-semibold text-black/55">· ${escapeHtml(co.boss_name)}</span>` : ""}</span>
+          ${availBadge(co)}
+        </div>
+        <div class="px-3 py-1 text-[11px] text-black/45 tabular-nums">${money(co.earned_365 || 0)} paid · ${co.jobs_365 || 0} job${co.jobs_365 === 1 ? "" : "s"} · 365d</div>
+        ${occ ? `<div class="pb-1">${occ}</div>` : `<div class="px-3 pb-1.5 text-[11.5px] text-black/35">No crews booked in this window.</div>`}
+        <div class="flex items-center gap-2 px-3 py-2 border-t border-black/[0.06] bg-black/[0.01]">
+          <select data-lead-pick="${i}" class="flex-1 min-w-0 text-[12px] border border-black/15 rounded px-1.5 py-1 bg-white text-black/70">${leadOpts}</select>
+          <button data-pick-co="${i}" data-cid="${co.id}" data-name="${escapeHtml(co.name)}"
+            class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1 whitespace-nowrap">Assign</button>
+        </div>
       </div>`;
-    }).join("") || `<div class="text-black/40 p-2">No crews found.</div>`;
-    wrap.querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => { onPick(b.getAttribute("data-pick"), b.getAttribute("data-name")); close(); }));
+    }).join("") || `<div class="text-black/40 p-2">No crew companies found.</div>`;
+    wrap.querySelectorAll("[data-pick-co]").forEach((b) => b.addEventListener("click", () => {
+      const i = b.getAttribute("data-pick-co");
+      const leadSel = wrap.querySelector(`[data-lead-pick="${i}"]`);
+      const leadId = leadSel && leadSel.value ? leadSel.value : null;
+      // company assign; a picked lead narrows it to that lead's crew id
+      onPick(leadId || b.getAttribute("data-cid"), b.getAttribute("data-name"));
+      close();
+    }));
   })();
 }
 

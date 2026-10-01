@@ -10,21 +10,31 @@ export async function teamsPage(routeFn) {
     api("/crew-auth/passcodes").catch(() => ({ passcodes: [] })),
   ]);
   const vendors = vendorData.vendors || [];
-  // Field-forms passcodes (Phase 2): one active lead code per crew + one boss
-  // master code (crew_id null). Codes are write-only — never retrievable.
+  // Field-forms passcodes (Crew Model v2 CR2): one active lead code per crew
+  // lead (child row) + one BOSS code per company (a passcode row pointing at
+  // the PARENT crew, role 'boss' — scoped to the whole company's projects).
+  // The old global crew_id-NULL master code is retired (migration 0057).
+  // Codes are write-only — never retrievable.
   const passcodes = passcodeData.passcodes || [];
   const leadCodeByCrew = new Map();
+  const bossCodeByCompany = new Map();
   passcodes.forEach(p => {
-    if (p.active && p.role === "lead" && p.crew_id != null) leadCodeByCrew.set(String(p.crew_id), p);
+    if (!p.active || p.crew_id == null) return;
+    if (p.role === "lead") leadCodeByCrew.set(String(p.crew_id), p);
+    else if (p.role === "boss") bossCodeByCompany.set(String(p.crew_id), p);
   });
-  const bossCode = passcodes.find(p => p.active && p.role === "boss" && p.crew_id == null) || null;
-  const fmtLastUsed = (p) => p.last_used_at ? `last used ${String(p.last_used_at).slice(0, 10)}` : "never used";
+  const fmtLastUsed = (p) => {
+    if (!p.last_used_at) return "never used";
+    const d = String(p.last_used_at).slice(0, 10).split("-"); // YYYY-MM-DD
+    return d.length === 3 ? `last used ${Number(d[1])}/${Number(d[2])}` : `last used ${String(p.last_used_at).slice(0, 10)}`;
+  };
   const users = (Array.isArray(usersData) ? usersData : []).filter(u => u.is_active);
   const userByPm = new Map();
   users.forEach(u => { if (u.project_manager_id != null) userByPm.set(String(u.project_manager_id), u); });
 
   // Shared inline-cell styles + a users dropdown builder (for the Linked-user column)
-  const CELL = "bg-transparent border border-transparent hover:border-black/15 focus:border-blue-400 focus:bg-white rounded px-1.5 py-1 outline-none text-sm";
+  // CR5-C: text-xs to match the projects/pipeline table typography.
+  const CELL = "bg-transparent border border-transparent hover:border-black/15 focus:border-blue-400 focus:bg-white rounded px-1.5 py-1 outline-none text-xs";
   const BTN = "rounded-lg border border-black/15 px-2.5 py-1 text-xs font-semibold text-ink-800 hover:bg-black/5 whitespace-nowrap";
   const userOpts = (selId) => `<option value="">— none —</option>` +
     users.map(u => `<option value="${u.id}" ${String(selId) === String(u.id) ? "selected" : ""}>${escOpt(u.email)}</option>`).join("");
@@ -37,14 +47,23 @@ export async function teamsPage(routeFn) {
   const activeCrews   = crews.filter(c => c.is_active);
   const inactiveCrews = crews.filter(c => !c.is_active);
 
-  // Active crew hierarchy — parents then their active children, indented
-  const activeParents = activeCrews.filter(c => !c.parent_id);
+  // Active crew hierarchy — parents then their active children, indented.
+  // CR5-C: display order = sort_order (drag & drop persists it). The
+  // /work-crews GET orders company BLOCKS by company id, so companies are
+  // sorted here client-side the same way the offers/browse-crews endpoints
+  // order them (sort_order, name); leads by (sort_order, id).
+  const bySort = (a, b) => (Number(a.sort_order || 0) - Number(b.sort_order || 0))
+    || String(a.name || "").localeCompare(String(b.name || ""))
+    || (Number(a.id) - Number(b.id));
+  const activeParents = activeCrews.filter(c => !c.parent_id).sort(bySort);
   const activeChildrenByParent = new Map();
   activeCrews.filter(c => c.parent_id).forEach(c => {
     const k = String(c.parent_id);
     if (!activeChildrenByParent.has(k)) activeChildrenByParent.set(k, []);
     activeChildrenByParent.get(k).push(c);
   });
+  activeChildrenByParent.forEach(list => list.sort(
+    (a, b) => (Number(a.sort_order || 0) - Number(b.sort_order || 0)) || (Number(a.id) - Number(b.id))));
 
   // Modal "Parent" dropdown — include all parents so an Edit of a disabled
   // crew still shows its current (possibly-disabled) parent.
@@ -129,81 +148,176 @@ export async function teamsPage(routeFn) {
   }
   function crewVendorCell(c) {
     if (c.parent_id) return `<span class="text-black/30 text-xs pl-1">—</span>`;
-    return `<select data-crew-field="vendor_qbo_id" data-crew-id="${c.id}" class="${CELL} w-full min-w-[12rem]"><option value="">(not linked)</option>${
+    return `<select data-crew-field="vendor_qbo_id" data-crew-id="${c.id}" class="${CELL} w-full" style="min-width:7.5rem"><option value="">(not linked)</option>${
       vendors.map(v => `<option value="${escOpt(v.vendor_qbo_id)}" ${String(c.vendor_qbo_id) === String(v.vendor_qbo_id) ? "selected" : ""}>${escOpt(v.name)}</option>`).join("")}</select>`;
   }
-  // Field-forms lead passcode control (Phase 2). Codes are set/rotated here,
-  // read aloud to the lead, and never shown again.
+  // Field-forms passcode controls (Crew Model v2 CR2 — compacted in CR5-C to
+  // a VERTICAL stack: status line over small action buttons, so the column
+  // stays narrow). Codes are set/rotated here, read aloud to the carrier,
+  // and never shown again. The label auto-fills (lead name / company boss)
+  // — no "who carries it" prompt anymore.
+  // "New code" (ex-Rotate) sets a fresh code and kills the old one's devices.
+  const NEWCODE_TIP = "Sets a new code and signs out any device using the old one";
+  // Lead code = the child crew's own sign-in (their assigned projects only).
   function crewPasscodeCell(c) {
     const pc = leadCodeByCrew.get(String(c.id));
-    if (!pc) return `<button class="${BTN}" data-pc-set="${c.id}" data-pc-default="${escOpt(c.name)} lead">Set code</button>`;
+    const def = escOpt(c.name); // label auto-fills with the lead's name
+    if (!pc) return `
+      <div class="tm-pc">
+        <div class="tm-pc-line text-black/40">No code</div>
+        <div class="tm-pc-btns"><button class="tm-pc-btn" data-pc-set="${c.id}" data-pc-role="lead" data-pc-default="${def}">Set code</button></div>
+      </div>`;
     return `
-      <div class="whitespace-nowrap">
-        <div class="flex items-center gap-1.5">
-          <span class="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold whitespace-nowrap bg-emerald-50 text-emerald-700 border-emerald-200">Active</span>
-          <span class="text-xs text-black/70 truncate" style="max-width:8rem" title="${escOpt(pc.label)}">${escOpt(pc.label)}</span>
-          <button class="${BTN}" data-pc-set="${c.id}" data-pc-default="${escOpt(pc.label)}">Rotate</button>
-          <button class="${BTN}" data-pc-deact="${pc.id}" data-pc-who="${escOpt(pc.label)}">Deactivate</button>
+      <div class="tm-pc">
+        <div class="tm-pc-line" title="${escOpt(pc.label)} — ${fmtLastUsed(pc)}">
+          <span class="tm-pc-dot tm-pc-dot-ok"></span>Code set · ${escOpt(pc.label)} · ${fmtLastUsed(pc)}
         </div>
-        <div class="text-[10px] text-black/40 mt-0.5">${fmtLastUsed(pc)}</div>
+        <div class="tm-pc-btns">
+          <button class="tm-pc-btn" data-pc-set="${c.id}" data-pc-role="lead" data-pc-default="${def}" title="${NEWCODE_TIP}">New code</button>
+          <button class="tm-pc-btn" data-pc-deact="${pc.id}" data-pc-who="${escOpt(pc.label)}">Deactivate</button>
+        </div>
+      </div>`;
+  }
+  // Boss code = one code per COMPANY (points at the parent crew row): the
+  // boss sees every project of their company, lead-less lines included.
+  function companyBossCodeCell(c) {
+    const pc = bossCodeByCompany.get(String(c.id));
+    const def = escOpt(c.boss_name || `${c.name} boss`); // auto label
+    if (!pc) return `
+      <div class="tm-pc">
+        <div class="tm-pc-line text-black/40">No boss code</div>
+        <div class="tm-pc-btns"><button class="tm-pc-btn" data-pc-set="${c.id}" data-pc-role="boss" data-pc-default="${def}">Set boss code</button></div>
+      </div>`;
+    return `
+      <div class="tm-pc">
+        <div class="tm-pc-line" title="${escOpt(pc.label)} — ${fmtLastUsed(pc)}">
+          <span class="tm-pc-dot tm-pc-dot-boss"></span>Boss code · ${escOpt(pc.label)} · ${fmtLastUsed(pc)}
+        </div>
+        <div class="tm-pc-btns">
+          <button class="tm-pc-btn" data-pc-set="${c.id}" data-pc-role="boss" data-pc-default="${def}" title="${NEWCODE_TIP}">New code</button>
+          <button class="tm-pc-btn" data-pc-deact="${pc.id}" data-pc-who="${escOpt(pc.label)}">Deactivate</button>
+        </div>
       </div>`;
   }
 
-  function crewRow(c, indent = 0) {
+  // CR5 A1 — capacity is auto-by-default. The cell shows the EFFECTIVE number
+  // (override when set, else the live active-lead count): typing a number
+  // creates an override; the small "auto" button (shown only when overridden)
+  // PUTs null to go back to tracking active leads.
+  function capacityCell(c, inputCls) {
+    const leadN = Number(c.active_lead_count || 0);
+    const overridden = c.crew_capacity != null;
+    const eff = c.effective_capacity != null ? c.effective_capacity : (overridden ? c.crew_capacity : leadN);
+    const leadWord = `${leadN} active lead${leadN === 1 ? "" : "s"}`;
+    return `
+      <div>
+        <div class="flex items-center gap-1">
+          <input type="number" min="0" max="99" value="${eff}" data-crew-field="crew_capacity" data-crew-id="${c.id}"
+            class="${inputCls} w-14 text-right tabular-nums"
+            title="${overridden ? "Manual override — press auto to track active leads again" : "Auto — tracks active leads; typing a number creates an override"}">
+          ${overridden ? `<button class="${BTN}" data-cap-auto="${c.id}" title="Back to auto (track active leads)">auto</button>` : ""}
+        </div>
+        <div class="text-[10px] text-black/40 mt-0.5 whitespace-nowrap">${overridden ? `override — ${leadWord}` : `auto (${leadWord})`}</div>
+      </div>`;
+  }
+
+  // Companies = parent rows (bold, with Boss/Owner + Crews capacity + vendor
+  // + Boss code); crew leads = indented child rows (identity only — the
+  // legacy per-lead code is deprecated and no longer shown: slot codes now
+  // live on the assignment, not the person).
+  // CR5-C: the Sort number column is gone — rows get a drag handle instead
+  // (active table only): companies reorder among companies (their lead block
+  // moves with them), leads reorder within their own company. Drop persists
+  // sort_order through the existing PUT /work-crews/{id}.
+  function crewRow(c, draggable = false) {
+    const isCompany = !c.parent_id;
     const isActive = !!c.is_active;
     const toggle = isActive
       ? `<button class="${BTN}" data-crew-disable="${c.id}">Disable</button>`
       : `<button class="${BTN}" data-crew-enable="${c.id}">Enable</button>`;
+    const addLead = (isCompany && isActive)
+      ? `<button class="${BTN}" data-crew-addlead="${c.id}" data-crew-addlead-name="${escOpt(c.name)}" title="Add a crew lead under ${escOpt(c.name)}">+ Lead</button> `
+      : "";
+    const nameCell = isCompany
+      ? `<div class="flex items-center gap-1.5">
+           <input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CELL} w-full font-semibold" style="min-width:7.5rem" placeholder="Company name">
+           <input value="${esc(c.code)}" data-crew-field="code" data-crew-id="${c.id}" class="${CELL} w-14" placeholder="JR" title="Slot-code prefix (JR1, JR2… on projects)">
+         </div>`
+      : `<div style="padding-left:18px"><input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CELL} w-full" style="min-width:7.5rem" placeholder="Lead name"></div>`;
+    const dndAttrs = draggable
+      ? ` data-dnd-kind="${isCompany ? "company" : "lead"}" data-dnd-id="${c.id}"${isCompany ? "" : ` data-dnd-parent="${c.parent_id}"`}`
+      : "";
+    const handleTd = draggable
+      ? `<td class="py-1 pr-1"><span class="tm-drag" draggable="true" data-drag-handle title="Drag to reorder${isCompany ? " (companies)" : " (within this company)"} — Esc cancels">⋮⋮</span></td>`
+      : "";
     return `
-      <tr class="border-b border-black/5">
+      <tr class="border-b border-black/5 ${isCompany ? "bg-black/[0.02]" : ""}"${dndAttrs}>
+        ${handleTd}
         <td class="py-1 pr-2"><input type="color" value="${c.color || "#000000"}" data-crew-field="color" data-crew-id="${c.id}" class="h-7 w-8 rounded border border-black/10 bg-white p-0.5 cursor-pointer align-middle" title="Color"></td>
-        <td class="py-1 pr-2"><div style="padding-left:${indent}px"><input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CELL} w-full min-w-[10rem]" placeholder="Name"></div></td>
-        <td class="py-1 pr-2"><input value="${esc(c.code)}" data-crew-field="code" data-crew-id="${c.id}" class="${CELL} w-24" placeholder="Code"></td>
-        <td class="py-1 pr-2"><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CELL} w-full min-w-[9rem]">${crewParentOpts(c)}</select></td>
+        <td class="py-1 pr-2">${nameCell}</td>
+        <td class="py-1 pr-2">${isCompany
+          ? `<input value="${esc(c.boss_name)}" data-crew-field="boss_name" data-crew-id="${c.id}" class="${CELL} w-full" style="min-width:7rem" placeholder="Boss / owner">`
+          : `<span class="text-black/30 text-xs pl-1">—</span>`}</td>
+        <td class="py-1 pr-2">${isCompany
+          ? capacityCell(c, CELL)
+          : `<span class="text-black/30 text-xs pl-1">—</span>`}</td>
+        <td class="py-1 pr-2">${isCompany
+          ? `<span class="text-black/30 text-xs pl-1">—</span>`
+          : `<select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CELL} w-full" style="min-width:7rem">${crewParentOpts(c)}</select>`}</td>
         <td class="py-1 pr-2">${crewVendorCell(c)}</td>
-        <td class="py-1 pr-2"><input type="number" value="${c.sort_order ?? 0}" data-crew-field="sort_order" data-crew-id="${c.id}" class="${CELL} w-16 text-right tabular-nums"></td>
-        <td class="py-1 pr-2">${crewPasscodeCell(c)}</td>
-        <td class="py-1 pl-2 text-right whitespace-nowrap">${toggle}</td>
+        <td class="py-1 pr-2">${isCompany ? companyBossCodeCell(c) : crewPasscodeCell(c)}</td>
+        <td class="py-1 pl-2 text-right whitespace-nowrap">${addLead}${toggle}</td>
       </tr>
     `;
   }
 
-  // Active crews: parent rows + indented active children
+  // Active crews: company rows + their indented active leads (draggable)
   let activeCrewRows = "";
   activeParents.forEach(p => {
-    activeCrewRows += crewRow(p, 0);
+    activeCrewRows += crewRow(p, true);
     (activeChildrenByParent.get(String(p.id)) || []).forEach(ch => {
-      activeCrewRows += crewRow(ch, 18);
+      activeCrewRows += crewRow(ch, true);
     });
   });
 
   // Inactive crews: flat list sorted by name (avoids orphan-hierarchy weirdness)
   const inactiveCrewRows = [...inactiveCrews]
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
-    .map(c => crewRow(c, 0))
+    .map(c => crewRow(c, false))
     .join("");
 
   function crewCard(c, isChild = false) {
+    const isCompany = !c.parent_id;
     const isActive = !!c.is_active;
     const CINP = `${CELL} border-black/15 w-full`;
     const childWrap = isChild ? "ml-4 border-l-4 border-l-black/15" : "";
     const toggle = isActive
       ? `<button class="flex-1 text-center ${BTN}" data-crew-disable="${c.id}">Disable</button>`
       : `<button class="flex-1 text-center ${BTN}" data-crew-enable="${c.id}">Enable</button>`;
+    const addLead = (isCompany && isActive)
+      ? `<button class="flex-1 text-center ${BTN}" data-crew-addlead="${c.id}" data-crew-addlead-name="${escOpt(c.name)}">+ Lead</button>`
+      : "";
+    const companyBits = isCompany ? `
+        <div class="grid grid-cols-2 gap-2">
+          <div><div class="text-[11px] text-black/45 mb-0.5">Boss / owner</div><input value="${esc(c.boss_name)}" data-crew-field="boss_name" data-crew-id="${c.id}" class="${CINP}" placeholder="Boss / owner"></div>
+          <div><div class="text-[11px] text-black/45 mb-0.5">Crews (capacity)</div>${capacityCell(c, `${CELL} border-black/15`)}</div>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div><div class="text-[11px] text-black/45 mb-0.5">Slot prefix</div><input value="${esc(c.code)}" data-crew-field="code" data-crew-id="${c.id}" class="${CINP}" placeholder="JR" title="Slot-code prefix (JR1, JR2… on projects)"></div>
+          <div><div class="text-[11px] text-black/45 mb-0.5">QuickBooks Vendor</div>${crewVendorCell(c)}</div>
+        </div>
+        <div><div class="text-[11px] text-black/45 mb-0.5">Boss code (all ${esc(c.name)} projects)</div>${companyBossCodeCell(c)}</div>` : `
+        <div><div class="text-[11px] text-black/45 mb-0.5">Company</div><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CINP}">${crewParentOpts(c)}</select></div>
+        <div><div class="text-[11px] text-black/45 mb-0.5">Field-forms passcode</div>${crewPasscodeCell(c)}</div>`;
     return `
       <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2 ${childWrap}">
         <div class="flex items-center gap-2">
           <input type="color" value="${c.color || "#000000"}" data-crew-field="color" data-crew-id="${c.id}" class="h-8 w-9 rounded border border-black/10 bg-white p-0.5 cursor-pointer shrink-0" title="Color">
-          <input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CINP} min-w-0 font-semibold" placeholder="Name">
+          <input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CINP} min-w-0 ${isCompany ? "font-semibold" : ""}" placeholder="${isCompany ? "Company name" : "Lead name"}">
           ${statusPill(isActive)}
         </div>
-        <div class="grid grid-cols-2 gap-2">
-          <div><div class="text-[11px] text-black/45 mb-0.5">Code</div><input value="${esc(c.code)}" data-crew-field="code" data-crew-id="${c.id}" class="${CINP}" placeholder="Code"></div>
-          <div><div class="text-[11px] text-black/45 mb-0.5">Parent</div><select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CINP}">${crewParentOpts(c)}</select></div>
-        </div>
-        ${!c.parent_id ? `<div><div class="text-[11px] text-black/45 mb-0.5">QuickBooks Vendor</div>${crewVendorCell(c)}</div>` : ""}
-        <div><div class="text-[11px] text-black/45 mb-0.5">Field-forms passcode</div>${crewPasscodeCell(c)}</div>
-        <div class="flex items-center gap-2 pt-1">${toggle}</div>
+        ${companyBits}
+        <div class="flex items-center gap-2 pt-1">${addLead}${toggle}</div>
       </div>`;
   }
 
@@ -241,7 +355,7 @@ export async function teamsPage(routeFn) {
         </div>
         <div id="pmMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
         <div class="hidden lg:block overflow-x-auto">
-          <table class="w-full text-sm" style="min-width:940px;">
+          <table class="w-full text-xs">
             <thead class="text-left text-black/50">
               <tr class="border-b border-black/10">
                 <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
@@ -268,7 +382,7 @@ export async function teamsPage(routeFn) {
               Disabled project managers (${inactivePms.length})
             </summary>
             <div class="hidden lg:block overflow-x-auto mt-3">
-              <table class="w-full text-sm" style="min-width:940px;">
+              <table class="w-full text-xs">
                 <thead class="text-left text-black/50">
                   <tr class="border-b border-black/10">
                     <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
@@ -297,41 +411,28 @@ export async function teamsPage(routeFn) {
         <div class="flex items-center justify-between mb-4">
           <div>
             <div class="text-lg font-extrabold">Work Crews</div>
-            <div class="text-sm text-black/60">Manage crews and sub crews.</div>
+            <div class="text-sm text-black/60">Companies (paid via their QBO vendor) with their crew leads underneath. Crews sign in at <span class="font-semibold">/#/field</span>.</div>
           </div>
           <button id="newCrewBtn" class="btn-primary">New crew</button>
         </div>
         <div id="crewMsg" class="text-sm text-red-700 min-h-[1.25rem]"></div>
 
-        <!-- Crew boss master code (field forms): crew_id null + role boss -->
-        <div class="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2.5 mb-4 flex items-center gap-3 flex-wrap">
-          <div class="min-w-0 flex-1">
-            <div class="text-xs font-bold text-ink-900">Crew boss master code</div>
-            <div class="text-[11px] text-black/45">${bossCode
-              ? `Active — ${escOpt(bossCode.label)} · ${fmtLastUsed(bossCode)}`
-              : `Not set. One master code lets the crew boss open any project's field forms.`} Crews sign in at <span class="font-semibold">/#/field</span>.</div>
-          </div>
-          <div class="flex items-center gap-1.5 shrink-0">
-            <button class="${BTN}" data-pc-set="boss" data-pc-default="${escOpt(bossCode ? bossCode.label : "Crew boss")}">${bossCode ? "Rotate" : "Set code"}</button>
-            ${bossCode ? `<button class="${BTN}" data-pc-deact="${bossCode.id}" data-pc-who="${escOpt(bossCode.label)}">Deactivate</button>` : ""}
-          </div>
-        </div>
-
         <div class="hidden lg:block overflow-x-auto">
-          <table class="w-full text-sm" style="min-width:1100px;">
+          <table class="w-full text-xs">
             <thead class="text-left text-black/50">
               <tr class="border-b border-black/10">
-                <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
-                <th class="py-2 pr-2 font-bold">Name</th>
-                <th class="py-2 pr-2 font-bold">Code</th>
-                <th class="py-2 pr-2 font-bold">Parent</th>
+                <th class="py-2 pr-1 font-bold" style="width:20px" title="Drag rows to reorder"></th>
+                <th class="py-2 pr-2 font-bold w-8"></th>
+                <th class="py-2 pr-2 font-bold">Company / Lead</th>
+                <th class="py-2 pr-2 font-bold">Boss / Owner</th>
+                <th class="py-2 pr-2 font-bold" title="How many crews the company can field">Crews</th>
+                <th class="py-2 pr-2 font-bold">Company</th>
                 <th class="py-2 pr-2 font-bold">QuickBooks Vendor</th>
-                <th class="py-2 pr-2 font-bold">Sort</th>
                 <th class="py-2 pr-2 font-bold">Passcode</th>
                 <th class="py-2 pl-2 text-right font-bold"></th>
               </tr>
             </thead>
-            <tbody>${activeCrewRows || `<tr><td colspan="8" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
+            <tbody id="crewActiveBody">${activeCrewRows || `<tr><td colspan="9" class="py-6 text-center text-black/40 text-sm">No active crews.</td></tr>`}</tbody>
           </table>
         </div>
 
@@ -346,15 +447,15 @@ export async function teamsPage(routeFn) {
               Disabled crews (${inactiveCrews.length})
             </summary>
             <div class="hidden lg:block overflow-x-auto mt-3">
-              <table class="w-full text-sm" style="min-width:1100px;">
+              <table class="w-full text-xs">
                 <thead class="text-left text-black/50">
                   <tr class="border-b border-black/10">
                     <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
-                    <th class="py-2 pr-2 font-bold">Name</th>
-                    <th class="py-2 pr-2 font-bold">Code</th>
-                    <th class="py-2 pr-2 font-bold">Parent</th>
+                    <th class="py-2 pr-2 font-bold">Company / Lead</th>
+                    <th class="py-2 pr-2 font-bold">Boss / Owner</th>
+                    <th class="py-2 pr-2 font-bold" title="How many crews the company can field">Crews</th>
+                    <th class="py-2 pr-2 font-bold">Company</th>
                     <th class="py-2 pr-2 font-bold">QuickBooks Vendor</th>
-                    <th class="py-2 pr-2 font-bold">Sort</th>
                     <th class="py-2 pr-2 font-bold">Passcode</th>
                     <th class="py-2 pl-2 text-right font-bold"></th>
                   </tr>
@@ -428,19 +529,22 @@ export async function teamsPage(routeFn) {
 
           <div><div class="label mb-1">Name</div><input id="crewName" class="input" required /></div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div><div class="label mb-1">Code</div><input id="crewCode" class="input" /></div>
-            <div>
-              <div class="label mb-1">Parent (optional)</div>
-              <select id="crewParent" class="input">
-                <option value="">(none)</option>
-                ${parents.map(p => `<option value="${p.id}">${p.name}</option>`).join("")}
-              </select>
-            </div>
+          <div>
+            <div class="label mb-1">Company <span class="text-black/40">(leave empty to create a company; pick one to add a crew lead under it)</span></div>
+            <select id="crewParent" class="input">
+              <option value="">(none — this is a company)</option>
+              ${parents.map(p => `<option value="${p.id}">${p.name}</option>`).join("")}
+            </select>
+          </div>
+
+          <div id="crewCompanyWrap" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div><div class="label mb-1">Boss / Owner</div><input id="crewBoss" class="input" placeholder="e.g. Jesse Rosales Jr." /></div>
+            <div><div class="label mb-1">Crews (capacity, 0-99 — blank = auto: tracks active leads)</div><input id="crewCapacity" type="number" min="0" max="99" class="input" placeholder="auto" /></div>
+            <div><div class="label mb-1">Slot-code prefix <span class="text-black/40">(JR → JR1, JR2… on projects)</span></div><input id="crewCode" class="input" /></div>
           </div>
 
           <div id="crewVendorWrap">
-            <div class="label mb-1">QuickBooks Vendor <span class="text-black/40">(parent crews — for crew earnings)</span></div>
+            <div class="label mb-1">QuickBooks Vendor <span class="text-black/40">(companies — for crew earnings)</span></div>
             <select id="crewVendor" class="input">
               <option value="">(not linked)</option>
               ${vendors.map(v => `<option value="${escOpt(v.vendor_qbo_id)}">${escOpt(v.name)} — $${Math.round(v.total_paid).toLocaleString("en-US")}</option>`).join("")}
@@ -455,13 +559,10 @@ export async function teamsPage(routeFn) {
             </div>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div><div class="label mb-1">Sort order</div><input id="crewSort" type="number" class="input" value="0" /></div>
-            <label class="flex items-center gap-2 text-sm text-black/70 mt-6">
-              <input id="crewActive" type="checkbox" class="h-4 w-4 rounded border-black/20" checked />
-              Active
-            </label>
-          </div>
+          <label class="flex items-center gap-2 text-sm text-black/70">
+            <input id="crewActive" type="checkbox" class="h-4 w-4 rounded border-black/20" checked />
+            Active
+          </label>
 
           <div class="flex justify-end gap-2 pt-2">
             <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" type="button" id="crewCancelBtn">Cancel</button>
@@ -475,21 +576,12 @@ export async function teamsPage(routeFn) {
   `;
 
 setShell({
-  title: "",
-  subtitle: "",
+  title: "Team Management",
+  subtitle: "Project managers and work-crew companies — contacts, capacity, QuickBooks vendors, and field passcodes.",
   bodyHtml,
   showLogout: true,
   routeFn
 });
-
-  // Hide the empty page-title block; restore when navigating away
-  const pageTitleBlock = document.getElementById("pageTitle")?.closest(".mb-5");
-  if (pageTitleBlock && pageTitleBlock.style.display !== "none") {
-    pageTitleBlock.style.display = "none";
-    window.addEventListener("hashchange", () => {
-      if (pageTitleBlock) pageTitleBlock.style.display = "";
-    }, { once: true });
-  }
 
   // --- Teams tabs: Project Managers | Work Crews (remembers last tab) ---
   (function bindTeamTabs() {
@@ -547,8 +639,15 @@ setShell({
         let body, reload = false;
         if (field === "parent_id") { body = { parent_id: t.value ? Number(t.value) : null }; reload = true; }
         else if (field === "vendor_qbo_id") body = { vendor_qbo_id: t.value || null };
-        else if (field === "sort_order") body = { sort_order: Number(t.value) || 0 };
         else if (field === "color") body = { color: t.value };
+        else if (field === "crew_capacity") {
+          const raw = t.value.trim();
+          const n = raw === "" ? null : Number(raw);
+          if (n !== null && (!Number.isInteger(n) || n < 0 || n > 99)) { alert("Crews capacity must be a whole number 0-99."); return; }
+          body = { crew_capacity: n };
+          reload = true;   // CR5 A1: the auto/override sub-label must refresh
+        }
+        else if (field === "boss_name") body = { boss_name: t.value.trim() || null };
         else {
           const v = t.value.trim();
           if (field === "name" && !v) { alert("Name cannot be empty."); return; }
@@ -566,11 +665,9 @@ setShell({
   // The code is typed once, sent hashed to the server, and can NEVER be read
   // back — the office reads it aloud to the lead/boss when setting it.
   async function setFieldPasscode(crewId, role, defaultLabel) {
-    const who = role === "boss" ? "the crew boss" : "this crew's lead";
-    const label = prompt(`Name for this code (who carries it — ${who})?`, defaultLabel || "");
-    if (label === null) return;
-    const lbl = label.trim();
-    if (!lbl) { alert("A name/label is required."); return; }
+    // CR5-C: no "who carries it" prompt — the label auto-fills (lead's name,
+    // or the company's boss_name / "<company> boss"). Only the code is asked.
+    const lbl = (defaultLabel || "").trim() || (role === "boss" ? "Boss" : "Crew lead");
     const code = prompt(`New 4-6 digit code for ${lbl}:`);
     if (code === null) return;
     const c = code.trim();
@@ -590,10 +687,10 @@ setShell({
   }
   document.querySelectorAll("[data-pc-set]").forEach(btn => {
     btn.addEventListener("click", () => {
-      const v = btn.getAttribute("data-pc-set");
+      const crewId = Number(btn.getAttribute("data-pc-set"));
+      const role = btn.getAttribute("data-pc-role") || "lead";
       const def = btn.getAttribute("data-pc-default") || "";
-      if (v === "boss") setFieldPasscode(null, "boss", def);
-      else setFieldPasscode(Number(v), "lead", def);
+      setFieldPasscode(crewId, role, def);
     });
   });
   document.querySelectorAll("[data-pc-deact]").forEach(btn => {
@@ -608,6 +705,145 @@ setShell({
       }
     });
   });
+
+  // CR5 A1: "auto" reset — clear the capacity override (PUT null) so the
+  // company's capacity tracks its live active-lead count again.
+  document.querySelectorAll("[data-cap-auto]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-cap-auto");
+      try {
+        await api(`/work-crews/${id}`, { method: "PUT", body: JSON.stringify({ crew_capacity: null }) });
+        location.hash = "#/teams"; routeFn();
+      } catch (err) {
+        alert("Could not reset capacity to auto: " + (err?.message || err));
+      }
+    });
+  });
+
+  // --- CR5-C: drag & drop reorder (active Work Crews table) ---------------
+  // Companies reorder among companies (a company's lead rows travel with it);
+  // leads reorder within their own company. On drop the whole scope is
+  // renumbered 10,20,30… and only the rows whose sort_order changed are PUT
+  // through the existing /work-crews/{id} endpoint (each write audited as
+  // crew.update) — no new backend. Esc cancels the native drag (dragend
+  // fires, marks are cleared, nothing is saved).
+  (function bindCrewDnd() {
+    const tbody = document.getElementById("crewActiveBody");
+    if (!tbody) return;
+    let drag = null; // { kind: "company"|"lead", id, parent }
+
+    const rows = () => [...tbody.querySelectorAll("tr[data-dnd-id]")];
+    const blockRows = (companyId) => rows().filter(r =>
+      r.getAttribute("data-dnd-id") === String(companyId) ||
+      r.getAttribute("data-dnd-parent") === String(companyId));
+    const clearDropMarks = () => rows().forEach(r => r.classList.remove("tm-drop-before", "tm-drop-after"));
+    const clearAll = () => rows().forEach(r => r.classList.remove("tm-drop-before", "tm-drop-after", "tm-dragging"));
+
+    // Resolve the hovered row into a drop target within the drag's scope,
+    // or null when the spot isn't a legal destination.
+    const targetOf = (e) => {
+      if (!drag) return null;
+      const tr = e.target.closest && e.target.closest("tr[data-dnd-id]");
+      if (!tr) return null;
+      if (drag.kind === "company") {
+        // Any row maps to its company block; before/after by block midpoint.
+        const coId = tr.getAttribute("data-dnd-kind") === "company"
+          ? tr.getAttribute("data-dnd-id")
+          : tr.getAttribute("data-dnd-parent");
+        if (!coId || String(coId) === String(drag.id)) return null;
+        const block = blockRows(coId);
+        if (!block.length) return null;
+        const top = block[0].getBoundingClientRect().top;
+        const bottom = block[block.length - 1].getBoundingClientRect().bottom;
+        const before = e.clientY < (top + bottom) / 2;
+        return { id: coId, before, markRow: before ? block[0] : block[block.length - 1] };
+      }
+      // Lead drag: only sibling lead rows of the SAME company are targets.
+      if (tr.getAttribute("data-dnd-kind") !== "lead") return null;
+      if (String(tr.getAttribute("data-dnd-parent")) !== String(drag.parent)) return null;
+      if (tr.getAttribute("data-dnd-id") === String(drag.id)) return null;
+      const r = tr.getBoundingClientRect();
+      return { id: tr.getAttribute("data-dnd-id"), before: e.clientY < (r.top + r.bottom) / 2, markRow: tr };
+    };
+
+    // Persist: renumber the scope's rows 10,20,30… in the new order and PUT
+    // only the changed ones (sequentially — small N, each write audited).
+    async function persistOrder(orderedIds) {
+      const byId = new Map(crews.map(c => [String(c.id), c]));
+      const writes = [];
+      orderedIds.forEach((cid, i) => {
+        const want = (i + 1) * 10;
+        const c = byId.get(String(cid));
+        if (c && Number(c.sort_order || 0) !== want) writes.push({ id: cid, sort_order: want });
+      });
+      if (!writes.length) return;
+      const msgEl = document.getElementById("crewMsg");
+      if (msgEl) msgEl.textContent = "Saving order…";
+      try {
+        for (const w of writes) {
+          await api(`/work-crews/${w.id}`, { method: "PUT", body: JSON.stringify({ sort_order: w.sort_order }) });
+        }
+        location.hash = "#/teams"; routeFn();
+      } catch (err) {
+        if (msgEl) msgEl.textContent = "Could not save the new order: " + (err?.message || err);
+        location.hash = "#/teams"; routeFn(); // re-render from server truth
+      }
+    }
+
+    tbody.addEventListener("dragstart", (e) => {
+      const handle = e.target.closest && e.target.closest("[data-drag-handle]");
+      const tr = e.target.closest && e.target.closest("tr[data-dnd-id]");
+      if (!handle || !tr) { e.preventDefault(); return; }
+      drag = {
+        kind: tr.getAttribute("data-dnd-kind"),
+        id: tr.getAttribute("data-dnd-id"),
+        parent: tr.getAttribute("data-dnd-parent") || null,
+      };
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", drag.id); } catch (_) {} // Firefox needs data
+      try { e.dataTransfer.setDragImage(tr, 24, 12); } catch (_) {}
+      const moving = drag.kind === "company" ? blockRows(drag.id) : [tr];
+      moving.forEach(r => r.classList.add("tm-dragging"));
+    });
+
+    tbody.addEventListener("dragover", (e) => {
+      const t = targetOf(e);
+      clearDropMarks();
+      if (!t) return; // no preventDefault → not-allowed cursor
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      t.markRow.classList.add(t.before ? "tm-drop-before" : "tm-drop-after");
+    });
+
+    tbody.addEventListener("dragleave", (e) => {
+      if (!tbody.contains(e.relatedTarget)) clearDropMarks();
+    });
+
+    tbody.addEventListener("drop", (e) => {
+      const t = targetOf(e);
+      if (!t || !drag) return;
+      e.preventDefault();
+      // Current displayed order of the drag's scope, from the DOM.
+      const scopeIds = rows()
+        .filter(r => drag.kind === "company"
+          ? r.getAttribute("data-dnd-kind") === "company"
+          : (r.getAttribute("data-dnd-kind") === "lead" &&
+             String(r.getAttribute("data-dnd-parent")) === String(drag.parent)))
+        .map(r => r.getAttribute("data-dnd-id"));
+      const from = scopeIds.indexOf(String(drag.id));
+      if (from < 0) return;
+      scopeIds.splice(from, 1);
+      let at = scopeIds.indexOf(String(t.id));
+      if (at < 0) return;
+      if (!t.before) at += 1;
+      scopeIds.splice(at, 0, String(drag.id));
+      clearAll();
+      drag = null;
+      persistOrder(scopeIds);
+    });
+
+    tbody.addEventListener("dragend", () => { clearAll(); drag = null; });
+  })();
 
   // --- Color controls (must be after setShell because DOM now exists) ---
   const pmColorEl = document.getElementById("pmColor");
@@ -780,28 +1016,42 @@ setShell({
     }
   });
 
-  // Vendor field only applies to PARENT crews (no parent selected).
+  // Company-only fields (boss/capacity/prefix/vendor) hide when a company is
+  // selected — the row being created/edited is then a crew LEAD (identity
+  // only: leads carry no code anymore, slot codes live on the assignment).
   function toggleVendorWrap() {
-    const isParent = !document.getElementById("crewParent").value;
-    document.getElementById("crewVendorWrap").style.display = isParent ? "" : "none";
+    const isCompany = !document.getElementById("crewParent").value;
+    document.getElementById("crewVendorWrap").style.display = isCompany ? "" : "none";
+    document.getElementById("crewCompanyWrap").style.display = isCompany ? "" : "none";
   }
   document.getElementById("crewParent").addEventListener("change", toggleVendorWrap);
 
-  // New Crew
-  document.getElementById("newCrewBtn").addEventListener("click", () => {
+  function openNewCrewModal(parentId, parentName) {
     document.getElementById("crewModalMsg").textContent = "";
-    document.getElementById("crewModalTitle").textContent = "New crew";
+    document.getElementById("crewModalTitle").textContent =
+      parentId ? `New crew lead — ${parentName || "company"}` : "New company / crew";
     document.getElementById("crewId").value = "";
     document.getElementById("crewName").value = "";
     document.getElementById("crewCode").value = "";
-    document.getElementById("crewParent").value = "";
-    document.getElementById("crewSort").value = "0";
+    document.getElementById("crewBoss").value = "";
+    document.getElementById("crewCapacity").value = "";
+    document.getElementById("crewParent").value = parentId ? String(parentId) : "";
     document.getElementById("crewActive").checked = true;
     document.getElementById("crewVendor").value = "";
     toggleVendorWrap();
     crewColorEl.value = "#000000"; // optional default
     crewColorEl.dataset.cleared = "1";
     openModal(crewModal);
+  }
+
+  // New Crew (company, or a lead once a company is picked)
+  document.getElementById("newCrewBtn").addEventListener("click", () => openNewCrewModal(null, null));
+
+  // "+ Lead" on a company row: same modal, company preselected
+  document.querySelectorAll("[data-crew-addlead]").forEach(btn => {
+    btn.addEventListener("click", () =>
+      openNewCrewModal(Number(btn.getAttribute("data-crew-addlead")),
+                       btn.getAttribute("data-crew-addlead-name") || ""));
   });
 
   // Edit Crew
@@ -816,10 +1066,11 @@ setShell({
       document.getElementById("crewId").value = c.id;
       document.getElementById("crewName").value = c.name || "";
       document.getElementById("crewCode").value = c.code || "";
+      document.getElementById("crewBoss").value = c.boss_name || "";
+      document.getElementById("crewCapacity").value = c.crew_capacity ?? "";
       document.getElementById("crewParent").value = c.parent_id ? String(c.parent_id) : "";
       document.getElementById("crewVendor").value = c.vendor_qbo_id || "";
       toggleVendorWrap();
-      document.getElementById("crewSort").value = String(c.sort_order || 0);
       document.getElementById("crewActive").checked = !!c.is_active;
       if (c.color) {
         crewColorEl.value = c.color;
@@ -881,14 +1132,38 @@ setShell({
     const id = document.getElementById("crewId").value;
     const parentVal = document.getElementById("crewParent").value;
 
+    const capRaw = document.getElementById("crewCapacity").value.trim();
+    const cap = capRaw === "" ? null : Number(capRaw);
+    if (!parentVal && cap !== null && (!Number.isInteger(cap) || cap < 0 || cap > 99)) {
+      msg.textContent = "Crews capacity must be a whole number 0-99.";
+      return;
+    }
+
+    // CR5-C: the Sort field is gone — order is drag & drop on the table.
+    // Edits keep the row's current sort_order; new rows append at the end of
+    // their scope (companies, or the picked company's leads).
+    let sortVal;
+    if (id) {
+      const cur = crews.find(x => String(x.id) === String(id));
+      sortVal = Number((cur && cur.sort_order) || 0);
+    } else {
+      const scope = parentVal
+        ? crews.filter(x => String(x.parent_id) === String(parentVal))
+        : crews.filter(x => !x.parent_id);
+      sortVal = Math.max(0, ...scope.map(x => Number(x.sort_order || 0))) + 10;
+    }
+
     const payload = {
       name: document.getElementById("crewName").value.trim(),
-      code: document.getElementById("crewCode").value.trim() || null,
+      // Company-only fields; crew leads are identity-only (no code — slot
+      // codes live on the assignment, boss/capacity/vendor on the company).
+      code: parentVal ? null : (document.getElementById("crewCode").value.trim() || null),
+      boss_name: parentVal ? null : (document.getElementById("crewBoss").value.trim() || null),
+      crew_capacity: parentVal ? null : cap,
       parent_id: parentVal ? Number(parentVal) : null,
       color: getCrewColorForPayload(),
-      sort_order: Number(document.getElementById("crewSort").value || 0),
+      sort_order: sortVal,
       is_active: document.getElementById("crewActive").checked,
-      // Vendor link only meaningful for parent crews; null for children.
       vendor_qbo_id: parentVal ? null : (document.getElementById("crewVendor").value || null),
     };
 

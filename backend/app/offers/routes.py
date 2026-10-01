@@ -59,20 +59,41 @@ def _estimate_suggestions(conn, entity_id):
 
 
 def _crew_options(conn):
+    """Crew Model v2 (CR3): offers list/target COMPANIES only — one option per
+    parent crew, labeled with the boss/owner when known."""
     rows = conn.execute(text("""
-        SELECT wc.id, wc.name, pc.name AS parent_name
-        FROM work_crews wc LEFT JOIN work_crews pc ON pc.id = wc.parent_id
-        WHERE wc.parent_id IS NOT NULL AND (wc.is_active = 1 OR wc.is_active IS NULL)
-        ORDER BY pc.name, wc.name
+        SELECT id, name, boss_name, code, crew_capacity
+        FROM work_crews
+        WHERE parent_id IS NULL AND (is_active = 1 OR is_active IS NULL)
+        ORDER BY sort_order, name
     """)).mappings().all()
-    return [{"id": r["id"], "name": r["name"], "parent_name": r["parent_name"]} for r in rows]
+    return [{"id": r["id"], "name": r["name"], "boss_name": r["boss_name"],
+             "prefix": r["code"], "crew_capacity": r["crew_capacity"],
+             "parent_name": None, "is_company": True} for r in rows]
+
+
+def _company_of(conn, crew_id):
+    """The crew's company id: itself for a parent row, its parent for a lead."""
+    if not crew_id:
+        return None
+    r = conn.execute(text("SELECT id, parent_id FROM work_crews WHERE id = :id"),
+                     {"id": int(crew_id)}).mappings().first()
+    if not r:
+        return None
+    return int(r["parent_id"]) if r["parent_id"] is not None else int(r["id"])
 
 
 def _offer_rows(conn, where, params):
+    """Offer rows labeled by COMPANY (CR3): new offers point at the parent crew
+    id; legacy offers to child crews resolve via parent lookup. company_id is
+    included so rollup matching can compare at the company level."""
     rows = conn.execute(text(f"""
         SELECT o.id, o.entity_id, o.crew_id, o.labor_amount, o.scope, o.status,
                o.sent_at, o.responded_at, o.response_note,
-               TRIM(CONCAT(COALESCE(wc.name,''), CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (', pc.name, ')') ELSE '' END)) AS crew_name
+               COALESCE(pc.id, wc.id) AS company_id,
+               TRIM(CONCAT(COALESCE(pc.name, wc.name, ''),
+                    CASE WHEN COALESCE(pc.boss_name, wc.boss_name) IS NOT NULL
+                         THEN CONCAT(' · ', COALESCE(pc.boss_name, wc.boss_name)) ELSE '' END)) AS crew_name
         FROM work_offers o
         LEFT JOIN work_crews wc ON wc.id = o.crew_id
         LEFT JOIN work_crews pc ON pc.id = wc.parent_id
@@ -80,6 +101,7 @@ def _offer_rows(conn, where, params):
     """), params).mappings().all()
     return [{
         "id": r["id"], "entity_id": r["entity_id"], "crew_id": r["crew_id"],
+        "company_id": r["company_id"],
         "crew_name": (r["crew_name"] or "").strip() or None,
         "labor_amount": float(r["labor_amount"] or 0), "scope": r["scope"], "status": r["status"],
         "sent_at": str(r["sent_at"]) if r["sent_at"] else None,
@@ -106,10 +128,15 @@ def list_for_project(entity_id: str, user=Depends(get_current_user)):
 @router.get("/crew-roster")
 def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = None,
                 end: Optional[str] = None, user=Depends(get_current_user)):
-    """All work crews with their recent track record + availability for a date
-    range — so the office can pick a crew for an offer from an informed panel:
-    jobs done in the last 365 days, $ paid to them (365d), and whether they're
-    already scheduled during the project's window."""
+    """Crew Model v2 (CR3) browse-crews panel: ONE CARD PER COMPANY —
+    "MTY · Jesse Rosales Jr. · X of Y crews available". Y = crew_capacity
+    (fallback: active-lead count); X = Y minus the slots occupied by that
+    company's assignments overlapping the project's window (true end = end +
+    overage days; the project's own assignments don't count against it).
+    Each card carries the occupied-slot list ("JR1 · Gustavo Ramirez — 6304
+    DHL thru 10/09"; lead-less slots show "lead TBD"), the company's active
+    leads (for the optional lead pick on assign), $ paid last 365d and jobs
+    done last 365d."""
     _require_office(user)
     from datetime import date, timedelta
     from collections import defaultdict
@@ -123,56 +150,91 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
     ps, pe = _d(start), _d(end)
 
     with engine.connect() as conn:
-        crews = conn.execute(text("""
-            SELECT wc.id, wc.name, pc.name AS company,
-                   COALESCE(wc.vendor_qbo_id, pc.vendor_qbo_id) AS vendor
-            FROM work_crews wc LEFT JOIN work_crews pc ON pc.id = wc.parent_id
-            WHERE wc.parent_id IS NOT NULL AND (wc.is_active = 1 OR wc.is_active IS NULL)
-            ORDER BY pc.name, wc.name
+        companies = conn.execute(text("""
+            SELECT id, name, code, boss_name, crew_capacity, vendor_qbo_id
+            FROM work_crews
+            WHERE parent_id IS NULL AND (is_active = 1 OR is_active IS NULL)
+            ORDER BY sort_order, name
+        """)).mappings().all()
+        leads = conn.execute(text("""
+            SELECT id, name, parent_id
+            FROM work_crews
+            WHERE parent_id IS NOT NULL AND (is_active = 1 OR is_active IS NULL)
+            ORDER BY sort_order, id
         """)).mappings().all()
         earned = {str(r["v"]): float(r["amt"] or 0) for r in conn.execute(text("""
             SELECT vendor_qbo_id AS v, ROUND(SUM(total_amt), 2) AS amt FROM qbo_transactions
             WHERE entity_type = 'Bill' AND txn_date >= :c AND vendor_qbo_id IS NOT NULL
             GROUP BY vendor_qbo_id
         """), {"c": cutoff}).mappings().all()}
-        # Availability + track record come from the ASSIGNMENT bookings (the crew
-        # actually placed on a project's schedule items), NOT the billing payment
-        # schedules — those only exist for the few projects whose billing has been
-        # generated, so they'd read almost every crew as "free". A crew can be
-        # booked on several schedule items (interrupted installs), each its own
-        # date range.
+        # Bookings come from the ASSIGNMENT rows (company_id/lead/slot — the v2
+        # columns; legacy rows fall back to the work_crew_id derivation).
         scheds = conn.execute(text("""
-            SELECT swc.work_crew_id AS crew_id, qc.qbo_id AS entity_id,
-                   psi.start_date, psi.end_date
+            SELECT COALESCE(swc.company_id, wc.parent_id, wc.id) AS company_id,
+                   swc.slot_code,
+                   COALESCE(ld.name, CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END) AS lead_name,
+                   qc.qbo_id AS entity_id, qc.display_name AS project_name,
+                   psi.start_date, psi.end_date,
+                   DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY) AS true_end
             FROM project_schedule_item_work_crews swc
             JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
             JOIN projects p ON p.id = psi.project_id
             JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            JOIN work_crews wc ON wc.id = swc.work_crew_id
+            LEFT JOIN work_crews ld ON ld.id = swc.lead_crew_id
             WHERE swc.unassigned_at IS NULL AND psi.start_date IS NOT NULL
+              AND COALESCE(psi.status, '') <> 'canceled'
         """)).mappings().all()
 
-    by_crew = defaultdict(list)
+    leads_by_co = defaultdict(list)
+    for l in leads:
+        leads_by_co[int(l["parent_id"])].append({"id": l["id"], "name": l["name"]})
+    by_co = defaultdict(list)
     for s in scheds:
-        by_crew[s["crew_id"]].append(s)
+        if s["company_id"] is not None:
+            by_co[int(s["company_id"])].append(s)
+
+    today = date.today()
     out = []
-    for c in crews:
-        cs = by_crew.get(c["id"], [])
-        jobs_365 = len({s["entity_id"] for s in cs if s["end_date"] and s["end_date"] >= cutoff})
-        conflict = False
-        if ps and pe:
-            for s in cs:
-                if project_qbo_id and str(s["entity_id"]) == str(project_qbo_id):
-                    continue
-                if s["start_date"] and s["end_date"] and s["start_date"] <= pe and s["end_date"] >= ps:
-                    conflict = True
-                    break
+    for c in companies:
+        cid = int(c["id"])
+        bookings = by_co.get(cid, [])
+        jobs_365 = len({b["entity_id"] for b in bookings if b["end_date"] and b["end_date"] >= cutoff})
+        # Window for occupancy: the project's dates when given, else today onward.
+        ws, we = (ps, pe) if (ps and pe) else (today, None)
+        occupied_rows, occupied_slots = [], set()
+        for b in bookings:
+            if project_qbo_id and str(b["entity_id"]) == str(project_qbo_id):
+                continue  # this project's own slots aren't "unavailable" to it
+            b_end = b["true_end"] or b["end_date"]
+            if not (b["start_date"] and b_end):
+                continue
+            if we is not None and b["start_date"] > we:
+                continue
+            if b_end < ws:
+                continue
+            slot_key = b["slot_code"] or f"?{b['entity_id']}?{b['lead_name'] or ''}"
+            if slot_key in occupied_slots:
+                continue
+            occupied_slots.add(slot_key)
+            occupied_rows.append({
+                "slot": b["slot_code"], "lead": b["lead_name"],
+                "project": b["project_name"], "entity_id": str(b["entity_id"]),
+                "thru": str(b_end),
+            })
+        occupied_rows.sort(key=lambda x: (x["slot"] or "~", x["thru"]))
+        capacity = c["crew_capacity"] if c["crew_capacity"] is not None else len(leads_by_co.get(cid, []))
+        available = max(0, int(capacity) - len(occupied_rows)) if (ps and pe) else None
         out.append({
-            "id": c["id"], "name": c["name"], "company": c["company"],
-            "earned_365": round(earned.get(str(c["vendor"]), 0), 2),
+            "id": c["id"], "name": c["name"], "boss_name": c["boss_name"],
+            "prefix": c["code"], "capacity": int(capacity),
+            "available": available,
+            "occupied": occupied_rows,
+            "leads": leads_by_co.get(cid, []),
+            "earned_365": round(earned.get(str(c["vendor_qbo_id"]), 0), 2),
             "jobs_365": jobs_365,
-            "available": (not conflict) if (ps and pe) else None,
         })
-    return {"crews": out, "has_dates": bool(ps and pe)}
+    return {"companies": out, "has_dates": bool(ps and pe)}
 
 
 class OfferCreate(BaseModel):
@@ -187,10 +249,15 @@ def send_offer(entity_id: str, body: OfferCreate, user=Depends(get_current_user)
     with engine.begin() as conn:
         if not _project_exists(conn, entity_id):
             raise HTTPException(status_code=404, detail="Project not found")
+        # CR3: offers target COMPANIES — a child-crew id is resolved to its
+        # parent so the offer row always points at the company.
+        company_id = _company_of(conn, body.crew_id)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="Unknown crew")
         res = conn.execute(text("""
             INSERT INTO work_offers (entity_id, crew_id, labor_amount, scope, status, sent_at, created_by_user_id)
             VALUES (:e,:c,:amt,:sc,'sent',NOW(),:u)
-        """), {"e": entity_id, "c": body.crew_id, "amt": body.labor_amount,
+        """), {"e": entity_id, "c": company_id, "amt": body.labor_amount,
                "sc": (body.scope or None), "u": user.get("id")})
     return {"ok": True, "id": res.lastrowid}
 
@@ -216,6 +283,7 @@ def backfill_accepted(entity_id: str, user=Depends(get_current_user)):
         if not crew_id:
             raise HTTPException(status_code=400,
                                 detail="Assign a crew on the Assignment page first, then record.")
+        crew_id = _company_of(conn, crew_id) or crew_id   # CR3: record at the company
         labor, scope = _estimate_suggestions(conn, entity_id)
         res = conn.execute(text("""
             INSERT INTO work_offers

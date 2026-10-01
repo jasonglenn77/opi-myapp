@@ -23,7 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from app.db import engine
-from app.crewauth.routes import get_crew_session, get_user_or_crew, require_crew_project
+from app.crewauth.routes import (get_crew_session, get_user_or_crew,
+                                 require_crew_project, crew_scope_clause)
 from app.permissions import has_capability, PAGE_PM_PORTAL
 from app.s3 import signed_file_url
 
@@ -42,12 +43,11 @@ CREW_FOLDER = "10_crew_documents"
 def my_projects(sess=Depends(get_crew_session)):
     """The crew's assigned projects, bucketed Active / Upcoming / Past. Crew
     token only. No financial fields of any kind (hard rule)."""
-    crew_clause, params = "", {}
-    if sess.get("role") != "boss":
-        crew_clause = " AND swc.work_crew_id = :crew"
-        params["crew"] = sess.get("crew_id") or -1
-
     with engine.connect() as conn:
+        # Crew Model v2 CR1: one shared scope rule (lead codes see rows where
+        # they're the lead; a parent-pointing code sees the whole company's
+        # projects incl. lead-less rows; the global master code sees all).
+        crew_clause, params = crew_scope_clause(conn, sess)
         rows = conn.execute(text(f"""
             WITH scope AS (
               SELECT DISTINCT p.qbo_customer_id

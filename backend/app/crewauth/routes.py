@@ -2,9 +2,11 @@
 Crew passcode auth (PM Portal Phase 2).
 
 Field devices don't get user accounts (Leo's preference): each crew lead gets a
-4-6 digit passcode, plus one MASTER code for the crew boss (crew_id NULL, role
-'boss'). Codes are set/rotated by the office on Teams -> Work Crews
-(page.teams) and stored pbkdf2-hashed (same scheme as user passwords). A
+4-6 digit passcode, plus a per-COMPANY "boss" code pointing at the PARENT crew
+row (Crew Model v2 CR2 — the old global crew_id-NULL master code is RETIRED:
+migration 0057 deactivates any such row and login no longer accepts them).
+Codes are set/rotated by the office on Teams -> Work Crews (page.teams) and
+stored pbkdf2-hashed (same scheme as user passwords). A
 successful login returns a 30-day JWT (same jose secret as user tokens but with
 a distinct {"crew_session": true} claim, so neither token kind works on the
 other's endpoints — crew tokens carry no "sub" email, user tokens carry no
@@ -59,7 +61,9 @@ def _crew_actor(payload):
             FROM crew_passcodes cp LEFT JOIN work_crews wc ON wc.id = cp.crew_id
             WHERE cp.id = :id
         """), {"id": pid}).mappings().first()
-    if not row or int(row["active"]) != 1:
+    # crew_id IS NULL = the retired global master code (CR2): always dead,
+    # even if a row somehow stayed active.
+    if not row or int(row["active"]) != 1 or row["crew_id"] is None:
         raise HTTPException(status_code=401, detail="Invalid/expired token")
     return {
         "kind": "crew",
@@ -98,22 +102,48 @@ def actor_for_audit(actor):
     return {"id": None, "email": f"crew:{actor.get('label') or actor.get('crew_name') or 'unknown'}"}
 
 
-# ── crew project scoping (Crew Portal design 2026-09-22) ───────────────────
-# One passcode = all of that crew's ASSIGNED projects; the boss master code
-# (crew_id NULL, role 'boss') = every crew's assigned projects. Enforced
-# server-side on every crew-token path (forms templates/submit/upload + the
-# crew-portal endpoints). Past projects (completed/canceled) are READ-ONLY.
+# ── crew project scoping (Crew Portal design 2026-09-22, Crew Model v2 CR2) ─
+# One passcode = all of that crew's ASSIGNED projects; a company BOSS code
+# (crew_id = PARENT crew, role 'boss') = every project of that company,
+# lead-less lines included. Enforced server-side on every crew-token path
+# (forms templates/submit/upload + the crew-portal endpoints). Past projects
+# (completed/canceled) are READ-ONLY.
 CREW_PAST_STATUSES = ("completed", "canceled")
+
+
+def crew_scope_clause(conn, actor, alias="swc"):
+    """(sql_clause, params) restricting assignment rows to this crew actor —
+    the ONE place crew-portal project scoping is defined (Crew Model v2 CR1).
+
+      * passcode pointing at a PARENT crew (a company — the CR2 "boss code"):
+        the company-wide set, INCLUDING lead-less assignments — company_id =
+        parent, plus the legacy work_crew_id chain (the parent itself or any
+        of its children) for rows that pre-date the v2 columns.
+      * lead (child crew) code: rows where they are the lead —
+        lead_crew_id = them OR legacy work_crew_id = them.
+      * crew_id NULL (the retired global master): matches nothing. Login and
+        _crew_actor already reject these; this is defense in depth.
+    """
+    if actor.get("crew_id") is None:
+        return " AND 1 = 0", {}   # retired global master code (CR2)
+    crew_id = int(actor.get("crew_id"))
+    is_parent = conn.execute(text(
+        "SELECT parent_id IS NULL FROM work_crews WHERE id = :c"
+    ), {"c": crew_id}).scalar()
+    if is_parent:
+        return (f" AND ({alias}.company_id = :crew OR {alias}.work_crew_id = :crew"
+                f" OR {alias}.work_crew_id IN"
+                f" (SELECT id FROM work_crews WHERE parent_id = :crew))",
+                {"crew": crew_id})
+    return (f" AND ({alias}.lead_crew_id = :crew OR {alias}.work_crew_id = :crew)",
+            {"crew": crew_id})
 
 
 def crew_project_ids(conn, actor):
     """QBO project ids actively assigned to this crew actor via the assignment
     chain (project_schedule_item_work_crews, unassigned_at IS NULL — the same
-    chain pm/routes.py joins). Role 'boss' → ALL crews' assigned projects."""
-    crew_clause, params = "", {}
-    if actor.get("role") != "boss":
-        crew_clause = " AND swc.work_crew_id = :crew"
-        params["crew"] = actor.get("crew_id") or -1
+    chain pm/routes.py joins). Scope rules: see crew_scope_clause."""
+    crew_clause, params = crew_scope_clause(conn, actor)
     rows = conn.execute(text(f"""
         SELECT DISTINCT qc.qbo_id
         FROM projects p
@@ -155,10 +185,12 @@ def crew_login(req: CrewLoginRequest):
     if not CODE_RE.fullmatch(code):
         raise HTTPException(status_code=401, detail="Invalid code")
 
+    # crew_id IS NOT NULL: the global master code is retired (CR2) — a
+    # NULL-crew row is dead even if still flagged active.
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT cp.id, cp.crew_id, cp.role, cp.label, cp.code_hash, wc.name AS crew_name
-            FROM crew_passcodes cp LEFT JOIN work_crews wc ON wc.id = cp.crew_id
+            FROM crew_passcodes cp JOIN work_crews wc ON wc.id = cp.crew_id
             WHERE cp.active = 1
             ORDER BY cp.id
         """)).mappings().all()
@@ -212,9 +244,10 @@ def crew_session_info(sess=Depends(get_crew_session)):
 # ── office + PM passcode management ─────────────────────────────────────────
 # Codes are managed from Teams -> Work Crews (page.teams, office) AND from the
 # PM portal's per-project Crew tab (page.pm_portal, Crew Portal step 3). A
-# non-admin pm_portal-only user may ONLY manage lead codes for crews assigned
-# to one of THEIR projects (users.project_manager_id -> the same assignment
-# chain pm/routes.py scopes by); admins and page.teams holders are
+# non-admin pm_portal-only user may ONLY manage codes for crews assigned to one
+# of THEIR projects (users.project_manager_id -> the same assignment chain
+# pm/routes.py scopes by) — lead codes AND, since CR2, the per-company BOSS
+# code of those crews' parent companies; admins and page.teams holders are
 # unrestricted. Audited exactly as before — the code itself is never logged.
 def get_passcode_manager(user=Depends(get_current_user)):
     if has_capability(user, PAGE_TEAMS) or has_capability(user, PAGE_PM_PORTAL):
@@ -224,28 +257,39 @@ def get_passcode_manager(user=Depends(get_current_user)):
 
 def _manageable_crew_ids(conn, user):
     """None = unrestricted (admin role or page.teams). Otherwise the set of
-    work_crew ids actively assigned to this PM's projects — the only crews a
-    pm_portal-scoped user may list/set/rotate/deactivate codes for (the boss
-    MASTER code is office-only for them)."""
+    work_crew ids a pm_portal-scoped user may list/set/rotate/deactivate codes
+    for: crews actively assigned to THEIR projects PLUS (Crew Model v2 CR2)
+    those crews' PARENT companies — so a PM can set the per-company BOSS code
+    for companies working their projects, whether the assignment points at a
+    child lead (legacy or lead_crew_id) or directly at the parent
+    (company_id, lead-less line)."""
     if (user.get("role") or "").lower() == "admin" or has_capability(user, PAGE_TEAMS):
         return None
     pm_id = user.get("project_manager_id") or -1
     # Project-level scope (same as the PM pages): PM on ANY item of a project
-    # -> every crew actively assigned to ANY item of that project.
+    # -> every crew actively assigned to ANY item of that project, plus each
+    # crew's company (its parent, or itself when company_id points at it).
     rows = conn.execute(text("""
-        SELECT DISTINCT swc.work_crew_id
+        SELECT DISTINCT swc.work_crew_id, swc.company_id, swc.lead_crew_id,
+                        wc.parent_id
         FROM project_schedule_items psi
         JOIN project_schedule_item_project_managers spm ON spm.schedule_item_id = psi.id
         JOIN project_schedule_items psi2 ON psi2.project_id = psi.project_id
         JOIN project_schedule_item_work_crews swc ON swc.schedule_item_id = psi2.id
+        LEFT JOIN work_crews wc ON wc.id = swc.work_crew_id
         WHERE spm.project_manager_id = :pm
           AND spm.unassigned_at IS NULL AND swc.unassigned_at IS NULL
-    """), {"pm": pm_id}).scalars().all()
-    return {int(r) for r in rows if r is not None}
+    """), {"pm": pm_id}).mappings().all()
+    allowed = set()
+    for r in rows:
+        for k in ("work_crew_id", "company_id", "lead_crew_id", "parent_id"):
+            if r[k] is not None:
+                allowed.add(int(r[k]))
+    return allowed
 
 
 class PasscodeSetRequest(BaseModel):
-    crew_id: Optional[int] = None   # NULL = the boss MASTER code
+    crew_id: Optional[int] = None   # lead: the child crew; boss: the PARENT (company)
     role: str = "lead"              # 'lead' | 'boss'
     label: str
     code: str                       # plain 4-6 digits; stored hashed, never logged
@@ -275,11 +319,12 @@ def list_passcodes(user=Depends(get_passcode_manager)):
 
 @router.post("/passcodes")
 def set_passcode(req: PasscodeSetRequest, user=Depends(get_passcode_manager)):
-    """Set (rotate) a crew lead's passcode, or the boss master code
-    (crew_id null + role 'boss'). Deactivates any previous active code for the
-    same crew/role, verifies the new code isn't already in use anywhere
-    (verify against all active rows), stores only the hash. Audited without the
-    code itself."""
+    """Set (rotate) a crew lead's passcode, or a company BOSS code (crew_id =
+    the PARENT crew, role 'boss' — Crew Model v2 CR2; the old crew_id-NULL
+    global master is retired and can no longer be created). Deactivates any
+    previous active code for the same crew/role, verifies the new code isn't
+    already in use anywhere (verify against all active rows), stores only the
+    hash. Audited without the code itself."""
     role = (req.role or "lead").strip().lower()
     if role not in ("lead", "boss"):
         raise HTTPException(status_code=400, detail="role must be 'lead' or 'boss'")
@@ -289,22 +334,23 @@ def set_passcode(req: PasscodeSetRequest, user=Depends(get_passcode_manager)):
     label = (req.label or "").strip()
     if not label:
         raise HTTPException(status_code=400, detail="Label is required (e.g. the lead's name)")
-    if role == "boss" and req.crew_id is not None:
-        raise HTTPException(status_code=400, detail="The boss master code has no crew (crew_id must be null)")
-    if role == "lead" and req.crew_id is None:
-        raise HTTPException(status_code=400, detail="crew_id is required for a lead code")
+    if req.crew_id is None:
+        raise HTTPException(status_code=400,
+                            detail="The global master code is retired — set a Boss code on the company instead")
 
     with engine.connect() as conn:
         allowed = _manageable_crew_ids(conn, user)
-        if allowed is not None and (req.crew_id is None or int(req.crew_id) not in allowed):
+        if allowed is not None and int(req.crew_id) not in allowed:
             raise HTTPException(status_code=403,
                                 detail="You can only manage codes for crews assigned to your projects")
-        crew_name = None
-        if req.crew_id is not None:
-            crew_name = conn.execute(text("SELECT name FROM work_crews WHERE id = :id"),
-                                     {"id": req.crew_id}).scalar()
-            if crew_name is None:
-                raise HTTPException(status_code=404, detail="Crew not found")
+        crew_row = conn.execute(text("SELECT name, parent_id FROM work_crews WHERE id = :id"),
+                                {"id": req.crew_id}).mappings().first()
+        if crew_row is None:
+            raise HTTPException(status_code=404, detail="Crew not found")
+        crew_name = crew_row["name"]
+        if role == "boss" and crew_row["parent_id"] is not None:
+            raise HTTPException(status_code=400,
+                                detail="Boss codes go on the company (the parent crew row), not a crew lead")
         active_rows = conn.execute(text(
             "SELECT id, code_hash FROM crew_passcodes WHERE active = 1"
         )).mappings().all()
@@ -320,16 +366,10 @@ def set_passcode(req: PasscodeSetRequest, user=Depends(get_passcode_manager)):
             continue
 
     with engine.begin() as conn:
-        if req.crew_id is not None:
-            replaced = conn.execute(text("""
-                UPDATE crew_passcodes SET active = 0
-                WHERE active = 1 AND crew_id = :c AND role = :r
-            """), {"c": req.crew_id, "r": role}).rowcount
-        else:
-            replaced = conn.execute(text("""
-                UPDATE crew_passcodes SET active = 0
-                WHERE active = 1 AND crew_id IS NULL AND role = 'boss'
-            """)).rowcount
+        replaced = conn.execute(text("""
+            UPDATE crew_passcodes SET active = 0
+            WHERE active = 1 AND crew_id = :c AND role = :r
+        """), {"c": req.crew_id, "r": role}).rowcount
         new_id = conn.execute(text("""
             INSERT INTO crew_passcodes (crew_id, role, label, code_hash, active)
             VALUES (:c, :r, :l, :h, 1)

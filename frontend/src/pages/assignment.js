@@ -2,6 +2,19 @@
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+import {
+  historyBadgeHtml, historyPanelHtml, loadHistory, invalidateHistory, cachedHistory,
+  historyCountOf,
+} from "../utils/assignment-history.js";
+import {
+  entryLabel as ceEntryLabel,
+  toDraftEntry as ceToDraftEntry,
+  crewFieldsFor as ceCrewFieldsFor,
+  crewEditorBodyHtml,
+  handleCrewEditorClick,
+  handleCrewEditorChange,
+  handleCrewEditorInput,
+} from "../utils/crew-editor.js";
 
 // Statuses the backend accepts on /assignment/save (ALLOWED_STATUS in
 // backend/app/projects/service.py). 'needs_attention' is included — a row
@@ -28,6 +41,7 @@ export async function assignmentPage(routeFn) {
     openFilter: null, // column key
     editing: { rowId: null, field: null },
     flashKey: null,
+    histOpen: new Set(), // schedule_item_ids with the history sub-lines expanded (CR4)
     filters: {
       project_name: "",
       project_status: [],
@@ -97,6 +111,34 @@ export async function assignmentPage(routeFn) {
   function getBundleItem(row) {
     const items = row._bundle?.schedule_items || [];
     return items.find(x => String(x.id) === String(row.schedule_item_id)) || null;
+  }
+
+  // ── Crew Model v2 (CR3) helpers — the editor + payload logic lives in the
+  // shared module (utils/crew-editor.js, also used by the workspace
+  // Assignment tab); these are thin row-scoped wrappers over it. ────────────
+  const ctxOf = (row) => row._bundle || { companies: [], work_crews: [] };
+  function entryLabel(row, e) {
+    return ceEntryLabel(ctxOf(row), e);
+  }
+  // Slot codes already occupied in this PROJECT (all schedule items), minus the
+  // row currently being edited (its entries are being replaced by the draft).
+  function takenSlotCodes(row) {
+    const taken = new Set();
+    for (const it of (row._bundle?.schedule_items || [])) {
+      if (String(it.id) === String(row.schedule_item_id)) continue;
+      for (const e of (it.active_work_crews || [])) {
+        if (e.slot_code) taken.add(String(e.slot_code).toUpperCase());
+      }
+    }
+    return taken;
+  }
+  function toDraftEntry(row, x) {
+    return ceToDraftEntry(ctxOf(row), x);
+  }
+  // The crew fields every save payload carries (v2 entries + legacy dual-write
+  // fields so older readers keep working).
+  function crewFieldsFor(row) {
+    return ceCrewFieldsFor(ctxOf(row), row._active_work_crews || []);
   }
 
   function normalize(v) {
@@ -295,8 +337,7 @@ export async function assignmentPage(routeFn) {
       equipment_type: row.equipment_type || null,
       project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
-      work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
-      primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+      ...crewFieldsFor(row),
       notes: row.notes || null,
     };
 
@@ -322,10 +363,9 @@ export async function assignmentPage(routeFn) {
       return `${pm.first_name || ""} ${pm.last_name || ""}`.trim() || pm.email || `PM #${x.project_manager_id}`;
     }).filter(Boolean).join(", ");
 
-    row.all_work_crews = activeCrews.map((x) => {
-      const crew = crewById.get(String(x.work_crew_id));
-      return crew ? crew.name : `Crew #${x.work_crew_id}`;
-    }).filter(Boolean).join(", ");
+    // CR3: cell labels are "Company · Lead" / "Company · lead TBD".
+    row.all_work_crews = activeCrews.map((x) => entryLabel(row, toDraftEntry(row, x)))
+      .filter(Boolean).join(", ");
 
     const primaryPm = activePms.find((x) => x.is_primary);
     const primaryCrew = activeCrews.find((x) => x.is_primary);
@@ -926,6 +966,27 @@ export async function assignmentPage(routeFn) {
     `;
   }
 
+  // Crew Model v2 (CR3): COMPANY-first two-stage picker. Each entry = company
+  // (required) + optional lead ("— lead TBD —") + editable slot code
+  // (auto-suggested). Multiple crews per line = multiple entries.
+  function renderCrewEditor(row) {
+    if (!row._bundle) {
+      return `<div class="text-sm text-black/50">Loading…</div>`;
+    }
+    return `
+      <div class="relative inline-block w-full">
+        <div class="absolute left-0 top-7 z-[100] rounded-xl border border-black/10 bg-white p-3 shadow-xl" style="width:380px;max-width:min(92vw,440px);">
+          ${crewEditorBodyHtml(ctxOf(row), row._crewDraft || [], `crewdraft-primary-${rowKey(row)}`)}
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5"
+              data-cancel-editor="1">Cancel</button>
+            <button type="button" class="btn-primary" data-save-crews="${rowKey(row)}">Apply</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   function renderAssignmentEditor(row, field) {
     const isPm = field === "primary_project_manager";
     const bundle = row._bundle;
@@ -1054,6 +1115,17 @@ export async function assignmentPage(routeFn) {
         const pmDisplay = row.all_project_managers || "";
         const crewDisplay = row.all_work_crews || "";
 
+        // CR4: history affordance (clock + "N changes") + expandable sub-lines.
+        const histId = row.schedule_item_id;
+        const histOpen = histId != null && state.histOpen.has(String(histId));
+        const histCached = histId != null ? cachedHistory(histId) : null;
+        const histCount = histId != null
+          ? (histCached ? historyCountOf(histCached) : row.history_count)
+          : null;
+        const histRow = histOpen
+          ? `<tr class="border-b border-black/5"><td colspan="12" class="py-1 px-3">${historyPanelHtml(histId)}</td></tr>`
+          : "";
+
         return `
           <tr class="border-b border-black/5">
             <td class="py-2 px-2 font-semibold whitespace-nowrap">
@@ -1075,6 +1147,7 @@ export async function assignmentPage(routeFn) {
                     - Row
                   </button>
                 ` : ""}
+                ${histId != null ? historyBadgeHtml(histId, histCount, histOpen) : ""}
               </div>
             </td>
 
@@ -1112,7 +1185,7 @@ export async function assignmentPage(routeFn) {
                 data-field="primary_work_crew">
               <div class="relative w-full z-100">
                 ${isEditing(rowKey(row), "primary_work_crew")
-                  ? renderAssignmentEditor(row, "primary_work_crew")
+                  ? renderCrewEditor(row)
                   : `<button
                       type="button"
                       class="w-full min-h-[32px] items-center rounded px-1 py-0.5 hover:bg-black/[0.03] text-left whitespace-normal break-words"
@@ -1188,7 +1261,7 @@ export async function assignmentPage(routeFn) {
               ${escapeHtml(formatMmDdYyyy(row.project_create_date))}
             </td>
           </tr>
-        `;
+        ${histRow}`;
       }).join("") || `
         <tr>
           <td class="py-6 text-center text-black/50" colspan="12">No projects match these filters.</td>
@@ -1208,6 +1281,14 @@ export async function assignmentPage(routeFn) {
     if (field === "primary_project_manager" || field === "primary_work_crew") {
       try {
         await ensureBundle(row);
+        if (field === "primary_work_crew") {
+          // CR3: seed the company/lead/slot draft from the line's active crews.
+          const bundleItem = getBundleItem(row);
+          const src = (row._active_work_crews && row._active_work_crews.length)
+            ? row._active_work_crews
+            : (bundleItem?.active_work_crews || []);
+          row._crewDraft = src.map(x => toDraftEntry(row, x));
+        }
       } catch (e) {
         console.error(e);
         clearEditing();
@@ -1251,13 +1332,32 @@ export async function assignmentPage(routeFn) {
       is_primary: Number(id) === Number(payload.primary_project_manager_id) ? 1 : 0,
     }));
 
-    row._active_work_crews = (payload.work_crew_ids || []).map((id) => ({
-      work_crew_id: Number(id),
-      is_primary: Number(id) === Number(payload.primary_work_crew_id) ? 1 : 0,
-    }));
+    row._active_work_crews = payload.crew_assignments
+      ? payload.crew_assignments.map((e) => ({
+          work_crew_id: e.lead_crew_id != null ? Number(e.lead_crew_id) : Number(e.company_id),
+          company_id: Number(e.company_id),
+          lead_crew_id: e.lead_crew_id != null ? Number(e.lead_crew_id) : null,
+          slot_code: e.slot_code || null,
+          is_primary: e.is_primary ? 1 : 0,
+        }))
+      : (payload.work_crew_ids || []).map((id) => ({
+          work_crew_id: Number(id),
+          is_primary: Number(id) === Number(payload.primary_work_crew_id) ? 1 : 0,
+        }));
 
     syncDisplayFieldsFromActiveAssignments(row);
     upsertBundleItem(row, payload, result?.project_id || null);
+
+    // CR4: the save may have recorded a history row — refresh the badge count
+    // (and the open panel) in the background.
+    if (row.schedule_item_id != null) {
+      const hid = String(row.schedule_item_id);
+      invalidateHistory(hid);
+      loadHistory(hid).then((rowsH) => {
+        row.history_count = historyCountOf(rowsH);
+        renderAll();
+      }).catch(() => {});
+    }
 
     clearEditing();
     renderAll();
@@ -1291,8 +1391,7 @@ export async function assignmentPage(routeFn) {
         notes: row.notes || null,
         project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
         primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
-        work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
-        primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+        ...crewFieldsFor(row),
       };
 
       await savePayload(row, payload, "project_status");
@@ -1324,8 +1423,7 @@ export async function assignmentPage(routeFn) {
       notes: row.notes || null,
       project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
-      work_crew_ids: (row._active_work_crews || []).map(x => Number(x.work_crew_id)),
-      primary_work_crew_id: (row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null,
+      ...crewFieldsFor(row),
     };
 
     try {
@@ -1338,12 +1436,11 @@ export async function assignmentPage(routeFn) {
   }
 
   async function saveAssignmentField(rowId, field) {
+    // PM editor apply (the crew editor saves through saveCrewAssignments).
     const row = rows.find((x) => rowKey(x) === String(rowId));
     if (!row) return;
 
     await ensureBundle(row);
-
-    const isPm = field === "primary_project_manager";
 
     const checkedSelector = `[data-assign-check="${rowId}"][data-assign-field="${field}"]`;
     const primarySelector = `[data-assign-primary="${rowId}"][data-assign-field="${field}"]:checked`;
@@ -1366,18 +1463,9 @@ export async function assignmentPage(routeFn) {
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
       notes: row.notes || null,
-      project_manager_ids: isPm
-        ? ids
-        : (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
-      primary_project_manager_id: isPm
-        ? primaryId
-        : ((row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null),
-      work_crew_ids: isPm
-        ? (row._active_work_crews || []).map(x => Number(x.work_crew_id))
-        : ids,
-      primary_work_crew_id: isPm
-        ? ((row._active_work_crews || []).find(x => x.is_primary)?.work_crew_id || null)
-        : primaryId,
+      project_manager_ids: ids,
+      primary_project_manager_id: primaryId,
+      ...crewFieldsFor(row),
     };
 
     try {
@@ -1395,6 +1483,48 @@ export async function assignmentPage(routeFn) {
       } catch { /* not JSON */ }
       if (!friendly) friendly = "Could not update assignments.";
       setMsg(`Could not update assignments: ${friendly}`);
+    }
+  }
+
+  // CR3: apply the crew editor's company/lead/slot entries.
+  async function saveCrewAssignments(rowId) {
+    const row = rows.find((x) => rowKey(x) === String(rowId));
+    if (!row) return;
+    await ensureBundle(row);
+
+    // Same shared payload builder as every other save path (v2 entries +
+    // legacy dual-write fields).
+    const crewFields = ceCrewFieldsFor(ctxOf(row), row._crewDraft || []);
+
+    const payload = {
+      schedule_item_id: row.schedule_item_id != null ? Number(row.schedule_item_id) : null,
+      qbo_customer_id: Number(row.qbo_customer_id),
+      status: USER_STATUSES.has(row.project_status) ? row.project_status : "not_started",
+      start_date: row.start_date || null,
+      end_date: row.end_date || null,
+      wire_guidance: row.wire_guidance || 0,
+      travel_days: row.travel_days || 0,
+      overage_days: row.overage_days || 0,
+      equipment_type: row.equipment_type || null,
+      notes: row.notes || null,
+      project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
+      primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
+      ...crewFields,
+    };
+
+    try {
+      await savePayload(row, payload, "primary_work_crew");
+      row._crewDraft = null;
+      setMsg(`Saved ${row.project_name}.`, true);
+    } catch (e) {
+      console.error(e);
+      const detail = e?.message || "";
+      let friendly = detail;
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed && parsed.detail) friendly = String(parsed.detail);
+      } catch { /* not JSON */ }
+      setMsg(`Could not update crews: ${friendly || "error"}`);
     }
   }
 
@@ -1467,6 +1597,30 @@ export async function assignmentPage(routeFn) {
   });
 
   document.getElementById("assignmentBody").addEventListener("click", async (e) => {
+    // CR4: history badge — expand/collapse the sub-lines under the row
+    // (lazy-fetch on first expand, cached afterwards).
+    const histBtn = e.target.closest("[data-hist-toggle]");
+    if (histBtn) {
+      const id = String(histBtn.getAttribute("data-hist-toggle"));
+      if (state.histOpen.has(id)) {
+        state.histOpen.delete(id);
+        renderAll();
+      } else {
+        state.histOpen.add(id);
+        renderAll(); // renders the "Loading…" panel when not cached yet
+        try {
+          const rowsH = await loadHistory(id);
+          const row = rows.find((x) => String(x.schedule_item_id) === id);
+          if (row) row.history_count = historyCountOf(rowsH);
+        } catch (err) {
+          console.error(err);
+          setMsg("Could not load assignment history.");
+        }
+        renderAll();
+      }
+      return;
+    }
+
     const addRowBtn = e.target.closest("[data-add-schedule-row]");
     if (addRowBtn) {
       const rowId = addRowBtn.getAttribute("data-add-schedule-row");
@@ -1564,9 +1718,35 @@ export async function assignmentPage(routeFn) {
       );
       return;
     }
+
+    // ── CR3 crew editor (company / lead / slot) ──
+    const saveCrews = e.target.closest("[data-save-crews]");
+    if (saveCrews) {
+      await saveCrewAssignments(saveCrews.getAttribute("data-save-crews"));
+      return;
+    }
+
+    if (e.target.closest("[data-crewdraft-add]") || e.target.closest("[data-crewdraft-remove]")) {
+      const row = rows.find((x) => rowKey(x) === String(state.editing.rowId));
+      if (row) {
+        row._crewDraft = row._crewDraft || [];
+        if (handleCrewEditorClick(e, row._crewDraft)) renderAll();
+      }
+      return;
+    }
   });
 
   document.getElementById("assignmentBody").addEventListener("change", async (e) => {
+      // ── CR3 crew editor draft controls (shared module) ──
+      if (e.target.closest("[data-crewdraft-company],[data-crewdraft-lead],[data-crewdraft-primary]")) {
+        const row = rows.find((x) => rowKey(x) === String(state.editing.rowId));
+        if (row && row._crewDraft) {
+          const r = handleCrewEditorChange(e, ctxOf(row), row._crewDraft, takenSlotCodes(row));
+          if (r.rerender) renderAll();
+        }
+        return;
+      }
+
       // Primary radio — auto-check the matching checkbox so the row's PM/crew
       // is included in the save payload. Without this, picking a primary
       // without first ticking the checkbox sends the backend a primary id
@@ -1635,6 +1815,13 @@ export async function assignmentPage(routeFn) {
       await saveDateField(rowId, field, iso);
       return;
     }
+  });
+
+  // CR3: slot-code typing (kept in the draft; no re-render while typing).
+  document.getElementById("assignmentBody").addEventListener("input", (e) => {
+    if (!e.target.closest("[data-crewdraft-slot]")) return;
+    const row = rows.find((x) => rowKey(x) === String(state.editing.rowId));
+    if (row) handleCrewEditorInput(e, row._crewDraft);
   });
 
   document.getElementById("assignmentBody").addEventListener("keydown", async (e) => {
@@ -1828,6 +2015,13 @@ export async function assignmentPage(routeFn) {
   });
 
   document.addEventListener("click", (e) => {
+    // CR5-C bug fix: a click handled by the body listener (e.g. the crew
+    // editor's "+ Add crew" / ✕ remove) may re-render the table BEFORE this
+    // document-level listener runs — the clicked button is then detached, so
+    // contains()/closest() checks below would misread it as an OUTSIDE click
+    // and close the popover. A real outside click always lands on a live
+    // node; a detached target was inside the page, so never close on it.
+    if (!e.target.isConnected) return;
     const inHeader = e.target.closest("#assignmentTable thead");
     const inBody = e.target.closest("#assignmentBody");
     const clickedEditCell = e.target.closest("[data-edit-cell]");

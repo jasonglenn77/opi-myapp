@@ -26,6 +26,16 @@ from app.s3 import s3_client, AWS_BUCKET, build_project_file_key, signed_file_ur
 
 router = APIRouter(prefix="/api", tags=["projects"])
 
+class CrewAssignmentEntry(BaseModel):
+    """Crew Model v2 (CR3) assignment entry: COMPANY is required, the lead is
+    optional ('lead TBD' until the boss/PM names one), slot_code is the
+    per-project slot (JR1…) — auto-suggested server-side when blank."""
+    company_id: int
+    lead_crew_id: Optional[int] = None
+    slot_code: Optional[str] = None
+    is_primary: bool = False
+
+
 class ScheduleItemSaveRequest(BaseModel):
     schedule_item_id: Optional[int] = None
     qbo_customer_id: int
@@ -40,6 +50,10 @@ class ScheduleItemSaveRequest(BaseModel):
     primary_project_manager_id: Optional[int] = None
     work_crew_ids: List[int] = []
     primary_work_crew_id: Optional[int] = None
+    # CR3: explicit company/lead/slot entries. When present (not None) they are
+    # the source of truth and the legacy work_crew_ids fields are ignored;
+    # legacy payloads (crew_assignments omitted) keep working unchanged.
+    crew_assignments: Optional[List[CrewAssignmentEntry]] = None
     notes: Optional[str] = None
 
 @router.get("/assignment/projects")
@@ -81,6 +95,54 @@ def delete_schedule_item(schedule_item_id: int, user=Depends(get_current_user)):
         return delete_schedule_item_service(schedule_item_id, int(user["id"]))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/projects/schedule-items/{schedule_item_id}/history")
+def schedule_item_history(schedule_item_id: int, user=Depends(get_current_user)):
+    """Assignment-line history (Crew Model v2 CR4). Rows newest-first:
+    {action, changed_by (display name/email, NULL = before tracking),
+    changed_at, changes {field: [old, new]}} — captured by CR1's
+    record_item_history on every create/update/delete. Auth matches the
+    other assignment reads (/assignment/bundle, /assignment/table): any
+    authenticated user token, which includes page.pm_portal users."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT
+              h.id, h.schedule_item_id, h.action, h.changed_by_user_id,
+              h.changed_at, h.changes,
+              TRIM(CONCAT(COALESCE(u.first_name,''), ' ', COALESCE(u.last_name,''))) AS changed_by_name,
+              u.email AS changed_by_email
+            FROM myapp.project_schedule_item_history h
+            LEFT JOIN myapp.users u ON u.id = h.changed_by_user_id
+            WHERE h.schedule_item_id = :sid
+            ORDER BY h.changed_at DESC, h.id DESC
+        """), {"sid": int(schedule_item_id)}).mappings().all()
+
+    items = []
+    for r in rows:
+        changes = r["changes"]
+        if isinstance(changes, (bytes, bytearray)):
+            try:
+                changes = json.loads(changes.decode("utf-8"))
+            except Exception:
+                changes = None
+        elif isinstance(changes, str):
+            try:
+                changes = json.loads(changes)
+            except Exception:
+                changes = None
+        changed_by = None
+        if r["changed_by_user_id"] is not None:
+            changed_by = (r["changed_by_name"] or "").strip() or r["changed_by_email"] or f"user #{r['changed_by_user_id']}"
+        items.append({
+            "id": int(r["id"]),
+            "schedule_item_id": int(r["schedule_item_id"]),
+            "action": r["action"],
+            "changed_by": changed_by,           # None -> "(before tracking)" in the UI
+            "changed_at": r["changed_at"].isoformat() if r["changed_at"] else None,
+            "changes": changes or {},
+        })
+    return {"schedule_item_id": int(schedule_item_id), "history": items}
 
 # Project status = the LATEST assignment row's status (owner decision): a project
 # with several assignment rows inherits the final row's status (e.g. 3 completed +
@@ -150,6 +212,12 @@ def assignment_table(user=Depends(get_current_user)):
       psi.notes AS notes,
       psi.is_extra_row AS is_extra_row,
 
+      -- CR4: history badge count on the Assignment page. CR5 A3: the single
+      -- backfilled "(before tracking)" created row doesn't count as a change.
+      (SELECT COUNT(*) FROM myapp.project_schedule_item_history h
+        WHERE h.schedule_item_id = psi.id
+          AND NOT (h.action = 'created' AND h.changed_by_user_id IS NULL)) AS history_count,
+
       pm.primary_pm_name AS primary_project_manager,
       wc.primary_crew_name AS primary_work_crew,
 
@@ -189,26 +257,36 @@ def assignment_table(user=Depends(get_current_user)):
       ON pm.schedule_item_id = psi.id
 
     LEFT JOIN (
+      -- Crew Model v2 (CR3): label = "Company · Lead" ("… · lead TBD" when the
+      -- assignment has no lead yet). company/lead come from the v2 columns,
+      -- falling back to the legacy work_crew_id derivation for old rows.
       SELECT
         swc.schedule_item_id,
         MAX(
           CASE
             WHEN swc.is_primary = 1
-            THEN wc.name
+            THEN CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                        COALESCE(ld.name,
+                                 CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                 'lead TBD'))
             ELSE NULL
           END
         ) AS primary_crew_name,
         GROUP_CONCAT(
-          DISTINCT wc.name
+          DISTINCT CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                          COALESCE(ld.name,
+                                   CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                   'lead TBD'))
           ORDER BY swc.is_primary DESC, wc.sort_order, wc.id
           SEPARATOR ', '
         ) AS all_crew_names
       FROM myapp.project_schedule_item_work_crews swc
       JOIN myapp.work_crews wc
         ON wc.id = swc.work_crew_id
+      LEFT JOIN myapp.work_crews co ON co.id = swc.company_id
+      LEFT JOIN myapp.work_crews ld ON ld.id = swc.lead_crew_id
+      LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
       WHERE swc.unassigned_at IS NULL
-        AND wc.is_active = 1
-        AND wc.parent_id IS NOT NULL
       GROUP BY swc.schedule_item_id
     ) wc
       ON wc.schedule_item_id = psi.id
@@ -280,17 +358,29 @@ def projects_schedule_list(user=Depends(get_current_user)):
     ) pm ON pm.schedule_item_id = psi.id
 
     LEFT JOIN (
+      -- Crew Model v2 (CR3): "Company · Lead" labels ("… · lead TBD" lead-less)
       SELECT
         swc.schedule_item_id,
-        MAX(CASE WHEN swc.is_primary = 1 THEN wc.name ELSE NULL END) AS primary_crew_name,
+        MAX(CASE WHEN swc.is_primary = 1
+                 THEN CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                             COALESCE(ld.name,
+                                      CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                      'lead TBD'))
+                 ELSE NULL END) AS primary_crew_name,
         GROUP_CONCAT(
-          DISTINCT wc.name
+          DISTINCT CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                          COALESCE(ld.name,
+                                   CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                   'lead TBD'))
           ORDER BY swc.is_primary DESC, wc.sort_order, wc.id
           SEPARATOR ', '
         ) AS all_crew_names
       FROM myapp.project_schedule_item_work_crews swc
       JOIN myapp.work_crews wc ON wc.id = swc.work_crew_id
-      WHERE swc.unassigned_at IS NULL AND wc.is_active = 1 AND wc.parent_id IS NOT NULL
+      LEFT JOIN myapp.work_crews co ON co.id = swc.company_id
+      LEFT JOIN myapp.work_crews ld ON ld.id = swc.lead_crew_id
+      LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
+      WHERE swc.unassigned_at IS NULL
       GROUP BY swc.schedule_item_id
     ) wc ON wc.schedule_item_id = psi.id
 
@@ -522,21 +612,31 @@ def projects(user=Depends(get_current_user)):
     ),
 
     crew_meta AS (
+      -- Crew Model v2 (CR3): "Company · Lead" labels ("… · lead TBD" lead-less)
       SELECT
         p.qbo_customer_id,
         GROUP_CONCAT(
-          DISTINCT wc.name
+          DISTINCT CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                          COALESCE(ld.name,
+                                   CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                   'lead TBD'))
           ORDER BY swc.is_primary DESC, wc.sort_order, wc.id
           SEPARATOR ', '
         ) AS all_crew_names,
-        MAX(CASE WHEN swc.is_primary = 1 THEN wc.name ELSE NULL END) AS primary_crew_name
+        MAX(CASE WHEN swc.is_primary = 1
+                 THEN CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                             COALESCE(ld.name,
+                                      CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                      'lead TBD'))
+                 ELSE NULL END) AS primary_crew_name
       FROM myapp.projects p
       INNER JOIN myapp.project_schedule_items psi ON psi.project_id = p.id
       INNER JOIN myapp.project_schedule_item_work_crews swc ON swc.schedule_item_id = psi.id
       INNER JOIN myapp.work_crews wc ON wc.id = swc.work_crew_id
+      LEFT JOIN myapp.work_crews co ON co.id = swc.company_id
+      LEFT JOIN myapp.work_crews ld ON ld.id = swc.lead_crew_id
+      LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
       WHERE swc.unassigned_at IS NULL
-        AND wc.is_active = 1
-        AND wc.parent_id IS NOT NULL
       GROUP BY p.qbo_customer_id
     )
 
@@ -709,7 +809,10 @@ def projects_basic(user=Depends(get_current_user)):
           ORDER BY psi.end_date, psi.id
           SEPARATOR ', '
         ) AS all_end_dates,
-        MAX(psi.end_date) AS latest_end_date
+        MAX(psi.end_date) AS latest_end_date,
+        -- CR3 "true end": scheduled end pushed by that item's overage days.
+        MAX(DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY))
+          AS true_end_date
       FROM myapp.projects p
       INNER JOIN myapp.project_schedule_items psi
         ON psi.project_id = p.id
@@ -738,21 +841,31 @@ def projects_basic(user=Depends(get_current_user)):
     ),
 
     crew_meta AS (
+      -- Crew Model v2 (CR3): "Company · Lead" labels ("… · lead TBD" lead-less)
       SELECT
         p.qbo_customer_id,
         GROUP_CONCAT(
-          DISTINCT wc.name
+          DISTINCT CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                          COALESCE(ld.name,
+                                   CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                   'lead TBD'))
           ORDER BY swc.is_primary DESC, wc.sort_order, wc.id
           SEPARATOR ', '
         ) AS all_crew_names,
-        MAX(CASE WHEN swc.is_primary = 1 THEN wc.name ELSE NULL END) AS primary_crew_name
+        MAX(CASE WHEN swc.is_primary = 1
+                 THEN CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                             COALESCE(ld.name,
+                                      CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                                      'lead TBD'))
+                 ELSE NULL END) AS primary_crew_name
       FROM myapp.projects p
       INNER JOIN myapp.project_schedule_items psi ON psi.project_id = p.id
       INNER JOIN myapp.project_schedule_item_work_crews swc ON swc.schedule_item_id = psi.id
       INNER JOIN myapp.work_crews wc ON wc.id = swc.work_crew_id
+      LEFT JOIN myapp.work_crews co ON co.id = swc.company_id
+      LEFT JOIN myapp.work_crews ld ON ld.id = swc.lead_crew_id
+      LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
       WHERE swc.unassigned_at IS NULL
-        AND wc.is_active = 1
-        AND wc.parent_id IS NOT NULL
       GROUP BY p.qbo_customer_id
     ),
 
@@ -780,6 +893,7 @@ def projects_basic(user=Depends(get_current_user)):
       am.earliest_start_date                         AS start_date,
       am.all_end_dates,
       am.latest_end_date                             AS end_date,
+      am.true_end_date                               AS true_end_date,
 
       COALESCE(pm.all_pm_names,   '')                AS all_project_managers,
       COALESCE(pm.primary_pm_name,'')                AS primary_project_manager,
@@ -905,9 +1019,12 @@ def projects_attention(user=Depends(get_current_user)):
         SELECT pid, status, crew_name,
                DATEDIFF(CURDATE(), COALESCE(sent_at, created_at)) AS age_days
         FROM (
+          -- Crew Model v2 (CR3): offers target COMPANIES — label the company
+          -- (child-crew offers resolve via parent lookup), plus the boss name.
           SELECT o.entity_id AS pid, o.status, o.sent_at, o.created_at,
-                 TRIM(CONCAT(COALESCE(wc.name,''),
-                   CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (', pc.name, ')') ELSE '' END)) AS crew_name,
+                 TRIM(CONCAT(COALESCE(pc.name, wc.name, ''),
+                   CASE WHEN COALESCE(pc.boss_name, wc.boss_name) IS NOT NULL
+                        THEN CONCAT(' · ', COALESCE(pc.boss_name, wc.boss_name)) ELSE '' END)) AS crew_name,
                  ROW_NUMBER() OVER (PARTITION BY o.entity_id
                    ORDER BY o.created_at DESC, o.id DESC) AS rn
           FROM myapp.work_offers o
@@ -1031,7 +1148,214 @@ def projects_attention(user=Depends(get_current_user)):
         out.setdefault(pid, {})["outstanding"] = {
             "crew_due": round(crew_due, 2), "exp_to_spend": round(exp_left, 2),
         }
+
+    # CR5 B3: crew-consistency flag per project (bulk — the same pure verdict
+    # as /projects/{qbo_id}/crew-consistency, fed by three grouped queries, so
+    # the All Projects hub gets its flag without an N+1 of per-project calls).
+    # Only non-ok verdicts ship (payload stays small; no flag = consistent).
+    with engine.connect() as conn:
+        cc_a, cc_o, cc_b = _crew_consistency_bulk(conn)
+    for pid in set(cc_a) | set(cc_o) | set(cc_b):
+        st, _details = _crew_consistency_verdict(
+            cc_a.get(pid, []), cc_o.get(pid, []), cc_b.get(pid, []))
+        if st in ("mismatch", "unmapped_vendor"):
+            out.setdefault(pid, {})["crew_consistency"] = {
+                "status": st,
+                "summary": _crew_consistency_summary(st, cc_a.get(pid, []),
+                                                     cc_o.get(pid, []), cc_b.get(pid, [])),
+            }
     return {"attention": out, "kickoff_total": kickoff_total}
+
+
+# ---------------------------------------------------------------------------
+# CR5 B3 — crew-consistency check: do the assigned company(ies), the accepted
+# crew offer's company, and the QBO Contract-Labor bill vendors agree?
+# Vendors map to companies via work_crews.vendor_qbo_id (parent rows); vendor
+# display names come from the bill's raw_json VendorRef.name (same source as
+# billing._crew_labor_bills — there is no separate vendors table).
+# Computed on request only — no caching table.
+# ---------------------------------------------------------------------------
+
+# Same Contract-Labor matching predicate as billing._crew_labor_bills, but
+# grouped by VENDOR (that helper groups per bill and doesn't select the
+# vendor_qbo_id, so it can't be reused directly for company mapping).
+_CC_BILLED_SQL = """
+    SELECT {pid_col} AS pid, t.vendor_qbo_id,
+           MAX(JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name'))) AS vendor_name,
+           w.id AS company_id, MAX(w.name) AS company_name,
+           ROUND(SUM(l.amount), 2) AS total
+    FROM myapp.qbo_transaction_lines l
+    JOIN myapp.qbo_transactions t ON t.id = l.transaction_id
+    LEFT JOIN myapp.work_crews w
+      ON w.vendor_qbo_id = t.vendor_qbo_id AND w.parent_id IS NULL
+    WHERE t.entity_type = 'Bill'
+      AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+      AND l.line_customer_qbo_id {pid_filter}
+    GROUP BY {pid_col}, t.vendor_qbo_id, w.id
+"""
+
+_CC_ASSIGNED_SQL = """
+    SELECT DISTINCT qc.qbo_id AS pid,
+           COALESCE(swc.company_id, wc.parent_id, wc.id) AS id,
+           COALESCE(co.name, pc.name, wc.name) AS name
+    FROM myapp.project_schedule_item_work_crews swc
+    JOIN myapp.project_schedule_items psi ON psi.id = swc.schedule_item_id
+    JOIN myapp.projects p ON p.id = psi.project_id
+    JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id
+    JOIN myapp.work_crews wc ON wc.id = swc.work_crew_id
+    LEFT JOIN myapp.work_crews co ON co.id = swc.company_id
+    LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
+    WHERE swc.unassigned_at IS NULL
+      AND COALESCE(psi.status, '') <> 'canceled'
+      {pid_filter}
+"""
+
+# Offers: ACCEPTED only — a sent offer preceding assignment is the normal
+# workflow order, and declined/withdrawn offers are settled history; neither
+# should read as a mismatch. Legacy child-crew offers resolve to the parent.
+_CC_OFFERS_SQL = """
+    SELECT DISTINCT o.entity_id AS pid,
+           COALESCE(pc.id, wc.id) AS id, COALESCE(pc.name, wc.name) AS name
+    FROM myapp.work_offers o
+    JOIN myapp.work_crews wc ON wc.id = o.crew_id
+    LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
+    WHERE o.status = 'accepted' {pid_filter}
+"""
+
+
+def _cc_billed_row(r):
+    return {
+        "vendor_qbo_id": str(r["vendor_qbo_id"]) if r["vendor_qbo_id"] is not None else None,
+        "vendor_name": r["vendor_name"] or "Unknown vendor",
+        "company": ({"id": int(r["company_id"]), "name": r["company_name"]}
+                    if r["company_id"] is not None else None),
+        "total": float(r["total"] or 0),
+    }
+
+
+def _crew_consistency_data(conn, entity_id):
+    """One project's three comparison sets: assignment companies (active rows on
+    non-canceled schedule items), accepted-offer companies, and Contract-Labor
+    bill vendors (grouped by vendor, mapped to a company when possible)."""
+    assigned = [{"id": int(r["id"]), "name": r["name"]} for r in conn.execute(
+        text(_CC_ASSIGNED_SQL.format(pid_filter="AND qc.qbo_id = :e")),
+        {"e": entity_id}).mappings().all()]
+    offers = [{"id": int(r["id"]), "name": r["name"]} for r in conn.execute(
+        text(_CC_OFFERS_SQL.format(pid_filter="AND o.entity_id = :e")),
+        {"e": entity_id}).mappings().all()]
+    billed = [_cc_billed_row(r) for r in conn.execute(
+        text(_CC_BILLED_SQL.format(pid_col="l.line_customer_qbo_id",
+                                   pid_filter="= :e")),
+        {"e": entity_id}).mappings().all()]
+    return assigned, offers, billed
+
+
+def _crew_consistency_bulk(conn):
+    """All projects at once (for /projects/attention): dicts pid -> list, same
+    shapes as _crew_consistency_data."""
+    a, o, b = {}, {}, {}
+    for r in conn.execute(text(_CC_ASSIGNED_SQL.format(pid_filter=""))).mappings().all():
+        a.setdefault(str(r["pid"]), []).append({"id": int(r["id"]), "name": r["name"]})
+    for r in conn.execute(text(_CC_OFFERS_SQL.format(pid_filter=""))).mappings().all():
+        o.setdefault(str(r["pid"]), []).append({"id": int(r["id"]), "name": r["name"]})
+    for r in conn.execute(text(_CC_BILLED_SQL.format(
+            pid_col="l.line_customer_qbo_id", pid_filter="IS NOT NULL"))).mappings().all():
+        b.setdefault(str(r["pid"]), []).append(_cc_billed_row(r))
+    return a, o, b
+
+
+def _crew_consistency_verdict(assignment_companies, offer_companies, billed_vendors):
+    """PURE comparison (no DB — unit-testable with mocked sets).
+    Returns (status, details). Rules (CR5 B3 spec):
+      * mismatch — the sets disagree: any billed company or accepted-offer
+        company not among the assignment companies, or (where any bills exist)
+        an assignment company with no Contract-Labor bills.
+      * unmapped_vendor — a billed vendor has no work_crews company mapping
+        (and nothing harder is wrong; an unmapped vendor can't prove a
+        mismatch on its own).
+      * no_data — nothing to compare yet.
+      * ok — everything that exists agrees."""
+    a_by_id = {int(c["id"]): c["name"] for c in (assignment_companies or [])}
+    o_by_id = {int(c["id"]): c["name"] for c in (offer_companies or [])}
+    billed_vendors = billed_vendors or []
+    mapped = [x for x in billed_vendors if x.get("company")]
+    unmapped = [x for x in billed_vendors if not x.get("company")]
+    b_by_id = {int(x["company"]["id"]): x["company"]["name"] for x in mapped}
+
+    if not a_by_id and not o_by_id and not billed_vendors:
+        return "no_data", ["No crew assignment, accepted offer, or Contract-Labor bills yet."]
+
+    details, mismatch = [], False
+    billed_not_assigned = sorted(n for i, n in b_by_id.items() if i not in a_by_id)
+    if billed_not_assigned:
+        mismatch = True
+        details.append("Billed but not assigned: " + ", ".join(billed_not_assigned))
+    offered_not_assigned = sorted(n for i, n in o_by_id.items() if i not in a_by_id)
+    if offered_not_assigned:
+        mismatch = True
+        details.append("Accepted offer but not assigned: " + ", ".join(offered_not_assigned))
+    if billed_vendors:
+        assigned_not_billed = sorted(n for i, n in a_by_id.items() if i not in b_by_id)
+        if assigned_not_billed:
+            mismatch = True
+            details.append("Assigned but no Contract-Labor bills yet: " + ", ".join(assigned_not_billed))
+    for x in unmapped:
+        details.append("Vendor not linked to a crew company: "
+                       f"{x.get('vendor_name') or 'Unknown vendor'}"
+                       f" (${round(float(x.get('total') or 0)):,})")
+
+    if mismatch:
+        return "mismatch", details
+    if unmapped:
+        return "unmapped_vendor", details
+    names = sorted(set(a_by_id.values()) | set(b_by_id.values()) | set(o_by_id.values()))
+    return "ok", ["Assigned, offered, and billed crews agree: " + ", ".join(names)
+                  if names else "Consistent."]
+
+
+def _crew_consistency_summary(status, assignment_companies, offer_companies, billed_vendors):
+    """One-line chip text, e.g. 'assigned MTY · billed GS Material Handling'."""
+    if status == "ok":
+        return "Crew consistent"
+    if status == "no_data":
+        return "No crew data"
+    if status == "unmapped_vendor":
+        un = sorted({(x.get("vendor_name") or "Unknown vendor")
+                     for x in (billed_vendors or []) if not x.get("company")})
+        return "vendor not linked to a crew company: " + ", ".join(un)
+    parts = ["assigned " + (", ".join(sorted({c["name"] for c in assignment_companies}))
+                            if assignment_companies else "none")]
+    if billed_vendors:
+        parts.append("billed " + ", ".join(sorted(
+            {(x["company"]["name"] if x.get("company") else (x.get("vendor_name") or "Unknown vendor"))
+             for x in billed_vendors})))
+    if offer_companies:
+        parts.append("offer accepted " + ", ".join(sorted({c["name"] for c in offer_companies})))
+    return " · ".join(parts)
+
+
+@router.get("/projects/{qbo_id}/crew-consistency")
+def project_crew_consistency(qbo_id: str, user=Depends(get_current_user)):
+    """CR5 B3 — per-project crew-consistency check. Auth matches the other
+    project reads (/assignment/bundle, /projects/{id}/card, history): any
+    authenticated user token, which includes page.pm_portal users. Computed on
+    request; nothing cached."""
+    with engine.connect() as conn:
+        if conn.execute(text(
+            "SELECT 1 FROM myapp.qbo_customers WHERE qbo_id = :q AND is_project = 1"),
+                {"q": qbo_id}).scalar() is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        assigned, offers, billed = _crew_consistency_data(conn, qbo_id)
+    status, details = _crew_consistency_verdict(assigned, offers, billed)
+    return {
+        "project_qbo_id": qbo_id,
+        "assignment_companies": assigned,
+        "offer_companies": offers,
+        "billed_vendors": billed,
+        "status": status,
+        "summary": _crew_consistency_summary(status, assigned, offers, billed),
+        "details": details,
+    }
 
 
 # Best-effort mapping of QBO estimate line items → the owner's shared-cost
@@ -1080,13 +1404,20 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             JOIN myapp.project_managers pm ON pm.id=spm.project_manager_id AND pm.is_active=1
             WHERE qc.qbo_id=:q
         """), {"q": qbo_id}).all() if (r[0] or "").strip()]
+        # Crew Model v2 (CR3): "Company · Lead" ("… · lead TBD" lead-less)
         crews = [r[0] for r in conn.execute(text("""
-            SELECT DISTINCT wc.name
+            SELECT DISTINCT CONCAT(COALESCE(co.name, pc.name, wc.name), ' · ',
+                     COALESCE(ld.name,
+                              CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END,
+                              'lead TBD'))
             FROM myapp.project_schedule_items psi
             JOIN myapp.projects p ON p.id=psi.project_id
             JOIN myapp.qbo_customers qc ON qc.id=p.qbo_customer_id
             JOIN myapp.project_schedule_item_work_crews swc ON swc.schedule_item_id=psi.id AND swc.unassigned_at IS NULL
-            JOIN myapp.work_crews wc ON wc.id=swc.work_crew_id AND wc.is_active=1 AND wc.parent_id IS NOT NULL
+            JOIN myapp.work_crews wc ON wc.id=swc.work_crew_id
+            LEFT JOIN myapp.work_crews co ON co.id=swc.company_id
+            LEFT JOIN myapp.work_crews ld ON ld.id=swc.lead_crew_id
+            LEFT JOIN myapp.work_crews pc ON pc.id=wc.parent_id
             WHERE qc.qbo_id=:q
         """), {"q": qbo_id}).all() if (r[0] or "").strip()]
 
@@ -1149,12 +1480,14 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
             for c in sorted(set(est_by_cat) | set(act_by_cat))
         ]
 
-        # latest crew offer
+        # latest crew offer — labeled by COMPANY (parent lookup for legacy
+        # child-crew offers), plus the boss name when set (CR3).
         o = conn.execute(text("""
             SELECT o.status, o.labor_amount,
                    DATEDIFF(CURDATE(), COALESCE(o.sent_at, o.created_at)) AS age_days,
-                   TRIM(CONCAT(COALESCE(wc.name,''),
-                     CASE WHEN pc.name IS NOT NULL THEN CONCAT(' (',pc.name,')') ELSE '' END)) AS crew_name
+                   TRIM(CONCAT(COALESCE(pc.name, wc.name, ''),
+                     CASE WHEN COALESCE(pc.boss_name, wc.boss_name) IS NOT NULL
+                          THEN CONCAT(' · ', COALESCE(pc.boss_name, wc.boss_name)) ELSE '' END)) AS crew_name
             FROM myapp.work_offers o
             LEFT JOIN myapp.work_crews wc ON wc.id=o.crew_id
             LEFT JOIN myapp.work_crews pc ON pc.id=wc.parent_id
@@ -1280,9 +1613,17 @@ def set_project_status(qbo_id: str, body: ProjectStatusUpdate, user=Depends(get_
     all of the project's schedule items so the derived project-grain status moves
     as a unit (the Assignment page still edits per-schedule-item)."""
     from app.projects.service import ALLOWED_STATUS
+    from app.projects.history import record_item_history
     if body.status not in ALLOWED_STATUS:
         raise HTTPException(status_code=400, detail="Invalid status")
     with engine.begin() as conn:
+        before = conn.execute(text("""
+            SELECT psi.id, psi.status
+            FROM myapp.project_schedule_items psi
+            JOIN myapp.projects p ON p.id = psi.project_id
+            JOIN myapp.qbo_customers qc ON qc.id = p.qbo_customer_id
+            WHERE qc.qbo_id = :q
+        """), {"q": qbo_id}).mappings().all()
         n = conn.execute(text("""
             UPDATE myapp.project_schedule_items psi
             JOIN myapp.projects p ON p.id = psi.project_id
@@ -1290,6 +1631,12 @@ def set_project_status(qbo_id: str, body: ProjectStatusUpdate, user=Depends(get_
             SET psi.status = :s
             WHERE qc.qbo_id = :q
         """), {"s": body.status, "q": qbo_id}).rowcount
+        # Assignment-line history (CR1): one 'updated' row per item whose
+        # status actually changed.
+        for it in before:
+            if it["status"] != body.status:
+                record_item_history(conn, int(it["id"]), "updated", int(user["id"]),
+                                    {"status": [it["status"], body.status]})
     if not n:
         raise HTTPException(status_code=404, detail="Project has no schedule rows")
     return {"ok": True, "updated": n}
@@ -1735,7 +2082,8 @@ def schedule(
         visible_start, visible_end = visible_end, visible_start
 
     crews_sql = text("""
-      SELECT id, name, code, parent_id, is_active, sort_order
+      SELECT id, name, code, parent_id, is_active, sort_order,
+             boss_name, crew_capacity
       FROM myapp.work_crews
       WHERE is_active = 1
       ORDER BY
@@ -1768,6 +2116,26 @@ def schedule(
             AND swc2.unassigned_at IS NULL
             AND wc2.is_active = 1
         ), JSON_ARRAY()) AS work_crew_codes,
+
+        -- Crew Model v2 (CR3): one entry per assignment crew row — the page
+        -- slots these under the COMPANY by slot_code (JR1…); lead NULL means
+        -- "lead not assigned yet" (visible indicator + tooltip note).
+        COALESCE((
+          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_OBJECT(
+                   'slot', swc2.slot_code,
+                   'company_id', COALESCE(swc2.company_id, wc2.parent_id, wc2.id),
+                   'company_code', COALESCE(co2.code, pc2.code, CASE WHEN wc2.parent_id IS NULL THEN wc2.code END),
+                   'company', COALESCE(co2.name, pc2.name, wc2.name),
+                   'lead', COALESCE(ld2.name, CASE WHEN wc2.parent_id IS NOT NULL THEN wc2.name END)
+                 ) ORDER BY swc2.is_primary DESC, swc2.slot_code, swc2.id), ']') AS JSON)
+          FROM myapp.project_schedule_item_work_crews swc2
+          JOIN myapp.work_crews wc2 ON wc2.id = swc2.work_crew_id
+          LEFT JOIN myapp.work_crews co2 ON co2.id = swc2.company_id
+          LEFT JOIN myapp.work_crews ld2 ON ld2.id = swc2.lead_crew_id
+          LEFT JOIN myapp.work_crews pc2 ON pc2.id = wc2.parent_id
+          WHERE swc2.schedule_item_id = psi.id
+            AND swc2.unassigned_at IS NULL
+        ), JSON_ARRAY()) AS crew_slots,
 
         COALESCE((
           SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(
@@ -1817,7 +2185,7 @@ def schedule(
     assignments = []
     for r in assignment_rows:
         row = dict(r)
-        for k in ("work_crew_codes", "pm_initials"):
+        for k in ("work_crew_codes", "crew_slots", "pm_initials"):
             v = row.get(k)
             if v is None:
                 row[k] = []
