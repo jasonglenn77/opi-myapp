@@ -7,6 +7,7 @@
 import { api } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
 import { mountConsistencyChip } from "../utils/crew-consistency.js";
+import { timeOffRangeLabel } from "../utils/crew-editor.js";
 
 const money = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)).toLocaleString("en-US"));
 const money2 = (n) => (n == null || n === "" ? "—" : "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 }));
@@ -999,11 +1000,22 @@ function openCrewRoster(entityId, start, end, onPick) {
         </div>`).join("");
       const leadOpts = `<option value="">— lead TBD —</option>` + (co.leads || []).map((l) =>
         `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+      // 0063 CREW TIME-OFF: company-level = the whole company is unavailable
+      // for the overlap ("Unavailable Oct 10-14 · vacation"); lead-level =
+      // that lead is off (availability already minus 1 server-side).
+      const offNotes = (co.time_off || []).map((t) => {
+        const range = timeOffRangeLabel(t.start_date, t.end_date);
+        const tail = t.reason ? ` · ${escapeHtml(t.reason)}` : "";
+        return t.level === "company"
+          ? `<span class="cto-note">Unavailable ${escapeHtml(range)}${tail}</span>`
+          : `<span class="cto-note">${escapeHtml(t.name)} off ${escapeHtml(range)}${tail}</span>`;
+      }).join("");
       return `<div class="mb-3 rounded-xl border border-black/10 overflow-hidden">
         <div class="flex justify-between items-center gap-2 px-3 py-2 bg-black/[0.03] flex-wrap">
           <span class="font-bold text-[13px] text-ink-900">${escapeHtml(co.name)}${co.boss_name ? ` <span class="font-semibold text-black/55">· ${escapeHtml(co.boss_name)}</span>` : ""}</span>
           ${availBadge(co)}
         </div>
+        ${offNotes}
         <div class="px-3 py-1 text-[11px] text-black/45 tabular-nums">${money(co.earned_365 || 0)} paid · ${co.jobs_365 || 0} job${co.jobs_365 === 1 ? "" : "s"} · 365d</div>
         ${occ ? `<div class="pb-1">${occ}</div>` : `<div class="px-3 pb-1.5 text-[11.5px] text-black/35">No crews booked in this window.</div>`}
         <div class="flex items-center gap-2 px-3 py-2 border-t border-black/[0.06] bg-black/[0.01]">

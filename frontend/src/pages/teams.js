@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
+import { timeOffRangeLabel } from "../utils/crew-editor.js";
 
 export async function teamsPage(routeFn) {
   const [pms, crews, vendorData, usersData, passcodeData] = await Promise.all([
@@ -238,6 +239,11 @@ export async function teamsPage(routeFn) {
     const addLead = (isCompany && isActive)
       ? `<button class="${BTN}" data-crew-addlead="${c.id}" data-crew-addlead-name="${escOpt(c.name)}" title="Add a crew lead under ${escOpt(c.name)}">+ Lead</button> `
       : "";
+    // 0063 CREW TIME-OFF: per-company manager (list + add + delete) — covers
+    // the whole company AND its leads in one panel.
+    const timeOffBtn = (isCompany && isActive)
+      ? `<button class="${BTN}" data-crew-timeoff="${c.id}" data-crew-timeoff-name="${escOpt(c.name)}" title="Vacation / unavailable date ranges for ${escOpt(c.name)} and its leads">Time off…</button> `
+      : "";
     const nameCell = isCompany
       ? `<div class="flex items-center gap-1.5">
            <input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CELL} w-full font-semibold" style="min-width:7.5rem" placeholder="Company name">
@@ -265,7 +271,7 @@ export async function teamsPage(routeFn) {
           : `<select data-crew-field="parent_id" data-crew-id="${c.id}" class="${CELL} w-full" style="min-width:7rem">${crewParentOpts(c)}</select>`}</td>
         <td class="py-1 pr-2">${crewVendorCell(c)}</td>
         <td class="py-1 pr-2">${isCompany ? companyBossCodeCell(c) : crewPasscodeCell(c)}</td>
-        <td class="py-1 pl-2 text-right whitespace-nowrap">${addLead}${toggle}</td>
+        <td class="py-1 pl-2 text-right whitespace-nowrap">${timeOffBtn}${addLead}${toggle}</td>
       </tr>
     `;
   }
@@ -296,6 +302,9 @@ export async function teamsPage(routeFn) {
     const addLead = (isCompany && isActive)
       ? `<button class="flex-1 text-center ${BTN}" data-crew-addlead="${c.id}" data-crew-addlead-name="${escOpt(c.name)}">+ Lead</button>`
       : "";
+    const timeOffBtn = (isCompany && isActive)
+      ? `<button class="flex-1 text-center ${BTN}" data-crew-timeoff="${c.id}" data-crew-timeoff-name="${escOpt(c.name)}">Time off…</button>`
+      : "";
     const companyBits = isCompany ? `
         <div class="grid grid-cols-2 gap-2">
           <div><div class="text-[11px] text-black/45 mb-0.5">Boss / owner</div><input value="${esc(c.boss_name)}" data-crew-field="boss_name" data-crew-id="${c.id}" class="${CINP}" placeholder="Boss / owner"></div>
@@ -315,7 +324,7 @@ export async function teamsPage(routeFn) {
           ${statusPill(isActive)}
         </div>
         ${companyBits}
-        <div class="flex items-center gap-2 pt-1">${addLead}${toggle}</div>
+        <div class="flex items-center gap-2 pt-1">${timeOffBtn}${addLead}${toggle}</div>
       </div>`;
   }
 
@@ -700,6 +709,111 @@ setShell({
         alert("Failed to deactivate: " + (err?.message || err));
       }
     });
+  });
+
+  // --- 0063 CREW TIME-OFF: per-company panel (list + add + delete) --------
+  // Whole-company range = the company is unavailable for the overlap; a
+  // lead's range = minus one crew. Rendered on Schedule (grey row), in
+  // browse-crews availability and as a warning in the assignment editors.
+  async function openTimeOffPanel(companyId, companyName) {
+    document.getElementById("ctoModal")?.remove();
+    const leads = activeChildrenByParent.get(String(companyId)) || [];
+    const overlay = document.createElement("div");
+    overlay.id = "ctoModal";
+    overlay.className = "fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4";
+    overlay.innerHTML = `
+      <div class="card p-5 w-full max-w-lg" style="max-height:85vh;overflow:auto;">
+        <div class="flex items-center justify-between gap-3 mb-2">
+          <div>
+            <div class="text-lg font-extrabold">Time off — ${escOpt(companyName)}</div>
+            <div class="text-xs text-black/55">A whole-company range makes ${escOpt(companyName)} unavailable; a lead's range takes one crew out. Shows on the Schedule and in crew availability.</div>
+          </div>
+          <button class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5" data-cto-close>Close</button>
+        </div>
+        <div class="rounded-xl border border-black/10 p-3 mb-3 bg-black/[0.02]">
+          <div class="text-xs font-bold text-black/50 mb-2">Add time off</div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <select data-cto-lead class="input text-xs py-1.5" style="flex:1;min-width:140px;">
+              <option value="">Whole company (${escOpt(companyName)})</option>
+              ${leads.map(l => `<option value="${l.id}">${escOpt(l.name)}</option>`).join("")}
+            </select>
+            <input type="date" data-cto-start class="input text-xs py-1.5" style="width:138px;" />
+            <input type="date" data-cto-end class="input text-xs py-1.5" style="width:138px;" />
+          </div>
+          <div class="flex items-center gap-2 mt-2">
+            <input type="text" data-cto-reason maxlength="160" placeholder="Reason (optional, e.g. vacation)" class="input text-xs py-1.5" style="flex:1;min-width:0;" />
+            <button class="btn-primary text-xs px-3 py-1.5" data-cto-addbtn>Add</button>
+          </div>
+          <div data-cto-msg class="text-xs text-red-700 min-h-[1rem] mt-1"></div>
+        </div>
+        <div data-cto-list class="text-sm text-black/50">Loading…</div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", onKey);
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector("[data-cto-close]").addEventListener("click", close);
+
+    async function refreshList() {
+      const host = overlay.querySelector("[data-cto-list]");
+      let rows = [];
+      try {
+        rows = (await api(`/crew-time-off?crew_id=${companyId}`)).time_off || [];
+      } catch (err) {
+        host.innerHTML = `<div class="text-red-700 text-sm">Failed to load time off: ${escOpt(err?.message || err)}</div>`;
+        return;
+      }
+      const today = new Date();
+      const todayYmd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      host.innerHTML = rows.length ? rows.map(r => `
+        <div class="cto-row ${r.end_date < todayYmd ? "cto-row-past" : ""}">
+          <span class="cto-range">${escOpt(timeOffRangeLabel(r.start_date, r.end_date))}</span>
+          <span class="cto-who">${r.level === "company" ? "Whole company" : escOpt(r.crew_name)}</span>
+          ${r.reason ? `<span class="cto-meta">· ${escOpt(r.reason)}</span>` : ""}
+          ${r.added_by ? `<span class="cto-meta">· added by ${escOpt(r.added_by)}</span>` : ""}
+          <button class="cto-del" data-cto-del="${r.id}">Delete</button>
+        </div>`).join("")
+        : `<div class="text-sm text-black/40 py-2">No time off recorded for ${escOpt(companyName)}.</div>`;
+      host.querySelectorAll("[data-cto-del]").forEach(b => b.addEventListener("click", async () => {
+        if (!confirm("Remove this time-off range?")) return;
+        try {
+          await api(`/crew-time-off/${b.getAttribute("data-cto-del")}`, { method: "DELETE" });
+          await refreshList();
+        } catch (err) { alert("Failed to remove: " + (err?.message || err)); }
+      }));
+    }
+
+    overlay.querySelector("[data-cto-addbtn]").addEventListener("click", async () => {
+      const msg = overlay.querySelector("[data-cto-msg]");
+      const leadVal = overlay.querySelector("[data-cto-lead]").value;
+      const s = overlay.querySelector("[data-cto-start]").value;
+      const en = overlay.querySelector("[data-cto-end]").value;
+      const reason = overlay.querySelector("[data-cto-reason]").value.trim();
+      msg.textContent = "";
+      if (!s || !en) { msg.textContent = "Start and end dates are required."; return; }
+      if (en < s) { msg.textContent = "End must be on or after start."; return; }
+      try {
+        await api("/crew-time-off", { method: "POST", body: JSON.stringify({
+          crew_id: Number(leadVal || companyId), start_date: s, end_date: en,
+          reason: reason || null }) });
+        overlay.querySelector("[data-cto-start]").value = "";
+        overlay.querySelector("[data-cto-end]").value = "";
+        overlay.querySelector("[data-cto-reason]").value = "";
+        await refreshList();
+      } catch (err) {
+        let detail = err?.message || "Failed to add.";
+        try { const o = JSON.parse(detail); if (o && o.detail) detail = o.detail; } catch (_) {}
+        msg.textContent = detail;
+      }
+    });
+
+    await refreshList();
+  }
+  document.querySelectorAll("[data-crew-timeoff]").forEach(btn => {
+    btn.addEventListener("click", () => openTimeOffPanel(
+      Number(btn.getAttribute("data-crew-timeoff")),
+      btn.getAttribute("data-crew-timeoff-name") || ""));
   });
 
   // CR5 A1: "auto" reset — clear the capacity override (PUT null) so the

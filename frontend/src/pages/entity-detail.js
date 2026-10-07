@@ -9,6 +9,8 @@ import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
+// 0062: non-working day math for the Overview days-remaining calculator.
+import { countNonWorkingBetween } from "../utils/nonworking.js";
 import { mountBillingPanel, prefetchBilling } from "./billing.js";
 
 const TYPE_STYLE = {
@@ -380,11 +382,29 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
   };
 
+  // 0062: the project's non-working config — union of the bundle's schedule
+  // items' non_working ({weekends_off, dates}); null when none.
+  function projectNonWorking(bundle) {
+    let weekends = false;
+    const dates = new Set();
+    for (const it of (bundle?.schedule_items || [])) {
+      const nw = it.non_working;
+      if (!nw || (it.status || "") === "canceled") continue;
+      weekends = weekends || !!nw.weekends_off;
+      for (const d of (nw.dates || [])) dates.add(String(d).slice(0, 10));
+    }
+    if (!weekends && !dates.size) return null;
+    return { weekends_off: weekends, dates: [...dates].sort() };
+  }
+
   // Timeline: start → scheduled end (solid) → true end (hatched overage
   // segment), a TODAY marker (clamped to an edge when outside the range) and
   // a calculator line ("starts in N days" / "N days remaining (M with
   // overage)" / "ended N days ago"). Text labels always; real CSS (.ovtl-*).
-  function timelineHtml(p) {
+  // 0062: non-working days subtract from the remaining counts — the line
+  // reads "N working days remaining (M with overage)" when exclusions exist.
+  // The bar keeps its calendar span (no hatching for day-offs there).
+  function timelineHtml(p, bundle) {
     const s = p.start_date && String(p.start_date).slice(0, 10);
     const e = p.end_date && String(p.end_date).slice(0, 10);
     if (!s || !e) return "";
@@ -396,12 +416,20 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     const today = todayYmd();
     const tPos = ovDayDiff(s, today);
     const tPct = Math.max(0, Math.min(100, (tPos / total) * 100));
+    const nw = projectNonWorking(bundle);
     let calc;
     if (tPos < 0) calc = `starts in ${-tPos} day${tPos === -1 ? "" : "s"}`;
     else if (ovDayDiff(today, te) >= 0) {
-      const rem = Math.max(0, ovDayDiff(today, e));
-      const remOd = Math.max(0, ovDayDiff(today, te));
-      calc = `${rem} day${rem === 1 ? "" : "s"} remaining${od > 0 ? ` (${remOd} with overage)` : ""}`;
+      let rem = Math.max(0, ovDayDiff(today, e));
+      let remOd = Math.max(0, ovDayDiff(today, te));
+      let unit = "day";
+      if (nw) {
+        // exclusions in (today, end] / (today, true end]
+        rem = Math.max(0, rem - countNonWorkingBetween(nw, today, e));
+        remOd = Math.max(0, remOd - countNonWorkingBetween(nw, today, te));
+        unit = "working day";
+      }
+      calc = `${rem} ${unit}${rem === 1 ? "" : "s"} remaining${od > 0 ? ` (${remOd} with overage)` : ""}`;
     } else {
       const ago = ovDayDiff(te, today);
       calc = `ended ${ago} day${ago === 1 ? "" : "s"} ago`;
@@ -518,7 +546,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
           ${fact("Est. expenses", expFact)}
           ${fact("Est. profit", profitFact, { color: (estProfit ?? 0) >= 0 ? "text-ink-900" : "text-red-600" })}
         </div>
-        ${timelineHtml(p)}
+        ${timelineHtml(p, bundle)}
         ${crewBlock}
         <div class="mt-5 pt-4 border-t border-black/10 flex flex-wrap gap-2">
           <button type="button" data-goto="financials" class="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-semibold text-ink-900 hover:bg-black/5">Financials →</button>

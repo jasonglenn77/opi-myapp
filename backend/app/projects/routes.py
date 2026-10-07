@@ -55,6 +55,11 @@ class ScheduleItemSaveRequest(BaseModel):
     # legacy payloads (crew_assignments omitted) keep working unchanged.
     crew_assignments: Optional[List[CrewAssignmentEntry]] = None
     notes: Optional[str] = None
+    # 0062 PROJECT NON-WORKING DAYS: {"weekends_off": bool,
+    # "dates": ["YYYY-MM-DD", ...]} or None (= no non-working days).
+    # Validated/normalized in save_schedule_item (ISO dates, cap 120;
+    # dates outside the window are allowed — harmless).
+    non_working: Optional[dict] = None
 
 @router.get("/assignment/projects")
 def assignment_projects(user=Depends(get_current_user)):
@@ -210,6 +215,7 @@ def assignment_table(user=Depends(get_current_user)):
       psi.overage_days AS overage_days,
       psi.equipment_type AS equipment_type,
       psi.notes AS notes,
+      psi.non_working AS non_working,
       psi.is_extra_row AS is_extra_row,
 
       -- CR4: history badge count on the Assignment page. CR5 A3: the single
@@ -298,7 +304,14 @@ def assignment_table(user=Depends(get_current_user)):
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
 
-    projects = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    from .service import _parse_non_working
+    out = []
+    for r in rows:
+        d = dict(r)
+        # 0062: JSON string -> dict (or None) for the Days-off cell
+        d["non_working"] = _parse_non_working(d.get("non_working"))
+        out.append(d)
+    projects = filter_visible(out, user, key="qbo_customer_id")
     return {"projects": projects}
 
 
@@ -2130,6 +2143,7 @@ def schedule(
         psi.overage_days,
         psi.equipment_type,
         psi.notes,
+        psi.non_working,
         psi.status AS project_status,
         qc.display_name AS project_name,
 
@@ -2187,13 +2201,32 @@ def schedule(
         AND psi.end_date IS NOT NULL
         AND COALESCE(psi.status, '') <> 'canceled'
         AND psi.start_date <= :range_end_plus
-        AND psi.end_date >= :range_start_minus
+        -- include rows whose OVERAGE/TRAVEL spill reaches into this window
+        -- (e.g. DHL: end 8/xx + 86 overage days extends into November; the
+        -- bare end_date filter clipped the row out of later months entirely)
+        AND DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days,0) + COALESCE(psi.travel_days,0) DAY) >= :range_start_minus
 
       ORDER BY psi.start_date, psi.id
     """)
 
     range_start_minus = (visible_start - timedelta(days=4)).isoformat()
     range_end_plus = (visible_end + timedelta(days=21)).isoformat()
+
+    # 0063 CREW TIME-OFF: ranges overlapping the visible window, one entry per
+    # row. company_id lets the page hang the grey "Unavailable" block row under
+    # the right company whether the row points at the company (level
+    # 'company' — whole company off) or at one lead (level 'lead').
+    time_off_sql = text("""
+      SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
+             wc.name AS crew_name, wc.parent_id,
+             COALESCE(wc.parent_id, wc.id) AS company_id,
+             COALESCE(pc.name, wc.name) AS company_name
+      FROM myapp.crew_time_off cto
+      JOIN myapp.work_crews wc ON wc.id = cto.crew_id
+      LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
+      WHERE cto.start_date <= :vend AND cto.end_date >= :vstart
+      ORDER BY cto.start_date, cto.id
+    """)
 
     with engine.connect() as conn:
         crews_rows = conn.execute(crews_sql).mappings().all()
@@ -2204,12 +2237,21 @@ def schedule(
                 "range_end_plus": range_end_plus,
             },
         ).mappings().all()
+        time_off_rows = conn.execute(time_off_sql, {
+            "vstart": visible_start.isoformat(),
+            "vend": visible_end.isoformat(),
+        }).mappings().all()
 
     crews = [dict(r) for r in crews_rows]
+
+    from .service import _parse_non_working
 
     assignments = []
     for r in assignment_rows:
         row = dict(r)
+        # 0062: non-working config per assignment — the page greys/hatches
+        # those cells inside the project bar (cellType "dayoff").
+        row["non_working"] = _parse_non_working(row.get("non_working"))
         for k in ("work_crew_codes", "crew_slots", "pm_initials"):
             v = row.get(k)
             if v is None:
@@ -2233,11 +2275,23 @@ def schedule(
     # Scope assignments to the user's visible projects (crews list is not sensitive).
     assignments = filter_visible(assignments, user, key="qbo_customer_id")
 
+    # 0063: crew time-off is crew-level data (like the crews list) — no
+    # project scoping. label = the person/company shown on the grey block.
+    time_off = [{
+        "id": r["id"], "crew_id": r["crew_id"],
+        "company_id": int(r["company_id"]),
+        "level": "lead" if r["parent_id"] is not None else "company",
+        "label": r["crew_name"], "company": r["company_name"],
+        "start_date": str(r["start_date"]), "end_date": str(r["end_date"]),
+        "reason": r["reason"],
+    } for r in time_off_rows]
+
     return {
         "week_start": visible_start.isoformat(),
         "week_end": visible_end.isoformat(),
         "crews": crews,
         "assignments": assignments,
+        "time_off": time_off,
     }
 
 

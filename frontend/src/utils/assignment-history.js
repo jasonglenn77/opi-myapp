@@ -91,14 +91,24 @@ function oldFragment(field, oldVal) {
       const list = Array.isArray(oldVal) ? oldVal : [];
       return list.length ? `PMs ${list.join(", ")}` : "no PMs";
     }
+    // 0062 PROJECT NON-WORKING DAYS: {weekends_off, dates} or null —
+    // "non-working days: 3 dates + weekends off" style.
+    case "non_working": {
+      if (!oldVal || typeof oldVal !== "object") return "no days off";
+      const n = Array.isArray(oldVal.dates) ? oldVal.dates.length : 0;
+      const bits = [];
+      if (n) bits.push(`${n} date${n === 1 ? "" : "s"}`);
+      if (oldVal.weekends_off) bits.push("weekends off");
+      return bits.length ? `non-working days: ${bits.join(" + ")}` : "no days off";
+    }
     default:                return `${field} ${oldVal ?? "—"}`;
   }
 }
 
 // Readable-sentence order: dates first, then the rest.
 const FIELD_ORDER = ["start_date", "end_date", "overage_days", "travel_days",
-                     "wire_guidance", "equipment_type", "status", "crews",
-                     "project_managers", "notes"];
+                     "non_working", "wire_guidance", "equipment_type", "status",
+                     "crews", "project_managers", "notes"];
 
 /** One history row -> the sub-line sentence, e.g.
  *  "was 3/10/26 → 4/5/26 · 0 overage — changed by Kelly Losee · Sep 23, 2:14 PM" */

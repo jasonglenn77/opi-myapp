@@ -16,9 +16,14 @@ import json
 from sqlalchemy import text
 
 # The scalar schedule-item fields history tracks (plus 'crews' and
-# 'project_managers' label lists handled by the callers).
+# 'project_managers' label lists handled by the callers). non_working (0062)
+# is JSON {"weekends_off": bool, "dates": [...]} — _item_fields_dict parses
+# the DB string into that dict so diffs compare by value and history rows
+# store the readable object (the frontend humanizer renders
+# "non-working days: 3 dates + weekends off" style fragments from it).
 ITEM_FIELDS = ("status", "start_date", "end_date", "wire_guidance",
-               "travel_days", "overage_days", "equipment_type", "notes")
+               "travel_days", "overage_days", "equipment_type", "notes",
+               "non_working")
 
 
 def record_item_history(conn, schedule_item_id, action, changed_by_user_id, changes):

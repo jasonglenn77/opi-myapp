@@ -106,9 +106,67 @@ export function crewFieldsFor(ctx, activeList) {
   };
 }
 
+// ── crew time-off warnings (0063, OPI feedback 2026-10-07 #3) ──────────────
+// ctx.time_off (from /assignment/bundle) = every crew_time_off row:
+// {id, crew_id, company_id, level: 'company'|'lead', name, start_date,
+//  end_date, reason}. When the host passes the line's window (start/end/
+// overage), each entry whose picked company or lead is marked off inside
+// start..true-end (end + overage days) gets a NON-BLOCKING amber warning —
+// saving stays allowed. Warnings recompute whenever the host re-renders the
+// editor body (add/remove/company change, popup reopen).
+
+function _toYmdDate(s) {
+  if (!s) return null;
+  const [y, m, d] = String(s).slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+
+const _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "Oct 10-14" / "Oct 28 - Nov 2" for an inclusive ISO date range. */
+export function timeOffRangeLabel(startIso, endIso) {
+  const s = _toYmdDate(startIso), e = _toYmdDate(endIso);
+  if (!s) return "";
+  if (!e || s.getTime() === e.getTime()) return `${_MONTHS[s.getMonth()]} ${s.getDate()}`;
+  if (s.getMonth() === e.getMonth() && s.getFullYear() === e.getFullYear()) {
+    return `${_MONTHS[s.getMonth()]} ${s.getDate()}-${e.getDate()}`;
+  }
+  return `${_MONTHS[s.getMonth()]} ${s.getDate()} - ${_MONTHS[e.getMonth()]} ${e.getDate()}`;
+}
+
+/** Time-off rows overlapping the line's start..true-end window for one draft
+ *  entry: company-level rows of the picked company + lead-level rows of the
+ *  picked lead. win = {start, end, overage} (ISO dates; both required). */
+export function timeOffOverlaps(ctx, entry, win) {
+  const rows = (ctx && ctx.time_off) || [];
+  if (!rows.length || !win || !entry) return [];
+  const ws = _toYmdDate(win.start);
+  let we = _toYmdDate(win.end);
+  if (!ws || !we) return [];
+  const overage = Number(win.overage || 0);
+  if (overage > 0) { we = new Date(we.getFullYear(), we.getMonth(), we.getDate() + overage); }
+  return rows.filter((t) => {
+    const match = t.level === "company"
+      ? (entry.company_id != null && String(t.crew_id) === String(entry.company_id))
+      : (entry.lead_crew_id != null && String(t.crew_id) === String(entry.lead_crew_id));
+    if (!match) return false;
+    const ts = _toYmdDate(t.start_date), te = _toYmdDate(t.end_date);
+    return !!(ts && te && ts <= we && te >= ws);
+  });
+}
+
+function timeOffWarningHtml(ctx, entry, win) {
+  const hits = timeOffOverlaps(ctx, entry, win);
+  if (!hits.length) return "";
+  return hits.map((t) => `
+    <div class="nwd-hint" style="margin:6px 0 0;">⚠ ${escapeHtml(t.name)} is marked off ${escapeHtml(timeOffRangeLabel(t.start_date, t.end_date))}${t.reason ? ` (${escapeHtml(t.reason)})` : ""}</div>`).join("");
+}
+
 // ── editor markup ───────────────────────────────────────────────────────────
 
-function entryRowHtml(ctx, e, idx, radioName) {
+function entryRowHtml(ctx, e, idx, radioName, win) {
   const companies = companiesOf(ctx);
   const co = companyById(ctx, e.company_id);
   const leads = co ? (co.leads || []) : [];
@@ -136,16 +194,19 @@ function entryRowHtml(ctx, e, idx, radioName) {
             data-crewdraft-primary="${idx}" ${e.is_primary ? "checked" : ""} /> Primary
         </label>
       </div>
+      ${timeOffWarningHtml(ctx, e, win)}
     </div>`;
 }
 
 /** The editor's inner body: heading, scrollable entry list, "+ Add crew".
- *  Hosts wrap it in their own popup and append Cancel/Apply. */
-export function crewEditorBodyHtml(ctx, draft, radioName) {
+ *  Hosts wrap it in their own popup and append Cancel/Apply. win (optional) =
+ *  the line's {start, end, overage} window — enables the non-blocking crew
+ *  time-off warnings (0063) when ctx.time_off is present. */
+export function crewEditorBodyHtml(ctx, draft, radioName, win) {
   return `
     <div class="text-xs font-bold text-black/50 mb-2">Work Crews — company first, lead optional</div>
     <div class="overflow-auto pr-1" style="max-height:280px;">
-      ${(draft || []).map((e, i) => entryRowHtml(ctx, e, i, radioName)).join("") || `<div class="text-xs text-black/45 mb-2">No crew on this line yet.</div>`}
+      ${(draft || []).map((e, i) => entryRowHtml(ctx, e, i, radioName, win)).join("") || `<div class="text-xs text-black/45 mb-2">No crew on this line yet.</div>`}
     </div>
     <button type="button" class="inline-flex items-center rounded-lg border border-black/10 px-2 py-1 text-[11px] font-semibold hover:bg-black/5"
       data-crewdraft-add="1">+ Add crew</button>`;

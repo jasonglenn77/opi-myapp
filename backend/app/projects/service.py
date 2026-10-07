@@ -107,6 +107,7 @@ def get_assignment_bundle(qbo_customer_id: int):
                     overage_days,
                     equipment_type,
                     notes,
+                    non_working,
                     is_extra_row,
                     sort_order
                 FROM project_schedule_items
@@ -116,6 +117,8 @@ def get_assignment_bundle(qbo_customer_id: int):
 
             for r in rows:
                 item = dict(r)
+                # 0062: JSON string -> {"weekends_off", "dates"} dict (or None)
+                item["non_working"] = _parse_non_working(item.get("non_working"))
                 sid = int(item["id"])
 
                 pms_active = conn.execute(text("""
@@ -171,6 +174,18 @@ def get_assignment_bundle(qbo_customer_id: int):
             ORDER BY COALESCE(parent_id, id), parent_id IS NULL DESC, sort_order, id
         """)).mappings().all()
 
+        # 0063 CREW TIME-OFF: every row (small table, hard-deleted) so the
+        # shared crew editor can warn — non-blocking — when the picked
+        # company/lead is marked off inside the line's start..true-end window.
+        time_off_rows = conn.execute(text("""
+            SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
+                   wc.name AS crew_name, wc.parent_id,
+                   COALESCE(wc.parent_id, wc.id) AS company_id
+            FROM crew_time_off cto
+            JOIN work_crews wc ON wc.id = cto.crew_id
+            ORDER BY cto.start_date, cto.id
+        """)).mappings().all()
+
     # CR3: company-first picker feed — one entry per company with its active
     # leads nested ("MTY · Jesse Rosales Jr." rendering is the frontend's job).
     companies = []
@@ -197,6 +212,14 @@ def get_assignment_bundle(qbo_customer_id: int):
         "project_managers": [dict(r) for r in pms],
         "work_crews": [dict(r) for r in crews if r["parent_id"] is not None] + [dict(r) for r in crews if r["parent_id"] is None],
         "companies": companies,
+        "time_off": [{
+            "id": r["id"], "crew_id": r["crew_id"],
+            "company_id": int(r["company_id"]),
+            "level": "lead" if r["parent_id"] is not None else "company",
+            "name": r["crew_name"],
+            "start_date": str(r["start_date"]), "end_date": str(r["end_date"]),
+            "reason": r["reason"],
+        } for r in time_off_rows],
     }
 
 def _json(conn, v):
@@ -248,6 +271,56 @@ def _pm_labels(conn, pm_ids):
     return [names.get(int(i), f"PM #{i}") for i in pm_ids]
 
 
+def _parse_non_working(v):
+    """DB JSON value (str/bytes/dict/None) -> canonical dict or None.
+    Canonical shape: {"weekends_off": bool, "dates": [sorted ISO strings]};
+    an empty config (no weekends, no dates) collapses to None."""
+    import json as _json
+    if v is None:
+        return None
+    if isinstance(v, (bytes, bytearray)):
+        v = v.decode("utf-8", "replace")
+    if isinstance(v, str):
+        try:
+            v = _json.loads(v)
+        except ValueError:
+            return None
+    if not isinstance(v, dict):
+        return None
+    weekends = bool(v.get("weekends_off"))
+    dates = sorted({str(d)[:10] for d in (v.get("dates") or [])
+                    if isinstance(d, str)})
+    if not weekends and not dates:
+        return None
+    return {"weekends_off": weekends, "dates": dates}
+
+
+def _normalize_non_working(v):
+    """Validate + canonicalize a request's non_working value (0062).
+    None / empty config -> None. Raises ValueError on bad shapes/dates.
+    Dates may lie outside the schedule window (harmless — ignored by the
+    render/calculators there); the list is capped at 120 entries."""
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise ValueError("non_working must be an object")
+    weekends = bool(v.get("weekends_off"))
+    raw_dates = v.get("dates") or []
+    if not isinstance(raw_dates, list):
+        raise ValueError("non_working.dates must be a list")
+    if len(raw_dates) > 120:
+        raise ValueError("non_working.dates is capped at 120 dates")
+    dates = set()
+    for d in raw_dates:
+        try:
+            dates.add(date.fromisoformat(str(d)[:10]).isoformat())
+        except ValueError:
+            raise ValueError(f"non_working.dates entry {d!r} is not a valid YYYY-MM-DD date")
+    if not weekends and not dates:
+        return None
+    return {"weekends_off": weekends, "dates": sorted(dates)}
+
+
 def _item_fields_dict(row_or_none, override=None):
     """Normalized {field: value} over ITEM_FIELDS for the history diff.
     `row_or_none` is a DB mapping (or None); `override` a dict that wins."""
@@ -256,7 +329,10 @@ def _item_fields_dict(row_or_none, override=None):
     if override:
         src.update(override)
     for f in ITEM_FIELDS:
-        out[f] = _hist_norm(src.get(f))
+        # non_working (0062): parse the DB JSON string into the canonical
+        # dict so old/new compare by value and history stores the object.
+        out[f] = _parse_non_working(src.get(f)) if f == "non_working" \
+            else _hist_norm(src.get(f))
     return out
 
 
@@ -348,6 +424,11 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
         if ed < sd:
             raise ValueError("end_date cannot be before start_date")
 
+    # 0062: non-working config — canonical dict or None (NULL in the DB).
+    non_working = _normalize_non_working(getattr(req, "non_working", None))
+    import json as _json
+    non_working_json = _json.dumps(non_working) if non_working else None
+
     with engine.begin() as conn:
         project_id = ensure_project_row_for_qbo_customer(conn, int(req.qbo_customer_id))
 
@@ -363,7 +444,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
         if schedule_item_id:
             prior_item = conn.execute(text("""
-                SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, is_extra_row, sort_order
+                SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, non_working, is_extra_row, sort_order
                 FROM project_schedule_items
                 WHERE id = :sid AND project_id = :pid
                 LIMIT 1
@@ -402,7 +483,8 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                     travel_days = :td,
                     overage_days = :od,
                     equipment_type = :eq,
-                    notes = :notes
+                    notes = :notes,
+                    non_working = :nw
                 WHERE id = :sid
             """), {
                 "sid": int(schedule_item_id),
@@ -414,6 +496,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 "od": getattr(req, "overage_days", 0) or 0,
                 "eq": getattr(req, "equipment_type", None) or None,
                 "notes": getattr(req, "notes", None) or None,
+                "nw": non_working_json,
             })
             sid = int(schedule_item_id)
         else:
@@ -425,9 +508,9 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
             conn.execute(text("""
                 INSERT INTO project_schedule_items
-                    (project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, is_extra_row,sort_order)
+                    (project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, non_working, is_extra_row,sort_order)
                 VALUES
-                    (:pid, :st, :sd, :ed, :wg, :td, :od, :eq, :notes, :is_extra_row, :so)
+                    (:pid, :st, :sd, :ed, :wg, :td, :od, :eq, :notes, :nw, :is_extra_row, :so)
             """), {
                 "pid": project_id,
                 "st": status,
@@ -438,6 +521,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 "od": getattr(req, "overage_days", 0) or 0,
                 "eq": getattr(req, "equipment_type", None) or None,
                 "notes": getattr(req, "notes", None) or None,
+                "nw": non_working_json,
                 "is_extra_row": 1,
                 "so": int(next_sort_order or 1),
             })
@@ -535,7 +619,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                                   "lead_crew_id": e["lead_crew_id"], "slot_code": slot_code})
 
         new_item = conn.execute(text("""
-            SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, is_extra_row, sort_order
+            SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, non_working, is_extra_row, sort_order
             FROM project_schedule_items
             WHERE id = :sid
             LIMIT 1

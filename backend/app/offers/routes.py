@@ -169,6 +169,25 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
         """), {"c": cutoff}).mappings().all()}
         # Bookings come from the ASSIGNMENT rows (company_id/lead/slot — the v2
         # columns; legacy rows fall back to the work_crew_id derivation).
+        # 0063 CREW TIME-OFF rows (all — overlap filtering happens per window
+        # below). AVAILABILITY RULE (OPI feedback 2026-10-07 #3):
+        #   * COMPANY-level time-off (row points at the parent crew)
+        #     overlapping the occupancy window => the company contributes 0
+        #     available crews for that window (card shows "Unavailable
+        #     <range> · <reason>"), whatever capacity/slots say;
+        #   * LEAD-level time-off (row points at a child crew) overlapping
+        #     => minus 1 available per distinct off lead, floored at 0 —
+        #     applied the same whether capacity is lead-derived (auto) or an
+        #     explicit override (CR5-A effective capacity), and the lead is
+        #     listed as off on the card.
+        time_off_all = conn.execute(text("""
+            SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
+                   wc.name AS crew_name, wc.parent_id,
+                   COALESCE(wc.parent_id, wc.id) AS company_id
+            FROM crew_time_off cto
+            JOIN work_crews wc ON wc.id = cto.crew_id
+            ORDER BY cto.start_date, cto.id
+        """)).mappings().all()
         scheds = conn.execute(text("""
             SELECT COALESCE(swc.company_id, wc.parent_id, wc.id) AS company_id,
                    swc.slot_code,
@@ -193,6 +212,9 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
     for s in scheds:
         if s["company_id"] is not None:
             by_co[int(s["company_id"])].append(s)
+    to_by_co = defaultdict(list)
+    for t in time_off_all:
+        to_by_co[int(t["company_id"])].append(t)
 
     today = date.today()
     out = []
@@ -224,12 +246,41 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
             })
         occupied_rows.sort(key=lambda x: (x["slot"] or "~", x["thru"]))
         capacity = c["crew_capacity"] if c["crew_capacity"] is not None else len(leads_by_co.get(cid, []))
-        available = max(0, int(capacity) - len(occupied_rows)) if (ps and pe) else None
+
+        # 0063 time-off overlapping the same occupancy window [ws, we]
+        # (we None = open-ended, today onward). See AVAILABILITY RULE above.
+        time_off_rows, off_lead_ids, company_off = [], set(), False
+        for t in to_by_co.get(cid, []):
+            if we is not None and t["start_date"] > we:
+                continue
+            if t["end_date"] < ws:
+                continue
+            is_company_level = t["parent_id"] is None
+            if is_company_level:
+                company_off = True
+            else:
+                off_lead_ids.add(int(t["crew_id"]))
+            time_off_rows.append({
+                "id": t["id"], "crew_id": t["crew_id"],
+                "level": "company" if is_company_level else "lead",
+                "name": t["crew_name"],
+                "start_date": str(t["start_date"]), "end_date": str(t["end_date"]),
+                "reason": t["reason"],
+            })
+
+        available = None
+        if ps and pe:
+            if company_off:
+                available = 0                       # whole company unavailable
+            else:
+                available = max(0, int(capacity) - len(occupied_rows) - len(off_lead_ids))
         out.append({
             "id": c["id"], "name": c["name"], "boss_name": c["boss_name"],
             "prefix": c["code"], "capacity": int(capacity),
             "available": available,
             "occupied": occupied_rows,
+            "time_off": time_off_rows,
+            "company_off": company_off,
             "leads": leads_by_co.get(cid, []),
             "earned_365": round(earned.get(str(c["vendor_qbo_id"]), 0), 2),
             "jobs_365": jobs_365,

@@ -6,6 +6,8 @@ import {
   historyBadgeHtml, historyPanelHtml, loadHistory, invalidateHistory, cachedHistory,
   historyCountOf,
 } from "../utils/assignment-history.js";
+// 0062: shared "Days off" (non-working days) control.
+import { nonWorkingButtonLabel, openNonWorkingEditor } from "../utils/nonworking.js";
 import {
   entryLabel as ceEntryLabel,
   toDraftEntry as ceToDraftEntry,
@@ -298,6 +300,7 @@ export async function assignmentPage(routeFn) {
       overage_days: 0,
       equipment_type: null,
       notes: "",
+      non_working: null,
       is_extra_row: 1,
 
       primary_project_manager: "",
@@ -339,6 +342,7 @@ export async function assignmentPage(routeFn) {
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       ...crewFieldsFor(row),
       notes: row.notes || null,
+      non_working: row.non_working || null,
     };
 
     await savePayload(row, payload, flashField || "project_status");
@@ -405,6 +409,7 @@ export async function assignmentPage(routeFn) {
       overage_days: payload.overage_days || 0,
       equipment_type: payload.equipment_type || null,
       notes: payload.notes || null,
+      non_working: payload.non_working || null,
       is_extra_row: row.is_extra_row || 0,
       active_project_managers: row._active_project_managers || [],
       active_work_crews: row._active_work_crews || [],
@@ -699,6 +704,8 @@ export async function assignmentPage(routeFn) {
               ${th("wire_guidance", "Wire")}
               ${th("travel_days", "Travel")}
               ${th("overage_days", "Overage")}
+      <th class="py-2 px-3 text-left align-middle" style="min-width:fit-content;"><span class="font-bold leading-none">Days Off</span></th>
+              <th class="py-2 px-3 text-left align-middle" style="min-width:fit-content;"><span class="font-bold leading-none">Days Off</span></th>
               ${th("equipment_type", "Equip")}
               ${th("notes", "Notes")}
               ${th("project_create_date", "QB Created")}
@@ -879,6 +886,17 @@ export async function assignmentPage(routeFn) {
     `;
   }
 
+  // 0062: compact "Days off" control — popover edits weekends-off + dates,
+  // saved through the normal /assignment/save payload (no auto-overage).
+  function renderNonWorkingCell(row) {
+    return `
+      <button type="button" class="nwd-btn" data-nwd-edit="${rowKey(row)}"
+        title="Non-working days (weekends off / specific dates)">
+        ${nonWorkingButtonLabel(row.non_working)}
+      </button>
+    `;
+  }
+
   function renderEquipmentTypeCell(row) {
     if (isEditing(rowKey(row), "equipment_type")) {
       return `
@@ -976,7 +994,8 @@ export async function assignmentPage(routeFn) {
     return `
       <div class="relative inline-block w-full">
         <div class="absolute left-0 top-7 z-[100] rounded-xl border border-black/10 bg-white p-3 shadow-xl" style="width:380px;max-width:min(92vw,440px);">
-          ${crewEditorBodyHtml(ctxOf(row), row._crewDraft || [], `crewdraft-primary-${rowKey(row)}`)}
+          ${crewEditorBodyHtml(ctxOf(row), row._crewDraft || [], `crewdraft-primary-${rowKey(row)}`,
+            { start: row.start_date, end: row.end_date, overage: row.overage_days })}
           <div class="mt-3 flex justify-end gap-2">
             <button type="button" class="inline-flex items-center rounded-xl border border-black/10 bg-white px-3 py-2 text-sm font-semibold hover:bg-black/5"
               data-cancel-editor="1">Cancel</button>
@@ -1123,7 +1142,7 @@ export async function assignmentPage(routeFn) {
           ? (histCached ? historyCountOf(histCached) : row.history_count)
           : null;
         const histRow = histOpen
-          ? `<tr class="border-b border-black/5"><td colspan="12" class="py-1 px-3">${historyPanelHtml(histId)}</td></tr>`
+          ? `<tr class="border-b border-black/5"><td colspan="13" class="py-1 px-3">${historyPanelHtml(histId)}</td></tr>`
           : "";
 
         return `
@@ -1245,6 +1264,10 @@ export async function assignmentPage(routeFn) {
               ${renderOverageDaysCell(row)}
             </td>
 
+            <td class="py-2 px-2 whitespace-nowrap">
+              ${renderNonWorkingCell(row)}
+            </td>
+
             <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "equipment_type")}"
                 data-cell="${rowKey(row)}"
                 data-field="equipment_type">
@@ -1264,7 +1287,7 @@ export async function assignmentPage(routeFn) {
         ${histRow}`;
       }).join("") || `
         <tr>
-          <td class="py-6 text-center text-black/50" colspan="12">No projects match these filters.</td>
+          <td class="py-6 text-center text-black/50" colspan="13">No projects match these filters.</td>
         </tr>
       `;
   }
@@ -1326,6 +1349,7 @@ export async function assignmentPage(routeFn) {
     row.overage_days = Number(payload.overage_days || 0);
     row.equipment_type = payload.equipment_type || null;
     row.notes = payload.notes || null;
+    row.non_working = payload.non_working || null;
 
     row._active_project_managers = (payload.project_manager_ids || []).map((id) => ({
       project_manager_id: Number(id),
@@ -1389,6 +1413,7 @@ export async function assignmentPage(routeFn) {
         overage_days: row.overage_days || 0,
         equipment_type: row.equipment_type || null,
         notes: row.notes || null,
+        non_working: row.non_working || null,
         project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
         primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
         ...crewFieldsFor(row),
@@ -1421,6 +1446,7 @@ export async function assignmentPage(routeFn) {
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
       notes: row.notes || null,
+      non_working: row.non_working || null,
       project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       ...crewFieldsFor(row),
@@ -1463,6 +1489,7 @@ export async function assignmentPage(routeFn) {
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
       notes: row.notes || null,
+      non_working: row.non_working || null,
       project_manager_ids: ids,
       primary_project_manager_id: primaryId,
       ...crewFieldsFor(row),
@@ -1507,6 +1534,7 @@ export async function assignmentPage(routeFn) {
       overage_days: row.overage_days || 0,
       equipment_type: row.equipment_type || null,
       notes: row.notes || null,
+      non_working: row.non_working || null,
       project_manager_ids: (row._active_project_managers || []).map(x => Number(x.project_manager_id)),
       primary_project_manager_id: (row._active_project_managers || []).find(x => x.is_primary)?.project_manager_id || null,
       ...crewFields,
@@ -1670,6 +1698,33 @@ export async function assignmentPage(routeFn) {
     if (cancelEditor) {
       clearEditing();
       renderAll();
+      return;
+    }
+
+    // 0062: "Days off" popover — weekends-off + specific dates; applies via
+    // the normal save payload. NO auto-overage (text hint only; the link
+    // opens the row's overage editor).
+    const nwdBtn = e.target.closest("[data-nwd-edit]");
+    if (nwdBtn) {
+      const rowId = nwdBtn.getAttribute("data-nwd-edit");
+      const row = rows.find((x) => rowKey(x) === String(rowId));
+      if (!row) return;
+      openNonWorkingEditor(nwdBtn, {
+        value: row.non_working,
+        startDate: row.start_date ? String(row.start_date).slice(0, 10) : "",
+        endDate: row.end_date ? String(row.end_date).slice(0, 10) : "",
+        overageDays: Number(row.overage_days) || 0,
+        onApply: async (v) => {
+          row.non_working = v;
+          try { await saveMiscFields(row); } catch (err) { console.error(err); setMsg("Save failed."); }
+        },
+        onFocusOverage: async () => {
+          await beginEdit(rowKey(row), "overage_days");
+          window.setTimeout(() => {
+            document.querySelector(`[data-overage-input="${rowKey(row)}"]`)?.focus();
+          }, 0);
+        },
+      });
       return;
     }
 

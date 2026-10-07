@@ -210,16 +210,57 @@ def _normalize_custom(entry, idx):
     return q
 
 
+def _project_non_working(conn, project_qbo_id):
+    """PROJECT NON-WORKING DAYS (0062): the union of the project's active
+    (non-canceled) schedule items' non_working configs, as
+    (weekends_off: bool, dates: set of ISO strings). This is THE merge
+    source for the forms engine — every consumer (form_status_rows verdicts,
+    GET /templates' stamped settings + off_today crew hints) flows through
+    _merged_templates, which folds these in below."""
+    from app.projects.service import _parse_non_working
+    rows = conn.execute(text("""
+        SELECT psi.non_working
+        FROM projects p
+        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+        JOIN project_schedule_items psi ON psi.project_id = p.id
+        WHERE qc.qbo_id = :e
+          AND psi.non_working IS NOT NULL
+          AND COALESCE(psi.status, '') <> 'canceled'
+    """), {"e": project_qbo_id}).scalars().all()
+    weekends_off, dates = False, set()
+    for raw in rows:
+        nw = _parse_non_working(raw)
+        if not nw:
+            continue
+        weekends_off = weekends_off or bool(nw.get("weekends_off"))
+        dates.update(nw.get("dates") or [])
+    return weekends_off, dates
+
+
 def _merged_templates(conn, project_qbo_id):
     """Templates with the project's toggles applied (each section gains
     "enabled"), removed_questions stripped (crew + preview never see them),
     custom questions appended to their form's last section, and the per-form
     settings stamped on each template (required, cadence, exclude_weekdays,
     skipped_dates, off_today — a required=false form is STILL returned,
-    marked so the crew UI can de-emphasize it)."""
+    marked so the crew UI can de-emphasize it).
+
+    0062: the project's non-working days merge in HERE — weekends_off adds
+    weekdays 5,6 (Sat/Sun, Python numbering) to every form's
+    exclude_weekdays and the dates list joins skipped_dates. Per-form
+    settings remain additive on top; the raw stored settings are untouched
+    (the PM settings editor reads /project-settings, which serves them
+    unmerged)."""
     templates = _load_templates(conn)
     toggles, custom, forms, _ = _load_settings(conn, project_qbo_id)
     forms_full = _forms_with_defaults(forms, [t["code"] for t in templates])
+    nw_weekends, nw_dates = _project_non_working(conn, project_qbo_id)
+    if nw_weekends or nw_dates:
+        for cfg in forms_full.values():
+            if nw_weekends:
+                cfg["exclude_weekdays"] = sorted(set(cfg["exclude_weekdays"]) | {5, 6})
+            if nw_dates:
+                cfg["skipped_dates"] = sorted(set(cfg["skipped_dates"]) | nw_dates)
     for t in templates:
         _strip_removed(t["definition"], forms_full[t["code"]]["removed_questions"])
     for i, entry in enumerate(custom, start=1):

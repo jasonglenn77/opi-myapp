@@ -22,6 +22,8 @@ import {
   handleCrewEditorClick, handleCrewEditorChange, handleCrewEditorInput,
 } from "../utils/crew-editor.js";
 import { mountConsistencyChip } from "../utils/crew-consistency.js";
+// 0062: shared "Days off" (non-working days) control.
+import { nonWorkingButtonLabel, openNonWorkingEditor } from "../utils/nonworking.js";
 
 // CR4: schedule-item ids whose history sub-lines are expanded — module-level
 // so the open state survives the panel's frequent remounts after saves.
@@ -114,6 +116,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
         ${field("Wire", `<label class="inline-flex items-center" style="height:30px;"><input data-f="wire_guidance" type="checkbox" class="h-4 w-4 cursor-pointer" ${it.wire_guidance ? "checked" : ""}/></label>`)}
         ${field("Travel", `<select data-f="travel_days" class="input text-xs py-1.5 w-20">${travelOptions(it.travel_days)}</select>`)}
         ${field("Overage", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16"/>`)}
+        ${field("Days off", `<button type="button" data-nwd-edit="${it.id}" class="nwd-btn" title="Non-working days (weekends off / specific dates)">${nonWorkingButtonLabel(it.non_working)}</button>`)}
         ${field("Equipment", `<select data-f="equipment_type" class="input text-xs py-1.5 w-28">${equipOptions(it.equipment_type)}</select>`)}
         ${field("Notes", `<input data-f="notes" type="text" value="${escapeHtml(it.notes || "")}" placeholder="—" title="${escapeHtml(it.notes || "")}" class="input text-xs py-1.5 w-full"/>`, "ap-notes")}
         <div class="ap-f ap-actions">
@@ -182,6 +185,8 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
       overage_days: Number(g("overage_days").value) || 0,
       equipment_type: g("equipment_type").value || null,
       notes: g("notes").value || null,
+      // 0062: non-working days ride the normal payload (null = none).
+      non_working: it.non_working || null,
       project_manager_ids: pmIds,
       primary_project_manager_id: (it.active_project_managers || []).find((a) => a.is_primary)?.project_manager_id || (pmIds[0] || null),
       // CR5 A2: v2 crew_assignments + the legacy dual-write fields, from the
@@ -289,7 +294,8 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
     const radioName = `apcrew-primary-${sid}`;
     const renderBody = () => {
       pop.innerHTML = `
-        ${crewEditorBodyHtml(ctx, draft, radioName)}
+        ${crewEditorBodyHtml(ctx, draft, radioName,
+          { start: it.start_date, end: it.end_date, overage: it.overage_days })}
         <div class="mt-3 flex justify-end gap-2">
           <button type="button" data-cancel class="rounded-lg border border-black/10 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">Cancel</button>
           <button type="button" data-apply class="btn-primary text-xs px-3 py-1.5">Apply</button>
@@ -369,6 +375,30 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
       const line = crewBtn.closest("[data-sid]");
       const sid = line?.getAttribute("data-sid");
       if (sid && sid !== "null") openCrewEditor(line, Number(sid), crewBtn);
+      return;
+    }
+    // 0062: "Days off" popover — weekends-off + specific dates; saves through
+    // the normal payload. NO auto-overage (text hint only; link focuses the
+    // line's overage input).
+    const nwdBtn = e.target.closest("[data-nwd-edit]");
+    if (nwdBtn) {
+      const line = nwdBtn.closest("[data-sid]");
+      const sid = line?.getAttribute("data-sid");
+      const it = sid && sid !== "null" ? itemById(sid) : null;
+      if (!it) return;
+      closePopup();
+      openNonWorkingEditor(nwdBtn, {
+        value: it.non_working,
+        startDate: it.start_date ? String(it.start_date).slice(0, 10) : "",
+        endDate: it.end_date ? String(it.end_date).slice(0, 10) : "",
+        overageDays: Number(line.querySelector('[data-f="overage_days"]')?.value) || 0,
+        onApply: async (v) => {
+          it.non_working = v;
+          await saveRow(line, Number(sid));
+          remount();
+        },
+        onFocusOverage: () => line.querySelector('[data-f="overage_days"]')?.focus(),
+      });
       return;
     }
     const del = e.target.closest("[data-del]");

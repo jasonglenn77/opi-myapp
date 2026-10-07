@@ -683,3 +683,78 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
              white-space:nowrap; cursor:pointer; }
 .tp-preset:hover { background:#f3f4f6; }
 .ms-pct-w { width:4.4rem; }
+
+/* -- 0062 PROJECT NON-WORKING DAYS: "Days off" control + schedule render -- */
+/* Compact control button on assignment lines (page / panel / modal). */
+.nwd-btn { display:inline-flex; align-items:center; gap:4px; min-height:30px;
+           border:1px solid rgba(0,0,0,.12); border-radius:6px; background:#fff;
+           color:#1f2937; font-size:11px; font-weight:600; padding:2px 8px;
+           white-space:nowrap; cursor:pointer; text-align:left; }
+.nwd-btn:hover { background:#f3f4f6; }
+.nwd-none { color:#9ca3af; font-weight:500; }
+/* The popover editor. */
+.nwd-pop { position:fixed; z-index:260; width:300px; max-width:92vw;
+           border:1px solid rgba(0,0,0,.12); border-radius:12px; background:#fff;
+           color:#111827; padding:12px; box-shadow:0 12px 32px rgba(0,0,0,.18);
+           font-size:12px; }
+.nwd-title { font-size:11px; font-weight:700; color:#4b5563; margin-bottom:8px; }
+.nwd-weekends { display:flex; align-items:center; gap:7px; font-size:12px;
+                font-weight:600; color:#111827; margin-bottom:8px; cursor:pointer; }
+.nwd-addrow { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+.nwd-addbtn { border:1px solid rgba(0,0,0,.15); border-radius:6px; background:#fff;
+              color:#1f2937; font-size:11px; font-weight:600; padding:5px 9px;
+              white-space:nowrap; cursor:pointer; }
+.nwd-addbtn:hover { background:#f3f4f6; }
+.nwd-chips { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px;
+             max-height:120px; overflow:auto; }
+.nwd-chip { display:inline-flex; align-items:center; gap:4px; background:#eef2f7;
+            border:1px solid rgba(0,0,0,.10); border-radius:6px; color:#1f2937;
+            font-size:11px; font-weight:600; padding:2px 6px; }
+.nwd-chip-x { border:0; background:transparent; color:#6b7280; font-size:10px;
+              font-weight:700; cursor:pointer; padding:0 1px; line-height:1; }
+.nwd-chip-x:hover { color:#b91c1c; }
+.nwd-hint { font-size:11px; font-weight:600; color:#92400e; background:#fef3c7;
+            border:1px solid #fcd34d; border-radius:6px; padding:5px 8px;
+            margin-bottom:8px; }
+.nwd-hintlink { border:0; background:transparent; color:#92400e; font-size:11px;
+                font-weight:700; text-decoration:underline; cursor:pointer; padding:0; }
+.nwd-foot { display:flex; justify-content:flex-end; gap:8px; }
+/* Schedule grid: non-working day INSIDE the project bar (cellType "dayoff")
+   — grey hatched, dark text on light, distinct from overage (orange) and
+   travel (plain grey). */
+.nwd-cell { background:#e5e7eb;
+            background-image:repeating-linear-gradient(135deg, #e5e7eb 0px,
+              #e5e7eb 4px, #d1d5db 4px, #d1d5db 8px);
+            border:1px solid #c5cad3; border-radius:4px; color:#4b5563;
+            padding:0 2px; }
+.nwd-cell .nwd-cell-label { color:#4b5563; font-style:italic; }
+/* Header legend swatch. */
+.nwd-legend { display:inline-block; width:12px; height:9px; border-radius:2px;
+              border:1px solid #c5cad3; vertical-align:middle;
+              background:#e5e7eb;
+              background-image:repeating-linear-gradient(135deg, #e5e7eb 0px,
+                #e5e7eb 3px, #d1d5db 3px, #d1d5db 6px); }
+
+/* -- 0063 CREW TIME-OFF: schedule quick-add + Teams panel bits -- */
+/* Tiny "+ time off" affordance under a company's first slot label. */
+.cto-add { display:inline-block; border:1px solid rgba(0,0,0,.15); border-radius:5px;
+           background:#fff; color:#4b5563; font-size:9px; font-weight:700;
+           padding:0 4px; line-height:1.5; margin-top:2px; cursor:pointer;
+           white-space:nowrap; }
+.cto-add:hover { background:#f3f4f6; color:#111827; }
+/* Teams time-off panel list rows. */
+.cto-row { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;
+           border-top:1px solid rgba(0,0,0,.06); padding:6px 2px; font-size:12px;
+           color:#1f2937; }
+.cto-row-past { opacity:.55; }
+.cto-range { font-weight:700; white-space:nowrap; color:#111827; }
+.cto-who { font-weight:600; }
+.cto-meta { color:#6b7280; font-size:11px; }
+.cto-del { border:1px solid #fecaca; border-radius:6px; background:#fff;
+           color:#b91c1c; font-size:11px; font-weight:700; padding:1px 7px;
+           cursor:pointer; margin-left:auto; white-space:nowrap; }
+.cto-del:hover { background:#fef2f2; }
+/* Card note on browse-crews: company unavailable / lead off. */
+.cto-note { display:block; font-size:11px; font-weight:700; color:#4b5563;
+            background:#e5e7eb; border:1px solid #c5cad3; border-radius:6px;
+            padding:3px 8px; margin:4px 12px 2px; }

@@ -13,6 +13,11 @@ import {
   entryLabel, toDraftEntry, crewFieldsFor, crewEditorBodyHtml,
   handleCrewEditorClick, handleCrewEditorChange, handleCrewEditorInput,
 } from "../utils/crew-editor.js";
+// 0062: shared "Days off" (non-working days) control + day checks.
+import {
+  nonWorkingButtonLabel, openNonWorkingEditor, nonWorkingSummary,
+  isNonWorkingYmd,
+} from "../utils/nonworking.js";
 
 export async function schedulePage(routeFn) {
   // --- date helpers (no timezone surprises: treat as local dates)
@@ -169,6 +174,7 @@ export async function schedulePage(routeFn) {
       overage_days: Number(it.overage_days || 0),
       equipment_type: it.equipment_type || "",
       notes: it.notes || "",
+      non_working: it.non_working || null,
       is_extra_row: it.is_extra_row,
       history_count: it.history_count,
       pms: (it.active_project_managers || []).map((x) => ({
@@ -181,7 +187,8 @@ export async function schedulePage(routeFn) {
     function blankLine() {
       return { id: null, status: "not_started", start_date: "", end_date: "",
                wire_guidance: 0, travel_days: 0, overage_days: 0,
-               equipment_type: "", notes: "", is_extra_row: 1, history_count: null,
+               equipment_type: "", notes: "", non_working: null,
+               is_extra_row: 1, history_count: null,
                pms: [], crews: [], _new: true };
     }
 
@@ -220,7 +227,8 @@ export async function schedulePage(routeFn) {
       // module (same as assignment.js + assignment-panel.js) — no forked copy.
       // Read-only mode renders a plain label list instead of the editor.
       const crewBox = canEdit
-        ? crewEditorBodyHtml(bundle, ln.crews, `schm-crewprim-${i}`)
+        ? crewEditorBodyHtml(bundle, ln.crews, `schm-crewprim-${i}`,
+            { start: ln.start_date, end: ln.end_date, overage: ln.overage_days })
         : `<div class="schm-boxhead">Crews — company first, lead optional</div>`
           + ((ln.crews || []).map((e) => `
             <div class="schm-pickrow"><span>${escapeHtml(entryLabel(bundle, e))}${e.slot_code ? ` (${escapeHtml(e.slot_code)})` : ""}${e.is_primary ? ` <span class="text-black/40">· primary</span>` : ""}</span></div>`).join("")
@@ -252,6 +260,8 @@ export async function schedulePage(routeFn) {
               <input type="date" class="input text-xs py-1.5" data-m-f="end_date" data-i="${i}" value="${escapeHtml(ln.end_date)}" ${dis}/></div>
             <div><span class="schm-l">Overage days</span>
               <input type="number" min="0" step="1" class="input text-xs py-1.5" data-m-f="overage_days" data-i="${i}" value="${ln.overage_days || 0}" ${dis}/></div>
+            <div><span class="schm-l">Days off</span>
+              <button type="button" class="nwd-btn" data-m-nwd="${i}" title="Non-working days (weekends off / specific dates)" ${dis}>${nonWorkingButtonLabel(ln.non_working)}</button></div>
             <div><span class="schm-l">Travel days</span>
               <select class="input text-xs py-1.5" data-m-f="travel_days" data-i="${i}" ${dis}>
                 ${MODAL_TRAVEL_OPTIONS.map(([v, l]) => `<option value="${v}" ${Number(ln.travel_days || 0) === v ? "selected" : ""}>${l}</option>`).join("")}
@@ -308,6 +318,8 @@ export async function schedulePage(routeFn) {
         overage_days: Number(ln.overage_days) || 0,
         equipment_type: ln.equipment_type || null,
         notes: ln.notes || null,
+        // 0062: non-working days ride the same payload (null = none).
+        non_working: ln.non_working || null,
         project_manager_ids: (ln.pms || []).map((x) => Number(x.project_manager_id)),
         primary_project_manager_id: (ln.pms || []).find((x) => x.is_primary)?.project_manager_id || null,
         // CR5 B1 de-fork: the exact same v2 + legacy dual-write crew block the
@@ -349,6 +361,24 @@ export async function schedulePage(routeFn) {
       if (e.target.closest("[data-m-addline]")) {
         lines.push(blankLine());
         renderModal();
+        return;
+      }
+
+      // 0062: "Days off" popover — edits the draft; the line's Save button
+      // ships it in the normal payload. NO auto-overage (text hint only).
+      const nwdBtn = e.target.closest("[data-m-nwd]");
+      if (nwdBtn && canEdit) {
+        const i = Number(nwdBtn.getAttribute("data-m-nwd"));
+        const ln = lines[i];
+        if (!ln) return;
+        openNonWorkingEditor(nwdBtn, {
+          value: ln.non_working,
+          startDate: ln.start_date || "",
+          endDate: ln.end_date || "",
+          overageDays: Number(ln.overage_days) || 0,
+          onApply: (v) => { ln.non_working = v; renderModal(); },
+          onFocusOverage: () => overlay.querySelector(`[data-m-f="overage_days"][data-i="${i}"]`)?.focus(),
+        });
         return;
       }
 
@@ -434,6 +464,20 @@ export async function schedulePage(routeFn) {
 
     const crews = data.crews || [];
     const assignments = data.assignments || [];
+    // 0063 CREW TIME-OFF: rows overlapping the visible window, grouped per
+    // company — rendered as a grey "Unavailable" block row under the company
+    // (visible even when the company has no project bars this month).
+    const timeOff = data.time_off || [];
+    const toByCompany = new Map();
+    for (const t of timeOff) {
+      const k = String(t.company_id);
+      if (!toByCompany.has(k)) toByCompany.set(k, []);
+      toByCompany.get(k).push(t);
+    }
+    // Quick-add is for admin/teams-capable users only (same holders as the
+    // Teams page's Work Crews editing); hidden otherwise.
+    let canTimeOff = false;
+    try { await fetchMe(); canTimeOff = hasCapability("page.teams"); } catch { /* hidden */ }
 
     // --- PM initials -> color map
     function pmInitialsFromRecord(pm) {
@@ -545,6 +589,13 @@ export async function schedulePage(routeFn) {
 
       const equipmentSuffix = a.equipment_type ? ` (${a.equipment_type})` : "";
 
+      // 0062: non-working days INSIDE the project bar render as cellType
+      // "dayoff" (grey hatched). weekends_off greys Sat/Sun within
+      // start..true-end; listed dates grey wherever they fall in the bar —
+      // the project/overage day loops below are the bar, travel stays travel.
+      const nw = a.non_working || null;
+      const offDay = (d) => isNonWorkingYmd(nw, ymd(d));
+
       // Tooltip "Crews": the LEAD NAME when set, else "JR1 — lead not
       // assigned yet" (Jason decision b); "— needs crew" for crewless rows.
       const crewsDisplay = needsCrew
@@ -569,6 +620,7 @@ export async function schedulePage(routeFn) {
         overage_days: Number(a.overage_days || 0),
         equipment_type: a.equipment_type || "",
         notes: a.notes || "",
+        non_working: nw,
       };
 
       for (const entry of entries) {
@@ -595,15 +647,16 @@ export async function schedulePage(routeFn) {
           d.setDate(d.getDate() + 1)
         ) {
           if (d >= monthStart && d <= monthEnd) {
-            put(ymd(d), { ...baseItem, cellType: "project", leadTbd });
+            put(ymd(d), { ...baseItem, cellType: offDay(d) ? "dayoff" : "project", leadTbd });
           }
         }
 
-        // Overage days (after end)
+        // Overage days (after end) — a non-working day inside the overage
+        // span also greys (day off wins over the orange overage cell).
         for (let i = 1; i <= overageDays; i++) {
           const d = addDays(end, i);
           if (d >= monthStart && d <= monthEnd) {
-            put(ymd(d), { ...baseItem, cellType: "overage", leadTbd });
+            put(ymd(d), { ...baseItem, cellType: offDay(d) ? "dayoff" : "overage", leadTbd });
           }
         }
 
@@ -625,7 +678,7 @@ export async function schedulePage(routeFn) {
       const n = Number(slot.slice(prefix.length));
       return Number.isFinite(n) ? n : 9998;
     }
-    const rowList = [];   // {key, label, companyName}
+    const rowList = [];   // {key, label, companyId, companyName}
     for (const p of parentsSorted) {
       const prefix = p.code || "";
       // CR5 A1: effective capacity — explicit override when set (0 honored),
@@ -642,10 +695,39 @@ export async function schedulePage(routeFn) {
         const key = `${p.id}|${s}`;
         const hasItems = map.has(key) && [...map.get(key).values()].some(arr => arr.length);
         if (state.crewView !== "all" && !hasItems) continue;
-        rowList.push({ key, label: s === "—" ? `${prefix || p.name}·?` : s, companyName: p.name });
+        rowList.push({ key, label: s === "—" ? `${prefix || p.name}·?` : s, companyId: p.id, companyName: p.name });
       }
     }
     const visibleCrews = rowList;
+
+    // 0063: the grey "Unavailable" block row for one company + one week —
+    // empty string when none of the company's time-off touches the week.
+    // Label on each block: "<company or lead> — time off: <reason>".
+    function timeOffRowHtml(p, week) {
+      const entries = toByCompany.get(String(p.id)) || [];
+      if (!entries.length) return "";
+      const dayHits = week.map(d => {
+        const ds = ymd(d);
+        return entries.filter(t => t.start_date <= ds && t.end_date >= ds);
+      });
+      if (!dayHits.some(h => h.length)) return "";
+      const tds = dayHits.map(hits => {
+        if (!hits.length) return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top"></td>`;
+        const html = hits.map(t => {
+          const label = `${t.label || p.name} — time off${t.reason ? `: ${t.reason}` : ""}`;
+          return `
+            <div class="nwd-cell mb-px" title="${escapeHtml(label)}">
+              <div class="text-[10px] leading-tight font-semibold nwd-cell-label break-words">${escapeHtml(label)}</div>
+            </div>`;
+        }).join("");
+        return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top">${html}</td>`;
+      }).join("");
+      return `
+        <tr>
+          <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top" style="color:#4b5563;" title="${escapeHtml(p.name)} — crew time off">Off</td>
+          ${tds}
+        </tr>`;
+    }
 
     // Build the fixed day-of-week header row (Mon–Sun)
     const dayHeaderRow = `
@@ -663,6 +745,7 @@ export async function schedulePage(routeFn) {
       const html = items.map(it => {
         const isTravel  = it.cellType === "travel";
         const isOverage = it.cellType === "overage";
+        const isDayoff  = it.cellType === "dayoff";   // 0062: non-working day
 
         // 👉 NEW: detect if this is the project's START DATE
         const isStartDate = it.start_date === ymd(currentDate);
@@ -675,6 +758,9 @@ export async function schedulePage(routeFn) {
 
         if (isTravel) {
           wrapClass = "bg-gray-300 rounded px-1 py-0.5 text-gray-800 italic text-center font-semibold border border-gray-400";
+        } else if (isDayoff) {
+          // 0062: grey hatched — distinct from overage (orange) and travel.
+          wrapClass = "nwd-cell";
         } else if (it.needsCrew) {
           // CR5 B1: amber "needs crew" bar (start day slightly darker).
           wrapClass = isStartDate ? "nc-bar nc-startday" : "nc-bar";
@@ -692,7 +778,7 @@ export async function schedulePage(routeFn) {
         }
 
         const pmList = Array.isArray(it.pms) ? it.pms : [];
-        const pmBadges = (!isTravel && pmList.length)
+        const pmBadges = (!isTravel && !isDayoff && pmList.length)
           ? pmList.map(pm => {
               const color = pmColorByInitials.get(pm) || null;
               if (!color) {
@@ -728,12 +814,14 @@ export async function schedulePage(routeFn) {
           overage_days: Number(it.overage_days || 0),
           equipment_type: it.equipment_type || "",
           notes: it.notes || "",
+          non_working: it.non_working || null,
+          dayoff: isDayoff,
         }));
 
         return `
           <div class="flex flex-col gap-px ${wrapClass} mb-px">
             ${pmBadges ? `<div class="flex flex-wrap gap-px">${pmBadges}</div>` : ""}
-            <div class="text-[10px] leading-tight font-semibold ${isTravel ? "text-center" : "cursor-pointer hover:underline"} break-words"
+            <div class="text-[10px] leading-tight font-semibold ${isTravel ? "text-center" : "cursor-pointer hover:underline"} ${isDayoff ? "nwd-cell-label" : ""} break-words"
               ${isTravel ? "" : `data-proj-tip="${tip}" data-proj-open="${escapeHtml(String(it.qbo_customer_id ?? ""))}" data-proj-pname="${escapeHtml(it.project_name_raw)}"`}>
               ${escapeHtml(it.project)}${tbdChip}${ncChip}
             </div>
@@ -745,7 +833,7 @@ export async function schedulePage(routeFn) {
     }
 
     // Build week blocks
-    const weeksHtml = weeks.map(week => {
+    const weeksHtml = weeks.map((week, weekIdx) => {
       // Week label row: show date numbers for each day
       const dateNumbers = week.map(d => {
         const isCurrentMonth = d.getMonth() === state.month;
@@ -787,29 +875,42 @@ export async function schedulePage(routeFn) {
           </tr>`;
       }
 
-      if (visibleCrews.length === 0) {
-        return dateRow + ncRow + (ncRow ? "" : `
+      // 0063: rows stay grouped per company (rowList order already is) so the
+      // grey time-off row can sit under that company's slot rows — and render
+      // even when the company has no visible project bars this month. The
+      // "+ time off" quick-add sits under the company's first slot label in
+      // the month's FIRST week block (admin/teams-capable users only).
+      const crewRows = parentsSorted.map(p => {
+        const companyRows = visibleCrews.filter(c => String(c.companyId) === String(p.id));
+        const rowsHtml = companyRows.map((c, ci) => {
+          const inner = map.get(c.key) || new Map();
+
+          const tds = week.map(d => {
+            const items = inner.get(ymd(d)) || [];
+            return renderAssignmentCell(items, d);
+          }).join("");
+
+          const addBtn = (canTimeOff && ci === 0 && weekIdx === 0)
+            ? `<div><button type="button" class="cto-add" data-cto-add="${p.id}" data-cto-name="${escapeHtml(p.name)}" title="Add time off — ${escapeHtml(p.name)}">+ time off</button></div>`
+            : "";
+
+          return `
+            <tr>
+              <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top" title="${escapeHtml(c.companyName || "")}">${escapeHtml(c.label)}${addBtn}</td>
+              ${tds}
+            </tr>
+          `;
+        }).join("");
+        return rowsHtml + timeOffRowHtml(p, week);
+      }).join("");
+
+      if (!crewRows && !ncRow) {
+        return dateRow + `
           <tr>
             <td class="text-[10px] text-black/40 px-1 py-2 border-b border-black/10" colspan="8">No assignments this week.</td>
           </tr>
-        `);
-      }
-
-      const crewRows = visibleCrews.map(c => {
-        const inner = map.get(c.key) || new Map();
-
-        const tds = week.map(d => {
-          const items = inner.get(ymd(d)) || [];
-          return renderAssignmentCell(items, d);
-        }).join("");
-
-        return `
-          <tr>
-            <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top" title="${escapeHtml(c.companyName || "")}">${escapeHtml(c.label)}</td>
-            ${tds}
-          </tr>
         `;
-      }).join("");
+      }
 
       return dateRow + ncRow + crewRows;
     }).join("");
@@ -826,7 +927,7 @@ export async function schedulePage(routeFn) {
               <div class="text-base font-extrabold">Schedule</div>
               <div class="text-xs text-black/60">Month view (Mon–Sun) by company crew slot (JR1…) ·
                 <span style="display:inline-block;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:0 2px;font-size:8px;font-weight:800;vertical-align:middle;">TBD</span>
-                = lead not assigned yet · click a project to view/edit its assignment</div>
+                = lead not assigned yet · <span class="nwd-legend"></span> = day off / crew time off · click a project to view/edit its assignment</div>
             </div>
             <div class="flex items-center gap-2 flex-wrap justify-end">
               <div class="text-xs font-semibold text-black/60 whitespace-nowrap">${escapeHtml(monthLabel)}</div>
@@ -927,6 +1028,7 @@ export async function schedulePage(routeFn) {
         const overage = Number(data.overage_days || 0) ? `${Number(data.overage_days)} day${Number(data.overage_days) === 1 ? "" : "s"}` : "None";
         const equip = data.equipment_type || "None";
         const notes = data.notes || "None";
+        const daysOff = nonWorkingSummary(data.non_working) || "None";
 
         const statusLabel = (s) =>
           s === "not_started"     ? "Not Started"     :
@@ -937,6 +1039,7 @@ export async function schedulePage(routeFn) {
 
         const html = `
           ${data.project ? `<div class="font-extrabold mb-1">${escapeHtml(data.project)}</div>` : ""}
+          ${data.dayoff ? `<div class="font-extrabold mb-1" style="color:#4b5563;">No work — day off</div>` : ""}
           <div class="text-black/70"><span class="font-semibold">Status:</span> ${escapeHtml(statusLabel(data.status))}</div>
           <div class="text-black/70"><span class="font-semibold">PMs:</span> ${escapeHtml(pms)}</div>
           <div class="text-black/70"><span class="font-semibold">Crews:</span> ${escapeHtml(crews)}</div>
@@ -944,6 +1047,7 @@ export async function schedulePage(routeFn) {
           <div class="text-black/70"><span class="font-semibold">Wire:</span> ${escapeHtml(wire)}</div>
           <div class="text-black/70"><span class="font-semibold">Travel:</span> ${escapeHtml(travel)}</div>
           <div class="text-black/70"><span class="font-semibold">Overage:</span> ${escapeHtml(overage)}</div>
+          <div class="text-black/70"><span class="font-semibold">Days off:</span> ${escapeHtml(daysOff)}</div>
           <div class="text-black/70"><span class="font-semibold">Equip:</span> ${escapeHtml(equip)}</div>
           <div class="text-black/70 mt-1"><span class="font-semibold">Notes:</span> ${escapeHtml(notes)}</div>
         `;
@@ -967,6 +1071,14 @@ export async function schedulePage(routeFn) {
       scrollHost.scrollLeft = prevScroll.left;
     }
     scrollHost?.addEventListener("click", (e) => {
+      // 0063: "+ time off" quick-add (admin/teams users only — the button
+      // only renders for them; the server re-checks regardless).
+      const addBtn = e.target.closest("[data-cto-add]");
+      if (addBtn) {
+        openTimeOffQuickAdd(addBtn, addBtn.getAttribute("data-cto-add"),
+                            addBtn.getAttribute("data-cto-name") || "");
+        return;
+      }
       const el = e.target.closest("[data-proj-open]");
       if (!el) return;
       const qid = el.getAttribute("data-proj-open");
@@ -974,6 +1086,68 @@ export async function schedulePage(routeFn) {
       hideTip();
       openAssignModal(qid, el.getAttribute("data-proj-pname") || "");
     });
+
+    // 0063: quick-add mini form — lead select optional (blank = the whole
+    // company is off), start, end, reason → POST /crew-time-off → redraw.
+    function openTimeOffQuickAdd(btn, companyId, companyName) {
+      document.getElementById("ctoPop")?.remove();
+      const leads = children.filter(ch => String(ch.parent_id) === String(companyId));
+      const pop = document.createElement("div");
+      pop.id = "ctoPop";
+      pop.className = "nwd-pop";
+      pop.innerHTML = `
+        <div class="nwd-title">Time off — ${escapeHtml(companyName)}</div>
+        <select data-cto-lead class="input text-xs py-1.5 w-full" style="margin-bottom:6px;">
+          <option value="">Whole company (${escapeHtml(companyName)})</option>
+          ${leads.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("")}
+        </select>
+        <div class="nwd-addrow">
+          <input type="date" data-cto-start class="input text-xs py-1.5" style="flex:1;min-width:0;" />
+          <input type="date" data-cto-end class="input text-xs py-1.5" style="flex:1;min-width:0;" />
+        </div>
+        <input type="text" data-cto-reason maxlength="160" placeholder="Reason (optional)" class="input text-xs py-1.5 w-full" style="margin-bottom:8px;" />
+        <div data-cto-msg style="font-size:11px;color:#b91c1c;min-height:14px;margin-bottom:4px;"></div>
+        <div class="nwd-foot">
+          <button type="button" class="nwd-addbtn" data-cto-cancel="1">Cancel</button>
+          <button type="button" class="btn-primary text-xs px-3 py-1.5" data-cto-save="1">Add</button>
+        </div>`;
+      document.body.appendChild(pop);
+      const r = btn.getBoundingClientRect();
+      pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 310))}px`;
+      pop.style.top = `${Math.max(8, Math.min(r.bottom + 6, window.innerHeight - pop.offsetHeight - 8))}px`;
+      const closePop = () => {
+        pop.remove();
+        document.removeEventListener("mousedown", onOutside, true);
+        document.removeEventListener("keydown", onEsc);
+      };
+      const onOutside = (ev) => { if (!pop.contains(ev.target) && ev.target !== btn) closePop(); };
+      const onEsc = (ev) => { if (ev.key === "Escape") closePop(); };
+      document.addEventListener("mousedown", onOutside, true);
+      document.addEventListener("keydown", onEsc);
+      pop.querySelector("[data-cto-cancel]").addEventListener("click", closePop);
+      pop.querySelector("[data-cto-save]").addEventListener("click", async () => {
+        const msg = pop.querySelector("[data-cto-msg]");
+        const leadVal = pop.querySelector("[data-cto-lead]").value;
+        const s = pop.querySelector("[data-cto-start]").value;
+        const en = pop.querySelector("[data-cto-end]").value;
+        const reason = pop.querySelector("[data-cto-reason]").value.trim();
+        msg.style.color = "#b91c1c";
+        if (!s || !en) { msg.textContent = "Start and end dates are required."; return; }
+        if (en < s) { msg.textContent = "End must be on or after start."; return; }
+        msg.style.color = "#047857"; msg.textContent = "Saving…";
+        try {
+          await api("/crew-time-off", { method: "POST", body: JSON.stringify({
+            crew_id: Number(leadVal || companyId), start_date: s, end_date: en,
+            reason: reason || null }) });
+          closePop();
+          await loadAndRender();
+        } catch (err) {
+          let friendly = err?.message || "Save failed";
+          try { const p2 = JSON.parse(friendly); if (p2 && p2.detail) friendly = String(p2.detail); } catch { /* not JSON */ }
+          msg.style.color = "#b91c1c"; msg.textContent = friendly;
+        }
+      });
+    }
 
     // --- Wire navigation buttons
     document.getElementById("prevMonth").onclick = () => {
