@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.auth import get_current_user
+from app.audit import diff_fields, record_audit
 from app.permissions import has_capability, PAGE_CUSTOMERS
 
 router = APIRouter(prefix="/api/invoices", tags=["invoices"])
@@ -86,6 +87,7 @@ def _ms_out(m):
     return {"id": m["id"], "seq": m["seq"], "label": m["label"], "pct": _num(m["pct"]),
             "invoice_date": str(m["invoice_date"]) if m["invoice_date"] else None,
             "due_date": str(m["due_date"]) if m["due_date"] else None,
+            "expected_paid_date": str(m["expected_paid_date"]) if m.get("expected_paid_date") else None,
             "amount": _num(m["amount"]), "status": m["status"], "note": m["note"]}
 
 
@@ -170,6 +172,10 @@ class MilestonePatch(BaseModel):
     label: Optional[str] = None
     invoice_date: Optional[str] = None
     due_date: Optional[str] = None
+    # Realistic "cash lands" date; blank/NULL falls back to the due date (the
+    # cash-flow forecast uses COALESCE(expected_paid_date, due_date, invoice_date)).
+    expected_paid_date: Optional[str] = None
+    pct: Optional[float] = None
     amount: Optional[float] = None
     status: Optional[str] = None
     note: Optional[str] = None
@@ -186,7 +192,15 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
         sets.append(f"{k} = :{k}")
         params[k] = (v if v != "" else None)
     with engine.begin() as conn:
+        old = conn.execute(text(
+            "SELECT * FROM project_invoice_milestones WHERE id = :id"), {"id": mid}).mappings().first()
+        # The UPDATE bumps updated_at (ON UPDATE CURRENT_TIMESTAMP), which is what
+        # invalidates the cash-flow schedule caches on data edits.
         conn.execute(text(f"UPDATE project_invoice_milestones SET {', '.join(sets)} WHERE id = :id"), params)
+    changes = diff_fields(dict(old) if old else {}, {k: params[k] for k in fields}, list(fields))
+    if changes:
+        record_audit(user, "billing.milestone_update", "invoice_milestone", mid,
+                     (old or {}).get("label"), {"changes": changes})
     return {"ok": True}
 
 

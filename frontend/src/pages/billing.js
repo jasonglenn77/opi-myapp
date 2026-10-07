@@ -35,6 +35,19 @@ function pill(label) {
 }
 const editedChip = (e) => e ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
 
+// Assignment-workflow glue (#4): corner toast after the offer-accept confirm —
+// did the crew land on the project schedule? (shared .doc-toast style)
+const assignToast = (r) => {
+  if (!r || r.assigned === undefined) return;
+  const t = document.createElement("div");
+  t.className = "doc-toast";
+  t.textContent = r.assigned
+    ? "Crew assigned to the project schedule ✓"
+    : (r.assign_error ? "Offer accepted — schedule assignment failed: " + r.assign_error : "Already on the schedule");
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+};
+
 // ── inline-edit cells (patch on change; kind → PATCH endpoint) ───────────────
 const EDIT_BASE = "bg-transparent border border-transparent hover:border-black/20 focus:border-blue-500 focus:bg-white rounded px-1.5 py-1 text-[12.5px] outline-none";
 const eInput = (kind, id, field, value, type = "text", extra = "") => {
@@ -117,6 +130,7 @@ function render(container, entityId, d) {
   const roll = d.crew_rollups || { rollups: [], total_labor: 0, total_paid: 0 };
   const inv = d.invoices, crew = d.crew, exp = d.expenses;
   const crews = d.crews || [];
+  const terms = d.terms || { percents: [35, 35, 30], net_days: 30, label: "35 / 35 / 30 · net-30", custom: false };
   const [stLabel, stCls] = STATUS_PILL[p.operational_status] || [p.operational_status || "—", "text-slate-700 bg-slate-100 border-slate-300"];
   // Crew Model v2 (CR3): assignable choices are COMPANIES ("MTY · Jesse
   // Rosales Jr."); leads stay in the list only so legacy child assignments
@@ -127,6 +141,12 @@ function render(container, entityId, d) {
     const opts = crews.filter((c) => c.is_company || (selected && String(c.id) === String(sel)));
     return `<option value="">Unassigned</option>` + opts.map((c) => `<option value="${c.id}" ${String(c.id) === String(sel) ? "selected" : ""}>${escapeHtml((c.label || c.name) + (c.is_company ? "" : " (legacy lead)"))}</option>`).join("");
   };
+  // Multi-crew split (item #3): estimate_qbo_id -> ordered allocations
+  // [{company_crew_id, name, pct}]. Absent/empty = single-crew mode.
+  const splits = d.crew_splits || {};
+  const splitOf = (eq) => { const s = splits[eq]; return (s && s.length >= 2) ? s : null; };
+  const fmtPct = (p) => (Number(p) === Math.round(Number(p)) ? String(Math.round(Number(p))) : String(Math.round(Number(p) * 100) / 100));
+  const splitLabel = (s) => "Split: " + s.map((a) => `${a.name} ${fmtPct(a.pct)}%`).join(" · ");
   // Crew "paid" = ALL actual Contract-Labor bills (any vendor, incl. crews not
   // registered/assigned in the app) — not just the assigned rollups.
   const crewPaid = crew.paid_qbo != null ? crew.paid_qbo : roll.total_paid;
@@ -191,13 +211,18 @@ function render(container, entityId, d) {
       </summary><div class="px-4 pb-3 overflow-x-auto">${innerHtml}</div></details>`;
 
   // ── INVOICES section: one card per estimate (schedule + actual invoices) ──
-  const milestoneRow = (m) => `
-    <tr class="border-b border-black/5">
+  // % and $ are BOTH editable and linked live (data-estval on the row lets the
+  // input handler recompute the other field before the autosave persists both).
+  // Expected paid = when the cash realistically lands; blank falls back to the
+  // due date (the cash-flow forecast uses expected ?? due ?? invoice).
+  const milestoneRow = (m, estVal) => `
+    <tr class="border-b border-black/5" data-ms-row data-estval="${estVal || 0}">
       <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[m.tier]}${eInput("milestone", m.id, "label", m.label || "Milestone", "text", "font-semibold min-w-[8rem]")}</span></td>
-      <td class="py-1 px-2 tabular-nums text-black/50">${m.pct ? Math.round(m.pct) + "%" : "—"}</td>
+      <td class="py-1 px-2"><span class="flex items-center gap-0.5"><input data-edit="milestone" data-id="${m.id}" data-field="pct" type="number" step="0.1" min="0" value="${m.pct ? Math.round(m.pct * 10) / 10 : ""}" class="${EDIT_BASE} ms-pct-w text-right tabular-nums"><span class="text-black/40 text-[11px]">%</span></span></td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "invoice_date", m.invoice_date, "date")}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "due_date", m.due_date, "date")}</td>
-      <td class="py-1 px-2 text-right">${eInput("milestone", m.id, "amount", Math.round(m.amount), "number", "ml-auto")}</td>
+      <td class="py-1 px-2">${eInput("milestone", m.id, "expected_paid_date", m.expected_paid_date, "date")}</td>
+      <td class="py-1 px-2 text-right"><input data-edit="milestone" data-id="${m.id}" data-field="amount" type="number" step="0.01" value="${m.amount != null ? Math.round(m.amount * 100) / 100 : ""}" class="${EDIT_BASE} w-[6.5rem] text-right tabular-nums font-semibold ml-auto"></td>
       <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(m.status_label)}${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`;
   const invEstimateCard = (a) => {
@@ -205,7 +230,12 @@ function render(container, entityId, d) {
     const statusPill = nr
       ? `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">● Needs review</span>`
       : `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Confirmed</span>`;
-    const rows = a.milestones.map(milestoneRow).join("");
+    const rows = a.milestones.map((m) => milestoneRow(m, a.value)).join("");
+    // Σ reconciliation footer: milestone total vs the estimate's value.
+    const msTotal = a.milestones.reduce((s, m) => s + (m.amount || 0), 0);
+    const msPct = a.value ? Math.round((msTotal / a.value) * 1000) / 10 : 0;
+    const msOff = Math.abs(msTotal - (a.value || 0)) > 0.5;
+    const sumLine = a.milestones.length ? `<div class="px-4 py-1.5 border-t border-black/[0.06] text-[11px] tabular-nums ${msOff ? "text-amber-700 font-semibold bg-amber-50" : "text-black/45"}">Σ ${money2(msTotal)} of ${money2(a.value)} (${msPct}%)${msOff ? " — milestones don't add up to the estimate" : ""}</div>` : "";
     const acts = a.invoice_actuals || [];
     const actTotal = acts.reduce((s, x) => s + (x.amount || 0), 0);
     const actuals = acts.length ? actualsBlock("Actual invoices in QuickBooks", acts.length,
@@ -225,8 +255,9 @@ function render(container, entityId, d) {
         </span>
       </summary>
       <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
-        <th class="py-2 pl-4 pr-3 text-left">Milestone</th><th class="py-2 px-2 text-left">%</th><th class="py-2 px-2 text-left">Invoice</th><th class="py-2 px-2 text-left">Due</th><th class="py-2 px-2 text-right">Amount</th><th class="py-2 pl-2 pr-4 text-right">Status</th>
+        <th class="py-2 pl-4 pr-3 text-left">Milestone</th><th class="py-2 px-2 text-left">%</th><th class="py-2 px-2 text-left">Invoice</th><th class="py-2 px-2 text-left">Due</th><th class="py-2 px-2 text-left">Expected paid</th><th class="py-2 px-2 text-right">Amount</th><th class="py-2 pl-2 pr-4 text-right">Status</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
+      ${sumLine}
       ${a.schedule_id ? addBtn("milestone", a.schedule_id, "Add invoice milestone") : ""}
       ${actuals}
     </details>`;
@@ -250,7 +281,7 @@ function render(container, entityId, d) {
         <div class="px-4 py-2 text-[11px] text-amber-800 bg-amber-50/60 border-t border-amber-200">Contract-Labor paid to crews not assigned to an estimate here. Assign the estimate to one of these crews to fold it into a rollup.</div>
       </div>`;
     }
-    const chips = g.estimates.map((e) => `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}</span>`).join("");
+    const chips = g.estimates.map((e) => `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}${e.split_pct ? ` <span class="text-indigo-700 font-bold">· ${fmtPct(e.split_pct)}% split</span>` : ""}</span>`).join("");
     const insts = g.installments.map((i) => `
       <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60"><span class="flex items-center gap-2">${DOT[i.tier] || ""}${shortDate(i.pay_date)}</span></td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
     const o = g.offer;
@@ -278,28 +309,62 @@ function render(container, entityId, d) {
   };
   const crewEstimateRow = (a) => {
     const complete = p.books_closed;
+    const split = splitOf(a.qbo_id);
+    // the composed schedule for this estimate carries the per-company share
+    // burn (installment "split" entries + "split_summary" subtotals)
+    const compSched = split ? (crew.schedules || []).find((s) => String(s.estimate_qbo_id) === String(a.qbo_id)) : null;
+    const splitByInst = {};
+    if (compSched) (compSched.installments || []).forEach((i) => { if (i.split) splitByInst[i.id] = i.split; });
+    const shareChips = (i) => {
+      const entries = splitByInst[i.id];
+      if (!entries) return "";
+      const chips = entries.map((se) => {
+        const paidUp = (se.remaining || 0) <= 0.5;
+        const cls = paidUp ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-indigo-700 bg-indigo-50 border border-indigo-200";
+        return `<span class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${cls}" title="${escapeHtml(se.name)} · ${fmtPct(se.pct)}% — ${paidUp ? "paid" : money(se.remaining) + " remaining"}">${escapeHtml(se.name)} · ${fmtPct(se.pct)}% · ${money(se.amount)}${paidUp ? " ✓" : ""}</span>`;
+      }).join("");
+      return `<tr class="border-b border-black/5"><td colspan="3" class="pb-1.5 pl-6 pr-4"><span class="flex flex-wrap gap-1.5">${chips}</span></td></tr>`;
+    };
     const insts = (a.crew_installments || []).map((i) => `
-      <tr class="border-b border-black/5">
+      <tr class="${split ? "" : "border-b border-black/5"}">
         <td class="py-1 pl-4 pr-2">${complete ? `<span class="tabular-nums text-black/60">${shortDate(i.pay_date)}</span>` : eInput("installment", i.id, "pay_date", i.pay_date, "date")}</td>
         <td class="py-1 px-2 text-right">${complete ? `<span class="tabular-nums font-semibold">${money(i.amount)}</span>` : eInput("installment", i.id, "amount", Math.round(i.amount), "number", "ml-auto")}</td>
         <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${i.edited ? editedChip(true) : ""}${complete ? "" : delBtn("installment", i.id)}</td>
-      </tr>`).join("");
+      </tr>${split ? shareChips(i) : ""}`).join("");
+    // per-company paid/remaining subtotals (split mode, from the server burn)
+    const splitTotals = (compSched && compSched.split_summary) ? `
+      <div class="px-4 pb-2">
+        ${compSched.split_summary.map((t) => `<div class="flex items-center gap-2 py-1 text-[11.5px] border-t border-black/[0.05]">
+          <span class="font-semibold text-ink-900">${escapeHtml(t.name)}</span>
+          <span class="text-black/45">${fmtPct(t.pct)}%</span>
+          <span class="ml-auto tabular-nums text-black/55">${money(t.scheduled)} scheduled</span>
+          <span class="tabular-nums font-semibold text-emerald-700">${money(t.paid)} paid</span>
+          <span class="tabular-nums font-semibold ${t.remaining > 0.5 ? "text-ink-900" : "text-black/35"}">${money(t.remaining)} remaining</span>
+        </div>`).join("")}
+      </div>` : "";
     // crew assignment lives OUTSIDE the <summary> so clicks reach the delegated
     // handler (a stopPropagation in the summary was swallowing them).
     const assignRow = complete
-      ? `<div class="px-4 py-1.5 text-[11.5px] text-black/55">Crew assigned: <b class="text-ink-900">${escapeHtml(crewName(a.crew_id) || "—")}</b> · books closed <span class="text-black/40">(actual payments may differ — see rollup + Other crews above)</span></div>`
-      : `<div class="px-4 py-1.5 flex items-center gap-1.5 text-[11.5px] flex-wrap"><span class="text-black/55">Crew</span>
-          <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select>
-          <button data-crew-browse data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-blue-600 hover:underline">browse crews →</button></div>`;
+      ? `<div class="px-4 py-1.5 text-[11.5px] text-black/55">Crew assigned: <b class="text-ink-900">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "—"))}</b> · books closed <span class="text-black/40">(actual payments may differ — see rollup + Other crews above)</span></div>`
+      : split
+        ? `<div class="px-4 py-1.5 flex items-center gap-1.5 text-[11.5px] flex-wrap"><span class="text-black/55">Crew</span>
+            <span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">${escapeHtml(splitLabel(split))}</span>
+            <button data-crew-split data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-blue-600 hover:underline">Edit split…</button>
+            <button data-crew-split-revert data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-black/45 hover:underline hover:text-red-600">Revert to single crew</button></div>`
+        : `<div class="px-4 py-1.5 flex items-center gap-1.5 text-[11.5px] flex-wrap"><span class="text-black/55">Crew</span>
+            <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select>
+            <button data-crew-browse data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-blue-600 hover:underline">browse crews →</button>
+            <button data-crew-split data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-indigo-700 hover:underline" title="Split this estimate's crew payments across 2+ crew companies — one schedule, each payment divided by percentage">Split across crews…</button></div>`;
     return `<details class="group/ce border-b border-black/[0.06]">
       <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015] flex-wrap">
         <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-[12.5px] font-semibold text-ink-900">Estimate #${escapeHtml(a.doc || "—")}</span>
         <span class="tabular-nums text-[12px] text-black/55">${money(a.labor)} labor</span>
-        <span class="ml-auto text-[11px] text-black/40">${escapeHtml(crewName(a.crew_id) || "Unassigned")}</span>
+        <span class="ml-auto text-[11px] ${split ? "font-bold text-indigo-700" : "text-black/40"}">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "Unassigned"))}</span>
       </summary>
       ${assignRow}
       <div class="overflow-x-auto px-2 pb-2"><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-4">Pay date (auto bi-weekly)</th><th class="py-1 text-right">Amount</th><th></th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
+      ${splitTotals}
       ${!complete && a.crew_schedule_id ? addBtn("installment", a.crew_schedule_id, "Add payment") : ""}
     </details>`;
   };
@@ -408,7 +473,7 @@ function render(container, entityId, d) {
         <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Customer invoices</span>
-          <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">35 / 35 / 30 · net-30</span>
+          <button data-terms-pill title="Change the invoice terms for this project" class="terms-pill inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">${escapeHtml(terms.label)} ▾</button>
           <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(est.contract_total)}</span>
         </summary>
         <div class="p-3">
@@ -485,6 +550,24 @@ function render(container, entityId, d) {
   };
   const root = container.firstElementChild; // replaced every render → no listener stacking
 
+  // Two-way % ↔ $ on milestone rows: typing in one recomputes the other LIVE
+  // (amount = round(estimate × pct, 2); pct = amount / estimate, 1 decimal).
+  // The change handler below then persists BOTH so stored pct and amount agree.
+  root?.addEventListener("input", (e) => {
+    const el = e.target.closest('[data-edit="milestone"]');
+    if (!el) return;
+    const field = el.getAttribute("data-field");
+    if (field !== "pct" && field !== "amount") return;
+    const row = el.closest("[data-ms-row]");
+    const estVal = Number(row?.getAttribute("data-estval") || 0);
+    if (!row || !estVal) return;
+    const other = row.querySelector(`[data-edit="milestone"][data-field="${field === "pct" ? "amount" : "pct"}"]`);
+    const v = Number(el.value);
+    if (!other || el.value === "" || !isFinite(v)) return;
+    if (field === "pct") other.value = Math.round(estVal * v) / 100;
+    else other.value = Math.round((v / estVal) * 1000) / 10;
+  });
+
   root?.addEventListener("change", async (e) => {
     // per-estimate crew reassignment (the rollup key / split)
     const cr = e.target.closest("[data-assign-crew]");
@@ -503,16 +586,52 @@ function render(container, entityId, d) {
     if (el.type === "number") val = val === "" ? null : Number(val);
     const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}` }[kind];
     if (!url) return;
+    let payload = { [field]: val };
+    // milestone % / $ save BOTH fields (kept in sync live by the input handler)
+    if (kind === "milestone" && (field === "pct" || field === "amount") && val != null) {
+      const estVal = Number(el.closest("[data-ms-row]")?.getAttribute("data-estval") || 0);
+      if (estVal > 0) {
+        payload = field === "pct"
+          ? { pct: Math.round(val * 10) / 10, amount: Math.round(estVal * val) / 100 }
+          : { amount: Math.round(val * 100) / 100, pct: Math.round((val / estVal) * 1000) / 10 };
+      }
+    }
     el.disabled = true;
-    try { await api(url, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); await reload(); }
+    try { await api(url, { method: "PATCH", body: JSON.stringify(payload) }); await reload(); }
     catch (err) { el.disabled = false; alert("Save failed: " + (err?.message || "error")); }
   });
 
   root?.addEventListener("click", async (e) => {
+    // terms pill lives inside a <details> summary — stop the toggle, open editor
+    const tpill = e.target.closest("[data-terms-pill]");
+    if (tpill) {
+      e.preventDefault();
+      e.stopPropagation();
+      openTermsEditor(entityId, d, terms, container);
+      return;
+    }
     const confirmEst = e.target.closest("[data-confirm-est]");
     if (confirmEst) {
       const eq = confirmEst.getAttribute("data-eq");
       post(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/confirm`, "Confirming…", confirmEst);
+      return;
+    }
+    // multi-crew split (item #3): open the allocation editor / revert to single
+    const splitBtn = e.target.closest("[data-crew-split]");
+    if (splitBtn) {
+      const eq = splitBtn.getAttribute("data-eq");
+      openCrewSplitEditor(entityId, eq, crews, splitOf(eq), container);
+      return;
+    }
+    const splitRevert = e.target.closest("[data-crew-split-revert]");
+    if (splitRevert) {
+      if (!confirm("Revert this estimate to a single crew? The payment schedule is kept; the per-company split is removed (the current crew assignment stays).")) return;
+      splitRevert.disabled = true;
+      try {
+        const fresh = await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(splitRevert.getAttribute("data-eq"))}/crew-split`,
+          { method: "POST", body: JSON.stringify({ allocations: [] }) });
+        render(container, entityId, fresh);
+      } catch (err) { splitRevert.disabled = false; alert("Revert failed: " + (err?.message || "error")); }
       return;
     }
     // browse crews (availability picker) for one estimate → assign on pick
@@ -529,7 +648,11 @@ function render(container, entityId, d) {
     const oAccept = e.target.closest("[data-offer-accept]");
     if (oAccept) {
       oAccept.disabled = true;
-      try { await api(`/offers/${oAccept.getAttribute("data-offer-accept")}/respond`, { method: "POST", body: JSON.stringify({ status: "accepted" }) }); await reload(); }
+      try {
+        const r = await api(`/offers/${oAccept.getAttribute("data-offer-accept")}/respond`, { method: "POST", body: JSON.stringify({ status: "accepted" }) });
+        assignToast(r); // #4 glue: "Crew assigned to the project schedule ✓" / "Already on the schedule"
+        await reload();
+      }
       catch (err) { oAccept.disabled = false; alert("Failed: " + (err?.message || "error")); }
       return;
     }
@@ -573,6 +696,181 @@ function render(container, entityId, d) {
       try { await api(url, { method: "DELETE" }); await reload(); }
       catch (err) { alert("Delete failed: " + (err?.message || "error")); }
     }
+  });
+}
+
+// ── invoice-terms editor (0058) ─────────────────────────────────────────────
+// The "35 / 35 / 30 · net-30" pill opens this. Percent split = comma list that
+// must sum to 100 (max 6 parts); net days ≥ 0. Apply PUTs the project terms —
+// the backend re-seeds every estimate's schedule, keeping invoiced/paid
+// milestones and redistributing the remaining value over the new split's
+// remaining lines.
+const TERM_PRESETS = [
+  { p: [35, 35, 30], n: 30 },
+  { p: [50, 50], n: 30 },
+  { p: [20, 20, 60], n: 10 },
+  { p: [100], n: 30 },
+];
+
+function parseTermPercents(s) {
+  const parts = String(s || "").split(",").map((x) => x.trim()).filter((x) => x !== "");
+  if (!parts.length || parts.length > 6) return null;
+  const nums = parts.map(Number);
+  if (nums.some((n) => !isFinite(n) || n <= 0)) return null;
+  const sum = nums.reduce((a, b) => a + b, 0);
+  if (Math.abs(sum - 100) > 0.1) return null;
+  return nums.map((n) => Math.round(n * 100) / 100);
+}
+
+function openTermsEditor(entityId, d, terms, container) {
+  const est = d.estimates || { accepted: [] };
+  const nScheds = est.accepted.filter((a) => a.schedule_id).length;
+  // mirrors the backend lock rule: stored status sent/paid OR QBO burn-down
+  // tier realized/committed (fully paid / fully invoiced)
+  const nKept = est.accepted.reduce((s, a) =>
+    s + (a.milestones || []).filter((m) => m.status === "sent" || m.status === "paid"
+      || m.tier === "realized" || m.tier === "committed").length, 0);
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+    <div class="text-base font-bold text-ink-900 mb-1">Invoice terms</div>
+    <div class="text-[12px] text-black/55 mb-3">Percent split of each estimate's value + days to pay. Applying re-seeds the milestone schedules below; milestones already invoiced or paid are kept.</div>
+    <div class="flex flex-wrap gap-1.5 mb-3">${TERM_PRESETS.map((pr, i) =>
+      `<button data-preset="${i}" class="tp-preset">${pr.p.join(" / ")} · net-${pr.n}</button>`).join("")}</div>
+    <label class="block text-[11px] font-bold uppercase tracking-wide text-black/45 mb-1">Percent split (comma list, sums to 100)</label>
+    <input data-tp-pct type="text" value="${escapeHtml((terms.percents || []).join(", "))}" class="tp-input mb-3" placeholder="35, 35, 30">
+    <label class="block text-[11px] font-bold uppercase tracking-wide text-black/45 mb-1">Net days</label>
+    <input data-tp-net type="number" min="0" step="1" value="${terms.net_days != null ? terms.net_days : 30}" class="tp-input tp-input-sm">
+    <div data-tp-err class="text-[11.5px] text-red-600 font-semibold mt-2 hidden"></div>
+    <div class="mt-4 flex items-center justify-end gap-2">
+      <button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+      <button data-apply class="btn-primary text-sm px-4 py-1.5">Apply to this project</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+  const pctEl = overlay.querySelector("[data-tp-pct]");
+  const netEl = overlay.querySelector("[data-tp-net]");
+  const errEl = overlay.querySelector("[data-tp-err]");
+  overlay.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => {
+    const pr = TERM_PRESETS[Number(b.getAttribute("data-preset"))];
+    pctEl.value = pr.p.join(", ");
+    netEl.value = pr.n;
+    errEl.classList.add("hidden");
+  }));
+  overlay.querySelector("[data-apply]").addEventListener("click", async (e) => {
+    const percents = parseTermPercents(pctEl.value);
+    const netDays = Number(netEl.value);
+    let err = null;
+    if (!percents) err = "Percent split must be 1–6 positive numbers that sum to 100 (±0.1).";
+    else if (!Number.isInteger(netDays) || netDays < 0 || netDays > 365) err = "Net days must be a whole number between 0 and 365.";
+    if (err) { errEl.textContent = err; errEl.classList.remove("hidden"); return; }
+    if (!confirm(`Apply ${percents.join("/")} net-${netDays} to this project?\n\nRe-seed ${nScheds} schedule${nScheds === 1 ? "" : "s"}; ${nKept} invoiced/paid milestone${nKept === 1 ? "" : "s"} kept. Other milestone rows (including hand-edits) are rebuilt on the new split.`)) return;
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = "Applying…";
+    try {
+      const fresh = await api(`/billing/project/${encodeURIComponent(entityId)}/terms`,
+        { method: "PUT", body: JSON.stringify({ percents, net_days: netDays }) });
+      close();
+      render(container, entityId, fresh);
+    } catch (err2) {
+      btn.disabled = false; btn.textContent = "Apply to this project";
+      errEl.textContent = "Save failed: " + (err2?.message || "error");
+      errEl.classList.remove("hidden");
+    }
+  });
+}
+
+// ── multi-crew split editor (item #3) ──────────────────────────────────────
+// Rows of company select + pct; 2+ companies, pcts sum to 100. Save POSTs the
+// allocation list (server re-validates: parents only, sum 100 ±0.1); the
+// header crew becomes the FIRST allocation's company. "Revert to single"
+// posts an empty list — back to today's single-crew behavior.
+function openCrewSplitEditor(entityId, estimateQboId, crews, existing, container) {
+  const companies = (crews || []).filter((c) => c.is_company);
+  const fmtPct = (p) => (Number(p) === Math.round(Number(p)) ? String(Math.round(Number(p))) : String(Math.round(Number(p) * 100) / 100));
+  let rows = (existing && existing.length >= 2)
+    ? existing.map((a) => ({ company_crew_id: a.company_crew_id, pct: a.pct }))
+    : [{ company_crew_id: companies[0] ? companies[0].id : "", pct: 50 },
+       { company_crew_id: companies[1] ? companies[1].id : "", pct: 50 }];
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
+    <div class="text-base font-bold text-ink-900 mb-1">Split crew payments — estimate ${escapeHtml(estimateQboId)}</div>
+    <div class="text-[12px] text-black/55 mb-3">One payment schedule (same dates); each installment's amount is divided across the companies by these percentages. The first company becomes the estimate's primary crew.</div>
+    <div data-split-rows></div>
+    <button data-split-add class="text-[12px] font-semibold text-blue-600 hover:underline mt-1">+ Add company</button>
+    <div data-split-sum class="text-[12px] font-semibold mt-2"></div>
+    <div data-split-err class="text-[11.5px] text-red-600 font-semibold mt-1 hidden"></div>
+    <div class="mt-4 flex items-center justify-end gap-2 flex-wrap">
+      ${existing && existing.length ? `<button data-split-revert class="mr-auto text-[12px] font-semibold text-black/45 hover:text-red-600 hover:underline">Revert to single crew</button>` : ""}
+      <button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
+      <button data-split-save class="btn-primary text-sm px-4 py-1.5">Save split</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+  const rowsEl = overlay.querySelector("[data-split-rows]");
+  const sumEl = overlay.querySelector("[data-split-sum]");
+  const errEl = overlay.querySelector("[data-split-err]");
+  const drawSum = () => {
+    const sum = rows.reduce((s, r) => s + (Number(r.pct) || 0), 0);
+    const ok = Math.abs(sum - 100) <= 0.1;
+    sumEl.innerHTML = `Total: <span class="tabular-nums ${ok ? "text-emerald-700" : "text-amber-700"}">${fmtPct(sum)}%</span>${ok ? " ✓" : " — must sum to 100"}`;
+  };
+  const draw = () => {
+    rowsEl.innerHTML = rows.map((r, i) => `
+      <div class="flex items-center gap-2 py-1.5 border-b border-black/[0.06]">
+        <select data-split-co="${i}" class="flex-1 min-w-0 text-[12.5px] border border-black/15 rounded px-1.5 py-1 bg-white text-ink-900">
+          ${companies.map((c) => `<option value="${c.id}" ${String(c.id) === String(r.company_crew_id) ? "selected" : ""}>${escapeHtml(c.label || c.name)}</option>`).join("")}
+        </select>
+        <input data-split-pct="${i}" type="number" min="0.01" max="100" step="0.01" value="${r.pct}" style="width:5.5rem" class="text-right tabular-nums text-[12.5px] border border-black/15 rounded px-1.5 py-1 bg-white text-ink-900">
+        <span class="text-black/40 text-[11px]">%</span>
+        <button data-split-del="${i}" class="text-black/25 hover:text-red-600 text-[13px]" title="Remove">✕</button>
+      </div>`).join("");
+    drawSum();
+    rowsEl.querySelectorAll("[data-split-co]").forEach((el) => el.addEventListener("change", () => { rows[Number(el.getAttribute("data-split-co"))].company_crew_id = Number(el.value); }));
+    rowsEl.querySelectorAll("[data-split-pct]").forEach((el) => el.addEventListener("input", () => { rows[Number(el.getAttribute("data-split-pct"))].pct = el.value === "" ? 0 : Number(el.value); drawSum(); }));
+    rowsEl.querySelectorAll("[data-split-del]").forEach((el) => el.addEventListener("click", () => { rows.splice(Number(el.getAttribute("data-split-del")), 1); draw(); }));
+  };
+  draw();
+  overlay.querySelector("[data-split-add]").addEventListener("click", () => {
+    const used = new Set(rows.map((r) => String(r.company_crew_id)));
+    const next = companies.find((c) => !used.has(String(c.id)));
+    rows.push({ company_crew_id: next ? next.id : (companies[0] ? companies[0].id : ""), pct: 0 });
+    draw();
+  });
+  const postSplit = async (allocations, btn, busyLabel) => {
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = busyLabel;
+    try {
+      const fresh = await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(estimateQboId)}/crew-split`,
+        { method: "POST", body: JSON.stringify({ allocations }) });
+      close();
+      render(container, entityId, fresh);
+    } catch (err) {
+      btn.disabled = false; btn.textContent = orig;
+      errEl.textContent = "Save failed: " + (err?.message || "error");
+      errEl.classList.remove("hidden");
+    }
+  };
+  overlay.querySelector("[data-split-save]").addEventListener("click", (e) => {
+    const sum = rows.reduce((s, r) => s + (Number(r.pct) || 0), 0);
+    let err = null;
+    if (rows.length < 2) err = "A split needs at least 2 companies (use Revert to go back to one crew).";
+    else if (rows.some((r) => !r.company_crew_id)) err = "Pick a company on every row.";
+    else if (new Set(rows.map((r) => String(r.company_crew_id))).size !== rows.length) err = "Each company may appear only once.";
+    else if (rows.some((r) => !(Number(r.pct) > 0))) err = "Every percentage must be greater than 0.";
+    else if (Math.abs(sum - 100) > 0.1) err = `Percentages must sum to 100 (currently ${fmtPct(sum)}).`;
+    if (err) { errEl.textContent = err; errEl.classList.remove("hidden"); return; }
+    errEl.classList.add("hidden");
+    postSplit(rows.map((r) => ({ company_crew_id: Number(r.company_crew_id), pct: Number(r.pct) })), e.currentTarget, "Saving…");
+  });
+  overlay.querySelector("[data-split-revert]")?.addEventListener("click", (e) => {
+    if (!confirm("Revert this estimate to a single crew? The payment schedule is kept; the per-company split is removed.")) return;
+    postSplit([], e.currentTarget, "Reverting…");
   });
 }
 
@@ -735,8 +1033,11 @@ function buildContribution(inv, crew, exp) {
   inv.milestones.forEach((m) => {
     const ar = Math.max(0, (m.covered || 0) - (m.paid || 0));   // sent, awaiting payment
     const toBill = m.remaining != null ? m.remaining : (m.tier !== "realized" ? m.amount : 0);
-    if (ar > 0.5 && m.due_date) inflow.push({ date: m.due_date.slice(0, 10), amt: ar });
-    if (toBill > 0.5 && m.invoice_date) inflow.push({ date: m.invoice_date.slice(0, 10), amt: toBill });
+    // expected_paid_date (0058) wins when set — the realistic cash-lands date
+    const arDate = m.expected_paid_date || m.due_date;
+    const billDate = m.expected_paid_date || m.invoice_date;
+    if (ar > 0.5 && arDate) inflow.push({ date: arDate.slice(0, 10), amt: ar });
+    if (toBill > 0.5 && billDate) inflow.push({ date: billDate.slice(0, 10), amt: toBill });
   });
   const outflow = [
     ...crew.installments.filter((i) => i.tier !== "realized" && i.pay_date).map((i) => ({ date: i.pay_date.slice(0, 10), amt: i.amount })),

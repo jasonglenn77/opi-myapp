@@ -33,6 +33,7 @@ from sqlalchemy import text, bindparam
 
 from app.db import engine
 from app.auth import get_current_user
+from app.audit import record_audit
 from app.permissions import has_capability, PAGE_CUSTOMERS
 
 from app.invoices.routes import DEFAULT_TERMS, _project_ctx
@@ -95,6 +96,75 @@ def _weekly_remaining_split(estimated, paid, start, end):
     for i in range(1, num + 1):
         amt = base if i < num else round(remaining - base * (num - 1), 2)
         out.append({"seq": i, "week_of": str(span_start + timedelta(days=7 * (i - 1))), "amount": amt})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Project default invoice terms (migration 0058). Stored per project in
+# project_billing_terms — its own table (not on project_invoice_schedules)
+# because schedules are per-estimate and get deleted/recreated by the
+# refresh/rebuild flows, which would lose the choice. No row / NULL fields
+# = the built-in 35/35/30 net-30.
+# ---------------------------------------------------------------------------
+DEFAULT_PERCENTS = [35.0, 35.0, 30.0]
+DEFAULT_NET_DAYS = 30
+MAX_TERM_PARTS = 6
+
+
+def _parse_percents(s):
+    """'35,35,30' -> [35.0, 35.0, 30.0], or None if invalid: 1-6 parts, each
+    > 0, summing to 100 (±0.1)."""
+    try:
+        parts = [round(float(p), 2) for p in str(s).split(",") if str(p).strip() != ""]
+    except (TypeError, ValueError):
+        return None
+    if not parts or len(parts) > MAX_TERM_PARTS:
+        return None
+    if any(p <= 0 for p in parts):
+        return None
+    if abs(sum(parts) - 100.0) > 0.1:
+        return None
+    return parts
+
+
+def _project_terms(conn, entity_id):
+    """The project's saved default terms, else the built-in 35/35/30 net-30."""
+    row = conn.execute(text(
+        "SELECT terms_percents, terms_net_days FROM project_billing_terms WHERE entity_id = :e"),
+        {"e": entity_id}).mappings().first()
+    percents = _parse_percents(row["terms_percents"]) if row and row["terms_percents"] else None
+    net_days = int(row["terms_net_days"]) if row and row["terms_net_days"] is not None else None
+    return {
+        "percents": percents or list(DEFAULT_PERCENTS),
+        "net_days": net_days if net_days is not None else DEFAULT_NET_DAYS,
+        "custom": bool(percents or net_days is not None),
+    }
+
+
+def _fmt_pct(p):
+    return str(int(p)) if float(p) == int(p) else str(round(float(p), 2))
+
+
+def _terms_label(percents, net_days):
+    return " / ".join(_fmt_pct(p) for p in percents) + f" · net-{net_days}"
+
+
+def _terms_lines(percents):
+    """Milestone blueprint for a percent split: (seq, label, pct, date-key).
+    First line bills at PO, last at completion, middles at start — mirroring
+    DEFAULT_TERMS semantics for any number of parts."""
+    n = len(percents)
+    out = []
+    for i, p in enumerate(percents):
+        if n == 1:
+            out.append((1, "Payment in full (at PO)", p, "po"))
+        elif i == 0:
+            out.append((1, "Deposit (at PO)", p, "po"))
+        elif i == n - 1:
+            out.append((n, "Final (at completion)", p, "end"))
+        else:
+            label = "Mobilization (at start)" if (n == 3 and i == 1) else f"Progress {i} (at start)"
+            out.append((i + 1, label, p, "start"))
     return out
 
 
@@ -231,7 +301,7 @@ def _estimates_for_billing(conn, entity_id):
     and its billing header (assigned crew + confirmed), if any."""
     rows = conn.execute(text("""
         SELECT t.qbo_id, t.doc_number, t.txn_date, t.total_amt AS value,
-               ROUND(SUM(CASE WHEN sl.item_name='Contract Labor'
+               ROUND(SUM(CASE WHEN sl.item_name LIKE 'Contract Labor%'
                               THEN COALESCE(sl.cost_amount, sl.amount) ELSE 0 END), 2) AS labor,
                JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) AS txn_status
         FROM qbo_transactions t
@@ -311,11 +381,135 @@ def _ensure_estimate_billing(conn, entity_id, default_crew_id):
                    "c": default_crew_id, "cf": 1 if initial_setup else 0})
 
 
+def _single_assigned_company(conn, entity_id):
+    """The ONE company assigned on the project's schedule, or None. Companies are
+    resolved the Crew-Model-v2 way (COALESCE(company_id, parent, self)) across
+    active assignment rows on non-canceled items. More than one distinct
+    company, or none → None."""
+    rows = conn.execute(text("""
+        SELECT DISTINCT COALESCE(swc.company_id, wc.parent_id, wc.id) AS company_id
+        FROM project_schedule_item_work_crews swc
+        JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
+        JOIN projects p ON p.id = psi.project_id
+        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+        JOIN work_crews wc ON wc.id = swc.work_crew_id
+        WHERE qc.qbo_id = :e AND swc.unassigned_at IS NULL
+          AND COALESCE(psi.status, '') <> 'canceled'
+    """), {"e": entity_id}).scalars().all()
+    ids = {int(c) for c in rows if c is not None}
+    return ids.pop() if len(ids) == 1 else None
+
+
+def _apply_assignment_default_crew(conn, entity_id):
+    """Assignment-workflow glue (Jason item #4, 2026-10-06): an estimate whose
+    billing header has NO crew chosen defaults to the project's assigned company
+    when EXACTLY ONE company is assigned on the schedule. PERSISTED here in the
+    bundle's ensure pass (both tables, mirroring assign_estimate_crew) so the
+    rollups/schedules group correctly immediately; the office can still override
+    via the existing crew select. Multiple companies or none → left unset."""
+    has_null = conn.execute(text(
+        "SELECT 1 FROM project_estimate_billing WHERE entity_id=:e AND crew_id IS NULL LIMIT 1"),
+        {"e": entity_id}).scalar()
+    if not has_null:
+        return
+    company_id = _single_assigned_company(conn, entity_id)
+    if not company_id:
+        return
+    conn.execute(text(
+        "UPDATE project_estimate_billing SET crew_id=:c WHERE entity_id=:e AND crew_id IS NULL"),
+        {"c": company_id, "e": entity_id})
+    conn.execute(text(
+        "UPDATE project_payment_schedules SET crew_id=:c WHERE entity_id=:e AND crew_id IS NULL"),
+        {"c": company_id, "e": entity_id})
+
+
+# ---------------------------------------------------------------------------
+# Multi-crew payment split (Jason item #3, 2026-10-06).
+#
+# project_estimate_crew_allocations (migration 0059): zero rows for an
+# (entity, estimate) = single-crew mode (today's behavior — the billing
+# header's crew_id governs); 2+ rows (pcts sum 100 ±0.1) = split mode. The
+# payment schedule itself is UNTOUCHED (one installment row per date at the
+# full amount); the compose layer carries per-company shares.
+#
+# BURN-DOWN RULE (split mode): company-level. Each company's shares across
+# the project's split installments (pay-date order) burn down against that
+# company's actual Contract-Labor bills on this project (bill vendor →
+# company via work_crews.vendor_qbo_id on PARENT rows — the same mapping the
+# crew-consistency check uses). Totals always reconcile: the shares of an
+# installment sum to its full amount (the last allocation absorbs rounding),
+# so project-level figures are unchanged by a split. The project-wide
+# installment tier (and the cash-flow forecast riding on it) keeps using the
+# existing project-level burn — split changes neither amounts nor dates, so
+# the forecast's crew outflow events are identical pre/post split.
+# ---------------------------------------------------------------------------
+def _crew_splits(conn, entity_id):
+    """estimate_qbo_id -> ordered allocations [{company_crew_id, name, pct,
+    sort_order}] for this project. Empty dict when nothing is split."""
+    rows = conn.execute(text("""
+        SELECT a.estimate_qbo_id, a.company_crew_id, a.pct, a.sort_order,
+               wc.name AS company_name
+        FROM project_estimate_crew_allocations a
+        JOIN work_crews wc ON wc.id = a.company_crew_id
+        WHERE a.entity_id = :e
+        ORDER BY a.estimate_qbo_id, a.sort_order, a.id
+    """), {"e": entity_id}).mappings().all()
+    out = {}
+    for r in rows:
+        out.setdefault(str(r["estimate_qbo_id"]), []).append({
+            "company_crew_id": int(r["company_crew_id"]),
+            "name": r["company_name"],
+            "pct": float(r["pct"] or 0),
+            "sort_order": int(r["sort_order"] or 0),
+        })
+    return out
+
+
+def _split_shares(amount, allocs):
+    """Split one installment amount per the allocation pcts. Every company but
+    the last gets round(amount·pct/100, 2); the LAST allocation absorbs the
+    rounding so the shares always sum exactly to the amount."""
+    amount = round(float(amount or 0), 2)
+    shares, acc = [], 0.0
+    for idx, a in enumerate(allocs):
+        if idx < len(allocs) - 1:
+            s = round(amount * a["pct"] / 100.0, 2)
+            acc = round(acc + s, 2)
+        else:
+            s = round(amount - acc, 2)
+        shares.append(s)
+    return shares
+
+
+def _company_labor_paid(conn, entity_id):
+    """Actual Contract-Labor paid on this project per crew COMPANY:
+    {company_id: paid}. Bill vendors map to companies via
+    work_crews.vendor_qbo_id on parent rows (unmapped vendors are excluded —
+    they can't be credited to any allocation)."""
+    rows = conn.execute(text("""
+        SELECT w.id AS company_id, ROUND(SUM(l.amount), 2) AS amt
+        FROM qbo_transaction_lines l
+        JOIN qbo_transactions t ON t.id = l.transaction_id
+        JOIN work_crews w
+          ON w.vendor_qbo_id = t.vendor_qbo_id AND w.parent_id IS NULL
+        WHERE l.line_customer_qbo_id = :e AND t.entity_type = 'Bill'
+          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
+        GROUP BY w.id
+    """), {"e": entity_id}).mappings().all()
+    return {int(r["company_id"]): float(r["amt"] or 0) for r in rows}
+
+
 def _ensure_invoice_schedules(conn, entity_id, ctx):
-    """One 35/35/30 net-30 invoice schedule per accepted estimate (create-if-missing)."""
+    """One invoice schedule per accepted estimate (create-if-missing), seeded
+    from the project's saved default terms (built-in 35/35/30 net-30 when none
+    were chosen) — so estimates that convert AFTER the office picked custom
+    terms arrive on the right split automatically."""
     start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
     date_for = {"po": start, "start": start, "end": end}
-    net_days = 30
+    t = _project_terms(conn, entity_id)
+    net_days = t["net_days"]
+    lines = _terms_lines(t["percents"])
+    terms = f"{' / '.join(_fmt_pct(p) + '%' for p in t['percents'])}, net-{net_days}"
     for e in _estimates_for_billing(conn, entity_id):
         if e["status"] != "accepted" or e["value"] <= 0:
             continue
@@ -325,15 +519,14 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
         if exists:
             continue
         contract = e["value"]
-        terms = f"35% PO / 35% start / 30% end, net-{net_days}"
         sid = conn.execute(text("""
             INSERT INTO project_invoice_schedules
               (entity_id, estimate_qbo_id, estimate_doc_number, contract_value, terms_note, net_days)
             VALUES (:e, :eq, :dn, :c, :t, :n)
         """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"],
                "c": contract, "t": terms, "n": net_days}).lastrowid
-        n, acc = len(DEFAULT_TERMS), 0.0
-        for idx, (seq, label, pct, key) in enumerate(DEFAULT_TERMS):
+        n, acc = len(lines), 0.0
+        for idx, (seq, label, pct, key) in enumerate(lines):
             amt = round(contract * pct / 100.0, 2) if idx < n - 1 else round(contract - acc, 2)
             if idx < n - 1:
                 acc += amt
@@ -369,7 +562,8 @@ def _compose_estimates(conn, entity_id):
         "SELECT id, estimate_qbo_id FROM project_invoice_schedules WHERE entity_id=:e AND estimate_qbo_id IS NOT NULL"),
         {"e": entity_id}).mappings().all():
         ms = conn.execute(text("""
-            SELECT id, seq, label, pct, invoice_date, due_date, amount, status, note, edited
+            SELECT id, seq, label, pct, invoice_date, due_date, expected_paid_date,
+                   amount, status, note, edited
             FROM project_invoice_milestones WHERE schedule_id=:sid ORDER BY seq, id
         """), {"sid": s["id"]}).mappings().all()
         scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
@@ -405,9 +599,10 @@ def _compose_estimates(conn, entity_id):
             "id": m["id"], "seq": m["seq"], "label": m["label"], "pct": float(m["pct"] or 0),
             "invoice_date": str(m["invoice_date"]) if m["invoice_date"] else None,
             "due_date": str(m["due_date"]) if m["due_date"] else None,
+            "expected_paid_date": str(m["expected_paid_date"]) if m["expected_paid_date"] else None,
             "amount": float(m["amount"] or 0), "tier": t["tier"], "edited": bool(m["edited"]),
             "covered": t["covered"], "paid": t["paid"], "remaining": t["remaining"],
-            "status_label": t["label"],
+            "status_label": t["label"], "status": m["status"],
         }
 
     unlinked = actuals_by_est.get("", [])
@@ -514,7 +709,7 @@ def _crew_labor_bills(conn, entity_id):
                ROUND(SUM(l.amount), 2) AS amt
         FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
         WHERE l.line_customer_qbo_id = :e AND t.entity_type = 'Bill'
-          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
         GROUP BY t.id, t.txn_date, t.doc_number, vendor
         ORDER BY t.txn_date
     """), {"e": entity_id}).mappings().all()
@@ -693,6 +888,7 @@ def _compose_invoices(conn, entity_id, books_closed):
             "id": m["id"], "seq": m["seq"], "label": m["label"], "pct": float(m["pct"] or 0),
             "invoice_date": str(m["invoice_date"]) if m["invoice_date"] else None,
             "due_date": str(m["due_date"]) if m["due_date"] else None,
+            "expected_paid_date": str(m["expected_paid_date"]) if m["expected_paid_date"] else None,
             "amount": amt, "tier": tier, "status_label": label, "edited": bool(m["edited"]),
         })
 
@@ -726,6 +922,37 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
     labor_bills = _crew_labor_bills(conn, entity_id)   # all crews, item-based
     paid = round(sum(b["amount"] for b in labor_bills), 2)
 
+    # Multi-crew split (item #3): per-company shares + a COMPANY-LEVEL burn
+    # for split estimates. Installment rows stay one-per-date at the full
+    # amount; each gains "split":[{company_id,name,pct,amount,paid,remaining}]
+    # and each split schedule a per-company "split_summary". Single-crew
+    # estimates are untouched (no keys added).
+    splits = _crew_splits(conn, entity_id)
+    split_by_inst = {}            # installment id -> [share entries]
+    if splits:
+        company_paid = _company_labor_paid(conn, entity_id)
+        split_insts = []          # (inst, allocs) across ALL split schedules
+        for eq, (s, insts) in sched_map.items():
+            allocs = splits.get(str(eq))
+            if allocs and len(allocs) >= 2:
+                for i in insts:
+                    split_insts.append((i, allocs))
+        split_insts.sort(key=lambda x: (x[0].get("pay_date") or "9999", x[0].get("id") or 0))
+        cum_by_company = {}
+        for (i, allocs) in split_insts:
+            shares = _split_shares(i.get("amount"), allocs)
+            entries = []
+            for a, share in zip(allocs, shares):
+                cid = a["company_crew_id"]
+                cum = cum_by_company.get(cid, 0.0)
+                covered = min(share, max(0.0, company_paid.get(cid, 0.0) - cum))
+                cum_by_company[cid] = round(cum + share, 2)
+                entries.append({"company_id": cid, "name": a["name"],
+                                "pct": a["pct"], "amount": share,
+                                "paid": round(covered, 2),
+                                "remaining": round(share - covered, 2)})
+            split_by_inst[i["id"]] = entries
+
     # Sum installments that land on the same pay date across all of the project's
     # schedules (main estimate + change orders) — the cash view cares about total
     # crew cash per date, not per estimate.
@@ -746,12 +973,15 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
 
     def _inst_out(i):
         t = tier_by_id.get(i["id"], "scheduled")
-        return {
+        out = {
             "id": i["id"], "seq": i["seq"], "pay_date": i.get("pay_date"),
             "amount": float(i["amount"] or 0), "note": i.get("note"),
             "tier": t, "status_label": "Paid" if t == "realized" else "Scheduled",
             "edited": bool(i.get("edited")),
         }
+        if i["id"] in split_by_inst:
+            out["split"] = split_by_inst[i["id"]]
+        return out
 
     crew_name = None
     schedules, flat_lines = [], []
@@ -762,7 +992,7 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
             crew_name = crew_name or s["crew_name"]
         out_insts = [_inst_out(i) for i in insts]
         flat_lines.extend(out_insts)
-        schedules.append({
+        sched_out = {
             "schedule_id": s["id"], "estimate_qbo_id": s.get("estimate_qbo_id"),
             "estimate_doc_number": s.get("estimate_doc_number"),
             "crew_id": s.get("crew_id"), "crew_name": s.get("crew_name"),
@@ -770,7 +1000,23 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
             "contract_labor": s.get("contract_labor"),
             "installments": out_insts,
             "subtotal": round(sum(x["amount"] for x in out_insts), 2),
-        })
+        }
+        # split mode: per-company subtotals for THIS estimate's schedule
+        allocs = splits.get(str(s.get("estimate_qbo_id"))) if splits else None
+        if allocs and len(allocs) >= 2:
+            summary = {a["company_crew_id"]: {"company_id": a["company_crew_id"],
+                                              "name": a["name"], "pct": a["pct"],
+                                              "scheduled": 0.0, "paid": 0.0,
+                                              "remaining": 0.0} for a in allocs}
+            for x in out_insts:
+                for se in x.get("split") or []:
+                    row = summary.get(se["company_id"])
+                    if row:
+                        row["scheduled"] = round(row["scheduled"] + se["amount"], 2)
+                        row["paid"] = round(row["paid"] + se["paid"], 2)
+                        row["remaining"] = round(row["remaining"] + se["remaining"], 2)
+            sched_out["split_summary"] = [summary[a["company_crew_id"]] for a in allocs]
+        schedules.append(sched_out)
 
     if books_closed:
         total = round(paid, 2)          # actual paid is the truth
@@ -839,7 +1085,7 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
                ROUND(SUM(l.amount), 2) AS amt
         FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
         WHERE l.line_customer_qbo_id = :e AND t.entity_type = 'Bill'
-          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+          AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
           AND t.vendor_qbo_id IS NOT NULL
         GROUP BY t.vendor_qbo_id, vendor
     """), {"e": entity_id}).mappings().all()
@@ -852,14 +1098,40 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
     parent_of = {int(r["id"]): (int(r["parent_id"]) if r["parent_id"] is not None else int(r["id"]))
                  for r in conn.execute(text("SELECT id, parent_id FROM work_crews")).mappings().all()}
 
+    # Multi-crew split (item #3): a split estimate contributes a SHARE to each
+    # allocated company's rollup (labor + per-date lumps per the pcts, last
+    # allocation absorbing rounding) instead of landing whole on the header
+    # crew — so each company's rollup burns against ITS OWN vendor's bills and
+    # the totals still sum to the full schedule.
+    splits = _crew_splits(conn, entity_id)
+
     groups = {}
+
+    def _group_for(cid, crew_name):
+        g = groups.setdefault(cid, {"crew_id": cid, "crew_name": crew_name,
+                                    "estimates": [], "labor": 0.0, "by_date": {}, "vid": None})
+        g["vid"] = str(_crew_vendor(conn, cid)) if cid else None
+        return g
+
     for eq, (s, insts) in sched_map.items():
         if not s:
             continue
+        allocs = splits.get(str(eq))
+        if allocs and len(allocs) >= 2:
+            labor_shares = _split_shares(s.get("contract_labor"), allocs)
+            inst_shares = {i["id"]: _split_shares(i.get("amount"), allocs) for i in insts}
+            for idx, a in enumerate(allocs):
+                g = _group_for(a["company_crew_id"], a["name"])
+                g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
+                                       "labor": labor_shares[idx], "split_pct": a["pct"]})
+                g["labor"] = round(g["labor"] + labor_shares[idx], 2)
+                for i in insts:
+                    d = i.get("pay_date")
+                    if d:
+                        g["by_date"][d] = round(g["by_date"].get(d, 0.0) + inst_shares[i["id"]][idx], 2)
+            continue
         cid = s.get("crew_id")
-        g = groups.setdefault(cid, {"crew_id": cid, "crew_name": s.get("crew_name"),
-                                    "estimates": [], "labor": 0.0, "by_date": {}, "vid": None})
-        g["vid"] = str(_crew_vendor(conn, cid)) if cid else None
+        g = _group_for(cid, s.get("crew_name"))
         g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
                                "labor": round(float(s.get("contract_labor") or 0), 2)})
         g["labor"] = round(g["labor"] + float(s.get("contract_labor") or 0), 2)
@@ -873,9 +1145,31 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
     unmatched = {v: a for v, a in paid_by_vid.items() if v not in matched_vids}
     unmatched_total = round(sum(unmatched.values()), 2)
 
+    # A vendor backing SEVERAL rollups (e.g. a split company + another estimate
+    # keyed to that company's lead) is a shared pool: each group draws up to its
+    # scheduled labor, the LAST one absorbs any overage — so total_paid stays
+    # the real vendor total instead of double-counting it per group. A vendor
+    # backing a single rollup keeps today's behavior (full vendor total).
+    vid_members = {}
+    for cid, g in groups.items():
+        if g["vid"]:
+            vid_members.setdefault(g["vid"], []).append(cid)
+    shared_paid = {}
+    for vid, members in vid_members.items():
+        if len(members) < 2:
+            continue
+        pool = paid_by_vid.get(vid, 0.0)
+        for idx, mcid in enumerate(members):
+            take = pool if idx == len(members) - 1 else min(groups[mcid]["labor"], pool)
+            shared_paid[mcid] = round(take, 2)
+            pool = round(pool - take, 2)
+
     out = []
     for cid, g in groups.items():
-        paid = paid_by_vid.get(g["vid"], 0.0) if g["vid"] else 0.0
+        if cid in shared_paid:
+            paid = shared_paid[cid]
+        else:
+            paid = paid_by_vid.get(g["vid"], 0.0) if g["vid"] else 0.0
         if cid is None:               # unassigned rollup absorbs the unmatched cash
             paid = round(paid + unmatched_total, 2)
         g_company = parent_of.get(int(cid)) if cid else None
@@ -1067,6 +1361,7 @@ def regenerate(entity_id: str, force: bool = False, user=Depends(get_current_use
 
         # re-create whatever is now missing (untouched-and-cleared, or brand-new estimate)
         _ensure_estimate_billing(conn, entity_id, _default_crew_for_project(conn, entity_id, meta))
+        _apply_assignment_default_crew(conn, entity_id)   # #4: single assigned company fills blanks
         _ensure_invoice_schedules(conn, entity_id, ctx)
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
@@ -1146,6 +1441,213 @@ def assign_estimate_crew(entity_id: str, estimate_qbo_id: str, body: EstimateCre
     return get_bundle(entity_id, user)
 
 
+class CrewAllocation(BaseModel):
+    company_crew_id: int
+    pct: float
+
+
+class CrewSplitUpdate(BaseModel):
+    allocations: list[CrewAllocation] = []
+
+
+@router.post("/project/{entity_id}/estimate/{estimate_qbo_id}/crew-split")
+@router.put("/project/{entity_id}/estimate/{estimate_qbo_id}/crew-split")
+def set_estimate_crew_split(entity_id: str, estimate_qbo_id: str, body: CrewSplitUpdate,
+                            user=Depends(get_current_user)):
+    """Multi-crew payment split (item #3): opt an estimate's crew payments into
+    a split across 2+ crew COMPANIES. ONE payment schedule (same dates); each
+    installment's amount splits per the allocation pcts at compose time.
+
+    * allocations = 2+ {company_crew_id (a PARENT work_crews row), pct} rows,
+      pcts summing to 100 (±0.1) → split mode. The header crew_id is pointed
+      at the FIRST allocation's company (both billing header and payment
+      schedule, mirroring assign_estimate_crew) so legacy readers keep working.
+    * allocations = [] → revert to single-crew mode: the allocation rows are
+      deleted and the header crew_id is left AS-IS.
+    Audited as billing.crew_split (old → new allocation lists)."""
+    _require(user)
+    allocs = body.allocations or []
+    with engine.begin() as conn:
+        ctx = _project_ctx(conn, entity_id)
+        if not ctx:
+            raise HTTPException(status_code=404, detail="Project not found")
+        hdr = conn.execute(text(
+            "SELECT 1 FROM project_estimate_billing WHERE entity_id=:e AND estimate_qbo_id=:eq"),
+            {"e": entity_id, "eq": estimate_qbo_id}).scalar()
+        if not hdr:
+            raise HTTPException(status_code=404, detail="Estimate billing header not found")
+
+        if allocs:
+            if len(allocs) < 2:
+                raise HTTPException(status_code=422,
+                                    detail="A split needs at least 2 crew companies (send an empty list to revert to single-crew)")
+            ids = [int(a.company_crew_id) for a in allocs]
+            if len(set(ids)) != len(ids):
+                raise HTTPException(status_code=422, detail="Each crew company may appear only once")
+            if any(float(a.pct) <= 0 for a in allocs):
+                raise HTTPException(status_code=422, detail="Every percentage must be greater than 0")
+            if abs(sum(float(a.pct) for a in allocs) - 100.0) > 0.1:
+                raise HTTPException(status_code=422, detail="Percentages must sum to 100 (±0.1)")
+            rows = conn.execute(text(
+                "SELECT id, name, parent_id FROM work_crews WHERE id IN :ids").bindparams(
+                bindparam("ids", expanding=True)), {"ids": ids}).mappings().all()
+            by_id = {int(r["id"]): r for r in rows}
+            bad = [str(i) for i in ids if i not in by_id or by_id[i]["parent_id"] is not None]
+            if bad:
+                raise HTTPException(status_code=422,
+                                    detail="Allocations must point at crew COMPANIES (parent crews); invalid id(s): " + ", ".join(bad))
+
+        old = [{"company_crew_id": a["company_crew_id"], "name": a["name"], "pct": a["pct"]}
+               for a in (_crew_splits(conn, entity_id).get(str(estimate_qbo_id)) or [])]
+        conn.execute(text(
+            "DELETE FROM project_estimate_crew_allocations WHERE entity_id=:e AND estimate_qbo_id=:eq"),
+            {"e": entity_id, "eq": estimate_qbo_id})
+        new = []
+        if allocs:
+            for so, a in enumerate(allocs):
+                conn.execute(text("""
+                    INSERT INTO project_estimate_crew_allocations
+                      (entity_id, estimate_qbo_id, company_crew_id, pct, sort_order)
+                    VALUES (:e, :eq, :c, :p, :so)
+                """), {"e": entity_id, "eq": estimate_qbo_id,
+                       "c": int(a.company_crew_id), "p": round(float(a.pct), 2), "so": so})
+                new.append({"company_crew_id": int(a.company_crew_id),
+                            "name": by_id[int(a.company_crew_id)]["name"],
+                            "pct": round(float(a.pct), 2)})
+            # keep legacy readers working: header crew = the FIRST allocation's
+            # company (same dual update as assign_estimate_crew)
+            first = int(allocs[0].company_crew_id)
+            conn.execute(text(
+                "UPDATE project_estimate_billing SET crew_id=:c WHERE entity_id=:e AND estimate_qbo_id=:eq"),
+                {"c": first, "e": entity_id, "eq": estimate_qbo_id})
+            conn.execute(text(
+                "UPDATE project_payment_schedules SET crew_id=:c WHERE entity_id=:e AND estimate_qbo_id=:eq"),
+                {"c": first, "e": entity_id, "eq": estimate_qbo_id})
+    record_audit(user, "billing.crew_split", "project", entity_id, ctx["name"], {
+        "estimate_qbo_id": estimate_qbo_id,
+        "changes": {"allocations": [old, new]},
+    })
+    return get_bundle(entity_id, user)
+
+
+class TermsUpdate(BaseModel):
+    percents: list[float]
+    net_days: int
+
+
+@router.put("/project/{entity_id}/terms")
+def update_terms(entity_id: str, body: TermsUpdate, user=Depends(get_current_user)):
+    """Save the project's default invoice terms and re-seed every estimate's
+    milestone schedule from them.
+
+    Guardrails / REDISTRIBUTION RULE:
+      * Milestones already invoiced or paid are KEPT untouched (original seq,
+        dates and amounts). "Invoiced or paid" reuses BOTH ways the app tracks
+        it: the stored status column ('sent'/'paid'), OR the Billing tab's QBO
+        burn-down tier ('realized' = paid / 'committed' = sent·A/R, from
+        _compose_estimates) — so a deposit that's paid in QuickBooks is kept
+        even if nobody flipped its status field. Partially-covered rows are
+        rebuilt (their covered dollars re-burn onto the new rows).
+      * Everything else on the schedule is rebuilt: with K kept milestones, the
+        first K lines of the new split are treated as consumed by them, and the
+        estimate's REMAINING value (contract_value minus the kept amounts) is
+        spread across lines K+1..N of the new split in proportion to those
+        lines' percents (the last new line absorbs rounding). If the new split
+        has K or fewer lines and value remains, one "Final (at completion)"
+        line carries the whole remainder. Stored pct on each new line is its
+        actual share of the estimate value (1 decimal), so % and $ agree.
+      * Hand-edited rows that are NOT invoiced/paid are rebuilt like the rest —
+        the UI asks the office to confirm before calling this.
+    """
+    _require(user)
+    percents = _parse_percents(",".join(str(p) for p in (body.percents or [])))
+    if percents is None:
+        raise HTTPException(status_code=422,
+                            detail="Percents must be 1-6 positive numbers summing to 100 (±0.1)")
+    if int(body.net_days) < 0 or int(body.net_days) > 365:
+        raise HTTPException(status_code=422, detail="Net days must be between 0 and 365")
+    net_days = int(body.net_days)
+    percents_str = ",".join(_fmt_pct(p) for p in percents)
+    reseeded, kept_total = 0, 0
+    with engine.begin() as conn:
+        ctx = _project_ctx(conn, entity_id)
+        if not ctx:
+            raise HTTPException(status_code=404, detail="Project not found")
+        old = conn.execute(text(
+            "SELECT terms_percents, terms_net_days FROM project_billing_terms WHERE entity_id=:e"),
+            {"e": entity_id}).mappings().first()
+        conn.execute(text("""
+            INSERT INTO project_billing_terms (entity_id, terms_percents, terms_net_days)
+            VALUES (:e, :p, :n)
+            ON DUPLICATE KEY UPDATE terms_percents=VALUES(terms_percents),
+                                    terms_net_days=VALUES(terms_net_days)
+        """), {"e": entity_id, "p": percents_str, "n": net_days})
+
+        start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+        date_for = {"po": start, "start": start, "end": end}
+        lines = _terms_lines(percents)
+        terms_note = f"{' / '.join(_fmt_pct(p) + '%' for p in percents)}, net-{net_days}"
+        # locked = invoiced/paid by stored status OR by the QBO burn-down tier
+        locked_ids = set()
+        for a in _compose_estimates(conn, entity_id).get("accepted", []):
+            for m in a.get("milestones", []):
+                if (m.get("status") or "").lower() in ("sent", "paid") or m.get("tier") in ("realized", "committed"):
+                    locked_ids.add(m["id"])
+        scheds = conn.execute(text(
+            "SELECT id, contract_value FROM project_invoice_schedules WHERE entity_id=:e"),
+            {"e": entity_id}).mappings().all()
+        for s in scheds:
+            ms = conn.execute(text("""
+                SELECT id, seq, amount FROM project_invoice_milestones
+                WHERE schedule_id=:s ORDER BY seq, id
+            """), {"s": s["id"]}).mappings().all()
+            kept = [m for m in ms if m["id"] in locked_ids]
+            kept_total += len(kept)
+            for m in ms:
+                if m["id"] not in locked_ids:
+                    conn.execute(text("DELETE FROM project_invoice_milestones WHERE id=:id"),
+                                 {"id": m["id"]})
+            conn.execute(text(
+                "UPDATE project_invoice_schedules SET terms_note=:t, net_days=:n WHERE id=:id"),
+                {"t": terms_note, "n": net_days, "id": s["id"]})
+            reseeded += 1
+            contract = float(s["contract_value"] or 0)
+            kept_amt = round(sum(float(m["amount"] or 0) for m in kept), 2)
+            remaining = round(contract - kept_amt, 2)
+            if remaining <= 0.5:
+                continue  # fully covered by invoiced/paid milestones
+            k = len(kept)
+            rem_lines = lines[k:] if k < len(lines) else []
+            if not rem_lines:
+                rem_lines = [(k + 1, "Final (at completion)", 100.0, "end")]
+            pct_pool = sum(p for (_, _, p, _) in rem_lines) or 100.0
+            base_seq = max((m["seq"] or 0) for m in kept) if kept else 0
+            acc = 0.0
+            for idx, (_, label, p, key) in enumerate(rem_lines):
+                last = idx == len(rem_lines) - 1
+                amt = round(remaining - acc, 2) if last else round(remaining * p / pct_pool, 2)
+                acc = round(acc + amt, 2)
+                stored_pct = round(amt / contract * 100.0, 1) if contract else round(p, 1)
+                inv_d = date_for.get(key)
+                due_d = (inv_d + timedelta(days=net_days)) if inv_d else None
+                conn.execute(text("""
+                    INSERT INTO project_invoice_milestones
+                      (schedule_id, seq, label, pct, invoice_date, due_date, amount, status, note)
+                    VALUES (:s,:seq,:l,:p,:iv,:du,:a,'pending',NULL)
+                """), {"s": s["id"], "seq": base_seq + idx + 1, "l": label, "p": stored_pct,
+                       "iv": inv_d, "du": due_d, "a": amt})
+    record_audit(user, "billing.terms_update", "project", entity_id, ctx["name"], {
+        "changes": {
+            "terms_percents": [(old["terms_percents"] if old else None), percents_str],
+            "terms_net_days": [(old["terms_net_days"] if old else None), net_days],
+        },
+        "reseeded_schedules": reseeded, "kept_milestones": kept_total,
+    })
+    bundle = get_bundle(entity_id, user)
+    bundle["terms_result"] = {"reseeded": reseeded, "kept": kept_total}
+    return bundle
+
+
 def _drift_reasons(conn, entity_id, ctx, inv):
     """Has the schedule fallen out of sync with the current dates / estimate?
     Only flags UNEDITED schedules (edited ones are intentionally preserved)."""
@@ -1178,6 +1680,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
 
         # auto-generate schedules the first time (create-if-missing)
         _ensure_estimate_billing(conn, entity_id, _default_crew_for_project(conn, entity_id, meta))
+        _apply_assignment_default_crew(conn, entity_id)   # #4: single assigned company fills blanks
         _ensure_invoice_schedules(conn, entity_id, ctx)   # per estimate (35/35/30)
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
@@ -1215,6 +1718,11 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         crews = _crew_choices(conn)
         drift = _drift_reasons(conn, entity_id, ctx, inv)
         offer_scope = _offer_scope(conn, entity_id)
+        terms = _project_terms(conn, entity_id)
+        terms["label"] = _terms_label(terms["percents"], terms["net_days"])
+        # item #3: per-estimate crew-split allocations. Key present ONLY when a
+        # split exists, so single-crew bundles are byte-identical to before.
+        crew_splits = _crew_splits(conn, entity_id)
 
     kpis = {
         "contract": inv["summary"]["total"],
@@ -1231,7 +1739,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
     appears_complete = (op_status != "complete" and inv["invoiced_qbo"] > 0
                         and inv["summary"]["ar"] < 1 and inv["summary"]["scheduled"] < 1)
 
-    return {
+    out = {
         "project": {
             "id": entity_id, "name": ctx["name"],
             "customer_name": meta.get("customer_name"),
@@ -1250,4 +1758,8 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         "kpis": kpis,
         "crews": crews,
         "offer_scope": offer_scope,
+        "terms": terms,
     }
+    if crew_splits:
+        out["crew_splits"] = crew_splits
+    return out

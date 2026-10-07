@@ -274,7 +274,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
 
   function showDocuments() {
     const body = document.getElementById("tabBody");
-    body.innerHTML = `<div id="docTree"></div>`;
+    body.innerHTML = `<div class="px-3 pt-2 text-[11px] text-black/45">Tip: drag files from your computer onto any folder row to upload</div><div id="docTree"></div>`;
     renderTree();
     attachDocHandlers();
     const host = document.getElementById("docTree");

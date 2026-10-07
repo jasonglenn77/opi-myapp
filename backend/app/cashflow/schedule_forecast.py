@@ -94,12 +94,17 @@ def _project_events(conn, entity_id):
     # layer (open invoices) or realized in Actuals (paid). This is exact even when a
     # milestone straddles the boundary, and it never mis-attributes across estimates
     # the way a single project-wide pool would.
+    # Date precedence (0058): the office's expected-paid date wins when set —
+    # it's the realistic "cash lands" date — else due date, else invoice date.
+    # NOTE: changing THIS code does not invalidate project_cash_cache /
+    # cashflow_schedule_cache (they key on schedule-row timestamps) — a deploy
+    # that changes this logic must also clear both cache tables.
     for e in est.get("accepted", []):
         for m in e.get("milestones", []):
             remaining = round(float(m.get("remaining") or 0), 2)  # still to bill
             if remaining <= EPS:
                 continue
-            d = _iso(m.get("due_date") or m.get("invoice_date"))
+            d = _iso(m.get("expected_paid_date") or m.get("due_date") or m.get("invoice_date"))
             if d and has_dates:  # only on the grid if the project is fully dated
                 events.append({"date": d, "dir": "in", "amt": remaining, "src": "invoice"})
             else:                # undated (incl. partial start-only) -> all to backlog

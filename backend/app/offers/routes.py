@@ -12,7 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
 from app.db import engine
 from app.auth import get_current_user
@@ -44,7 +44,7 @@ def _estimate_suggestions(conn, entity_id):
     labor = conn.execute(text("""
         SELECT ROUND(COALESCE(SUM(COALESCE(sl.cost_amount, sl.amount)), 0), 2)
         FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
-        WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
+        WHERE t.entity_type = 'Estimate' AND sl.item_name LIKE 'Contract Labor%'
           AND sl.project_customer_qbo_id = :id
           AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
     """), {"id": entity_id}).scalar()
@@ -295,6 +295,140 @@ def backfill_accepted(entity_id: str, user=Depends(get_current_user)):
     return {"ok": True, "id": res.lastrowid}
 
 
+def _auto_assign_accepted_offer(offer_id: int, actor_user_id: int):
+    """Assignment-workflow glue (Jason item #4, 2026-10-06): the moment an offer
+    is confirmed accepted, the company lands on the project schedule — unless it
+    is already there. Rules:
+
+      * company already assigned anywhere on the project (active swc row on any
+        schedule item) → do nothing (no dupes);
+      * exactly one ACTIVE schedule item (status not canceled/completed) →
+        attach there; several → the earliest-dated active item (undated lines
+        sort last); none → create one undated line via the normal create path
+        (status 'needs_attention', the service's initial default);
+      * lead_crew_id = the billing header's chosen lead for this project when it
+        belongs to the offer's company (offers point at COMPANIES per CR3, so
+        the offer itself carries no lead), else NULL ("lead TBD");
+      * the write goes through projects.service.save_schedule_item — the SAME
+        path as a manual assignment save — so the v2+legacy dual-write, the
+        slot auto-suggest, project_events and the CR1 item history ("created/
+        updated by <user>") all happen exactly as a hand edit would.
+
+    Returns {"assigned": bool, "schedule_item_id": int|None}.
+    """
+    from app.projects.routes import ScheduleItemSaveRequest, CrewAssignmentEntry
+    from app.projects.service import save_schedule_item
+
+    with engine.connect() as conn:
+        o = conn.execute(text("SELECT entity_id, crew_id FROM work_offers WHERE id=:id"),
+                         {"id": offer_id}).mappings().first()
+        if not o:
+            return {"assigned": False, "schedule_item_id": None}
+        entity_id = o["entity_id"]
+        company_id = _company_of(conn, o["crew_id"])
+        if not company_id:
+            return {"assigned": False, "schedule_item_id": None}
+        qc_id = conn.execute(text(
+            "SELECT id FROM qbo_customers WHERE qbo_id=:e AND is_project=1"),
+            {"e": entity_id}).scalar()
+        if not qc_id:
+            return {"assigned": False, "schedule_item_id": None}
+
+        items = conn.execute(text("""
+            SELECT psi.id, psi.status, psi.start_date, psi.end_date, psi.wire_guidance,
+                   psi.travel_days, psi.overage_days, psi.equipment_type, psi.notes,
+                   psi.sort_order
+            FROM project_schedule_items psi
+            JOIN projects p ON p.id = psi.project_id
+            WHERE p.qbo_customer_id = :qc
+            ORDER BY psi.sort_order, psi.id
+        """), {"qc": int(qc_id)}).mappings().all()
+
+        crew_rows = []
+        if items:
+            crew_rows = conn.execute(text("""
+                SELECT swc.schedule_item_id, swc.work_crew_id, swc.is_primary, swc.slot_code,
+                       COALESCE(swc.company_id, wc.parent_id, wc.id) AS company_id,
+                       COALESCE(swc.lead_crew_id,
+                                CASE WHEN swc.company_id IS NULL AND wc.parent_id IS NOT NULL
+                                     THEN wc.id END) AS lead_crew_id
+                FROM project_schedule_item_work_crews swc
+                JOIN work_crews wc ON wc.id = swc.work_crew_id
+                WHERE swc.unassigned_at IS NULL AND swc.schedule_item_id IN :ids
+            """).bindparams(bindparam("ids", expanding=True)),
+                {"ids": [int(i["id"]) for i in items]}).mappings().all()
+
+        # No dupes: the company already assigned anywhere on the project → done.
+        for r in crew_rows:
+            if r["company_id"] is not None and int(r["company_id"]) == int(company_id):
+                return {"assigned": False, "schedule_item_id": int(r["schedule_item_id"])}
+
+        # Lead: the billing header's chosen crew, when it's a lead of this company.
+        lead_id = None
+        for h in conn.execute(text("""
+            SELECT peb.crew_id, wc.parent_id
+            FROM project_estimate_billing peb JOIN work_crews wc ON wc.id = peb.crew_id
+            WHERE peb.entity_id = :e AND peb.crew_id IS NOT NULL ORDER BY peb.id
+        """), {"e": entity_id}).mappings().all():
+            if h["parent_id"] is not None and int(h["parent_id"]) == int(company_id):
+                lead_id = int(h["crew_id"])
+                break
+
+        active = [i for i in items if (i["status"] or "") not in ("canceled", "completed")]
+        target = None
+        if active:
+            # one active item → it; several → the earliest-dated (undated last)
+            target = sorted(active, key=lambda i: (i["start_date"] is None, i["start_date"],
+                                                   i["sort_order"] or 0, int(i["id"])))[0]
+
+        new_entry = {"company_id": int(company_id), "lead_crew_id": lead_id,
+                     "slot_code": None, "is_primary": False}
+
+        if target is not None:
+            sid = int(target["id"])
+            pm_rows = conn.execute(text("""
+                SELECT project_manager_id, is_primary
+                FROM project_schedule_item_project_managers
+                WHERE schedule_item_id = :sid AND unassigned_at IS NULL
+            """), {"sid": sid}).mappings().all()
+            existing = [r for r in crew_rows if int(r["schedule_item_id"]) == sid]
+            entries = [CrewAssignmentEntry(
+                company_id=int(r["company_id"]),
+                lead_crew_id=(int(r["lead_crew_id"]) if r["lead_crew_id"] is not None else None),
+                slot_code=r["slot_code"], is_primary=bool(r["is_primary"]),
+            ) for r in existing if r["company_id"] is not None]
+            new_entry["is_primary"] = not entries  # sole crew on the line → primary
+            entries.append(CrewAssignmentEntry(**new_entry))
+            req = ScheduleItemSaveRequest(
+                schedule_item_id=sid,
+                qbo_customer_id=int(qc_id),
+                status=(target["status"] or "needs_attention"),
+                start_date=(str(target["start_date"]) if target["start_date"] else None),
+                end_date=(str(target["end_date"]) if target["end_date"] else None),
+                wire_guidance=int(target["wire_guidance"] or 0),
+                travel_days=int(target["travel_days"] or 0),
+                overage_days=int(target["overage_days"] or 0),
+                equipment_type=target["equipment_type"],
+                notes=target["notes"],
+                project_manager_ids=[int(r["project_manager_id"]) for r in pm_rows],
+                primary_project_manager_id=next(
+                    (int(r["project_manager_id"]) for r in pm_rows if r["is_primary"]), None),
+                crew_assignments=entries,
+            )
+        else:
+            # no active schedule line at all → create one undated line, crew attached
+            new_entry["is_primary"] = True
+            req = ScheduleItemSaveRequest(
+                qbo_customer_id=int(qc_id),
+                status="needs_attention",
+                crew_assignments=[CrewAssignmentEntry(**new_entry)],
+            )
+
+    # save_schedule_item opens its own transaction — call it outside the read conn
+    res = save_schedule_item(req=req, actor_user_id=actor_user_id)
+    return {"assigned": True, "schedule_item_id": res.get("schedule_item_id")}
+
+
 class OfferResponse(BaseModel):
     status: str          # accepted | declined
     note: Optional[str] = None
@@ -320,7 +454,17 @@ def respond(offer_id: int, body: OfferResponse, user=Depends(get_current_user)):
             conn.execute(text("""UPDATE work_offers SET status='withdrawn'
                                  WHERE entity_id=:e AND id<>:id AND status='sent'"""),
                          {"e": o["entity_id"], "id": offer_id})
-    return {"ok": True}
+    out = {"ok": True}
+    if body.status == "accepted":
+        # Glue (#4): the accepted company goes on the project schedule unless it's
+        # already there. The accept above is committed; a glue failure must not
+        # un-accept the offer, so it degrades to assigned=false with the reason.
+        try:
+            out.update(_auto_assign_accepted_offer(offer_id, int(user.get("id"))))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI, accept stands
+            out.update({"assigned": False, "schedule_item_id": None,
+                        "assign_error": str(exc)})
+    return out
 
 
 @router.post("/{offer_id}/withdraw")

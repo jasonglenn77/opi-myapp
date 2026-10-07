@@ -847,7 +847,7 @@ async function mountPmDocuments(container, qboId) {
   };
 
   const render = () => {
-    container.innerHTML = `<div class="pb-2">${tree.map((n) => renderNode(n, 0)).join("")}</div>`;
+    container.innerHTML = `<div class="px-3 pt-2 text-[11px] text-black/45">Tip: drag files from your computer onto any folder row to upload</div><div class="pb-2">${tree.map((n) => renderNode(n, 0)).join("")}</div>`;
   };
 
   const refetch = async () => {

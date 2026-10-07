@@ -2,8 +2,9 @@
 // QBO estimates (original cost-basis + change orders) plus quick app-side drafts,
 // classifies/annotates them, and rolls up the revised contract value. Ties to the
 // Payments tab (same QBO estimates drive the crew payment schedules).
-import { api, getToken } from "../api.js";
+import { api, getToken, getMe } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
+import { mountPdfEditor, buildPdfPayload } from "../utils/pdf-editor.js";
 
 const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString("en-US"));
 const ymd = (s) => (s ? String(s).slice(0, 10) : "—");
@@ -123,20 +124,31 @@ export async function mountChangeOrdersPanel(container, entityId) {
   function rowHtml(i, idx, opts = {}) {
     const asg = (data.assignments || {})[String(i.qbo_estimate_id)];
     const unconfirmed = opts.inPhase && asg && !asg.confirmed;
+    // Estimate-number cell: QBO doc # (plus "App quote ↔ QBO" when a full
+    // quote auto-linked), app quote # for unlinked full quotes, DRAFT otherwise.
+    const estCell = i.doc_number
+      ? `#${escapeHtml(i.doc_number)}<div class="text-[10px] text-black/40">${ymd(i.txn_date)}</div>${i.app_estimate_id ? `<div class="text-[10px] font-semibold text-emerald-700 whitespace-nowrap">App quote #${escapeHtml(String(i.app_quote_number || i.app_estimate_id))} ↔ QBO #${escapeHtml(i.doc_number)}</div>` : ""}`
+      : (i.app_estimate_id
+        ? `<span class="inline-flex rounded bg-emerald-100 text-emerald-800 px-1.5 py-0.5 text-[9px] font-bold">APP QUOTE</span><div class="text-[10px] text-black/45 whitespace-nowrap">#${escapeHtml(String(i.app_quote_number || i.app_estimate_id))}${i.app_quote_locked ? " · 🔒 locked" : " · draft"}</div>`
+        : `<span class="inline-flex rounded bg-black/10 text-black/50 px-1.5 py-0.5 text-[9px] font-bold">DRAFT</span>`);
+    const openQuote = i.app_estimate_id
+      ? `<a href="#/estimate/${i.app_estimate_id}/base" class="text-xs text-emerald-700 font-semibold hover:underline mr-2" title="Open the quoting workspace">Open quote →</a>` : "";
     return `
       <tr class="border-b border-black/5 hover:bg-black/[0.015] ${unconfirmed ? "bg-amber-50/60" : ""}">
         <td class="py-1.5 pr-2 whitespace-nowrap">${i.qbo_estimate_id
           ? `<button data-expand="${escapeHtml(String(i.qbo_estimate_id))}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>`
           : (i.has_lines ? `<button data-co-expand="${i.co_id}" class="text-black/30 hover:text-black/70 mr-1 align-middle" title="Show line items"><svg data-chev class="w-3 h-3 inline transition-transform" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg></button>` : "")}${kindBadge(i)}</td>
-        <td class="py-1.5 pr-2 text-black/70">${i.doc_number ? `#${escapeHtml(i.doc_number)}<div class="text-[10px] text-black/40">${ymd(i.txn_date)}</div>` : `<span class="inline-flex rounded bg-black/10 text-black/50 px-1.5 py-0.5 text-[9px] font-bold">DRAFT</span>`}</td>
+        <td class="py-1.5 pr-2 text-black/70">${estCell}</td>
         <td class="py-1.5 pr-2 text-black/70 max-w-[200px]"><div class="font-semibold text-ink-900 truncate">${escapeHtml(i.title || i.reason || "—")}</div>${i.scope ? `<div class="text-[10px] text-black/45 truncate">${escapeHtml(i.scope)}</div>` : ""}</td>
         <td class="py-1.5 pr-2 text-right tabular-nums font-semibold">${money(i.amount)}</td>
         <td class="py-1.5 pr-2 text-right tabular-nums text-black/60">${i.contract_labor ? money(i.contract_labor) : "—"}</td>
         <td class="py-1.5 pr-2">${statusPill(i.status)}</td>
         ${opts.inPhase ? `<td class="py-1.5 pr-2 whitespace-nowrap">${phaseSelect(i.qbo_estimate_id, asg ? asg.phase_id : null)}${unconfirmed ? `<button data-confirm="${escapeHtml(String(i.qbo_estimate_id))}" data-phase="${asg.phase_id}" class="ml-1 text-[10px] font-bold text-amber-700 hover:underline" title="Confirm this phase">⚑ confirm</button>` : ""}</td>` : ""}
         <td class="py-1.5 text-right whitespace-nowrap">${i.source === "draft"
-          ? `${i.has_lines ? `<button data-co-pdf="${i.co_id}" class="text-xs text-emerald-700 font-semibold hover:underline mr-2" title="Generate PDF + file to 4 Quotes">PDF</button>` : ""}<button data-edit-draft="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button><button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>`
-          : `<button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button>`}</td>
+          ? (i.app_estimate_id
+            ? `${openQuote}<button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button><button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>`
+            : `${i.has_lines ? `<button data-co-pdf="${i.co_id}" class="text-xs text-emerald-700 font-semibold hover:underline mr-2" title="Generate PDF + file to 4 Quotes">PDF</button>` : ""}<button data-edit-draft="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button><button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>`)
+          : `${openQuote}<button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button>`}</td>
       </tr>
       ${i.qbo_estimate_id ? `<tr data-lines-row="${escapeHtml(String(i.qbo_estimate_id))}" hidden><td colspan="8" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}
       ${(!i.qbo_estimate_id && i.has_lines) ? `<tr data-co-lines-row="${i.co_id}" hidden><td colspan="8" class="bg-black/[0.02] px-4 py-2 border-b border-black/5"><div data-co-lines-body class="text-xs text-black/50">Loading…</div></td></tr>` : ""}`;
@@ -261,9 +273,10 @@ export async function mountChangeOrdersPanel(container, entityId) {
     }));
     container.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () =>
       openEditModal(data.items[Number(b.getAttribute("data-edit"))])));
-    // draft change order: edit-as-estimate-form, expand stored lines, re-print PDF
+    // draft change order: edit through the SHARED pdf-editor (phase 2 — the
+    // old simple estimate-form modal is retired), expand stored lines, re-print
     container.querySelectorAll("[data-edit-draft]").forEach(b => b.addEventListener("click", () =>
-      openEstimateFormModal(data.items[Number(b.getAttribute("data-edit-draft"))])));
+      openCoPdfEditorModal(data.items[Number(b.getAttribute("data-edit-draft"))])));
     container.querySelectorAll("[data-co-expand]").forEach(btn => btn.addEventListener("click", async () => {
       const cid = btn.getAttribute("data-co-expand");
       const row = container.querySelector(`[data-co-lines-row="${CSS.escape(cid)}"]`);
@@ -310,105 +323,151 @@ export async function mountChangeOrdersPanel(container, entityId) {
       <div class="grid gap-3">
         ${card("📝", "Fill out an estimate → PDF", "Enter the line items and generate an OPI-branded estimate PDF to send. The common path — no need to build it in QuickBooks first.", "form")}
         ${card("🧮", "Build a full quote (quoting metrics)", "Open the quoting workspace to price it with the full calc engine. For a real re-estimate (rare for change orders).", "quote")}
-        ${card("📥", "Already created in QuickBooks", "Log it now to track it; it links to the QBO estimate automatically once synced.", "qbo")}
+        ${card("📥", "Already created in QuickBooks", "Made the estimate in QBO? Log it here now — it links up automatically after the next sync.", "qbo")}
       </div>
       <div class="mt-4 flex justify-end"><button data-cancel class="${CANCEL}">Cancel</button></div></div>`;
     document.body.appendChild(overlay);
     const close = () => overlay.remove();
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
     overlay.querySelector("[data-cancel]").addEventListener("click", close);
-    overlay.querySelectorAll("[data-choice]").forEach(b => b.addEventListener("click", () => {
-      const c = b.getAttribute("data-choice"); close();
-      if (c === "form") openEstimateFormModal();
-      else if (c === "qbo") openEditModal(null);
-      else if (c === "quote") location.hash = "#/pipeline";
+    overlay.querySelectorAll("[data-choice]").forEach(b => b.addEventListener("click", async () => {
+      const c = b.getAttribute("data-choice");
+      if (c === "form") { close(); openCoPdfEditorModal(); }
+      else if (c === "qbo") { close(); openEditModal(null); }
+      else if (c === "quote") {
+        // Option 2 (phase 2): create a REAL quoting-metrics estimate attached
+        // to this project (+ its draft CO row) and drop into the workspace.
+        b.disabled = true;
+        try {
+          const r = await api(`/change-orders/project/${encodeURIComponent(entityId)}/full-quote`, { method: "POST" });
+          close();
+          location.hash = `#/estimate/${r.estimate_id}/base`;
+        } catch (e) { b.disabled = false; alert(e?.message || "Could not create the quote"); }
+      }
     }));
   }
 
-  // Editable change-order estimate form → OPI-branded PDF (persists line items).
-  async function openEstimateFormModal(item = null) {
-    let lines = [{ label: "", description: "", qty: 1, rate: 0 }];
-    if (item && item.co_id) {
-      try {
-        const r = await api(`/change-orders/co/${item.co_id}/lines`);
-        if (r.lines && r.lines.length) lines = r.lines.map(l => ({ label: l.item || "", description: l.description || "", qty: l.qty ?? 1, rate: l.rate ?? 0 }));
-      } catch (_) {}
+  // Option 1 — "Fill out an estimate → PDF" (CO estimate rework phase 1,
+  // 2026-10-06). The SAME Estimate-PDF editor the Pipeline's PDF tab uses
+  // (shared utils/pdf-editor.js — not forked), prefilled from the project:
+  // bill-to from the project's root QBO customer, footer title from project
+  // name + location, boilerplate language from /estimates/pdf-defaults.
+  // Preview renders through the project-context PDF endpoint (identical
+  // layout); Save is one call — creates the draft CO (+ its lines), files the
+  // PDF into "4 Quotes", audited server-side.
+  // `item` (optional) = an EXISTING draft CO (data-edit-draft): the editor
+  // prefills from its saved pdf_model (full fidelity) or its stored lines +
+  // defaults (legacy drafts), and Save updates the row instead of creating one.
+  async function openCoPdfEditorModal(item = null) {
+    let dfl = {}, ctx = null, coDetail = null;
+    [dfl, ctx, coDetail] = await Promise.all([
+      api("/estimates/pdf-defaults").catch(() => ({})),
+      api(`/change-orders/project/${encodeURIComponent(entityId)}/pdf-context`).catch(() => null),
+      item && item.co_id ? api(`/change-orders/co/${item.co_id}/lines`).catch(() => null) : Promise.resolve(null),
+    ]);
+    const me = getMe();
+    const initials = (s) => String(s || "").split(/[^A-Za-z0-9]+/).filter(Boolean).map(w => w[0]).join("").toUpperCase().slice(0, 4);
+    const loc = ctx ? [ctx.city, ctx.state].filter(Boolean).join(", ") : "";
+    const projName = (ctx && ctx.project_name) || (data.project && data.project.name) || "";
+    const saved = coDetail && coDetail.pdf_model;
+    let model;
+    if (saved && Array.isArray(saved.lines)) {
+      // Full saved model — bill-to/footer edits survive re-opens.
+      model = {
+        bill_to: Array.isArray(saved.bill_to) ? saved.bill_to.join("\n") : (saved.bill_to || ""),
+        sales_rep: saved.sales_rep ?? (dfl.sales_rep || ""),
+        preparer: saved.preparer ?? initials((me && me.email || "").split("@")[0]),
+        quote_date: saved.quote_date || new Date().toISOString().slice(0, 10),
+        footer_title: saved.footer_title || `Change Order — ${projName}`,
+        lines: saved.lines.map(l => ({ label: l.label || "", description: l.description || "", qty: l.qty ?? 1, rate: l.rate ?? 0, amount: l.amount ?? 0 })),
+      };
+    } else {
+      const defaultLines = [
+        { label: "", description: "", qty: 1, rate: 0, amount: 0 },
+        { label: "Payment Terms", description: dfl.payment_terms || "", qty: 1, rate: 0, amount: 0 },
+        { label: "Stipulations", description: dfl.stipulations || "", qty: 1, rate: 0, amount: 0 },
+      ];
+      const storedLines = coDetail && coDetail.lines && coDetail.lines.length
+        ? coDetail.lines.map(l => ({ label: l.item || "", description: l.description || "", qty: l.qty ?? 1, rate: l.rate ?? 0, amount: l.amount ?? 0 }))
+        : null;
+      model = {
+        bill_to: [ctx && ctx.customer_name, projName, loc].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join("\n"),
+        sales_rep: dfl.sales_rep || "",
+        preparer: initials((me && me.email || "").split("@")[0]),
+        quote_date: new Date().toISOString().slice(0, 10),
+        footer_title: (item && item.title) || `Change Order — ${projName}${loc ? " in " + loc : ""}`.trim(),
+        lines: storedLines || defaultLines,
+      };
     }
+
     const overlay = document.createElement("div");
     overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
-    const money2 = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const lineAmt = (l) => (Number(l.qty) || 0) * (Number(l.rate) || 0);
-    const total = () => lines.reduce((s, l) => s + lineAmt(l), 0);
-    const GRID = "grid grid-cols-[1.4fr_2fr_.6fr_.9fr_.9fr_auto] gap-1.5 items-center";
-    const rowHtml = (l, idx) => `<div class="${GRID}">
-      <input data-l="${idx}" data-k="label" value="${escapeHtml(l.label)}" placeholder="Item" list="coItemList" class="input text-xs py-1">
-      <input data-l="${idx}" data-k="description" value="${escapeHtml(l.description)}" placeholder="Description" class="input text-xs py-1">
-      <input data-l="${idx}" data-k="qty" type="number" step="1" value="${l.qty}" class="input text-xs py-1 text-right">
-      <input data-l="${idx}" data-k="rate" type="number" step="1" value="${l.rate}" class="input text-xs py-1 text-right">
-      <div data-amt="${idx}" class="text-right tabular-nums text-xs font-semibold">${money2(lineAmt(l))}</div>
-      <button data-rm="${idx}" class="text-black/30 hover:text-red-600 text-sm">✕</button></div>`;
-    overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-5 max-h-[90vh] overflow-auto">
-      <datalist id="coItemList">${CO_ITEMS.map((i) => `<option value="${escapeHtml(i)}">`).join("")}</datalist>
-      <div class="text-base font-bold text-ink-900 mb-3">${item ? "Edit change order" : "Change order — estimate"}</div>
+    overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-4xl p-5 max-h-[90vh] overflow-auto">
+      <div class="text-base font-bold text-ink-900 mb-1">${item ? "Edit change order — estimate PDF" : "Change order — estimate PDF"}</div>
+      <div class="text-[12px] text-black/50 mb-3">The same estimate PDF as a pipeline quote, prefilled from this project. Saving files the PDF into “4 Quotes” and ${item ? "updates the change order" : "adds the change order below"}.</div>
       <div class="grid grid-cols-2 gap-3 mb-3">
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Title</div><input data-title value="${escapeHtml(item?.title || "")}" class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div><select data-reason class="input text-sm py-1.5 w-full"><option value="">—</option>${REASONS.map((r) => `<option ${item?.reason === r ? "selected" : ""}>${r}</option>`).join("")}</select></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">CO Title</div><input data-cotitle value="${escapeHtml(item?.title || "")}" class="input text-sm py-1.5 w-full" placeholder="e.g. Added mezzanine railing"></label>
+        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Reason</div><select data-coreason class="input text-sm py-1.5 w-full"><option value="">—</option>${REASONS.map((r) => `<option ${item?.reason === r ? "selected" : ""}>${r}</option>`).join("")}</select></label>
       </div>
-      <div class="${GRID} text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1"><div>Item</div><div>Description</div><div class="text-right">Qty</div><div class="text-right">Rate</div><div class="text-right">Amount</div><div></div></div>
-      <div data-lines class="space-y-1.5"></div>
-      <button data-addline class="text-xs font-semibold text-blue-600 hover:underline mt-2">+ Add line</button>
-      <div class="flex justify-end items-baseline gap-2 mt-3 pt-3 border-t border-black/10"><span class="text-xs text-black/50">Total</span><span data-total class="text-base font-extrabold tabular-nums">$0.00</span></div>
-      <div class="mt-4 flex items-center justify-end gap-2">
-        <span data-msg class="text-xs font-semibold mr-auto"></span>
-        <button data-cancel class="${CANCEL}">Cancel</button>
-        <button data-save class="rounded-lg border border-black/15 px-3 py-1.5 text-sm font-semibold hover:bg-black/5">Save</button>
-        <button data-savepdf class="btn-primary text-sm px-4 py-1.5">Save &amp; PDF →</button>
-      </div></div>`;
+      <div data-pdfed></div>
+    </div>`;
     document.body.appendChild(overlay);
-    const linesEl = overlay.querySelector("[data-lines]");
-    const redraw = () => { linesEl.innerHTML = lines.map(rowHtml).join(""); };
-    const updTotal = () => { overlay.querySelector("[data-total]").textContent = money2(total()); };
-    redraw(); updTotal();
     const close = () => overlay.remove();
-    const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
-    overlay.querySelector("[data-cancel]").addEventListener("click", close);
-    linesEl.addEventListener("input", (e) => {
-      const inp = e.target.closest("[data-l]"); if (!inp) return;
-      const i = Number(inp.getAttribute("data-l")), k = inp.getAttribute("data-k");
-      lines[i][k] = inp.type === "number" ? Number(inp.value) : inp.value;
-      if (k === "qty" || k === "rate") { overlay.querySelector(`[data-amt="${i}"]`).textContent = money2(lineAmt(lines[i])); updTotal(); }
-    });
-    linesEl.addEventListener("click", (e) => { const rm = e.target.closest("[data-rm]"); if (!rm) return; lines.splice(Number(rm.getAttribute("data-rm")), 1); if (!lines.length) lines = [{ label: "", description: "", qty: 1, rate: 0 }]; redraw(); updTotal(); });
-    overlay.querySelector("[data-addline]").addEventListener("click", () => { lines.push({ label: "", description: "", qty: 1, rate: 0 }); redraw(); });
-    const payload = () => ({ title: overlay.querySelector("[data-title]").value.trim() || null, reason: overlay.querySelector("[data-reason]").value || null, total: total(),
-      lines: lines.filter(l => l.label || lineAmt(l)).map(l => ({ label: l.label, description: l.description, qty: Number(l.qty) || null, rate: Number(l.rate) || null, amount: lineAmt(l) })) });
-    // Persist the CO with its line items (create or edit), return its co_id.
-    const persist = async () => {
-      const p = payload();
-      if (item && item.co_id) {
-        await api(`/change-orders/${item.co_id}`, { method: "PATCH", body: JSON.stringify({ title: p.title, reason: p.reason, lines: p.lines }) });
-        return item.co_id;
-      }
-      const res = await api(`/change-orders/project/${encodeURIComponent(entityId)}/draft`, { method: "POST", body: JSON.stringify({ kind: "change_order", title: p.title, reason: p.reason, status: "draft", lines: p.lines }) });
-      return res.co_id;
-    };
-    overlay.querySelector("[data-save]").addEventListener("click", async () => {
-      try { await persist(); close(); await reloadData(); }
-      catch (e) { setMsg(e?.message || "Save failed", false); }
-    });
-    overlay.querySelector("[data-savepdf]").addEventListener("click", async (e) => {
-      const btn = e.currentTarget; btn.disabled = true; setMsg("Saving…", true);
-      try {
-        const coId = await persist();
-        // file into the project's "4 Quotes" folder, then open it in a new tab
-        await api(`/change-orders/co/${coId}/pdf?save=true`, { method: "POST" });
-        const pres = await fetch(`/api/change-orders/co/${coId}/pdf`, { method: "POST", headers: { "Authorization": "Bearer " + getToken() } });
-        window.open(URL.createObjectURL(await pres.blob()), "_blank");
-        close(); await reloadData();
-      } catch (err) { btn.disabled = false; setMsg("Could not save / PDF.", false); }
+
+    const coMsg = { text: "", err: false };
+    const payloadOf = (m) => ({ ...buildPdfPayload(m, false),
+      title: overlay.querySelector("[data-cotitle]").value.trim() || null,
+      reason: overlay.querySelector("[data-coreason]").value || null,
+      co_id: item && item.co_id ? item.co_id : null });
+
+    mountPdfEditor(overlay.querySelector("[data-pdfed]"), {
+      model,
+      hintHtml: `Prefilled from the project — edit the line items, bill-to and standard blocks, then preview or save.`,
+      actions: {
+        html: `<span data-comsg class="text-xs font-semibold mr-auto"></span>
+          <button data-cocancel class="${CANCEL}">Cancel</button>
+          <button data-copreview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
+          <button data-cosave class="btn-primary text-sm px-4 py-1.5">Save &amp; file PDF</button>`,
+        wire: (root, ed) => {
+          const m = root.querySelector("[data-comsg]");
+          const paint = () => { m.textContent = coMsg.text; m.className = "text-xs font-semibold mr-auto " + (coMsg.err ? "text-red-600" : "text-emerald-700"); };
+          const setMsg = (t, err) => { coMsg.text = t; coMsg.err = !!err; paint(); };
+          paint();
+          root.querySelector("[data-cocancel]").addEventListener("click", close);
+          root.querySelector("[data-copreview]").addEventListener("click", async () => {
+            try {
+              const resp = await fetch(`/api/change-orders/project/${encodeURIComponent(entityId)}/estimate-pdf`, {
+                method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() },
+                body: JSON.stringify(payloadOf(ed.getModel())),
+              });
+              if (!resp.ok) throw new Error((await resp.text()).slice(0, 160));
+              window.open(URL.createObjectURL(await resp.blob()), "_blank");
+            } catch (e2) { setMsg("Preview failed: " + (e2?.message || e2), true); }
+          });
+          root.querySelector("[data-cosave]").addEventListener("click", async (ev) => {
+            const btn = ev.currentTarget;
+            const p = payloadOf(ed.getModel());
+            if (!p.title) { setMsg("Add a CO title first — it names the change order.", true); return; }
+            btn.disabled = true; setMsg("Saving…", false);
+            try {
+              await api(`/change-orders/project/${encodeURIComponent(entityId)}/estimate-pdf`, {
+                method: "POST", body: JSON.stringify({ ...p, save: true }) });
+              close(); await reloadData();
+            } catch (e2) {
+              btn.disabled = false;
+              let d = e2?.message || "Save failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {}
+              setMsg(d, true);
+            }
+          });
+        },
+      },
     });
   }
+
+  // (The old simple estimate-form modal for drafts was retired in phase 2 —
+  // data-edit-draft now opens the shared pdf-editor above, which persists the
+  // full PDF model so re-prints keep bill-to/footer edits.)
 
   // item === null → add a new draft. Otherwise edit an existing item.
   function openEditModal(item) {

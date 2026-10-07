@@ -97,7 +97,7 @@ def _estimate_contract_labor(conn, entity_id):
         SELECT ROUND(COALESCE(SUM(COALESCE(sl.cost_amount, sl.amount)), 0), 2)
         FROM qbo_sales_transaction_lines sl
         JOIN qbo_transactions t ON t.id = sl.transaction_id
-        WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
+        WHERE t.entity_type = 'Estimate' AND sl.item_name LIKE 'Contract Labor%'
           AND sl.project_customer_qbo_id = :id
           AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
     """), {"id": entity_id}).scalar()
@@ -141,7 +141,7 @@ def _converted_estimates_with_labor(conn, entity_id):
         SELECT t.qbo_id, t.doc_number, t.txn_date,
                ROUND(SUM(COALESCE(sl.cost_amount, sl.amount)), 2) AS labor
         FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
-        WHERE t.entity_type = 'Estimate' AND sl.item_name = 'Contract Labor'
+        WHERE t.entity_type = 'Estimate' AND sl.item_name LIKE 'Contract Labor%'
           AND sl.project_customer_qbo_id = :id
           AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
         GROUP BY t.qbo_id, t.doc_number, t.txn_date HAVING labor > 0 ORDER BY t.txn_date, t.doc_number

@@ -20,6 +20,8 @@ if ! docker ps --format '{{.Names}}' | grep -q '^myapp-backend$'; then
   exit 0
 fi
 
+# Customers first (new QBO projects/customers exist before their transactions reference them)
+docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_customers_sync(triggered_by='cron'), default=str))"
 docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_transactions_sync(triggered_by='cron'), default=str))"
 rc=$?
 echo "[$(ts)] qbo-cron-sync: done (exit ${rc})"

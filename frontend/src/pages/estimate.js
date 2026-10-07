@@ -12,6 +12,7 @@ import { api, hasCapability, getToken } from "../api.js";
 import { mountBaseQuotingMetrics, createCellOverrideClient } from "./base-quoting-metrics.js";
 import { contactFormModal } from "./contacts.js";
 import { computeSetRollup, computeSetBundles, applyLineOverrides } from "../utils/qm-rollup.js";
+import { mountPdfEditor, buildPdfPayload, pdfModelTotal } from "../utils/pdf-editor.js";
 
 // The blank quoting-metrics workbook's defaults (mirrors ESTIMATE_DEFAULTS on the
 // backend, which pre-fills them on a new quote). Any General Info field changed
@@ -406,16 +407,20 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   const isLocked = !!estimate.locked;
   // Context-aware back link: quotes that belong to a pipeline opportunity return
   // to the pipeline (their real origin); orphan quotes fall back to the list.
-  // The standalone list is retired, so every quote returns to the pipeline.
-  const backHref = "#/pipeline";
-  const backLabel = "pipeline";
+  // The standalone list is retired, so every quote returns to the pipeline —
+  // EXCEPT project-attached change-order quotes (phase 2), which return to
+  // their project's workspace (Change Orders tab).
+  const isProjectQuote = !!estimate.project_qbo_id;
+  const backHref = isProjectQuote ? `#/entity/project/${encodeURIComponent(estimate.project_qbo_id)}` : "#/pipeline";
+  const backLabel = isProjectQuote ? "project" : "pipeline";
   const headerHtml = `
     <div class="card px-5 py-3">
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-baseline gap-4 min-w-0">
-          <a href="${backHref}" class="text-xs font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap">← Back to ${backLabel}</a>
+          <a href="${backHref}" data-estback class="text-xs font-semibold text-blue-600 hover:text-blue-800 whitespace-nowrap">← Back to ${backLabel}</a>
           <div class="min-w-0">
             <div class="text-base font-extrabold truncate">${escapeHtml(estimate.customer_display_name || "(Unknown customer)")}</div>
+            ${isProjectQuote ? `<div class="text-[11px] font-bold text-amber-700 truncate">Change order for ${escapeHtml(estimate.project_name || estimate.project_qbo_id)}</div>` : ""}
             <div class="text-xs text-black/50 truncate">
               Quote #${escapeHtml(estimate.quote_number || "—")} · <b>Revision ${estimate.revision_no ?? 1}</b>${estimate.customer_email ? " · " + escapeHtml(estimate.customer_email) : ""}
             </div>
@@ -523,9 +528,18 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
   // Step 9 — one action from anywhere in the workspace: file the PDF into
   // "4 Quotes", update the pipeline row, lock the quote. Same behavior the
   // Estimate PDF tab's button had; saveAndSendEstimate() is the shared engine.
+  // Returning to the project, land on its Change Orders tab (one-shot hint
+  // entity-detail.js consumes).
+  if (isProjectQuote) document.querySelector("[data-estback]")?.addEventListener("click", () => {
+    try { sessionStorage.setItem("opi_entity_tab", "changeorders"); } catch (_) {}
+  });
+
   document.querySelector("[data-savesend]")?.addEventListener("click", async (e) => {
     const btn = e.currentTarget;
-    if (!confirm("Save & Send this estimate?\n\nThis files the PDF into the “4 Quotes” folder, updates the pipeline row, and locks this quote (start a New revision or Unlock to edit later).")) return;
+    const confirmText = isProjectQuote
+      ? "Save & Send this change-order quote?\n\nThis files the PDF into the project's “4 Quotes” folder and locks this quote (start a New revision or Unlock to edit later)."
+      : "Save & Send this estimate?\n\nThis files the PDF into the “4 Quotes” folder, updates the pipeline row, and locks this quote (start a New revision or Unlock to edit later).";
+    if (!confirm(confirmText)) return;
     const msgEl = document.querySelector("[data-savesend-msg]");
     const say = (text, ok) => {
       if (!msgEl) return;
@@ -540,7 +554,9 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     btn.textContent = "Saving…";
     try {
       const j = await saveAndSendEstimate(estimateId, metricSets, estimate);
-      say(`Saved ✓ filed to “4 Quotes” (${j.filename}), pipeline updated, quote locked.`, true);
+      say(isProjectQuote
+        ? `Saved ✓ filed to the project's “4 Quotes” (${j.filename}), quote locked.`
+        : `Saved ✓ filed to “4 Quotes” (${j.filename}), pipeline updated, quote locked.`, true);
       setTimeout(() => location.reload(), 1000);   // reflect the locked read-only state
     } catch (err) {
       say("Save failed: " + (err?.message || err), false);
@@ -794,7 +810,6 @@ function createPdfEngine({ estimateId, estimateRow, metricSets, lookups, allLine
     wg_additional: "Wire Guidance - Additional", mobilization: "Mobilization",
     remobilization: "Remobilization", downtime: "Downtime",
   };
-  const num = (v) => { const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : 0; };
   const initials = (name) => (name || "").trim().split(/\s+/).map(w => w[0] || "").join("").toUpperCase().slice(0, 4) || "";
 
   const defaultDesc = (label, loc, e) => {
@@ -810,7 +825,10 @@ function createPdfEngine({ estimateId, estimateRow, metricSets, lookups, allLine
   function buildDefaultModel() {
     const e = estimateRow || {};
     const loc = [e.project_city, e.project_state].filter(Boolean).join(", ");
-    const contact = [e.contact_first, e.contact_last].filter(Boolean).join(" ");
+    // Project-attached change-order quote: bill-to is root customer + project
+    // (there's no pipeline contact on these).
+    const contact = e.project_qbo_id ? (e.project_name || "")
+      : [e.contact_first, e.contact_last].filter(Boolean).join(" ");
     const agg = new Map(); const order = [];
     for (const set of orderedSets) {
       const bundles = computeSetBundles({ set, lines: linesBySet.get(set.id) || [], lookups, estimateState,
@@ -847,16 +865,10 @@ function createPdfEngine({ estimateId, estimateRow, metricSets, lookups, allLine
     return (model && Array.isArray(model.lines)) ? model : buildDefaultModel();
   }
   const saveModel = (model) => localStorage.setItem(MODEL_KEY, JSON.stringify(model));
-  const totalOf = (model) => model.lines.reduce((s, l) => s + num(l.amount), 0);
+  const totalOf = (model) => pdfModelTotal(model);
 
   async function callPdf(model, saveMode) {
-    const payload = {
-      lines: model.lines.map(l => ({ label: l.label, description: l.description, qty: num(l.qty), rate: num(l.rate), amount: num(l.amount) })),
-      total: totalOf(model), sales_rep: model.sales_rep, footer_title: model.footer_title,
-      preparer: model.preparer, quote_date: model.quote_date,
-      bill_to: String(model.bill_to || "").split("\n").map(s => s.trim()).filter(Boolean),
-      save: !!saveMode,
-    };
+    const payload = buildPdfPayload(model, saveMode);
     const resp = await fetch(`/api/estimates/${estimateId}/pdf`, {
       method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() },
       body: JSON.stringify(payload),
@@ -944,79 +956,27 @@ async function renderPdfTab(container, estimateId, initialMetricSets, estimateRo
   }
   const eng = createPdfEngine({ estimateId, estimateRow, metricSets: initialMetricSets, lookups, allLines, dfl, cellOverrides });
 
-  let model = eng.loadModel();
-  const save = () => eng.saveModel(model);
-  const totalOf = () => eng.totalOf(model);
-  const money = (n) => "$" + Math.round(Number(n) || 0).toLocaleString("en-US");
-  let msg = "";
-
-  const preview = () => eng.callPdf(model, false).catch(e => { msg = "Preview failed: " + e.message; render(); });
-
-  function render() {
-    const inp = (val, attrs) => `<input value="${escapeHtml(val ?? "")}" ${attrs} class="w-full text-sm rounded border border-black/15 px-2 py-1">`;
-    const headHtml = `
-      <div class="card px-4 py-3 grid sm:grid-cols-2 gap-3">
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Bill To (one per line)</div>
-          <textarea data-h="bill_to" rows="3" class="w-full text-sm rounded border border-black/15 px-2 py-1">${escapeHtml(model.bill_to || "")}</textarea></label>
-        <div class="grid grid-cols-2 gap-2 content-start">
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Sales Rep</div>${inp(model.sales_rep, 'data-h="sales_rep"')}</label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Prepared By (initials)</div>${inp(model.preparer, 'data-h="preparer"')}</label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Quote Date</div>${inp(model.quote_date, 'data-h="quote_date" type="date"')}</label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Footer Title</div>${inp(model.footer_title, 'data-h="footer_title"')}</label>
-        </div>
-      </div>`;
-
-    const rows = model.lines.map((l, i) => `
-      <tr class="border-t border-black/5 align-top">
-        <td class="px-2 py-2 w-40"><input value="${escapeHtml(l.label || "")}" data-l="${i}" data-f="label" class="w-full text-xs font-semibold rounded border border-black/10 px-1.5 py-1"></td>
-        <td class="px-2 py-2"><textarea data-l="${i}" data-f="description" rows="2" class="w-full text-xs rounded border border-black/10 px-1.5 py-1">${escapeHtml(l.description || "")}</textarea></td>
-        <td class="px-1 py-2 w-14"><input value="${escapeHtml(String(l.qty ?? ""))}" data-l="${i}" data-f="qty" inputmode="numeric" class="w-full text-xs text-right rounded border border-black/10 px-1 py-1"></td>
-        <td class="px-1 py-2 w-20"><input value="${escapeHtml(String(l.rate ?? ""))}" data-l="${i}" data-f="rate" inputmode="numeric" class="w-full text-xs text-right rounded border border-black/10 px-1 py-1"></td>
-        <td class="px-1 py-2 w-24"><input value="${escapeHtml(String(l.amount ?? ""))}" data-l="${i}" data-f="amount" inputmode="numeric" class="w-full text-xs text-right tabular-nums rounded border border-black/10 px-1 py-1"></td>
-        <td class="px-1 py-2 w-6 text-right"><button data-del="${i}" title="Remove line" class="text-black/30 hover:text-red-600 text-sm">×</button></td>
-      </tr>`).join("");
-
-    container.innerHTML = `
-      <div class="grid gap-3">
-        <div class="flex items-center justify-between flex-wrap gap-2 px-1">
-          <div class="text-[11px] text-black/50">Amounts come from the validated metrics. Edit the customized areas (scope/BOM, bill-to, stipulations); standard blocks prefill from app defaults. ${msg ? `<span class="text-emerald-700 font-semibold ml-2">${escapeHtml(msg)}</span>` : ""}</div>
-          <button data-rebuild class="text-[11px] font-semibold text-blue-600 hover:underline">↺ Rebuild from metrics</button>
-        </div>
-        ${headHtml}
-        <div class="card px-2 py-2 overflow-x-auto">
-          <table class="w-full" style="min-width:680px;">
-            <thead><tr class="text-left text-[10px] uppercase tracking-wide text-black/40">
-              <th class="px-2 py-1">Item</th><th class="px-2 py-1">Description</th>
-              <th class="px-1 py-1 text-right">Qty</th><th class="px-1 py-1 text-right">Rate</th>
-              <th class="px-1 py-1 text-right">Amount</th><th></th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-          <div class="flex items-center justify-between px-2 pt-2 mt-1 border-t border-black/5">
-            <button data-add class="text-[11px] font-semibold text-blue-600 hover:underline">+ Add line</button>
-            <div class="text-sm">Total <span data-total class="font-extrabold text-ink-900 tabular-nums">${money(totalOf())}</span></div>
-          </div>
-        </div>
-        <div class="flex items-center justify-end gap-3 px-1">
-          ${estimateRow?.locked
-            ? `<span class="text-[11px] text-amber-700 font-semibold">🔒 Locked — unlock or start a new revision to edit</span>` : ""}
-          <button data-preview class="rounded-lg border border-black/15 text-sm font-semibold px-4 py-2 hover:bg-black/5">Preview PDF</button>
-        </div>
-        <div class="text-[11px] text-black/45 px-1 text-right">When it's ready, <b>Save &amp; Send</b> (in the header above) files the PDF into “4 Quotes”, updates the pipeline, and locks the quote.</div>
-      </div>`;
-
-    container.querySelectorAll("[data-h]").forEach(el => el.addEventListener("input", () => { model[el.getAttribute("data-h")] = el.value; save(); }));
-    container.querySelectorAll("[data-l]").forEach(el => el.addEventListener("input", () => {
-      const i = Number(el.getAttribute("data-l")), f = el.getAttribute("data-f");
-      model.lines[i][f] = el.value; save();
-      if (f === "amount") { const t = container.querySelector("[data-total]"); if (t) t.textContent = money(totalOf()); }
-    }));
-    container.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => { model.lines.splice(Number(b.getAttribute("data-del")), 1); save(); render(); }));
-    container.querySelector("[data-add]")?.addEventListener("click", () => { model.lines.push({ label: "", description: "", qty: 1, rate: 0, amount: 0 }); save(); render(); });
-    container.querySelector("[data-rebuild]")?.addEventListener("click", () => { if (confirm("Rebuild the line items + standard blocks from the current metrics? Your description edits on this quote will be replaced.")) { model = eng.buildDefaultModel(); save(); render(); } });
-    container.querySelector("[data-preview]")?.addEventListener("click", () => preview());
-  }
-
-  render();
+  // The editor UI itself lives in utils/pdf-editor.js (shared with the
+  // Change Orders "Fill out an estimate — PDF" flow); this host wires the
+  // per-estimate persistence, rebuild-from-metrics and the /pdf endpoint.
+  mountPdfEditor(container, {
+    model: eng.loadModel(),
+    onChange: (m) => eng.saveModel(m),
+    onPreview: (m, ed) => eng.callPdf(m, false).catch(e => ed.setMessage("Preview failed: " + e.message)),
+    hintHtml: `Amounts come from the validated metrics. Edit the customized areas (scope/BOM, bill-to, stipulations); standard blocks prefill from app defaults.`,
+    toolbar: {
+      html: `<button data-rebuild class="text-[11px] font-semibold text-blue-600 hover:underline">↺ Rebuild from metrics</button>`,
+      wire: (root, ed) => root.querySelector("[data-rebuild]")?.addEventListener("click", () => {
+        if (confirm("Rebuild the line items + standard blocks from the current metrics? Your description edits on this quote will be replaced.")) {
+          const m = eng.buildDefaultModel(); eng.saveModel(m); ed.setModel(m);
+        }
+      }),
+    },
+    actions: estimateRow?.locked
+      ? { html: `<span class="text-[11px] text-amber-700 font-semibold">🔒 Locked — unlock or start a new revision to edit</span>` }
+      : null,
+    footHtml: `<div class="text-[11px] text-black/45 px-1 text-right">When it's ready, <b>Save &amp; Send</b> (in the header above) files the PDF into ${estimateRow?.project_qbo_id ? "the project's “4 Quotes”" : "“4 Quotes”, updates the pipeline,"} and locks the quote.</div>`,
+  });
 }
 
 // ── Send to QBO tab ──────────────────────────────────────────────────────────

@@ -1089,8 +1089,8 @@ def projects_attention(user=Depends(get_current_user)):
                 AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Accepted','Converted','Closed')
             )
             SELECT le.customer_qbo_id AS pid,
-                   ROUND(SUM(CASE WHEN sl.item_name='Contract Labor' THEN COALESCE(sl.cost_amount,0) ELSE 0 END),2) AS crew_est,
-                   ROUND(SUM(CASE WHEN sl.item_name NOT IN ('Contract Labor','Contract Labor - Daily Rate Local','Buffer','OH&P')
+                   ROUND(SUM(CASE WHEN sl.item_name LIKE 'Contract Labor%' THEN COALESCE(sl.cost_amount,0) ELSE 0 END),2) AS crew_est,
+                   ROUND(SUM(CASE WHEN sl.item_name NOT LIKE 'Contract Labor%' AND sl.item_name NOT LIKE 'OH&P%' AND sl.item_name NOT LIKE 'Buffer%'
                                   THEN COALESCE(sl.cost_amount,0) ELSE 0 END),2) AS exp_est
             FROM latest le
             JOIN myapp.qbo_sales_transaction_lines sl ON sl.transaction_id=le.id AND sl.line_level='child'
@@ -1099,10 +1099,11 @@ def projects_attention(user=Depends(get_current_user)):
         # crew labor + expenses actually paid (QBO bills / purchases)
         act_out_rows = conn.execute(text("""
             SELECT l.line_customer_qbo_id AS pid,
-                   ROUND(SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name'))='Contract Labor'
+                   ROUND(SUM(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
                                   THEN l.amount ELSE 0 END),2) AS crew_paid,
-                   ROUND(SUM(CASE WHEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')),'')
-                                  NOT IN ('Contract Labor','Contract Labor - Daily Rate Local','Buffer','OH&P')
+                   ROUND(SUM(CASE WHEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')),'') NOT LIKE 'Contract Labor%'
+                                  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')),'') NOT LIKE 'OH&P%'
+                                  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')),'') NOT LIKE 'Buffer%'
                                   THEN l.amount ELSE 0 END),2) AS exp_act
             FROM myapp.qbo_transaction_lines l JOIN myapp.qbo_transactions t ON t.id=l.transaction_id
             WHERE t.entity_type IN ('Bill','Purchase') AND l.line_customer_qbo_id IS NOT NULL
@@ -1189,7 +1190,7 @@ _CC_BILLED_SQL = """
     LEFT JOIN myapp.work_crews w
       ON w.vendor_qbo_id = t.vendor_qbo_id AND w.parent_id IS NULL
     WHERE t.entity_type = 'Bill'
-      AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+      AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
       AND l.line_customer_qbo_id {pid_filter}
     GROUP BY {pid_col}, t.vendor_qbo_id, w.id
 """
@@ -1222,6 +1223,18 @@ _CC_OFFERS_SQL = """
     WHERE o.status = 'accepted' {pid_filter}
 """
 
+# Multi-crew split (item #3): companies allocated a share of an estimate's
+# crew payments COUNT AS EXPECTED — they fold into the assignment set, so
+# bills from any allocated company are consistent, and (per the existing
+# strict rule's spirit) an allocated company with NO Contract-Labor bills
+# while others are billed is flagged like an unbilled assigned company.
+_CC_ALLOC_SQL = """
+    SELECT DISTINCT a.entity_id AS pid, wc.id AS id, wc.name AS name
+    FROM myapp.project_estimate_crew_allocations a
+    JOIN myapp.work_crews wc ON wc.id = a.company_crew_id
+    WHERE 1=1 {pid_filter}
+"""
+
 
 def _cc_billed_row(r):
     return {
@@ -1240,6 +1253,13 @@ def _crew_consistency_data(conn, entity_id):
     assigned = [{"id": int(r["id"]), "name": r["name"]} for r in conn.execute(
         text(_CC_ASSIGNED_SQL.format(pid_filter="AND qc.qbo_id = :e")),
         {"e": entity_id}).mappings().all()]
+    # fold split-allocation companies into the expected set (item #3)
+    seen = {c["id"] for c in assigned}
+    for r in conn.execute(text(_CC_ALLOC_SQL.format(pid_filter="AND a.entity_id = :e")),
+                          {"e": entity_id}).mappings().all():
+        if int(r["id"]) not in seen:
+            assigned.append({"id": int(r["id"]), "name": r["name"]})
+            seen.add(int(r["id"]))
     offers = [{"id": int(r["id"]), "name": r["name"]} for r in conn.execute(
         text(_CC_OFFERS_SQL.format(pid_filter="AND o.entity_id = :e")),
         {"e": entity_id}).mappings().all()]
@@ -1256,6 +1276,11 @@ def _crew_consistency_bulk(conn):
     a, o, b = {}, {}, {}
     for r in conn.execute(text(_CC_ASSIGNED_SQL.format(pid_filter=""))).mappings().all():
         a.setdefault(str(r["pid"]), []).append({"id": int(r["id"]), "name": r["name"]})
+    # fold split-allocation companies into the expected set (item #3)
+    for r in conn.execute(text(_CC_ALLOC_SQL.format(pid_filter=""))).mappings().all():
+        lst = a.setdefault(str(r["pid"]), [])
+        if int(r["id"]) not in {c["id"] for c in lst}:
+            lst.append({"id": int(r["id"]), "name": r["name"]})
     for r in conn.execute(text(_CC_OFFERS_SQL.format(pid_filter=""))).mappings().all():
         o.setdefault(str(r["pid"]), []).append({"id": int(r["id"]), "name": r["name"]})
     for r in conn.execute(text(_CC_BILLED_SQL.format(
@@ -1563,7 +1588,7 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
         crew_est = conn.execute(text("""
             SELECT COALESCE(ROUND(SUM(COALESCE(sl.cost_amount, sl.amount)),2),0)
             FROM myapp.qbo_sales_transaction_lines sl JOIN myapp.qbo_transactions t ON t.id=sl.transaction_id
-            WHERE t.entity_type='Estimate' AND sl.item_name='Contract Labor' AND sl.project_customer_qbo_id=:q
+            WHERE t.entity_type='Estimate' AND sl.item_name LIKE 'Contract Labor%' AND sl.project_customer_qbo_id=:q
               AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json,'$.TxnStatus')) IN ('Accepted','Converted')
         """), {"q": qbo_id}).scalar()
         crew_paid_rows = conn.execute(text("""
@@ -1571,7 +1596,7 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
                    ROUND(SUM(l.amount),2) AS amt
             FROM myapp.qbo_transaction_lines l JOIN myapp.qbo_transactions t ON t.id=l.transaction_id
             WHERE l.line_customer_qbo_id=:q AND t.entity_type='Bill'
-              AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name'))='Contract Labor'
+              AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json,'$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
             GROUP BY vendor ORDER BY amt DESC
         """), {"q": qbo_id}).mappings().all()
         crew_paid_total = round(sum(float(r["amt"] or 0) for r in crew_paid_rows), 2)

@@ -251,9 +251,8 @@ export async function teamsPage(routeFn) {
       ? `<td class="py-1 pr-1"><span class="tm-drag" draggable="true" data-drag-handle title="Drag to reorder${isCompany ? " (companies)" : " (within this company)"} — Esc cancels">⋮⋮</span></td>`
       : "";
     return `
-      <tr class="border-b border-black/5 ${isCompany ? "bg-black/[0.02]" : ""}"${dndAttrs}>
+      <tr class="border-b border-black/5${isCompany ? " tm-company-row" : ""}"${dndAttrs}>
         ${handleTd}
-        <td class="py-1 pr-2"><input type="color" value="${c.color || "#000000"}" data-crew-field="color" data-crew-id="${c.id}" class="h-7 w-8 rounded border border-black/10 bg-white p-0.5 cursor-pointer align-middle" title="Color"></td>
         <td class="py-1 pr-2">${nameCell}</td>
         <td class="py-1 pr-2">${isCompany
           ? `<input value="${esc(c.boss_name)}" data-crew-field="boss_name" data-crew-id="${c.id}" class="${CELL} w-full" style="min-width:7rem" placeholder="Boss / owner">`
@@ -312,7 +311,6 @@ export async function teamsPage(routeFn) {
     return `
       <div class="rounded-2xl border border-black/10 bg-white p-4 text-ink-900 flex flex-col gap-2 ${childWrap}">
         <div class="flex items-center gap-2">
-          <input type="color" value="${c.color || "#000000"}" data-crew-field="color" data-crew-id="${c.id}" class="h-8 w-9 rounded border border-black/10 bg-white p-0.5 cursor-pointer shrink-0" title="Color">
           <input value="${esc(c.name)}" data-crew-field="name" data-crew-id="${c.id}" class="${CINP} min-w-0 ${isCompany ? "font-semibold" : ""}" placeholder="${isCompany ? "Company name" : "Lead name"}">
           ${statusPill(isActive)}
         </div>
@@ -422,7 +420,6 @@ export async function teamsPage(routeFn) {
             <thead class="text-left text-black/50">
               <tr class="border-b border-black/10">
                 <th class="py-2 pr-1 font-bold" style="width:20px" title="Drag rows to reorder"></th>
-                <th class="py-2 pr-2 font-bold w-8"></th>
                 <th class="py-2 pr-2 font-bold">Company / Lead</th>
                 <th class="py-2 pr-2 font-bold">Boss / Owner</th>
                 <th class="py-2 pr-2 font-bold" title="How many crews the company can field">Crews</th>
@@ -450,8 +447,7 @@ export async function teamsPage(routeFn) {
               <table class="w-full text-xs">
                 <thead class="text-left text-black/50">
                   <tr class="border-b border-black/10">
-                    <th class="py-2 pl-2 pr-2 font-bold w-8"></th>
-                    <th class="py-2 pr-2 font-bold">Company / Lead</th>
+                    <th class="py-2 pr-2 font-bold" style="padding-left:8px">Company / Lead</th>
                     <th class="py-2 pr-2 font-bold">Boss / Owner</th>
                     <th class="py-2 pr-2 font-bold" title="How many crews the company can field">Crews</th>
                     <th class="py-2 pr-2 font-bold">Company</th>

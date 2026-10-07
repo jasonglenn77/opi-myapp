@@ -513,9 +513,11 @@ def _load_estimate(conn, estimate_id: int):
         SELECT e.*,
                c.display_name AS customer_display_name,
                c.email        AS customer_email,
-               c.qbo_id       AS customer_qbo_id
+               c.qbo_id       AS customer_qbo_id,
+               p.display_name AS project_name
         FROM estimates e
         LEFT JOIN qbo_customers c ON c.id = e.qbo_customer_id
+        LEFT JOIN qbo_customers p ON p.qbo_id = e.project_qbo_id
         WHERE e.id = :id
     """), {"id": estimate_id}).mappings().first()
     if not row:
@@ -597,11 +599,29 @@ def estimate_pdf(estimate_id: int, req: EstimatePdfRequest, user=Depends(get_cur
     rev = est.get("revision_no") or 1
     if req.save:
         from app.documents.routes import store_document_bytes
-        ent_type = "opportunity" if est.get("opportunity_id") else "estimate"
-        ent_id = est.get("opportunity_id") or estimate_id
+        # Project-attached change-order quotes (phase 2) file into the PROJECT
+        # entity's "4 Quotes" — same folder phase 1's CO PDFs use. Pipeline
+        # quotes keep the opportunity flow.
+        if est.get("project_qbo_id"):
+            ent_type, ent_id = "project", est["project_qbo_id"]
+        elif est.get("opportunity_id"):
+            ent_type, ent_id = "opportunity", est["opportunity_id"]
+        else:
+            ent_type, ent_id = "estimate", estimate_id
         fname = f"Estimate-{qn}-rev{rev}.pdf"
         doc_id = store_document_bytes(ent_type, ent_id, "4_quotes", fname, pdf,
                                       "application/pdf", user.get("id"))
+        if est.get("project_qbo_id"):
+            # Mirror the quoted total onto the estimate + its CO row so the
+            # Change Orders tab shows the $ without a pipeline sync (which
+            # project quotes deliberately skip — no opportunity).
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE estimates SET contract_value=:t WHERE id=:id"),
+                             {"t": req.total, "id": estimate_id})
+                conn.execute(text("""
+                    UPDATE project_change_orders SET amount=:t
+                    WHERE app_estimate_id=:id AND qbo_estimate_id IS NULL
+                """), {"t": req.total, "id": estimate_id})
         return {"ok": True, "document_id": doc_id, "filename": fname,
                 "entity_type": ent_type, "entity_id": ent_id}
     return Response(content=pdf, media_type="application/pdf",

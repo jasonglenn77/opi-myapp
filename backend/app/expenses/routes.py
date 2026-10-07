@@ -25,7 +25,10 @@ CATEGORIES = ["Materials", "Rentals", "Lodging", "Propane", "Travel", "Other"]
 
 # Estimate cost lines that are NOT real project expenses: Contract Labor is the
 # crew payment schedule; Buffer / OH&P are margin, not outflows.
-NON_EXPENSE_ITEMS = {"Contract Labor", "Contract Labor - Daily Rate Local", "Buffer", "OH&P"}
+# Crew/margin line items are NOT project expenses. QBO now has naming variants
+# ("Contract Labor - Daily Rate Local/Non-Local", "OH&P - Daily Rate ...",
+# "OH&P - Socks & Diapers"), so match by PREFIX, not exact name.
+NON_EXPENSE_PREFIXES = ("Contract Labor", "OH&P", "Buffer")
 
 # Keyword -> expense category. Any non-excluded cost line maps here by keyword,
 # defaulting to "Other" so nothing is silently dropped (Lifts, Scrubbers,
@@ -44,7 +47,7 @@ _CATEGORY_KEYWORDS = [
 def _expense_category(item_name: str) -> str | None:
     """Map an estimate cost line-item to an expense category, or None if it's not
     a real outflow (labor/buffer/OH&P)."""
-    if not item_name or item_name in NON_EXPENSE_ITEMS:
+    if not item_name or any(item_name.startswith(p) for p in NON_EXPENSE_PREFIXES):
         return None
     low = item_name.lower()
     for kw, cat in _CATEGORY_KEYWORDS:

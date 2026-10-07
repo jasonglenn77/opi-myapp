@@ -9,6 +9,19 @@ import { escapeHtml } from "../utils/html.js";
 const money = (n) => (n == null ? "—" : "$" + Math.round(n).toLocaleString("en-US"));
 const ymd = (s) => (s ? String(s).slice(0, 10) : "");
 
+// Assignment-workflow glue (#4): corner toast after the offer-accept confirm —
+// did the crew land on the project schedule? (shared .doc-toast style)
+const assignToast = (r) => {
+  if (!r || r.assigned === undefined) return;
+  const t = document.createElement("div");
+  t.className = "doc-toast";
+  t.textContent = r.assigned
+    ? "Crew assigned to the project schedule ✓"
+    : (r.assign_error ? "Offer accepted — schedule assignment failed: " + r.assign_error : "Already on the schedule");
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+};
+
 export async function mountPaymentsPanel(container, entityId) {
   let data, offers;
   const load = async () => {
@@ -172,7 +185,11 @@ export async function mountPaymentsPanel(container, entityId) {
     container.querySelectorAll("[data-respond]").forEach(b => b.addEventListener("click", async () => {
       const [id, status] = b.getAttribute("data-respond").split(":");
       const note = status === "declined" ? (prompt("Reason for declining (optional):") ?? "") : "";
-      try { await api(`/offers/${id}/respond`, { method: "POST", body: JSON.stringify({ status, note }) }); await reload(); } catch (err) { alert(err.message); }
+      try {
+        const r = await api(`/offers/${id}/respond`, { method: "POST", body: JSON.stringify({ status, note }) });
+        assignToast(r); // #4 glue (accepted only — declined carries no `assigned` field)
+        await reload();
+      } catch (err) { alert(err.message); }
     }));
     const wd = container.querySelector("[data-withdraw]");
     if (wd) wd.addEventListener("click", async () => {

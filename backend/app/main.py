@@ -369,14 +369,14 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
             SELECT l.line_customer_qbo_id, ROUND(SUM(l.amount), 2)
             FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
             WHERE t.entity_type = 'Bill' AND l.line_customer_qbo_id IS NOT NULL
-              AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) = 'Contract Labor'
+              AND JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')) LIKE 'Contract Labor%'
             GROUP BY l.line_customer_qbo_id
         """)).all()}
         # All per-crew installments (non-rollup), ordered so we can burn down by date.
         # Crew Model v2 (CR3): label = "Company · Lead" ("Company · lead TBD"
         # when the schedule points straight at the company). Math unchanged.
         inst = conn.execute(text("""
-            SELECT s.entity_id, i.pay_date, i.amount,
+            SELECT s.entity_id, s.estimate_qbo_id, i.pay_date, i.amount,
                    TRIM(CASE WHEN wc.id IS NULL THEN ''
                              WHEN pc.id IS NULL THEN CONCAT(wc.name, ' · lead TBD')
                              ELSE CONCAT(pc.name, ' · ', wc.name) END) AS crew_name,
@@ -389,6 +389,19 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
             WHERE s.is_rollup = 0
             ORDER BY s.entity_id, i.pay_date, i.id
         """)).mappings().all()
+        # Multi-crew split (item #3): allocations per (project, estimate). A
+        # split estimate's owed rows render one row PER COMPANY per installment
+        # (amount = that company's share of the owed remainder, label
+        # "MTY · 60%"); totals unchanged in aggregate.
+        split_allocs = {}
+        for r in conn.execute(text("""
+            SELECT a.entity_id, a.estimate_qbo_id, a.pct, wc.name
+            FROM project_estimate_crew_allocations a
+            JOIN work_crews wc ON wc.id = a.company_crew_id
+            ORDER BY a.entity_id, a.estimate_qbo_id, a.sort_order, a.id
+        """)).mappings().all():
+            split_allocs.setdefault((str(r["entity_id"]), str(r["estimate_qbo_id"])), []).append(
+                {"name": r["name"], "pct": float(r["pct"] or 0)})
         # Assignment schedule window per project (earliest start .. latest end).
         win_by = {}
         for r in conn.execute(text("""
@@ -455,11 +468,27 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
             if owed <= EPS:
                 continue  # fully covered by actual crew payments
             pd = r["pay_date"]
-            item = {"pay_date": str(pd) if pd else None, "amount": owed, "entity_id": eid,
+            base = {"pay_date": str(pd) if pd else None, "entity_id": eid,
                     "project": r["project"] or "(unknown project)",
-                    "crew": (r["crew_name"] or "").strip() or "(crew TBD)", "company": r["crew_company"],
+                    "company": r["crew_company"],
                     "status": "partial" if covered > EPS else "scheduled",
                     "schedule": win_by.get(eid)}
+            allocs = split_allocs.get((eid, str(r["estimate_qbo_id"] or "")))
+            if allocs and len(allocs) >= 2:
+                # split estimate: one owed row per company (share of the owed
+                # remainder, last allocation absorbs rounding)
+                fmt_pct = lambda p: str(int(p)) if float(p) == int(p) else str(round(p, 2))
+                acc = 0.0
+                for idx, a in enumerate(allocs):
+                    share = round(owed - acc, 2) if idx == len(allocs) - 1 else round(owed * a["pct"] / 100.0, 2)
+                    acc = round(acc + share, 2) if idx < len(allocs) - 1 else acc
+                    if share <= 0:
+                        continue
+                    item = dict(base, amount=share, crew=f"{a['name']} · {fmt_pct(a['pct'])}%")
+                    (overdue if (pd and pd < today) else upcoming).append(item)
+                continue
+            item = dict(base, amount=owed,
+                        crew=(r["crew_name"] or "").strip() or "(crew TBD)")
             (overdue if (pd and pd < today) else upcoming).append(item)
     upcoming.sort(key=lambda x: x["pay_date"] or "9999")
     overdue.sort(key=lambda x: x["pay_date"] or "9999")
