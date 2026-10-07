@@ -5278,7 +5278,7 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
 .nwd-btn:hover { background:#f3f4f6; }
 .nwd-none { color:#9ca3af; font-weight:500; }
 /* The popover editor. */
-.nwd-pop { position:fixed; z-index:260; width:300px; max-width:92vw;
+.nwd-pop { position:fixed; z-index:1000; width:300px; max-width:92vw;
            border:1px solid rgba(0,0,0,.12); border-radius:12px; background:#fff;
            color:#111827; padding:12px; box-shadow:0 12px 32px rgba(0,0,0,.18);
            font-size:12px; }
