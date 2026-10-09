@@ -498,6 +498,46 @@ def _ensure_labor_templates(conn, metric_set_id: int):
             })
 
 
+# New BASE / OPTION tabs start from the workbook template's defaults. Seeded
+# ONLY when a set is created (never on reload) so quotes already in progress
+# are not repriced. "auto:<kind>" rows are kept in sync by the BASE tab
+# (scissor/forklift qty = rental duration x per-crew x crew count).
+NEW_SET_DEFAULTS = {"scissor_lifts_per_crew": 2, "forklifts_per_crew": 1}
+NEW_SET_MATERIALS = [  # (label, qty, cost) — BASE C41/C42
+    ("Anchor Drill Bits", 1, 250),
+    ("Banding Material ($750 per week of teardown)", 0, 750),
+]
+
+
+def _seed_new_set(conn, metric_set_id: int):
+    conn.execute(text("""
+        UPDATE quote_metric_sets
+           SET scissor_lifts_per_crew = :sc, forklifts_per_crew = :fk
+         WHERE id = :id
+    """), {"sc": NEW_SET_DEFAULTS["scissor_lifts_per_crew"],
+           "fk": NEW_SET_DEFAULTS["forklifts_per_crew"], "id": metric_set_id})
+    for idx, (label, qty, cost) in enumerate(NEW_SET_MATERIALS):
+        conn.execute(text("""
+            INSERT INTO quote_metric_lines
+              (metric_set_id, section_code, line_kind, sort_order, label, qty, unit_price, ext_cost)
+            VALUES (:mid, 'materials_rack_install', 'free_form', :so, :label, :qty, :cost, :ext)
+        """), {"mid": metric_set_id, "so": idx, "label": label, "qty": qty, "cost": cost,
+               "ext": round(qty * cost, 2)})
+    tele = conn.execute(text("""
+        SELECT id FROM rental_rates
+         WHERE equipment_type = 'Telehandler 12K' AND duration = 'week' LIMIT 1
+    """)).scalar()
+    rows = [("Scissor Lift", None, "auto:scissor"), ("Forklift", None, "auto:forklift"),
+            ("Telehandler 12K", tele, None)]
+    for idx, (label, rate_id, notes) in enumerate(rows):
+        conn.execute(text("""
+            INSERT INTO quote_metric_lines
+              (metric_set_id, section_code, line_kind, sort_order, rental_rate_id, label, qty, ext_cost, notes)
+            VALUES (:mid, 'rentals_rack_install', 'rental', :so, :rid, :label, 0, :ext, :notes)
+        """), {"mid": metric_set_id, "so": idx, "rid": rate_id, "label": label,
+               "ext": 0 if rate_id else None, "notes": notes})
+
+
 # ---------------------------------------------------------------------------
 # Quote metric sets — Base + Options + Project Rentals per estimate. The GET
 # endpoint auto-creates the Base row on first call so the Quoting Metrics
@@ -557,6 +597,9 @@ def list_metric_sets(estimate_id: int, _user=Depends(get_current_user)):
                   (estimate_id, kind, label, sort_order, is_enabled, mobilizations)
                 VALUES (:estimate_id, 'base', 'Base', 0, 1, 1)
             """), {"estimate_id": estimate_id})
+            _seed_new_set(conn, conn.execute(text(
+                "SELECT id FROM quote_metric_sets WHERE estimate_id=:e AND kind='base' ORDER BY id DESC LIMIT 1"),
+                {"e": estimate_id}).scalar())
             rows = _list_metric_sets(conn, estimate_id)
 
         # Ensure labor-block templates exist for the Base set. Idempotent —
@@ -620,6 +663,8 @@ def create_metric_set(req: MetricSetCreate, _user=Depends(get_current_user)):
             "so":    sort_order,
         })
         new_id = result.lastrowid
+        if req.kind == "option":
+            _seed_new_set(conn, new_id)
 
         # Seed labor-block + other-rentals templates so the option starts in
         # a usable state, same as the Base set does on auto-create.
@@ -721,6 +766,9 @@ class MetricLineWrite(BaseModel):
     rental_rate_id: Optional[int] = None
     label: Optional[str] = None
     qty: Optional[float] = None
+    qty_formula: Optional[str] = None
+    custom_std_per_day: Optional[float] = None
+    custom_agg_per_day: Optional[float] = None
     mobilizations: Optional[float] = None
     unit_price: Optional[float] = None
     notes: Optional[str] = None
@@ -754,6 +802,12 @@ def _compute_line_totals(conn, payload: MetricLineWrite):
                 std_total = round(float(payload.qty) / float(rate["standard_per_day"]), 3)
             if rate["aggressive_per_day"]:
                 agg_total = round(float(payload.qty) / float(rate["aggressive_per_day"]), 3)
+
+    elif payload.line_kind == "productivity" and payload.qty is not None             and (payload.custom_std_per_day or payload.custom_agg_per_day):
+        # Quote-specific item (workbook: G = iferror(D/E, 0)).
+        q = float(payload.qty)
+        std_total = round(q / float(payload.custom_std_per_day), 3) if payload.custom_std_per_day else 0.0
+        agg_total = round(q / float(payload.custom_agg_per_day), 3) if payload.custom_agg_per_day else 0.0
 
     elif payload.line_kind == "rental" and payload.rental_rate_id and payload.qty is not None:
         rate = _snapshot_rate(conn, payload, "rental")
@@ -808,7 +862,9 @@ def _fetch_line(conn, line_id: int):
                CAST(l.ext_cost AS DECIMAL(14,2))   AS ext_cost,
                CAST(l.std_total AS DECIMAL(12,3))  AS std_total,
                CAST(l.agg_total AS DECIMAL(12,3))  AS agg_total,
-               l.notes,
+               l.notes, l.qty_formula,
+               CAST(l.custom_std_per_day AS DECIMAL(12,3)) AS custom_std_per_day,
+               CAST(l.custom_agg_per_day AS DECIMAL(12,3)) AS custom_agg_per_day,
                pr.item_name             AS productivity_item_name,
                pr.standard_per_day      AS productivity_std_per_day,
                pr.aggressive_per_day    AS productivity_agg_per_day,
@@ -849,7 +905,9 @@ def list_metric_lines(
                CAST(l.ext_cost AS DECIMAL(14,2))   AS ext_cost,
                CAST(l.std_total AS DECIMAL(12,3))  AS std_total,
                CAST(l.agg_total AS DECIMAL(12,3))  AS agg_total,
-               l.notes,
+               l.notes, l.qty_formula,
+               CAST(l.custom_std_per_day AS DECIMAL(12,3)) AS custom_std_per_day,
+               CAST(l.custom_agg_per_day AS DECIMAL(12,3)) AS custom_agg_per_day,
                pr.item_name             AS productivity_item_name,
                pr.standard_per_day      AS productivity_std_per_day,
                pr.aggressive_per_day    AS productivity_agg_per_day,
@@ -894,11 +952,11 @@ def create_metric_line(req: MetricLineWrite, _user=Depends(get_current_user)):
             INSERT INTO quote_metric_lines (
                 metric_set_id, section_code, line_kind, sort_order,
                 productivity_rate_id, rental_rate_id, label,
-                qty, mobilizations, unit_price, ext_cost, std_total, agg_total, notes
+                qty, qty_formula, custom_std_per_day, custom_agg_per_day, mobilizations, unit_price, ext_cost, std_total, agg_total, notes
             ) VALUES (
                 :metric_set_id, :section_code, :line_kind, :sort_order,
                 :productivity_rate_id, :rental_rate_id, :label,
-                :qty, :mobilizations, :unit_price, :ext_cost, :std_total, :agg_total, :notes
+                :qty, :qty_formula, :custom_std_per_day, :custom_agg_per_day, :mobilizations, :unit_price, :ext_cost, :std_total, :agg_total, :notes
             )
         """), {
             **req.model_dump(),
@@ -936,7 +994,10 @@ def update_metric_line(line_id: int, req: MetricLineWrite, _user=Depends(get_cur
                 ext_cost = :ext_cost,
                 std_total = :std_total,
                 agg_total = :agg_total,
-                notes = :notes
+                notes = :notes,
+                qty_formula = :qty_formula,
+                custom_std_per_day = :custom_std_per_day,
+                custom_agg_per_day = :custom_agg_per_day
             WHERE id = :id
         """), {
             **req.model_dump(),
@@ -985,6 +1046,63 @@ def delete_metric_lines_bulk(
 # (ON DELETE CASCADE). Base sets are protected — there must always be a
 # Base for an estimate.
 # ---------------------------------------------------------------------------
+@router.post("/metric-sets/{set_id}/duplicate")
+def duplicate_metric_set(set_id: int, user=Depends(get_current_user)):
+    """Copy a BASE (or option) tab into a NEW option tab: tab settings, every
+    line, and the tab's typed-over cells — so an option starts from the base
+    instead of from scratch."""
+    import json as _json
+    with engine.begin() as conn:
+        src = conn.execute(text("SELECT * FROM quote_metric_sets WHERE id=:id"),
+                           {"id": set_id}).mappings().first()
+        if not src or src["kind"] not in ("base", "option"):
+            raise HTTPException(status_code=404, detail="Base/option tab not found")
+        est = conn.execute(text("SELECT locked, cell_overrides FROM estimates WHERE id=:e"),
+                           {"e": src["estimate_id"]}).mappings().first()
+        if est and est["locked"]:
+            raise HTTPException(status_code=400, detail="This revision is locked.")
+        n = int(conn.execute(text("""
+            SELECT COALESCE(MAX(sort_order), 0) FROM quote_metric_sets
+             WHERE estimate_id = :e AND kind = 'option'"""), {"e": src["estimate_id"]}).scalar()) + 1
+        skip = {"id", "estimate_id", "kind", "label", "sort_order", "created_at", "updated_at"}
+        cols = [c for c in src.keys() if c not in skip]
+        params = {c: src[c] for c in cols}
+        params.update({"estimate_id": src["estimate_id"], "kind": "option",
+                       "label": f"Option {n}", "sort_order": n})
+        allc = ["estimate_id", "kind", "label", "sort_order"] + cols
+        new_id = conn.execute(text(
+            f"INSERT INTO quote_metric_sets ({', '.join(allc)}) VALUES ({', '.join(':' + c for c in allc)})"),
+            params).lastrowid
+        line_map = {}
+        for ln in conn.execute(text("SELECT * FROM quote_metric_lines WHERE metric_set_id=:s ORDER BY id"),
+                               {"s": set_id}).mappings().all():
+            lcols = [c for c in ln.keys() if c not in ("id", "metric_set_id", "created_at", "updated_at")]
+            lp = {c: ln[c] for c in lcols}
+            lp["metric_set_id"] = new_id
+            line_map[ln["id"]] = conn.execute(text(
+                f"INSERT INTO quote_metric_lines (metric_set_id, {', '.join(lcols)}) "
+                f"VALUES (:metric_set_id, {', '.join(':' + c for c in lcols)})"), lp).lastrowid
+        try:
+            ov = _json.loads(est["cell_overrides"]) if isinstance(est["cell_overrides"], str)                 else (est["cell_overrides"] or {})
+        except Exception:
+            ov = {}
+        added = {}
+        for k, v in ov.items():
+            if k.startswith(f"s{set_id}:"):
+                added[f"s{new_id}:" + k[len(f"s{set_id}:"):]] = v
+            elif k.startswith("l") and ":" in k:
+                head, rest = k[1:].split(":", 1)
+                if head.isdigit() and int(head) in line_map:
+                    added[f"l{line_map[int(head)]}:{rest}"] = v
+        if added:
+            ov.update(added)
+            conn.execute(text("UPDATE estimates SET cell_overrides=:o WHERE id=:e"),
+                         {"o": _json.dumps(ov), "e": src["estimate_id"]})
+    record_audit(user, "quote_metric_set.duplicate", "quote_metric_set", new_id, f"Option {n}",
+                 detail={"from_set_id": set_id, "lines": len(line_map), "overrides": len(added)})
+    return {"id": new_id, "sort_order": n, "label": f"Option {n}"}
+
+
 @router.delete("/metric-sets/{set_id}")
 def delete_metric_set(set_id: int, _user=Depends(get_current_user)):
     with engine.begin() as conn:

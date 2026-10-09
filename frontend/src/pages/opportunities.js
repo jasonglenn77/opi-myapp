@@ -6,6 +6,7 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { customerCombobox, contactFormModal } from "./contacts.js";
+import { copyPdfModel } from "../utils/estimate-bridge.js";
 
 const SOURCES = ["Email", "Referral", "Repeat customer", "Website", "Phone", "Other"];
 const STATUS_META = {
@@ -400,7 +401,7 @@ export async function pipelinePage(routeFn) {
     filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => { unlinkedOnly = !unlinkedOnly; page = 0; renderFilters(); render(); });
     filtersEl.querySelector("[data-showinactive]").addEventListener("click", () => { showInactive = !showInactive; page = 0; renderFilters(); render(); });
     filtersEl.querySelector("[data-new]").addEventListener("click", () =>
-      newOpportunityModal({ estimators, onSaved: () => { loadMetrics(); load(); } }));
+      newOpportunityModal({ estimators, pipelineStatuses, onSaved: () => { loadMetrics(); load(); } }));
     const sb = filtersEl.querySelector("[data-search]");
     let t = null;
     sb.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { searchQ = sb.value.trim(); page = 0; render(); }, 200); });
@@ -505,6 +506,7 @@ export async function pipelinePage(routeFn) {
       if (!confirm("Create a new revision? This duplicates the current quote, locks the current revision, and opens the new draft.")) return;
       try {
         const r = await api(`/estimates/${o.app_estimate_id}/revise`, { method: "POST" });
+      copyPdfModel(o.app_estimate_id, r.estimate_id);
         location.hash = `#/estimate/${r.estimate_id}`;
       } catch (err) { alert(err.message || "Failed to create revision"); }
     }));
@@ -573,7 +575,7 @@ export async function pipelinePage(routeFn) {
     }));
     listEl.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => {
       const opp = allRows.find(o => String(o.id) === b.getAttribute("data-edit"));
-      editOpportunityModal(opp, (updated) => {
+      editOpportunityModal(opp, { estimators, pipelineStatuses }, (updated) => {
         if (updated) { const i = allRows.findIndex(o => o.id === updated.id); if (i >= 0) allRows[i] = updated; }
         render();
       });
@@ -776,68 +778,6 @@ function startQuoteModal(opp, onDone) {
 }
 
 // ── Edit an opportunity (job / contact / notes / dates) ──────────────────────
-function editOpportunityModal(opp, onDone) {
-  const overlay = document.createElement("div");
-  overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
-  overlay.innerHTML = `
-    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[90vh] overflow-auto">
-      <div class="text-base font-bold text-ink-900 mb-0.5">Edit opportunity</div>
-      <div class="text-xs text-black/50 mb-3">${escapeHtml(opp.customer_name || "")}${opp.quote_number ? ` · Quote #${escapeHtml(opp.quote_number)}` : ""}</div>
-      <div class="space-y-3">
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Job / description</div>
-          <input data-f="title" class="input text-sm py-1.5 w-full" value="${escapeHtml(opp.title || "")}"></label>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Contact</div>
-          <select data-f="contact_id" class="input text-sm py-1.5 w-full"><option value="">— loading —</option></select>
-          <div class="text-[10px] text-black/40 mt-0.5">${opp.contact_name ? "Current: " + escapeHtml(opp.contact_name) : "No contact set"}</div></label>
-        <div class="grid grid-cols-2 gap-2">
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target start</div>
-            <input data-f="target_start_date" type="date" class="input text-sm py-1.5 w-full" value="${escapeHtml((opp.target_start_date || "").slice(0,10))}"></label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target end</div>
-            <input data-f="target_end_date" type="date" class="input text-sm py-1.5 w-full" value="${escapeHtml((opp.target_end_date || "").slice(0,10))}"></label>
-        </div>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Notes</div>
-          <textarea data-f="notes" rows="3" class="input text-sm py-1.5 w-full">${escapeHtml(opp.notes || "")}</textarea></label>
-      </div>
-      <div class="mt-4 flex items-center justify-end gap-2">
-        <span data-msg class="text-xs font-semibold mr-auto"></span>
-        <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
-        <button data-save class="btn-primary text-sm px-4 py-1.5">Save</button>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  const close = () => overlay.remove();
-  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
-  overlay.querySelector("[data-cancel]").addEventListener("click", close);
-  const val = (f) => overlay.querySelector(`[data-f="${f}"]`);
-  const setMsg = (t, ok) => { const m = overlay.querySelector("[data-msg]"); m.textContent = t; m.className = "text-xs font-semibold mr-auto " + (ok ? "text-emerald-700" : "text-red-600"); };
-
-  // contacts for this customer
-  (async () => {
-    const sel = val("contact_id");
-    if (!opp.customer_qbo_id) { sel.innerHTML = `<option value="">— link a customer first —</option>`; sel.disabled = true; return; }
-    try {
-      const list = (await api(`/contacts/customer/${encodeURIComponent(opp.customer_qbo_id)}`)).contacts || [];
-      sel.innerHTML = `<option value="">— none —</option>` + list.map(c =>
-        `<option value="${c.id}" ${String(c.id) === String(opp.contact_id || "") ? "selected" : ""}>${escapeHtml(c.full_name || "contact")}</option>`).join("");
-    } catch (_) { sel.innerHTML = `<option value="">Couldn't load contacts</option>`; }
-  })();
-
-  overlay.querySelector("[data-save]").addEventListener("click", async () => {
-    const payload = {
-      title: val("title").value.trim() || null,
-      contact_id: val("contact_id").value ? Number(val("contact_id").value) : null,
-      target_start_date: val("target_start_date").value || null,
-      target_end_date: val("target_end_date").value || null,
-      notes: val("notes").value.trim() || null,
-    };
-    setMsg("Saving…", true);
-    try {
-      const r = await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify(payload) });
-      close(); onDone && onDone(r.opportunity);
-    } catch (err) { let d = err?.message || "Failed"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch {} setMsg(d, false); }
-  });
-}
-
 // ── Link an unlinked opportunity to a QBO customer ───────────────────────────
 function linkCustomerModal(opp, onDone) {
   let customer = null;
@@ -1028,38 +968,57 @@ function opportunityDocsModal(opp, onDone) {
   load();
 }
 
-// ── New Opportunity (RFQ intake) modal ──────────────────────────────────────
-function newOpportunityModal({ estimators, onSaved }) {
-  let customer = null;   // {qbo_id, name}
+// ── Opportunity form (create + edit share every field) ───────────────────────
+const DEFAULT_PIPELINE_STATUS = "20% Budgetary, Project Uncertain";
+function newOpportunityModal({ estimators, pipelineStatuses, onSaved }) {
+  opportunityFormModal({ opp: null, estimators, pipelineStatuses, onDone: () => onSaved && onSaved() });
+}
+function editOpportunityModal(opp, { estimators, pipelineStatuses }, onDone) {
+  opportunityFormModal({ opp, estimators, pipelineStatuses, onDone });
+}
+
+function opportunityFormModal({ opp, estimators, pipelineStatuses, onDone }) {
+  const isEdit = !!opp;
+  let customer = isEdit && opp.customer_qbo_id ? { qbo_id: opp.customer_qbo_id, name: opp.customer_name || "" } : null;
+  const v = (k) => (isEdit && opp[k] != null ? opp[k] : "");
+  const d10 = (k) => escapeHtml(String(v(k)).slice(0, 10));
+  const curStatus = isEdit ? (opp.pipeline_status || "") : DEFAULT_PIPELINE_STATUS;
+  const statuses = [...new Set([...(pipelineStatuses || []), ...(curStatus ? [curStatus] : [])])];
+  const sources = [...new Set([...SOURCES, ...(v("source") ? [v("source")] : [])])];
+  const lbl = (t) => `<div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">${t}</div>`;
   const overlay = document.createElement("div");
   overlay.className = "fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4";
   overlay.innerHTML = `
     <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5 max-h-[90vh] overflow-auto">
-      <div class="text-base font-bold text-ink-900 mb-3">New opportunity (log an RFQ)</div>
-      <div class="space-y-3">
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Customer</div><div data-cust></div></label>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Contact</div>
+      <div class="text-base font-bold text-ink-900 mb-0.5">${isEdit ? "Edit opportunity" : "New opportunity (log an RFQ)"}</div>
+      ${isEdit && opp.quote_number ? `<div class="text-xs text-black/50">Quote #${escapeHtml(opp.quote_number)}</div>` : ""}
+      <div class="space-y-3 mt-3">
+        <label class="block">${lbl("Customer")}<div data-cust></div></label>
+        <label class="block">${lbl("Contact")}
           <div class="flex gap-2">
             <select data-contact class="input text-sm py-1.5 flex-1" disabled><option value="">Pick a customer first</option></select>
             <button data-newcontact class="rounded-lg border border-black/15 px-2.5 py-1 text-xs font-semibold text-ink-900 hover:bg-black/5 whitespace-nowrap disabled:text-black/30" disabled>+ New</button>
           </div></label>
-        <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Job / description</div><input data-f="title" class="input text-sm py-1.5 w-full" placeholder="e.g. Rack install — Odessa TX"></label>
+        <label class="block">${lbl("Job / description")}<input data-f="title" class="input text-sm py-1.5 w-full" placeholder="e.g. Rack install — Odessa TX" value="${escapeHtml(v("title"))}"></label>
+        <label class="block">${lbl("Status")}
+          <select data-f="pipeline_status" class="input text-sm py-1.5 w-full"><option value="">—</option>${statuses.map(s => `<option ${s === curStatus ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select></label>
         <div class="grid grid-cols-3 gap-2">
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">RFQ received</div><input data-f="rfq_received_date" type="date" class="input text-sm py-1.5 w-full"></label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target start</div><input data-f="target_start_date" type="date" class="input text-sm py-1.5 w-full"></label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Target end</div><input data-f="target_end_date" type="date" class="input text-sm py-1.5 w-full"></label>
+          <label class="block">${lbl("RFQ received")}<input data-f="rfq_received_date" type="date" class="input text-sm py-1.5 w-full" value="${d10("rfq_received_date")}"></label>
+          <label class="block">${lbl("Target start")}<input data-f="target_start_date" type="date" class="input text-sm py-1.5 w-full" value="${d10("target_start_date")}"></label>
+          <label class="block">${lbl("Target end")}<input data-f="target_end_date" type="date" class="input text-sm py-1.5 w-full" value="${d10("target_end_date")}"></label>
         </div>
         <div class="grid grid-cols-2 gap-2">
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Source</div>
-            <select data-f="source" class="input text-sm py-1.5 w-full"><option value="">—</option>${SOURCES.map(s => `<option>${s}</option>`).join("")}</select></label>
-          <label class="block"><div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1">Estimator</div>
-            <select data-f="estimator_user_id" class="input text-sm py-1.5 w-full"><option value="">—</option>${estimators.map(u => `<option value="${u.id}">${escapeHtml(u.name)}${u.role ? ` — ${escapeHtml(humanRole(u.role))}` : ""}</option>`).join("")}</select></label>
+          <label class="block">${lbl("Source")}
+            <select data-f="source" class="input text-sm py-1.5 w-full"><option value="">—</option>${sources.map(s => `<option ${s === v("source") ? "selected" : ""}>${escapeHtml(s)}</option>`).join("")}</select></label>
+          <label class="block">${lbl("Estimator")}
+            <select data-f="estimator_user_id" class="input text-sm py-1.5 w-full"><option value="">—</option>${estimators.map(u => `<option value="${u.id}" ${String(u.id) === String(v("estimator_user_id")) ? "selected" : ""}>${escapeHtml(u.name)}${u.role ? ` — ${escapeHtml(humanRole(u.role))}` : ""}</option>`).join("")}</select></label>
         </div>
+        <label class="block">${lbl("Notes")}<textarea data-f="notes" rows="3" class="input text-sm py-1.5 w-full">${escapeHtml(v("notes"))}</textarea></label>
       </div>
       <div class="mt-4 flex items-center justify-end gap-2">
         <span data-msg class="text-xs font-semibold mr-auto"></span>
         <button data-cancel class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Cancel</button>
-        <button data-save class="btn-primary text-sm px-4 py-1.5">Create</button>
+        <button data-save class="btn-primary text-sm px-4 py-1.5">${isEdit ? "Save" : "Create"}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
@@ -1080,12 +1039,14 @@ function newOpportunityModal({ estimators, onSaved }) {
       contactSel.innerHTML = `<option value="">— none —</option>` +
         list.map(c => `<option value="${c.id}" ${String(c.id) === String(selectId || "") ? "selected" : ""}>${escapeHtml(c.full_name || "contact")}</option>`).join("");
       contactSel.disabled = false; newContactBtn.disabled = false;
-    } catch (_) { /* ignore */ }
+    } catch (_) { contactSel.innerHTML = `<option value="">Couldn't load contacts</option>`; }
   };
 
   customerCombobox(overlay.querySelector("[data-cust]"), {
+    initial: customer,
     onPick: (c) => { customer = c; if (c) loadContacts(); else { contactSel.innerHTML = `<option value="">Pick a customer first</option>`; contactSel.disabled = true; newContactBtn.disabled = true; } },
   });
+  if (customer) loadContacts(isEdit ? opp.contact_id : null);
   newContactBtn.addEventListener("click", () => {
     if (!customer) return;
     contactFormModal({ customer, contact: null, onSaved: (saved) => loadContacts(saved?.id) });
@@ -1097,13 +1058,25 @@ function newOpportunityModal({ estimators, onSaved }) {
       customer_qbo_id: customer.qbo_id,
       contact_id: contactSel.value ? Number(contactSel.value) : null,
       title: val("title").value.trim() || null,
+      pipeline_status: val("pipeline_status").value || null,
       source: val("source").value || null,
       rfq_received_date: val("rfq_received_date").value || null,
       target_start_date: val("target_start_date").value || null,
       target_end_date: val("target_end_date").value || null,
       estimator_user_id: val("estimator_user_id").value ? Number(val("estimator_user_id").value) : null,
+      notes: val("notes").value.trim() || null,
     };
-    try { await api(`/opportunities`, { method: "POST", body: JSON.stringify(payload) }); close(); onSaved && onSaved(); }
-    catch (err) { let d = err?.message || "Could not save"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
+    if (isEdit) {
+      // Only send what changed so an untouched status never re-drives the stage.
+      if ((payload.pipeline_status || "") === (opp.pipeline_status || "")) delete payload.pipeline_status;
+      if (payload.customer_qbo_id === opp.customer_qbo_id) delete payload.customer_qbo_id;
+    }
+    setMsg("Saving…", true);
+    try {
+      const r = isEdit
+        ? await api(`/opportunities/${opp.id}`, { method: "PATCH", body: JSON.stringify(payload) })
+        : await api(`/opportunities`, { method: "POST", body: JSON.stringify(payload) });
+      close(); onDone && onDone(r && r.opportunity);
+    } catch (err) { let d = err?.message || "Could not save"; try { const o = JSON.parse(d); if (o.detail) d = o.detail; } catch (_) {} setMsg(d, false); }
   });
 }

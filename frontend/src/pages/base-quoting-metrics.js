@@ -14,7 +14,9 @@
 // 'other_rental' (label/qty/mobs/price with auto-derived smart rows).
 
 import { setShell } from "../shell.js";
+import { readEstimateBridge as readQuoteBridge, bridgeKey } from "../utils/estimate-bridge.js";
 import { escapeHtml } from "../utils/html.js";
+import { qtyCellHtml, evalQtyFormula, openQtyFormulaModal } from "../utils/qty-formula.js";
 import { api } from "../api.js";
 import { computeSetRollup, computeSetBundles, applyLineOverrides } from "../utils/qm-rollup.js";
 
@@ -422,7 +424,35 @@ export async function mountBaseQuotingMetrics({
                   class="text-xs text-black/40 hover:text-red-600 px-1 rounded"
                   title="Delete row">✕</button>`;
 
+  const CUSTOM_ITEM_SECTIONS = new Set(["miscellaneous"]);
+  const isCustomItem = (code, row) => CUSTOM_ITEM_SECTIONS.has(code) && !row.productivity_rate_id &&
+    (row._custom || row.custom_std_per_day != null || row.custom_agg_per_day != null ||
+     (row.label != null && String(row.label).trim() !== ""));
+
+  function lineRowHtmlCustomItem(code, row, idx) {
+    const num = (v) => (v != null && v !== "" ? Number(v) : "");
+    const kS = row.id != null ? `l${row.id}:std_total` : null;
+    const kA = row.id != null ? `l${row.id}:agg_total` : null;
+    const pS = ovrCellParts(kS, row.std_total, "num3", fmt(row.std_total, 3));
+    const pA = ovrCellParts(kA, row.agg_total, "num3", fmt(row.agg_total, 3));
+    return `
+      <tr data-row-idx="${idx}">
+        <td class="qmx-in">
+          <input type="text" data-row-field="label" style="text-align:left"
+                 value="${escapeHtml(row.label ?? "")}" placeholder="Custom item for this quote"/>
+          <div style="padding:0 6px 3px"><span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">custom item</span></div>
+        </td>
+        <td class="qmx-in">${qtyCellHtml(row.qty, row.qty_formula)}</td>
+        <td class="qmx-in"><input type="number" step="any" min="0" data-row-field="custom_std_per_day" value="${num(row.custom_std_per_day)}" placeholder="per day"/></td>
+        <td class="qmx-in"><input type="number" step="any" min="0" data-row-field="custom_agg_per_day" value="${num(row.custom_agg_per_day)}" placeholder="per day"/></td>
+        <td class="qmx-out qmx-strong" data-row-cell="std_total"${pS.attrs}>${pS.inner}</td>
+        <td class="qmx-out qmx-strong" data-row-cell="agg_total"${pA.attrs}>${pA.inner}</td>
+        <td class="qmx-del">${delBtnHtml}</td>
+      </tr>`;
+  }
+
   function lineRowHtmlProductivity(code, row, idx) {
+    if (isCustomItem(code, row)) return lineRowHtmlCustomItem(code, row, idx);
     const section = sections[code];
     const item = row.productivity_rate_id ? section.itemById.get(row.productivity_rate_id) : null;
     const stdPerDay = item ? item.standard_per_day : (row.productivity_std_per_day ?? null);
@@ -432,7 +462,8 @@ export async function mountBaseQuotingMetrics({
       `<option value="" ${!row.productivity_rate_id ? "selected" : ""}>< Select ></option>` +
       section.items.map(p =>
         `<option value="${p.id}" ${row.productivity_rate_id === p.id ? "selected" : ""}>${escapeHtml(p.item_name)}</option>`
-      ).join("");
+      ).join("") +
+      (CUSTOM_ITEM_SECTIONS.has(code) ? `<option value="custom">+ Custom item (this quote only)…</option>` : "");
 
     return `
       <tr data-row-idx="${idx}">
@@ -440,8 +471,7 @@ export async function mountBaseQuotingMetrics({
           <select data-row-field="productivity_rate_id">${itemOptions}</select>
         </td>
         <td class="qmx-in">
-          <input type="number" step="any" min="0" data-row-field="qty"
-                 value="${row.qty != null ? Number(row.qty) : ""}" placeholder="0"/>
+          ${qtyCellHtml(row.qty, row.qty_formula)}
         </td>
         <td class="qmx-out">${fmt(stdPerDay, 0)}</td>
         <td class="qmx-out">${fmt(aggPerDay, 0)}</td>
@@ -479,10 +509,10 @@ export async function mountBaseQuotingMetrics({
             <option value="" ${placeholderSelected}>< Select ></option>
             ${optGroupsHtml}
           </select>
+          ${smartRowKind(code, row) ? `<div data-smart-badge style="padding:0 6px 3px">${smartRowBadgeHtml(code, row)}</div>` : ""}
         </td>
         <td class="qmx-in">
-          <input type="number" step="any" min="0" data-row-field="qty"
-                 value="${row.qty != null ? Number(row.qty) : ""}" placeholder="0"/>
+          ${qtyCellHtml(row.qty, row.qty_formula)}
         </td>
         <td class="qmx-out">${fmtMoney(unitPrice)}</td>
         ${(() => {
@@ -501,10 +531,13 @@ export async function mountBaseQuotingMetrics({
     const kind = smartRowKind(code, row);
     if (!kind) return "";
     const suggest = row._autoSuggest;
-    const suggestTxt = (suggest == null || suggest.ext == null) ? "—" : fmtMoney(suggest.ext);
+    const suggestTxt = (suggest == null || suggest.ext == null) ? "—"
+      : (kind in LIFT_EQUIPMENT ? `qty ${suggest.qty}` : fmtMoney(suggest.ext));
     const autoDesc = kind === "env"     ? "1.9% of lift rentals"
                    : kind === "hauling" ? "round-trips × mobs × $175"
-                   :                      "workbook formula (0 if electric)";
+                   : kind in LIFT_EQUIPMENT
+                     ? `rental ${suggest?.period || "period"} × ${kind === "scissor" ? "scissor lifts" : "forklifts"} per crew × crews${suggest && suggest.period && !suggest.rental_rate_id ? " (set energy type + rack height on ROLL UP)" : ""}`
+                     : "workbook formula (0 if electric)";
     if (autoState(row) === "auto") {
       return `<div class="mt-0.5 flex items-center gap-1">
         <span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">auto</span>
@@ -531,8 +564,7 @@ export async function mountBaseQuotingMetrics({
           <div data-smart-badge style="padding:0 6px 3px">${smartRowBadgeHtml(code, row)}</div>
         </td>
         <td class="qmx-in">
-          <input type="number" step="any" min="0" data-row-field="qty"
-                 value="${qty ?? ""}" placeholder="0"/>
+          ${qtyCellHtml(row.qty, row.qty_formula)}
         </td>
         <td class="qmx-in">
           <input type="number" step="0.5" min="0" data-row-field="mobilizations"
@@ -560,8 +592,7 @@ export async function mountBaseQuotingMetrics({
                  value="${escapeHtml(row.label ?? "")}" placeholder="Enter description"/>
         </td>
         <td class="qmx-in">
-          <input type="number" step="any" min="0" data-row-field="qty"
-                 value="${row.qty != null ? Number(row.qty) : ""}" placeholder="0"/>
+          ${qtyCellHtml(row.qty, row.qty_formula)}
         </td>
         <td class="qmx-in">
           <input type="number" step="0.01" min="0" data-row-field="unit_price"
@@ -596,7 +627,7 @@ export async function mountBaseQuotingMetrics({
     if (kind === "rental") {
       headerCols = `
         <th>Type</th>
-        <th style="width:72px">QTY</th>
+        <th style="width:104px">QTY</th>
         <th style="width:110px">Unit Cost</th>
         <th style="width:110px">Ext. Cost</th>${delTh}`;
       colCount = 5;
@@ -612,7 +643,7 @@ export async function mountBaseQuotingMetrics({
       const isMat = code.startsWith("materials_");
       headerCols = `
         <th>${isMat ? "Description" : "Item"}</th>
-        <th style="width:72px">QTY</th>
+        <th style="width:104px">QTY</th>
         <th style="width:110px">${isMat ? "Cost" : "Price"}</th>
         <th style="width:110px">${isMat ? "Total" : "Extended"}</th>${delTh}`;
       colCount = 5;
@@ -625,7 +656,7 @@ export async function mountBaseQuotingMetrics({
     } else if (kind === "other_rental") {
       headerCols = `
         <th>Item</th>
-        <th style="width:60px">QTY</th>
+        <th style="width:96px">QTY</th>
         <th style="width:60px"># Mobs</th>
         <th style="width:70px">EXT QTY</th>
         <th style="width:96px">Cost</th>
@@ -641,7 +672,7 @@ export async function mountBaseQuotingMetrics({
       // productivity
       headerCols = `
         <th>Item</th>
-        <th style="width:72px">QTY</th>
+        <th style="width:104px">QTY</th>
         <th style="width:92px">Standard Daily Production</th>
         <th style="width:92px">Aggressive Daily Production</th>
         <th style="width:92px">Standard Day Total</th>
@@ -719,9 +750,11 @@ export async function mountBaseQuotingMetrics({
       </div>`;
   }
 
+  let markChangedHook = null;
   function renderTable(code) {
     const host = document.querySelector(`[data-section-code="${code}"] [data-section-host-table]`);
     if (host) host.innerHTML = tableHtml(code);
+    if (code === "materials_rack_install" && markChangedHook) markChangedHook();
     const h = document.querySelector(`[data-section-code="${code}"] [data-header-total]`);
     if (h) h.textContent = headerTotalText(code);
   }
@@ -804,6 +837,11 @@ export async function mountBaseQuotingMetrics({
         cells[3].textContent = fmt(extQty, 2);
         paintOvrEl(cells[5], lk("ext_cost"), row.ext_cost, "money", fmtMoney(row.ext_cost));
       }
+    } else if (isCustomItem(code, row)) {
+      if (cells.length >= 6) {
+        paintOvrEl(cells[4], lk("std_total"), row.std_total, "num3", fmt(row.std_total, 3));
+        paintOvrEl(cells[5], lk("agg_total"), row.agg_total, "num3", fmt(row.agg_total, 3));
+      }
     } else {
       const item = row.productivity_rate_id ? section.itemById.get(row.productivity_rate_id) : null;
       if (cells.length >= 6) {
@@ -856,6 +894,15 @@ export async function mountBaseQuotingMetrics({
     }
 
     // productivity
+    if (isCustomItem(code, row)) {
+      const q = row.qty == null || row.qty === "" ? null : Number(row.qty);
+      if (q == null || Number.isNaN(q)) { row.std_total = null; row.agg_total = null; return; }
+      const per = (v) => (v != null && v !== "" && Number(v) > 0 ? Number(v) : null);
+      const sd = per(row.custom_std_per_day), ad = per(row.custom_agg_per_day);
+      row.std_total = sd ? +(q / sd).toFixed(3) : 0;
+      row.agg_total = ad ? +(q / ad).toFixed(3) : 0;
+      return;
+    }
     const item = row.productivity_rate_id ? section.itemById.get(row.productivity_rate_id) : null;
     if (!item || row.qty == null || row.qty === "") {
       row.std_total = null;
@@ -873,6 +920,7 @@ export async function mountBaseQuotingMetrics({
     if (kind === "rental")       return row.rental_rate_id != null && row.qty != null && row.qty !== "";
     if (kind === "free_form" || kind === "other_rental")
                                  return row.label != null && String(row.label).trim() !== "";
+    if (isCustomItem(code, row)) return row.label != null && String(row.label).trim() !== "";
     return row.productivity_rate_id != null && row.qty != null && row.qty !== "";
   }
 
@@ -887,8 +935,11 @@ export async function mountBaseQuotingMetrics({
       sort_order:           sortOrder,
       productivity_rate_id: kind === "productivity" ? row.productivity_rate_id : null,
       rental_rate_id:       kind === "rental"       ? row.rental_rate_id       : null,
-      label:                labelKinds              ? (row.label ?? null)      : null,
+      label:                (labelKinds || isCustomItem(code, row)) ? (row.label ?? null) : null,
+      custom_std_per_day:   isCustomItem(code, row) && row.custom_std_per_day !== "" ? (row.custom_std_per_day ?? null) : null,
+      custom_agg_per_day:   isCustomItem(code, row) && row.custom_agg_per_day !== "" ? (row.custom_agg_per_day ?? null) : null,
       qty:                  row.qty != null && row.qty !== "" ? Number(row.qty) : null,
+      qty_formula:          row.qty_formula || null,
       mobilizations:        kind === "other_rental" && row.mobilizations != null && row.mobilizations !== ""
                               ? Number(row.mobilizations) : null,
       unit_price:           priceKinds && row.unit_price != null && row.unit_price !== ""
@@ -901,22 +952,20 @@ export async function mountBaseQuotingMetrics({
   async function persistRow(code, idx) {
     const row = sections[code].rows[idx];
     if (!rowIsSaveable(code, row)) return;
-    if (row._saving) return;
+    if (row._saving) { row._pending = true; return; }
     row._saving = true;
     try {
-      if (row.id == null) {
-        const created = await api("/quoting/metric-lines", {
-          method: "POST",
-          body:   JSON.stringify(buildPayload(code, row, idx)),
-        });
-        sections[code].rows[idx] = { ...created, _saving: false };
-      } else {
-        const updated = await api(`/quoting/metric-lines/${row.id}`, {
-          method: "PUT",
-          body:   JSON.stringify(buildPayload(code, row, idx)),
-        });
-        sections[code].rows[idx] = { ...updated, _saving: false };
+      const saved = row.id == null
+        ? await api("/quoting/metric-lines", { method: "POST", body: JSON.stringify(buildPayload(code, row, idx)) })
+        : await api(`/quoting/metric-lines/${row.id}`, { method: "PUT", body: JSON.stringify(buildPayload(code, row, idx)) });
+      // Edits typed while this save was in flight win over the server echo:
+      // keep them, adopt the new id, and save again.
+      if (row._pending && sections[code].rows[idx] === row) {
+        row.id = saved.id; row._saving = false; row._pending = false;
+        persistRow(code, idx);
+        return;
       }
+      sections[code].rows[idx] = { ...saved, _saving: false };
       renderRowComputed(code, idx);
       renderTravelCosts();
       renderCostSummary();
@@ -1322,15 +1371,11 @@ export async function mountBaseQuotingMetrics({
   attrs.mobilizations = baseSet.mobilizations ?? 0;
 
   // ── Travel Costs (computed) ────────────────────────────────────────────────
-  // Replicates the BASE sheet's row 32-35 formulas. Pulls Estimate inputs
-  // from localStorage (temporary bridge — see estimate.js publishEstimateState).
-  const ESTIMATE_BRIDGE_KEY = "opi_estimate_state_v1";
-  function readEstimateBridge() {
-    try {
-      const raw = localStorage.getItem(ESTIMATE_BRIDGE_KEY);
-      return raw ? JSON.parse(raw) || {} : {};
-    } catch { return {}; }
-  }
+  // Replicates the BASE sheet's row 32-35 formulas. ROLL UP inputs come from
+  // THIS quote (utils/estimate-bridge.js).
+  const ESTIMATE_BRIDGE_KEY = bridgeKey(ESTIMATE_ID);
+  function readEstimateBridge() { return readQuoteBridge(ESTIMATE_ID, estimateRow, lookups); }
+
 
 
   // computeTravelCosts is now a thin wrapper around qm-rollup#computeSetRollup
@@ -1399,6 +1444,63 @@ export async function mountBaseQuotingMetrics({
   const PROPANE_WG_RATE        = 40;                       // G242
   const PROPANE_WG_LF_PER_UNIT = 1500;                     // F242 = ceiling(G29/1500, 0.5)
   const HAUL_RATE              = 175;                      // G204 / G241
+  // RENTALS - RACK INSTALL lift rows (BASE rows 190-196):
+  //   G23  = roundup(D23 / crew)                     rack labor days per crew
+  //   D25  = 0 if G23<1, 1 if G23<8, else roundup(G23/28)   rental duration
+  //   E25  = day (G23=1) / week (<8) / month          rental period
+  //   D192 = D25 × scissor lifts per crew × crew      E192 = rate(Scissor Lift, energy, height, E25)
+  //   D196 = D25 × forklifts per crew × crew          E196 = rate(Forklift, energy, height, E25)
+  const LIFT_SECTION = "rentals_rack_install";
+  const LIFT_EQUIPMENT = { scissor: "Scissor Lift", forklift: "Forklift" };
+  const LIFT_ATTR = { scissor: "scissor_lifts_per_crew", forklift: "forklifts_per_crew" };
+  function rackRentalTerm(rackLaborDays, crew) {
+    const g23 = crew > 0 ? Math.ceil(Number(rackLaborDays) / crew) : 0;
+    if (g23 < 1) return { qty: 0, period: null };
+    if (g23 === 1) return { qty: 1, period: "day" };
+    if (g23 < 8) return { qty: 1, period: "week" };
+    return { qty: Math.ceil(g23 / 28), period: "month" };
+  }
+  function computeLiftSuggestions() {
+    const tc = computeTravelCosts();
+    const est = readEstimateBridge();
+    const crew = Number(est.crew_count ?? 0) || 0;
+    const term = rackRentalTerm(Number(tc.D23 ?? 0) || 0, crew);
+    const items = sections[LIFT_SECTION]?.items || [];
+    const out = {};
+    for (const kind of Object.keys(LIFT_EQUIPMENT)) {
+      const perCrew = Number(attrs[LIFT_ATTR[kind]] ?? 0) || 0;
+      const qty = term.qty * perCrew * crew;
+      const rate = term.period ? items.find(r =>
+        r.equipment_type === LIFT_EQUIPMENT[kind] &&
+        r.power_source === est.equipment_requirement &&
+        r.size_class === est.rack_height &&
+        r.duration === term.period) : null;
+      out[kind] = { rental_rate_id: rate ? rate.id : null, qty,
+                    ext: rate ? round2(qty * Number(rate.price)) : 0, period: term.period };
+    }
+    return out;
+  }
+  // Keep auto lift rows on the formula (in-memory); returns rows needing a save.
+  function syncLiftRows() {
+    const sec = sections[LIFT_SECTION];
+    if (!sec) return [];
+    const sugg = computeLiftSuggestions();
+    const dirty = [];
+    sec.rows.forEach((row, idx) => {
+      const kind = smartRowKind(LIFT_SECTION, row);
+      if (!kind) return;
+      const t = sugg[kind];
+      row._autoSuggest = t;
+      if (locked || autoState(row) !== "auto") return;
+      if (row.rental_rate_id !== t.rental_rate_id || Number(row.qty) !== t.qty) {
+        row.rental_rate_id = t.rental_rate_id;
+        row.qty = t.qty;
+        localComputeTotals(LIFT_SECTION, row);
+        dirty.push([LIFT_SECTION, idx]);
+      }
+    });
+    return dirty;
+  }
 
   // A suggested value expressed in the other_rental row shape (qty × mobs × unit).
   const suggestion = (qty, mobs, unit) => ({
@@ -1407,6 +1509,10 @@ export async function mountBaseQuotingMetrics({
   });
 
   function smartRowKind(code, row) {
+    if (code === LIFT_SECTION) {
+      const m = /^(?:auto|manual):(scissor|forklift)$/.exec(String(row.notes || ""));
+      return m ? m[1] : null;
+    }
     if (!SMART_RENTAL_SECTIONS.includes(code)) return null;
     const lbl = String(row.label || "").toLowerCase();
     if (lbl.includes("environmental")) return "env";
@@ -1509,6 +1615,10 @@ export async function mountBaseQuotingMetrics({
     _autoRefreshing = true;
     const toPersist = [];
     try {
+      const liftDirty = syncLiftRows();
+      toPersist.push(...liftDirty);
+      if (liftDirty.length) renderTable(LIFT_SECTION);
+      else (sections[LIFT_SECTION]?.rows || []).forEach((r, i) => { if (smartRowKind(LIFT_SECTION, r)) renderSmartBadge(LIFT_SECTION, i); });
       const sugg = computeAutoRentalSuggestions();
       for (const code of SMART_RENTAL_SECTIONS) {
         const sec = sections[code];
@@ -1898,6 +2008,49 @@ export async function mountBaseQuotingMetrics({
 
   container.innerHTML = bodyHtml;
 
+  // Review aid: any tab setting or seeded material row moved off the workbook
+  // template's default gets an amber highlight + "Changed from default" tip.
+  const SET_DEFAULTS = {
+    estimate_type_override: "", installation_environment: "Ambient",
+    wire_guidance_linear_footage: 0, scissor_lifts_per_crew: 2, forklifts_per_crew: 1,
+    scrubbers_per_wire_scope: 1, saws_per_wire_scope: 0,
+  };
+  for (const d of ["rack_install", "wire_guidance", "downtime", "travel"]) {
+    SET_DEFAULTS[`${d}_labor_day_override`] = "";
+    SET_DEFAULTS[`${d}_project_time_adder`] = "";
+    SET_DEFAULTS[`${d}_buffer_day_counter`] = "";
+  }
+  const MATERIAL_DEFAULTS = {
+    "anchor drill bits": { qty: 1, unit_price: 250 },
+    "banding material ($750 per week of teardown)": { qty: 0, unit_price: 750 },
+  };
+  function flagChanged(el, changed, def) {
+    el.classList.toggle("qm-changed", changed);
+    if (changed) el.title = `Changed from default (${def === "" ? "blank" : def})`;
+    else if ((el.title || "").startsWith("Changed from default")) el.title = "";
+  }
+  function markChangedInputs() {
+    container.querySelectorAll("[data-attr-field]").forEach((el) => {
+      const key = el.getAttribute("data-attr-field");
+      if (!(key in SET_DEFAULTS)) return;
+      const def = SET_DEFAULTS[key];
+      const cur = el.value;
+      const changed = typeof def === "number"
+        ? (cur === "" ? def !== 0 : Number(cur) !== def)
+        : String(cur ?? "") !== def;
+      flagChanged(el, changed, def);
+    });
+    const mat = sections.materials_rack_install;
+    container.querySelectorAll('[data-section-code="materials_rack_install"] tr[data-row-idx]').forEach((tr) => {
+      const row = mat?.rows[Number(tr.getAttribute("data-row-idx"))];
+      const def = row && MATERIAL_DEFAULTS[String(row.label || "").trim().toLowerCase()];
+      tr.querySelectorAll('[data-row-field="qty"], [data-row-field="unit_price"]').forEach((el) => {
+        const f = el.getAttribute("data-row-field");
+        flagChanged(el, !!def && (el.value === "" ? 0 : Number(el.value)) !== def[f], def ? def[f] : "");
+      });
+    });
+  }
+
   // Populate the auto-derived Env-Fee / Propane rows on first paint (and adopt
   // any untouched seed rows into auto-management), then re-sync the computed
   // panes (their first paint ran before the auto rows were written).
@@ -1905,6 +2058,10 @@ export async function mountBaseQuotingMetrics({
   renderTravelCosts();
   renderCostSummary();
   renderBundleOutput();
+  markChangedHook = markChangedInputs;
+  markChangedInputs();
+  container.addEventListener("input", markChangedInputs);
+  container.addEventListener("change", markChangedInputs);
 
   // ── input wiring ───────────────────────────────────────────────────────────
   function ctxFromEvent(e) {
@@ -1918,7 +2075,30 @@ export async function mountBaseQuotingMetrics({
     return { code, idx: Number.isNaN(idx) ? null : idx };
   }
 
+  function applyQty(code, idx, value, formula) {
+    const row = sections[code].rows[idx];
+    row.qty = value;
+    row.qty_formula = formula || null;
+    const smartKind = smartRowKind(code, row);
+    if (smartKind && autoState(row) === "auto") row.notes = `manual:${smartKind}`;
+    localComputeTotals(code, row);
+    renderTable(code);
+    persistRow(code, idx);
+    if (code === "rentals_rack_install" || code === "rentals_wire_guidance") refreshAutoRentalRows();
+    renderTravelCosts();
+    renderCostSummary();
+    renderBundleOutput();
+  }
+
   function onFieldChange(e) {
+    if (e.target.getAttribute?.("data-row-field") === "qty" && String(e.target.value).trim().startsWith("=")) {
+      const ctx = ctxFromEvent(e);
+      if (!ctx || ctx.idx == null || locked) return;
+      const r = evalQtyFormula(e.target.value);
+      if (r.error) { e.target.classList.add("qm-fx-bad"); e.target.title = r.error; return; }
+      applyQty(ctx.code, ctx.idx, r.value, r.expr);
+      return;
+    }
     // Per-set attribute selects (estimate_type_override, installation_environment).
     const attrField = e.target.getAttribute?.("data-attr-field");
     if (attrField) {
@@ -1940,9 +2120,19 @@ export async function mountBaseQuotingMetrics({
     if (!ctx || ctx.idx == null) return;
     const row = sections[ctx.code].rows[ctx.idx];
 
+    if (field === "productivity_rate_id" && e.target.value === "custom") {
+      row.productivity_rate_id = null;
+      row._custom = true;
+      localComputeTotals(ctx.code, row);
+      renderTable(ctx.code);
+      container.querySelector(`[data-section-code="${ctx.code}"] tr[data-row-idx="${ctx.idx}"] [data-row-field="label"]`)?.focus();
+      return;
+    }
     if (field === "productivity_rate_id" || field === "rental_rate_id") {
       const v = e.target.value;
       row[field] = v === "" ? null : Number(v);
+      const liftKind = smartRowKind(ctx.code, row);
+      if (liftKind && autoState(row) === "auto") row.notes = `manual:${liftKind}`;
       localComputeTotals(ctx.code, row);
       renderRowComputed(ctx.code, ctx.idx);
       persistRow(ctx.code, ctx.idx);
@@ -1980,11 +2170,18 @@ export async function mountBaseQuotingMetrics({
     const row = sections[ctx.code].rows[ctx.idx];
 
     if (field === "qty") {
-      row.qty = e.target.value === "" ? null : Number(e.target.value);
+      const raw = String(e.target.value).trim();
+      if (raw.startsWith("=")) return;
+      const n = raw === "" ? null : Number(raw.replace(/,/g, ""));
+      if (n != null && Number.isNaN(n)) return;
+      row.qty = n;
+      row.qty_formula = null;
     } else if (field === "unit_price") {
       row.unit_price = e.target.value === "" ? null : Number(e.target.value);
     } else if (field === "mobilizations") {
       row.mobilizations = e.target.value === "" ? null : Number(e.target.value);
+    } else if (field === "custom_std_per_day" || field === "custom_agg_per_day") {
+      row[field] = e.target.value === "" ? null : Number(e.target.value);
     } else if (field === "label") {
       row.label = e.target.value;
     } else {
@@ -2043,6 +2240,14 @@ export async function mountBaseQuotingMetrics({
     if (e.target.closest("[data-add-row]")) {
       const ctx = ctxFromEvent(e);
       if (ctx) addEmptyRow(ctx.code);
+      return;
+    }
+    if (e.target.closest("[data-qty-fx]")) {
+      const ctx = ctxFromEvent(e);
+      if (!ctx || ctx.idx == null || locked) return;
+      const row = sections[ctx.code].rows[ctx.idx];
+      openQtyFormulaModal({ formula: row.qty_formula, qty: row.qty,
+        onApply: ({ value, formula }) => applyQty(ctx.code, ctx.idx, value, formula) });
       return;
     }
     if (e.target.closest("[data-reset-auto]")) {
@@ -2126,6 +2331,8 @@ export async function mountBaseQuotingMetrics({
     if (_paneTimer) { clearTimeout(_paneTimer); _paneTimer = null; }
     container.removeEventListener("change", onFieldChange);
     container.removeEventListener("input",  onFieldInput);
+    container.removeEventListener("input",  markChangedInputs);
+    container.removeEventListener("change", markChangedInputs);
     container.removeEventListener("click",  onClick);
     window.removeEventListener("storage", onStorage);
   };

@@ -26,6 +26,7 @@ router = APIRouter(prefix="/api/opportunities", tags=["opportunities"])
 OPEN_STATUSES = ("received", "quoting", "sent")
 DECIDED_STATUSES = ("won", "lost", "declined")
 ALL_STATUSES = OPEN_STATUSES + DECIDED_STATUSES
+DEFAULT_PIPELINE_STATUS = "20% Budgetary, Project Uncertain"
 
 
 def _terminal_from_stage(pstat):
@@ -294,6 +295,7 @@ class OpportunityIn(BaseModel):
     target_end_date: Optional[str] = None
     estimator_user_id: Optional[int] = None
     notes: Optional[str] = None
+    pipeline_status: Optional[str] = DEFAULT_PIPELINE_STATUS
 
 
 @router.post("")
@@ -312,9 +314,12 @@ def create_opportunity(body: OpportunityIn, user=Depends(get_current_user)):
         res = conn.execute(text("""
             INSERT INTO opportunities
               (qbo_customer_id, contact_id, title, source, rfq_received_date, target_start_date,
-               target_end_date, estimator_user_id, status, received_at, notes, created_by_user_id)
-            VALUES (:cid,:contact,:title,:source,:rfq,:target,:tend,:est,'received',NOW(),:notes,:uid)
+               target_end_date, estimator_user_id, status, pipeline_status, received_at, notes,
+               created_by_user_id)
+            VALUES (:cid,:contact,:title,:source,:rfq,:target,:tend,:est,:status,:pstat,NOW(),:notes,:uid)
         """), {"cid": cust["id"], "contact": body.contact_id, "title": body.title,
+               "pstat": body.pipeline_status or None,
+               "status": _terminal_from_stage(body.pipeline_status) or "received",
                "source": body.source, "rfq": body.rfq_received_date or None,
                "target": body.target_start_date or None, "tend": body.target_end_date or None,
                "est": body.estimator_user_id, "notes": body.notes, "uid": user.get("id")})
@@ -323,6 +328,7 @@ def create_opportunity(body: OpportunityIn, user=Depends(get_current_user)):
 
 
 class OpportunityPatch(BaseModel):
+    customer_qbo_id: Optional[str] = None  # re-point to another QBO customer
     contact_id: Optional[int] = None
     title: Optional[str] = None
     source: Optional[str] = None
@@ -356,6 +362,20 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
         cur = conn.execute(text("SELECT * FROM opportunities WHERE id=:id"), {"id": opp_id}).mappings().first()
         if not cur:
             raise HTTPException(status_code=404, detail="Opportunity not found")
+        if fields.get("customer_qbo_id"):
+            cust = _resolve_customer(conn, fields["customer_qbo_id"])
+            if not cust:
+                raise HTTPException(status_code=404, detail="Customer not found")
+            fields["qbo_customer_id"] = cust["id"]
+        cust_id = fields.get("qbo_customer_id", cur["qbo_customer_id"])
+        contact_id = fields.get("contact_id", cur["contact_id"])
+        if contact_id is not None and ("contact_id" in fields or "qbo_customer_id" in fields):
+            ok = conn.execute(text("SELECT 1 FROM contacts WHERE id=:id AND qbo_customer_id=:cid"),
+                              {"id": contact_id, "cid": cust_id}).scalar()
+            if not ok:
+                if "contact_id" in fields:
+                    raise HTTPException(status_code=400, detail="Contact does not belong to this customer")
+                fields["contact_id"] = None
         if fields.get("project_qbo_id"):
             okp = conn.execute(text("SELECT 1 FROM qbo_customers WHERE qbo_id=:p AND is_project=1"),
                                {"p": fields["project_qbo_id"]}).scalar()
@@ -372,7 +392,7 @@ def update_opportunity(opp_id: int, body: OpportunityPatch, user=Depends(get_cur
                 fields["status"] = terminal
             elif cur["status"] in DECIDED_STATUSES:
                 fields["status"] = "sent"
-        cols = {"contact_id", "title", "source", "rfq_received_date", "target_start_date",
+        cols = {"qbo_customer_id", "contact_id", "title", "source", "rfq_received_date", "target_start_date",
                 "target_end_date", "estimator_user_id", "quote_number", "status",
                 "pipeline_status", "project_qbo_id", "notes", "app_estimate_id", "active",
                 "workbook_url", "discounted_contract_value"}

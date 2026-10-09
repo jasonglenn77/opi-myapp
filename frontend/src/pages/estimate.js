@@ -13,12 +13,14 @@ import { mountBaseQuotingMetrics, createCellOverrideClient } from "./base-quotin
 import { contactFormModal } from "./contacts.js";
 import { computeSetRollup, computeSetBundles, applyLineOverrides } from "../utils/qm-rollup.js";
 import { mountPdfEditor, buildPdfPayload, pdfModelTotal } from "../utils/pdf-editor.js";
+import { readEstimateBridge, publishEstimateBridge, copyPdfModel } from "../utils/estimate-bridge.js";
 
 // The blank quoting-metrics workbook's defaults (mirrors ESTIMATE_DEFAULTS on the
 // backend, which pre-fills them on a new quote). Any General Info field changed
 // away from these gets highlighted, so estimators can see at a glance what they
 // tuned for this job vs. what's still standard.
 const GI_DEFAULTS = {
+  one_way_travel_hrs:           8,
   equipment_requirement:        "LP (Liquid Propane)",
   rack_height:                  "Shorter than 25' (300\")",
   crew_count:                   1,
@@ -35,7 +37,6 @@ const GI_DEFAULTS = {
   mobilization_profit_target:   -1.5,
   mgmt_travel_multiplier:       3.57,
 };
-const CHANGED_CLS = ["ring-2", "ring-amber-300", "bg-amber-50/60"];
 
 // Flag every General Info input whose value differs from the workbook default.
 function markChangedFields(root) {
@@ -53,9 +54,7 @@ function markChangedFields(root) {
     } else {
       changed = String(cur).trim() !== String(def).trim();
     }
-    el.classList.toggle("ring-2", changed);
-    el.classList.toggle("ring-amber-300", changed);
-    el.classList.toggle("bg-amber-50/60", changed);
+    el.classList.toggle("qm-changed", changed);
     if (changed) el.title = `Changed from default (${def})`;
     else if (el.title && el.title.startsWith("Changed from default")) el.title = "";
   });
@@ -403,6 +402,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     .filter(s => s.kind === "option")
     .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const projectRentalsSet = metricSets.find(s => s.kind === "project_rentals") || null;
+  const baseSet = metricSets.find(s => s.kind === "base") || null;
 
   const isLocked = !!estimate.locked;
   // Context-aware back link: quotes that belong to a pipeline opportunity return
@@ -494,6 +494,12 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
                 data-add-option>
           + Add Option
         </button>
+        ${baseSet ? `<button type="button"
+                class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
+                title="New option tab pre-filled with everything on the BASE tab"
+                data-copy-base="${baseSet.id}">
+          + Copy BASE as Option
+        </button>` : ""}
         ${!projectRentalsSet ? `
           <button type="button"
                   class="shrink-0 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap text-blue-600 hover:bg-blue-50 border border-dashed border-blue-200"
@@ -572,6 +578,7 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
     btn.disabled = true; btn.textContent = "Creating…";
     try {
       const r = await api(`/estimates/${estimateId}/revise`, { method: "POST" });
+      copyPdfModel(estimateId, r.estimate_id);
       location.hash = `#/estimate/${r.estimate_id}`;
     } catch (err) { alert(err?.message || "Failed to create revision"); btn.disabled = false; btn.textContent = "+ New revision"; }
   });
@@ -667,6 +674,22 @@ async function renderEstimateWorkspace(routeFn, estimateId, tab, optionN) {
         alert("Failed to delete: " + (err?.message || err));
         delSet.disabled = false;
         delSet.removeAttribute("disabled");
+      }
+      return;
+    }
+
+    const copyBase = e.target.closest("[data-copy-base]");
+    if (copyBase) {
+      if (copyBase.hasAttribute("disabled")) return;
+      copyBase.setAttribute("disabled", "true");
+      copyBase.textContent = "Copying…";
+      try {
+        const created = await api(`/quoting/metric-sets/${copyBase.getAttribute("data-copy-base")}/duplicate`, { method: "POST" });
+        location.hash = `#/estimate/${estimateId}/option/${created.sort_order}`;
+      } catch (err) {
+        alert("Failed to copy BASE: " + (err?.message || err));
+        copyBase.removeAttribute("disabled");
+        copyBase.textContent = "+ Copy BASE as Option";
       }
       return;
     }
@@ -788,8 +811,7 @@ async function openRevisionsModal(estimateId) {
 // the /pdf endpoint call, and the pipeline sync-metrics computation. One
 // implementation, two callers.
 function createPdfEngine({ estimateId, estimateRow, metricSets, lookups, allLines, dfl, cellOverrides = {} }) {
-  let estimateState = {};
-  try { const raw = localStorage.getItem("opi_estimate_state_v1"); if (raw) estimateState = JSON.parse(raw) || {}; } catch {}
+  const estimateState = readEstimateBridge(estimateId, estimateRow, lookups);
 
   // Typed-over cells (#1 sheet parity): per-line overrides transform the line
   // data itself; the map + per-set key prefix rides every rollup/bundle call
@@ -1000,8 +1022,7 @@ async function renderSendToQboTab(container, estimateId, initialMetricSets, esti
     container.innerHTML = `<div class="card px-5 py-4 text-sm text-red-600">Failed to load: ${escapeHtml(err?.message || String(err))}</div>`;
     return;
   }
-  let estimateState = {};
-  try { const raw = localStorage.getItem("opi_estimate_state_v1"); if (raw) estimateState = JSON.parse(raw) || {}; } catch {}
+  const estimateState = readEstimateBridge(estimateId, estimateRow, lookups);
 
   const isLocked = !!(estimateRow && estimateRow.locked);
   const metricSets = [...(initialMetricSets || [])];
@@ -2552,10 +2573,10 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
       US_STATES.map(s => `<option value="${s}" ${state.project_state === s ? "selected" : ""}>${s}</option>`).join("");
     return giLabel(label) + withChips(`
       <div class="flex items-center gap-2">
-        <input type="text" class="input text-sm py-1.5 flex-1 min-w-0"
-               data-est-input="project_city"
+        <input type="text" class="input text-sm py-1.5" style="flex:1 1 auto;min-width:0;width:100%"
+               data-est-input="project_city" title="${escapeHtml(state.project_city)}"
                value="${escapeHtml(state.project_city)}" placeholder="Enter City Name"/>
-        <select class="input text-sm py-1.5 w-20" data-est-input="project_state">
+        <select class="input text-sm py-1.5" style="flex:0 0 74px;width:74px;padding-left:6px;padding-right:4px" data-est-input="project_state">
           ${stateOptions}
         </select>
       </div>`);
@@ -2625,35 +2646,8 @@ async function renderGeneralInfoTab(container, estimateRow, estimateId, routeFn)
   state.lodging_cost_per_day       = computeLodgingCostPerDay();
   state.travel_days_per_crew_per_mob = computeTravelDaysPerCrewPerMob();
 
-  // ── Estimate state bridge to other pages ──────────────────────────────────
-  // TEMP: until we add an `estimates` table + real persistence, publish the
-  // inputs the Quoting Metrics page needs (Travel Costs computation) via
-  // localStorage. Re-emitted on every input change. Move to /api/estimates
-  // when that table lands.
-  const ESTIMATE_BRIDGE_KEY = "opi_estimate_state_v1";
-  function publishEstimateState() {
-    try {
-      const subset = {
-        one_way_travel_hrs:           state.one_way_travel_hrs,
-        equipment_requirement:        state.equipment_requirement,
-        crew_count:                   state.crew_count,
-        crew_size:                    state.crew_size,
-        lodging_cost_per_day:         state.lodging_cost_per_day,
-        mgmt_travel_multiplier:       state.mgmt_travel_multiplier,
-        estimate_type:                state.estimate_type,
-        breaking_out_mobilization:    state.breaking_out_mobilization,
-        rack_install_profit_target:   state.rack_install_profit_target,
-        rental_rack_profit_target:    state.rental_rack_profit_target,
-        mobilization_profit_target:   state.mobilization_profit_target,
-        wire_guidance_profit_target:  state.wire_guidance_profit_target,
-        rental_wire_profit_target:    state.rental_wire_profit_target,
-        price_adjustment:             state.price_adjustment,
-      };
-      localStorage.setItem(ESTIMATE_BRIDGE_KEY, JSON.stringify(subset));
-    } catch (err) {
-      console.warn("Estimate state bridge: localStorage write failed", err);
-    }
-  }
+  // ── Estimate state bridge to the metrics/PDF tabs (per quote) ─────────────
+  function publishEstimateState() { publishEstimateBridge(estimateId, state); }
   publishEstimateState();   // initial publish on mount
 
   // ── page HTML ──────────────────────────────────────────────────────────────

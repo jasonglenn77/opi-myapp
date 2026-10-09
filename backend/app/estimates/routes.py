@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/estimates", tags=["estimates"])
 # Job-specific fields (travel hours, dates, location) are intentionally NOT
 # defaulted. The frontend highlights any field changed away from these.
 ESTIMATE_DEFAULTS = {
+    "one_way_travel_hrs":           8,
     "equipment_requirement":        "LP (Liquid Propane)",
     "rack_height":                  "Shorter than 25' (300\")",
     "crew_count":                   1,
@@ -88,7 +89,7 @@ _SET_COPY = [
 ]
 _LINE_COPY = [
     "section_code", "line_kind", "sort_order", "productivity_rate_id", "rental_rate_id", "label",
-    "qty", "mobilizations", "unit_price", "ext_cost", "std_total", "agg_total", "notes",
+    "qty", "qty_formula", "custom_std_per_day", "custom_agg_per_day", "mobilizations", "unit_price", "ext_cost", "std_total", "agg_total", "notes",
 ]
 
 

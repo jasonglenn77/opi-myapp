@@ -758,3 +758,32 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
 .cto-note { display:block; font-size:11px; font-weight:700; color:#4b5563;
             background:#e5e7eb; border:1px solid #c5cad3; border-radius:6px;
             padding:3px 8px; margin:4px 12px 2px; }
+
+/* Quoting metrics: input moved off the workbook template default (review aid). */
+.qm-changed { background:#fff3cd !important; box-shadow:0 0 0 2px #f59e0b inset !important; color:#111 !important; }
+
+/* Quoting metrics: QTY cell with Excel-style formula (fx) entry. */
+.qm-qty { display:flex; align-items:center; gap:2px; }
+.qm-qty input { flex:1; min-width:0; }
+.qm-fx { flex:0 0 auto; border:1px solid #c7c7c7; border-radius:4px; background:#fff; color:#555;
+         font:italic 600 10px/1 Georgia, "Times New Roman", serif; padding:3px 4px; cursor:pointer; }
+.qm-fx:hover { background:#eef2ff; color:#3730a3; border-color:#a5b4fc; }
+.qm-fx-on { background:#e0e7ff; color:#3730a3; border-color:#818cf8; }
+.qm-fx-note { font-size:9.5px; color:#4338ca; padding:0 6px 2px; white-space:nowrap; overflow:hidden;
+              text-overflow:ellipsis; max-width:100px; text-align:right; }
+.qm-fx-bad { box-shadow:0 0 0 2px #ef4444 inset !important; }
+.qm-fx-overlay { position:fixed; inset:0; z-index:1000; background:rgba(15,23,42,.45);
+                 display:flex; align-items:center; justify-content:center; padding:16px; }
+.qm-fx-modal { width:360px; max-width:100%; background:#fff; color:#111; border-radius:12px;
+               box-shadow:0 12px 32px rgba(0,0,0,.25); padding:16px; font-size:13px; }
+.qm-fx-title { font-weight:800; font-size:14px; margin-bottom:4px; }
+.qm-fx-help { font-size:12px; color:#555; margin-bottom:10px; }
+.qm-fx-input { width:100%; border:1px solid #c7c7c7; border-radius:8px; padding:8px 10px; color:#111;
+               background:#fff; font:600 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.qm-fx-result { font-size:12px; font-weight:700; margin:8px 0 12px; min-height:16px; }
+.qm-fx-actions { display:flex; align-items:center; gap:8px; }
+.qm-fx-btn { border:1px solid #d1d5db; border-radius:8px; background:#f8fafc; color:#111;
+             font-size:12px; font-weight:600; padding:6px 12px; cursor:pointer; }
+.qm-fx-btn:hover { background:#eef2f7; }
+.qm-fx-primary { background:#1d4ed8; border-color:#1d4ed8; color:#fff; }
+.qm-fx-primary:hover { background:#1e40af; }
