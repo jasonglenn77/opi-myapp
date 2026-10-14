@@ -5458,3 +5458,44 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
 .kk-auto { background:#ecfdf5; color:#047857; }
 .kk-was { background:#fffbeb; color:#92400e; }
 .kk-legend { font-size:11px; color:rgba(0,0,0,.55); background:rgba(0,0,0,.025); border:1px solid rgba(0,0,0,.08); border-radius:10px; padding:7px 10px; margin-bottom:10px; line-height:1.7; }
+
+/* Top bar on phones: the brand text truncates and the account button stays
+   compact so the header never forces the page wider than the screen. */
+#brandSlot { min-width:0; flex:1 1 auto; }
+@media (max-width: 640px) {
+  #accountLabel { max-width:5.5rem; }
+  #accountBtn { padding-left:.6rem; padding-right:.6rem; }
+}
+
+/* Touch-size buttons on drawing cards (44px minimum tap height). */
+.dw-open, .dw-rm { min-height:44px; }
+
+/* Touchscreens (phones/tablets): finger-sized controls across the office app.
+   Desktop mice are unaffected — this keys on the pointer, not the width. */
+@media (pointer: coarse) {
+  button:not(.pm-switch):not(.dm-swatch):not(.dwp-item):not(.dw-card),
+  select,
+  input:not([type=checkbox]):not([type=radio]):not([type=range]),
+  [role=button] { min-height: 40px; }
+  button:not(.pm-switch):not(.dwp-item):not(.dw-card) { min-width: 40px; }
+  input[type=checkbox], input[type=radio] { width: 22px; height: 22px; }
+  textarea { font-size: 16px; }
+}
+/* iOS zooms the page when a focused input's text is under 16px. */
+@media (pointer: coarse) and (max-width: 640px) {
+  input:not([type=checkbox]):not([type=radio]), select { font-size: 16px !important; }
+}
+@media (pointer: coarse) {
+  /* iOS-sized switch + a larger back link on touchscreens. */
+  .pm-switch { width:52px; height:30px; }
+  .pm-switch::after { width:26px; height:26px; }
+  .pm-switch.on::after { left:24px; }
+  .pm-backlink { padding:10px 4px; }
+}
+.pm-wd-row { flex-wrap:wrap; }
+@media (pointer: coarse) {
+  .pm-wd button { width:36px; min-width:36px !important; height:40px; }
+}
+@media (pointer: coarse) and (max-width: 360px) {
+  .pm-wd button { width:32px; min-width:32px !important; }
+}

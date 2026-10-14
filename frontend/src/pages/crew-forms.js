@@ -348,8 +348,8 @@ function projCardHtml(r, past) {
   return `
     <button type="button" class="ff-row mb-2${past ? " ff-past" : ""}" data-proj="${escapeHtml(r.qbo_id)}">
       <div style="min-width:0;flex:1">
-        <div class="ff-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.name)}${badge}</div>
-        <div class="ff-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.customer || "")}</div>
+        <div class="ff-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.name)}</div>
+        <div class="ff-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${badge ? badge.trim() + " " : ""}${escapeHtml(r.customer || "")}</div>
         <div class="ff-hint">${escapeHtml(fmtRange(r.start_date, r.end_date))}${pmBit}</div>
       </div>
       <span style="color:rgba(0,0,0,.3);font-size:20px">›</span>

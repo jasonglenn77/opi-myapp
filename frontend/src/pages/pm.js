@@ -242,7 +242,7 @@ async function pmProjectDetail(routeFn, qboId) {
 
   mount(routeFn, `
     <div class="w-full max-w-4xl">
-      <div class="mb-3"><a href="#/pm" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← PM Portal</a></div>
+      <div class="mb-3"><a href="#/pm" class="pm-backlink inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← PM Portal</a></div>
       <div class="card flex flex-col overflow-hidden" style="min-height:420px">
         <div class="shrink-0 px-4 sm:px-5 pt-4 border-b border-black/10">
           <div class="text-base font-extrabold text-ink-900">${escapeHtml(proj?.name || "Project")}</div>
@@ -1272,7 +1272,7 @@ async function mountPmFormsTab(container, qboId) {
       : formStatusChip(f);
     const dayControls = !recurring ? "" : `
       <div class="mt-2 flex items-center gap-x-3 gap-y-2 flex-wrap">
-        <span class="flex items-center gap-1.5">
+        <span class="pm-wd-row flex items-center gap-1.5">
           <span class="text-[10px] font-bold uppercase tracking-wide text-black/40">Days</span>
           <span class="pm-wd">${WEEKDAYS.map((lbl, i) =>
             `<button type="button" data-wd="${escapeHtml(f.form_code)}:${i}" class="${excl.includes(i) ? "off" : ""}" title="${lbl}${excl.includes(i) ? " — excluded (never expected)" : " — expected"}" aria-pressed="${excl.includes(i) ? "false" : "true"}">${lbl[0]}</button>`).join("")}</span>
@@ -1713,7 +1713,7 @@ function openDrawingPicker(qboId, selectedIds, onDone) {
   const upMsg = overlay.querySelector("[data-dwp-up]");
   const count = () => {
     overlay.querySelector("[data-dwp-count]").textContent =
-      `${selected.size} selected · ${files.length} drawing${files.length === 1 ? "" : "s"} in the folder`;
+      `${selected.size} of ${files.length} selected`;
   };
 
   const renderGrid = () => {
