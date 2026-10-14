@@ -11,7 +11,6 @@ Templates (milestones + form fields) live here in code, like the document
 folder tree. Per-project status/answers live in project_milestones and
 project_kickoff_responses. Gated by page.customers (same as the project page).
 """
-import re
 from datetime import timedelta
 from typing import Optional
 
@@ -49,144 +48,176 @@ MILESTONES = [
 MILESTONE_KEYS = {m["key"] for m in MILESTONES}
 
 # ── kickoff form templates ──────────────────────────────────────────────────
-# Section title None = ungrouped fields. Field types: yn, yn_note, text, textarea.
-_CUSTOMER_SECTIONS = [
-    (None, [
-        ("Project Name, Address and Start Date", "text"),
-        ("Quote and PO Reviewed and Are Correct", "yn"),
-        ("On Point Providing Materials", "yn"),
-    ]),
-    ("Drawing", [
-        ("Elevations", "yn"), ("Layout", "yn"),
-        ("Building Column Dims Confirmed and on Drawing", "yn_note"),
-        ("Structural Engineering Calcs Provided", "yn"),
-        ("Anchor Inspection", "yn"),
-        ("Anchors per baseplate", "text"),
-    ]),
-    ("On Point Customer Contact", [
-        ("Name", "text"), ("Phone Number", "text"), ("Email", "text"),
-    ]),
-    ("Site Contact", [
-        ("Name", "text"), ("Phone Number", "text"), ("Email", "text"),
-    ]),
-    (None, [
-        ("Site Condition (Clean / Clear)", "yn"),
-        ("On Point Providing Rentals", "yn"),
-        ("Socks / Diapers / Non-Marking Tires", "yn"),
-        ("Pre-Drop Available", "yn"),
-    ]),
-    ("Access", [("Dock Height Dock Doors", "yn"), ("Ground Ramp", "yn")]),
-    ("Work Hours", [("7 Days a week 7-7 Confirmation", "yn")]),
-    ("Materials", [
-        ("Staging Area", "yn"), ("Materials On Site", "yn"), ("Total Trucks", "text"),
-        ("BOM's List / Count Sheet Received", "yn"), ("Building Open and Accessible", "yn"),
-        ("Lockbox or Door Keypad", "yn"), ("LP and Gas Allowed in Building", "yn"),
-        ("Lights / Power", "yn"), ("Temperatures (Ambient / Freezer / Blast Freezer)", "text"),
-        ("Bathrooms", "yn"), ("Dumpster Provided", "text"), ("What Dock Door Can We Drop", "text"),
-    ]),
-    (None, [
-        ("GC Contact Info", "text"), ("Superintendent Contact Info", "text"),
-        ("On Point Crew Lead", "text"), ("Active Warehouse", "yn"),
-    ]),
-    ("Specific Safety Requirements", [("Safety Orientations", "yn")]),
-    ("Wire Guidance", [
-        ("Wire Guidance", "yn"), ("Water Supply", "yn_note"), ("Slurry Pan Drop Location", "text"),
-        ("Wire Guidance Layout", "yn"), ("Measurements Confirmed", "yn"),
-        ("Out of Aisle Extension Distance", "text"),
-        ("Distance Off Racks If Not Centered in Aisle", "text"),
-        ("Magnets Quoted", "yn"), ("Magnet Placement Confirmation", "text"),
-        ("New Line Driver Or Existing", "text"), ("Line Driver Brand", "text"),
-        ("Line Driver Location On Drawing Confirmed", "yn"),
-    ]),
-    (None, [("Notes", "textarea")]),
+# Mirror OPI's Word checklists in order and wording ("Customer Project Kickoff
+# Checklist 2025 V3", "Crew Project Kickoff Checklist 2025 V2").
+# Field: (key, label, type, opts). Types: yn, yn_note (Y/N + where/note),
+# text, textarea, date, select (opts["options"]), label (a sub-heading row).
+# opts["shared"]: the item exists on BOTH checklists — one stored answer
+# (form_key 'shared') shown on both, stamped with the form that set it.
+# opts["auto"]: prefill from project data when empty (see _autofill).
+S = {"shared": True}
+
+
+def F(key, label, ftype="yn", **opts):
+    return {"key": key, "label": label, "type": ftype, **opts}
+
+
+def _sh(field):
+    return {**field, "shared": True}
+
+
+_HEADER = [
+    _sh(F("project_name", "Project Name & Quote #", "text", auto="project_name")),
+    _sh(F("address", "Address", "text", auto="address")),
+    _sh(F("start_date", "Start Date", "date", auto="start_date")),
 ]
 
-_CREW_SECTIONS = [
-    (None, [
-        ("Project Name, Address and Start Date", "text"),
-        ("Crew Boss", "text"),
-        ("Crew Lead and Phone Number", "text"),
-        ("Full Scope of Work Reviewed / Received", "yn"),
-        ("On Point Providing Materials", "yn"),
-        ("Drill Bits Needed", "yn"),
-        ("Banding Needed", "yn"),
-        ("Torque Wrench Needed", "yn"),
+_FACILITY = [_sh(f) for f in [
+    F("onsite_contact", "Onsite Contact", "text"),
+    F("onsite_phone", "Phone #", "text"),
+    F("onsite_email", "Email", "text"),
+    F("site_clean", "Site Condition (Clean/Clear)"),
+    F("active_warehouse", "Active Warehouse"),
+    F("work_hours", "Work Hours Confirmed", hint="7 Days a Week 7AM - 7PM"),
+    F("building_open", "Building Open & Accessible"),
+    F("lockbox", "Lockbox or Door Keypad"),
+    F("propane_allowed", "Propane & Gas Allowed in Building"),
+    F("lights_power", "Lights/Power"),
+    F("bathrooms", "Bathrooms"),
+    F("temperatures", "Temperatures", "select",
+      options=["Ambient", "Cooler", "Freezer", "Blast Freezer"], auto="temperatures"),
+    F("safety_orientations", "Site Safety Orientations"),
+    F("ear_eye_protection", "Ear or Eye Protections"),
+    F("ground_ramp", "Ground Ramp"),
+    F("unload_inside", "Can trucks be unloaded inside"),
+    F("pallet_jack", "If N, is a pallet jack provided"),
+    F("dock_door_access", "Dock Door Access"),
+    F("dock_door_number", "Dock Door #", "text"),
+    F("staging_area", "Staging Area"),
+    F("active_construction", "Active Construction Site"),
+    F("gc_contact", "GC/Superintendent Contact info", "text"),
+]]
+
+
+def _bom(with_drawing_version):
+    rows = [
+        F("bom_received", "BOM List/ Count Sheet Received"),
+        F("truck_count", "Total Truck Count", "text"),
+        F("materials_onsite", "Materials Onsite"),
+        F("anchor_inspection", "Anchor Inspection"),
+        F("anchor_specs", "Anchor Specs", "label"),
+        F("anchor_size", "Anchor Size", "text"),
+        F("anchors_per_baseplate", "# Per Baseplate/ Per Upright", "text"),
+        F("anchor_ft_lbs", "FT-LBS", "text"),
+        F("anchor_placement", "Anchor placement", "text"),
+        F("drawings_received", "Drawings Received"),
+    ]
+    if with_drawing_version:
+        rows.append(F("drawing_version", "Drawing Version & Revision #", "text", customer_only=True))
+    rows += [
+        F("calcs_provided", "Structural Engineering Calcs Provided"),
+        F("elevations", "Elevations"),
+        F("layout", "Layout"),
+        F("start_ref_point", "Starting reference point"),
+        F("measure_off_cc", "Measurement off CC"),
+        F("column_size", "Building Column Size", "text"),
+        F("tek_screw_wiredecks", "Tek Screw Wiredecks"),
+        F("row_spacers", "Row Spacers Count & Elevations"),
+        F("ergs", "ERG's and/or Column protectors"),
+        F("erg_anchor_size", "Anchor Size", "text"),
+        F("wire_guidance", "Wire Guidance", auto="wire_guidance"),
+        F("wg_layout", "Wire Guidance Layout"),
+        F("wg_measurements", "Measurements Confirmed"),
+        F("wg_out_of_aisle", "Out of Aisle Extension Distance"),
+        F("wg_center_aisles", "Center of Aisles"),
+        F("wg_distance_off_rack", "Distance off Rack if N", "text"),
+        F("wg_line_driver_location", "Line Driver Location on Drawing"),
+        F("wg_line_driver_new", "New Line Driver or Existing", "text"),
+        F("wg_line_driver_brand", "Line Driver Brand", "text"),
+        F("wg_water_supply", "Water Supply", "yn_note", note_label="Where"),
+        F("wg_magnet_quoted", "Magnet Quoted"),
+        F("wg_magnet_placement", "Magnet Placement Confirmation"),
+    ]
+    # Drawing Version is customer-only; everything else is the same item on both.
+    return [f if f.get("customer_only") else _sh(f) for f in rows]
+
+
+_CUSTOMER_FORM = [
+    (None, _HEADER),
+    ("Customer Contacts", [
+        F("sales_rep_name", "Customer Sales Representative", "text", auto="sales_rep_name"),
+        F("sales_rep_phone", "Phone #", "text", auto="sales_rep_phone"),
+        F("sales_rep_email", "Email", "text", auto="sales_rep_email"),
+        F("cust_pm_name", "Customer Project Manager", "text"),
+        F("cust_pm_phone", "Phone #", "text"),
+        F("cust_pm_email", "Email", "text"),
     ]),
-    ("Drawing", [
-        ("Elevations", "yn"), ("Layout", "yn"),
-        ("Building Column Dims Confirmed and on Drawing", "yn_note"),
-        ("Structural Engineering Calcs Provided", "yn"),
-        ("Anchor Torque Requirements Confirmed", "yn"),
-        ("Anchors per baseplate", "text"),
+    ("PO & Quote Review", [
+        F("po_quote_reviewed", "PO & Quote Reviewed and Correct"),
+        _sh(F("opi_materials", "On Point Providing Materials")),
+        _sh(F("opi_dumpsters", "On Point Providing Dumpsters")),
+        F("dumpster_dock_door", "Dock Door to drop", "text"),
+        _sh(F("opi_slurry_pan", "On Point Providing Slurry Pan")),
+        F("slurry_dock_door", "Dock Door to drop", "text"),
+        F("opi_rentals", "On Point Providing Rentals"),
+        F("electric_only", "Electric Only"),
+        F("socks_diapers", "Socks/Diapers/Non-marking tires",
+          hint="If socks and diapers were not included, they cost OPI $350 per machine."),
+        F("pre_drop", "Pre-drop Available"),
+        F("pre_drop_location", "Dock door drop or ground ramp", "text"),
     ]),
-    ("Site Contact", [("Name", "text"), ("Phone Number", "text")]),
-    (None, [
-        ("Site Condition Expectations (Clean / Clear)", "yn"),
-        ("Rental Equipment Needs Reviewed and Approved", "yn"),
+    ("Facility Checklist", _FACILITY),
+    ("BOM & Drawing Review", _bom(True)),
+    (None, [F("notes", "Notes", "textarea")]),
+]
+
+_CREW_FORM = [
+    (None, _HEADER),
+    ("Crew", [
+        F("crew_boss", "Crew Boss", "text", auto="crew_boss"),
+        F("crew_boss_phone", "Phone #", "text"),
+        F("crew_lead", "Crew Lead", "text", auto="crew_lead"),
+        F("crew_lead_phone", "Phone #", "text"),
+        F("crew_size", "Crew Size", "text", auto="crew_size"),
     ]),
-    ("Access", [("Dock Height Dock Doors", "yn"), ("Ground Ramp", "yn")]),
-    ("Work Hours", [("7 Days a week 7-7 Confirmation", "yn")]),
-    ("Materials", [
-        ("Staging Area", "yn"), ("Materials On Site", "yn"), ("Total Trucks", "text"),
-        ("BOM's List / Count Sheet Received", "yn"), ("Building Open and Accessible", "yn"),
-        ("Lockbox or Door Keypad", "yn"), ("LP and Gas Allowed in Building", "yn"),
-        ("Lights / Power", "yn"), ("Temperatures (Ambient / Freezer / Blast Freezer)", "text"),
-        ("Bathrooms", "yn"), ("Dumpster Provided", "text"),
+    ("Scope & Materials Review", [
+        F("scope_reviewed", "Full Scope of Work Reviewed/Received"),
+        _sh(F("opi_materials", "On Point Providing Materials")),
+        F("drill_bits", "Drill Bits Needed"),
+        F("banding", "Banding Needed"),
+        F("torque_wrench", "Torque Wrench Needed"),
+        F("saw_blades", "Saw blades/ Cutting Disc Needed"),
+        F("wire_epoxy", "Wire and/or epoxy Needed"),
+        F("rentals_reviewed", "Rental Equipment Needed Reviewed/Approved"),
+        _sh(F("opi_dumpsters", "Dumpster Provided")),
+        _sh(F("opi_slurry_pan", "Slurry Pan Provided")),
+        F("safety_reviewed", "Safety Requirements Reviewed"),
+        F("hard_hats_vests", "OPI Hard hats and Vest Needed"),
+        F("timeline_reviewed", "Project Timeline Reviewed"),
     ]),
-    (None, [
-        ("GC Contact Info", "text"), ("Superintendent Contact Info", "text"),
-        ("Active Warehouse", "yn"),
-    ]),
-    ("Safety Requirements", [
-        ("Safety Orientations", "yn"),
-        ("On Point Vests and Hard Hats", "yn"),
-        ("Do all Crew Members have Licenses for FL, SL and Fall Protection", "yn"),
-        ("Crew Understands Safety Checklist Expectations", "yn"),
-        ("Crew Understands Not to Climb in Racks without Proper Fall Protection", "yn"),
-    ]),
-    ("Wire Guidance", [
-        ("Wire Guidance", "yn"), ("Water Supply", "yn_note"),
-        ("Slurry Pan Needed", "yn"), ("Slurry Pan Drop Location", "text"),
-        ("Wire Guidance Layout", "yn"), ("Measurements Confirmed", "yn"),
-        ("Out of Aisle Extension Distance", "text"),
-        ("Distance Off Racks If Not Centered in Aisle", "text"),
-        ("Magnets Quoted", "yn"), ("Magnet Placement Confirmation", "text"),
-        ("New Line Driver Or Existing", "text"), ("Line Driver Brand", "text"),
-        ("Line Driver Location On Drawing Confirmed", "yn"),
-    ]),
-    (None, [("Notes", "textarea")]),
+    ("Facility Checklist", _FACILITY),
+    ("BOM & Drawing Review", _bom(False)),
+    (None, [F("notes", "Notes", "textarea")]),
 ]
 
 _FORM_META = {
-    "customer": {"label": "Customer Kickoff Checklist", "milestone": "customer_kickoff", "sections": _CUSTOMER_SECTIONS},
-    "crew":     {"label": "Crew Kickoff Checklist",     "milestone": "crew_kickoff",     "sections": _CREW_SECTIONS},
+    "customer": {"label": "Customer Kickoff Checklist", "milestone": "customer_kickoff", "sections": _CUSTOMER_FORM},
+    "crew":     {"label": "Crew Kickoff Checklist",     "milestone": "crew_kickoff",     "sections": _CREW_FORM},
 }
-
-
-def _slug(s: str) -> str:
-    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", s.lower())).strip("_")
+FORM_LABELS = {"customer": "Customer kickoff", "crew": "Crew kickoff"}
+SHARED_FORM = "shared"
 
 
 def _build_form(meta):
-    """Turn the (title, [(label, type)]) sections into stable keyed sections."""
-    used = set()
-    sections = []
-    for title, fields in meta["sections"]:
-        sec_slug = _slug(title) if title else ""
-        built = []
-        for label, ftype in fields:
-            base = (sec_slug + "__" if sec_slug else "") + _slug(label)
-            key, i = base, 2
-            while key in used:
-                key, i = f"{base}_{i}", i + 1
-            used.add(key)
-            built.append({"key": key, "label": label, "type": ftype})
-        sections.append({"title": title, "fields": built})
+    sections = [{"title": t, "fields": [dict(f) for f in fields]} for t, fields in meta["sections"]]
     return {"label": meta["label"], "milestone": meta["milestone"], "sections": sections}
 
 
 FORMS = {k: _build_form(v) for k, v in _FORM_META.items()}
-FORM_KEYS = {k: {f["key"] for s in v["sections"] for f in s["fields"]} for k, v in FORMS.items()}
+# Answerable fields per form (sub-heading "label" rows hold no answer).
+FIELD_DEFS = {k: {f["key"]: f for s in v["sections"] for f in s["fields"] if f["type"] != "label"}
+              for k, v in FORMS.items()}
+FORM_KEYS = {k: set(v) for k, v in FIELD_DEFS.items()}
 HELD_KEY = "_held_date"
 
 
@@ -305,11 +336,9 @@ def get_project_kickoff(entity_id: str, user=Depends(get_current_user)):
         # filled-field counts per form (excludes the reserved held key)
         counts = {}
         for fk in FORMS:
-            n = conn.execute(text("""SELECT COUNT(*) FROM project_kickoff_responses
-                                     WHERE entity_id=:e AND form_key=:f AND field_key<>:h
-                                       AND value IS NOT NULL AND value<>''"""),
-                             {"e": entity_id, "f": fk, "h": HELD_KEY}).scalar()
-            counts[fk] = int(n or 0)
+            rows = _form_rows(conn, entity_id, fk)
+            counts[fk] = sum(1 for k in FIELD_DEFS[fk]
+                             if (r := rows.get((_store_key(fk, k), k))) and _norm(r["value"]) is not None)
 
     milestones = []
     for m in MILESTONES:
@@ -377,8 +406,119 @@ def update_milestone(entity_id: str, body: MilestoneUpdate, user=Depends(get_cur
     return {"ok": True}
 
 
+def _store_key(form_key, field_key):
+    """Where an answer lives: shared items under 'shared', the rest per form.
+    yn_note companions ("<key>__note") follow their base field."""
+    base = field_key[:-6] if field_key.endswith("__note") else field_key
+    f = FIELD_DEFS[form_key].get(base)
+    return SHARED_FORM if (f and f.get("shared")) else form_key
+
+
+def _norm(v):
+    v = None if v is None else str(v)
+    return None if v is None or v.strip() == "" else v
+
+
+def _source_label(src):
+    if not src:
+        return None
+    if src.startswith("auto:"):
+        return "Auto-filled from " + src[5:]
+    return FORM_LABELS.get(src, src)
+
+
+def _autofill(conn, entity_id, meta):
+    """Suggested answers from data the app already has: {field_key: (value, where)}."""
+    out = {}
+    name = meta.get("name") or ""
+    parts = [p.strip() for p in name.split(" - ")]
+    opp = conn.execute(text("""
+        SELECT id, quote_number, contact_id, app_estimate_id FROM opportunities
+        WHERE project_qbo_id = :e ORDER BY id DESC LIMIT 1
+    """), {"e": entity_id}).mappings().first()
+    est = None
+    if opp and opp["app_estimate_id"]:
+        est = conn.execute(text("""
+            SELECT crew_count, crew_size, project_city, project_state FROM estimates WHERE id = :i
+        """), {"i": opp["app_estimate_id"]}).mappings().first()
+
+    # Project name & quote # — OPI's QuickBooks naming is "<quote#> - <customer> - <city, ST>".
+    pname = " - ".join(parts[:2]) if len(parts) >= 3 else name
+    if opp and opp["quote_number"] and str(opp["quote_number"]) not in pname:
+        pname = f"{pname} (Quote #{opp['quote_number']})"
+    if pname:
+        out["project_name"] = (pname, "the project name")
+    if est and (est["project_city"] or est["project_state"]):
+        out["address"] = (", ".join(x for x in (est["project_city"], est["project_state"]) if x), "the quote")
+    elif len(parts) >= 3 and "," in parts[-1]:
+        out["address"] = (parts[-1], "the project name (city, state)")
+    if meta.get("start_date"):
+        out["start_date"] = (str(meta["start_date"])[:10], "the project schedule")
+
+    crews = conn.execute(text("""
+        SELECT MAX(COALESCE(pc.name, wc.name)) AS company,
+               MAX(COALESCE(pc.boss_name, wc.boss_name)) AS boss,
+               MAX(CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END) AS lead_name
+        FROM projects p
+        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+        JOIN project_schedule_items psi ON psi.project_id = p.id
+        JOIN project_schedule_item_work_crews swc ON swc.schedule_item_id = psi.id
+        JOIN work_crews wc ON wc.id = swc.work_crew_id
+        LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+        WHERE qc.qbo_id = :e AND swc.unassigned_at IS NULL
+        GROUP BY wc.id
+    """), {"e": entity_id}).mappings().all()
+    bosses = list(dict.fromkeys(
+        (f"{c['boss']} ({c['company']})" if c["boss"] else c["company"]) for c in crews if c["company"]))
+    leads = list(dict.fromkeys(c["lead_name"] for c in crews if c["lead_name"]))
+    if bosses:
+        out["crew_boss"] = (", ".join(bosses), "the crew assignment")
+    if leads:
+        out["crew_lead"] = (", ".join(leads), "the crew assignment")
+    if est and est["crew_count"]:
+        n = int(est["crew_count"])
+        out["crew_size"] = (f"{n} crew{'s' if n != 1 else ''}" + (f" · {est['crew_size']}" if est["crew_size"] else ""),
+                            "the quote")
+
+    if opp and opp["contact_id"]:
+        c = conn.execute(text("SELECT full_name, phone, email FROM contacts WHERE id = :i"),
+                         {"i": opp["contact_id"]}).mappings().first()
+        if c:
+            for k, col in (("sales_rep_name", "full_name"), ("sales_rep_phone", "phone"), ("sales_rep_email", "email")):
+                if c[col]:
+                    out[k] = (c[col], "the RFQ contact")
+
+    if opp and opp["app_estimate_id"]:
+        base = conn.execute(text("""
+            SELECT installation_environment, wire_guidance_linear_footage FROM quote_metric_sets
+            WHERE estimate_id = :i AND kind = 'base' LIMIT 1
+        """), {"i": opp["app_estimate_id"]}).mappings().first()
+        if base:
+            env = (base["installation_environment"] or "").lower()
+            temp = ("Blast Freezer" if "blast" in env else "Freezer" if "freezer" in env
+                    else "Cooler" if "cooler" in env else "Ambient" if "ambient" in env else None)
+            if temp:
+                out["temperatures"] = (temp, "the quote")
+            if base["wire_guidance_linear_footage"] and float(base["wire_guidance_linear_footage"]) > 0:
+                out["wire_guidance"] = ("Y", "the quote (wire guidance footage)")
+    return out
+
+
+def _form_rows(conn, entity_id, form_key):
+    rows = conn.execute(text("""
+        SELECT r.form_key, r.field_key, r.value, r.source, r.updated_at,
+               TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS by_name
+        FROM project_kickoff_responses r LEFT JOIN users u ON u.id = r.updated_by_user_id
+        WHERE r.entity_id = :e AND r.form_key IN (:f, :s)
+    """), {"e": entity_id, "f": form_key, "s": SHARED_FORM}).mappings().all()
+    return {(r["form_key"], r["field_key"]): r for r in rows}
+
+
 @router.get("/project/{entity_id}/form/{form_key}")
 def get_form(entity_id: str, form_key: str, user=Depends(get_current_user)):
+    """The checklist with its answers. Shared items come from the 'shared' store,
+    each answer carries where it came from (which checklist / auto-fill, who,
+    when) and the value it replaced; empty auto-fillable fields get a suggestion."""
     _require(user)
     if form_key not in FORMS:
         raise HTTPException(status_code=400, detail="Unknown form")
@@ -386,45 +526,99 @@ def get_form(entity_id: str, form_key: str, user=Depends(get_current_user)):
         meta = _project_meta(conn, entity_id)
         if not meta:
             raise HTTPException(status_code=404, detail="Project not found")
-        rows = conn.execute(text("""SELECT field_key, value FROM project_kickoff_responses
-                                    WHERE entity_id=:e AND form_key=:f"""),
-                            {"e": entity_id, "f": form_key}).mappings().all()
-    responses = {r["field_key"]: r["value"] for r in rows}
+        rows = _form_rows(conn, entity_id, form_key)
+        hist = conn.execute(text("""
+            SELECT h.form_key, h.field_key, h.old_value, h.old_source, h.changed_at,
+                   TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS by_name
+            FROM project_kickoff_history h LEFT JOIN users u ON u.id = h.changed_by_user_id
+            WHERE h.entity_id = :e AND h.form_key IN (:f, :s) AND h.old_value IS NOT NULL AND h.old_value <> ''
+            ORDER BY h.id DESC
+        """), {"e": entity_id, "f": form_key, "s": SHARED_FORM}).mappings().all()
+        auto = _autofill(conn, entity_id, meta)
+    prev = {}
+    for h in hist:
+        prev.setdefault((h["form_key"], h["field_key"]), h)
+
+    responses, info = {}, {}
+    for key in FIELD_DEFS[form_key]:
+        for fk in (key, f"{key}__note"):
+            store = _store_key(form_key, fk)
+            r = rows.get((store, fk))
+            if r and _norm(r["value"]) is not None:
+                responses[fk] = r["value"]
+            p = prev.get((store, fk))
+            if (r and _norm(r["value"]) is not None) or p:
+                info[fk] = {
+                    "shared": store == SHARED_FORM,
+                    "source": _source_label(r["source"]) if r else None,
+                    "by": ((r["by_name"] or "").strip() or None) if r else None,
+                    "at": str(r["updated_at"]) if r and r["updated_at"] else None,
+                    "prev": ({"value": p["old_value"], "source": _source_label(p["old_source"]),
+                              "by": (p["by_name"] or "").strip() or None,
+                              "at": str(p["changed_at"]) if p["changed_at"] else None} if p else None),
+                }
+    suggestions = {k: {"value": v, "source": f"Auto-filled from {where}", "where": where}
+                   for k, (v, where) in auto.items()
+                   if k in FIELD_DEFS[form_key] and FIELD_DEFS[form_key][k].get("auto") and k not in responses}
+    held = rows.get((form_key, HELD_KEY))
     return {
         "entity": {"type": "project", "id": entity_id, "name": meta["name"], "customer_name": meta["customer_name"]},
         "form": FORMS[form_key],
-        "responses": {k: v for k, v in responses.items() if k != HELD_KEY},
-        "held_date": responses.get(HELD_KEY),
+        "other_form_label": FORM_LABELS["crew" if form_key == "customer" else "customer"],
+        "responses": responses,
+        "info": info,
+        "suggestions": suggestions,
+        "held_date": held["value"] if held else None,
     }
 
 
 class FormSave(BaseModel):
     responses: dict
     held_date: Optional[str] = None
+    # field_key -> "auto:<where>" for auto-filled values saved as-is
+    sources: Optional[dict] = None
 
 
 @router.post("/project/{entity_id}/form/{form_key}")
 def save_form(entity_id: str, form_key: str, body: FormSave, user=Depends(get_current_user)):
+    """Write only what changed. Shared items land in the 'shared' store (so the
+    other checklist shows them too); every change keeps the replaced value in
+    project_kickoff_history."""
     _require(user)
     if form_key not in FORMS:
         raise HTTPException(status_code=400, detail="Unknown form")
     valid = FORM_KEYS[form_key]
     uid = user.get("id")
-    # accept the field keys, plus per-field "<key>__note" companions for yn_note
-    items = []
-    for k, v in (body.responses or {}).items():
-        base = k[:-6] if k.endswith("__note") else k
-        if base in valid:
-            items.append((k, None if v is None else str(v)))
+    srcs = body.sources or {}
+    changed = 0
     with engine.begin() as conn:
         if not _project_meta(conn, entity_id):
             raise HTTPException(status_code=404, detail="Project not found")
+        rows = _form_rows(conn, entity_id, form_key)
+        items = []
+        for k, v in (body.responses or {}).items():
+            base = k[:-6] if k.endswith("__note") else k
+            if base in valid:
+                src = srcs.get(k) if isinstance(srcs.get(k), str) and srcs[k].startswith("auto:") else form_key
+                items.append((_store_key(form_key, k), k, _norm(v), src[:64]))
         if body.held_date is not None:
-            items.append((HELD_KEY, body.held_date or None))
-        for fk, val in items:
+            items.append((form_key, HELD_KEY, _norm(body.held_date), form_key))
+        for store, fk, val, src in items:
+            cur = rows.get((store, fk))
+            old = _norm(cur["value"]) if cur else None
+            if old == val:
+                continue
             conn.execute(text("""
-                INSERT INTO project_kickoff_responses (entity_id, form_key, field_key, value, updated_by_user_id)
-                VALUES (:e,:f,:k,:v,:u)
-                ON DUPLICATE KEY UPDATE value=VALUES(value), updated_by_user_id=VALUES(updated_by_user_id)
-            """), {"e": entity_id, "f": form_key, "k": fk, "v": val, "u": uid})
-    return {"ok": True}
+                INSERT INTO project_kickoff_responses (entity_id, form_key, field_key, value, source, updated_by_user_id)
+                VALUES (:e,:f,:k,:v,:s,:u)
+                ON DUPLICATE KEY UPDATE value=VALUES(value), source=VALUES(source), updated_by_user_id=VALUES(updated_by_user_id)
+            """), {"e": entity_id, "f": store, "k": fk, "v": val, "s": src, "u": uid})
+            if fk != HELD_KEY:
+                conn.execute(text("""
+                    INSERT INTO project_kickoff_history
+                        (entity_id, form_key, field_key, old_value, new_value, old_source, new_source, changed_by_user_id)
+                    VALUES (:e,:f,:k,:ov,:nv,:os,:ns,:u)
+                """), {"e": entity_id, "f": store, "k": fk, "ov": old, "nv": val,
+                       "os": cur["source"] if cur else None, "ns": src, "u": uid})
+            changed += 1
+    return {"ok": True, "changed": changed}

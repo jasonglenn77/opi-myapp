@@ -30,6 +30,7 @@ import { showAuth, brandHeader } from "../shell.js";
 import { api, getToken } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
 import { createFormRenderer, FORM_SHORT, TOGGLE_LABEL } from "../utils/form-render.js";
+import { openMarkupViewer, fillDrawingThumbs, fillMarkedThumbs } from "../utils/drawing-markup.js";
 
 const TOKEN_KEY = "opi_crew_session";      // {token, crew, role, label}
 const RECENT_KEY = "opi_field_recent";     // [{qbo_id, name, ts}]
@@ -150,9 +151,33 @@ function xhrUpload(url, file, onProgress) {
   });
 }
 
-function crewUpload(projectQboId, formCode, file, onProgress) {
-  const qs = `project_qbo_id=${encodeURIComponent(projectQboId)}&form_code=${encodeURIComponent(formCode)}`;
+function crewUpload(projectQboId, formCode, file, onProgress, questionKey) {
+  const qs = `project_qbo_id=${encodeURIComponent(projectQboId)}&form_code=${encodeURIComponent(formCode)}`
+    + (questionKey ? `&question_key=${encodeURIComponent(questionKey)}` : "");
   return xhrUpload(`/api/forms/upload?${qs}`, file, onProgress);
+}
+
+/** A saved marked drawing's bytes (the crew's own "4 Drawing Updates" files). */
+async function formFileBlob(projectQboId, docId) {
+  const token = isPmView() ? getToken() : getSession()?.token;
+  const res = await fetch(`/api/forms/file/${docId}?project_qbo_id=${encodeURIComponent(projectQboId)}`,
+                          { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!res.ok) throw new Error(`Couldn't load the drawing (${res.status})`);
+  return res.blob();
+}
+
+/** A PM-attached drawing's bytes (Marked Drawings), through the app so the
+ *  viewer can render PDFs and export the marked copy. */
+async function drawingBlob(projectQboId, docId) {
+  const token = isPmView() ? getToken() : getSession()?.token;
+  const res = await fetch(`/api/forms/drawing-file/${docId}?project_qbo_id=${encodeURIComponent(projectQboId)}`,
+                          { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!res.ok) {
+    const err = new Error(res.status === 403 ? "This drawing is no longer shared with your crew." : `Couldn't load the drawing (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.blob();
 }
 
 /** Receipt file → the project's "8 Receipts" documents folder. */
@@ -799,7 +824,16 @@ function renderForm(data, tpl, readOnly) {
     bindSwitch();
     document.getElementById("ffBackProj")?.addEventListener("click", () => renderProject(data));
     const roHost = document.getElementById("ffRoBody");
-    if (roHost) ro.attach(roHost);   // yes/no stays tappable to explore branches
+    if (roHost) {
+      ro.attach(roHost);   // yes/no stays tappable to explore branches
+      fillDrawingThumbs(roHost, tpl.drawings, (id) => drawingBlob(qbo, id));
+      roHost.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-dw-open]");
+        const d = b && (tpl.drawings || []).find((x) => String(x.id) === b.getAttribute("data-dw-open"));
+        if (d) openMarkupViewer({ title: d.filename, filename: d.filename, contentType: d.content_type,
+                                  loadBlob: () => drawingBlob(qbo, d.id) });
+      });
+    }
     return;
   }
   const draft = loadDraft(qbo, code);
@@ -820,11 +854,19 @@ function renderForm(data, tpl, readOnly) {
   const _now = new Date();   // device-LOCAL date (toISOString would be UTC)
   const todayIso = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
   const isRecurring = RECURRING.has(tpl.cadence);
+  // Backfill window: project start → today. A project that hasn't started yet
+  // has no earlier days to fill in, so the date stays on today.
+  const startIso = proj.start_date ? String(proj.start_date).slice(0, 10) : "";
+  const notStarted = !!startIso && startIso > todayIso;
+  const fmtUS = (iso) => { const [y, m, d] = iso.split("-"); return `${Number(m)}/${Number(d)}/${y}`; };
   const datePicker = !isRecurring ? "" : `
     <div class="ff-q" style="margin-top:14px">
       <div class="ff-label mb-1">For date</div>
-      <div class="ff-hint" style="margin-bottom:6px">Filling this in for an earlier day? Pick that day — otherwise leave today.${tpl.off_today ? " Today is an off day for this form." : ""}</div>
-      <input type="date" id="ffReportDate" class="ff-input" value="${todayIso}" max="${todayIso}" ${proj.start_date ? `min="${escapeHtml(String(proj.start_date).slice(0, 10))}"` : ""} />
+      <div class="ff-hint" style="margin-bottom:6px">${notStarted
+        ? `This project starts ${escapeHtml(fmtUS(startIso))}, so this update is for today.`
+        : `Filling this in for an earlier day? Pick that day — otherwise leave today.`}${tpl.off_today ? " Today is an off day for this form." : ""}</div>
+      <input type="date" id="ffReportDate" class="ff-input" value="${todayIso}" max="${todayIso}"
+             ${notStarted ? "disabled" : (startIso ? `min="${escapeHtml(startIso)}"` : "")} />
     </div>`;
 
   renderShell(`
@@ -879,20 +921,92 @@ function renderForm(data, tpl, readOnly) {
     if (btn && uploadsInFlight.size === 0) btn.disabled = false;
   }
 
+  const refreshFiles = (key) => {
+    renderer.redrawFiles(key);
+    fillMarkedThumbs(form, (id) => formFileBlob(qbo, id));
+  };
+  const discardFile = async (docId) => {
+    try { await portalApi(`/forms/file/${docId}?project_qbo_id=${encodeURIComponent(qbo)}`, { method: "DELETE" }); }
+    catch (_) { /* already submitted or gone — the answer list still updates */ }
+  };
+
+  // Open a drawing in the highlighter. editIdx = re-open a saved marked copy:
+  // its marks come back editable; Save replaces that copy (old file discarded).
+  // Without a source drawing (no longer attached) the saved image itself is
+  // the base and new marks go on top.
+  function openDrawing(key, d, editIdx = null) {
+    const prev = editIdx != null ? (answers[key] || [])[editIdx] : null;
+    const baseFromSaved = prev && (!d || !prev.markup);
+    openMarkupViewer({
+      title: baseFromSaved ? prev.filename : d.filename,
+      filename: baseFromSaved ? prev.filename : d.filename,
+      contentType: baseFromSaved ? "image/png" : d.content_type,
+      loadBlob: () => (baseFromSaved ? formFileBlob(qbo, prev.document_id) : drawingBlob(qbo, d.id)),
+      initialMarkup: baseFromSaved ? null : (prev?.markup || null),
+      onSave: async (blob, fname, markup) => {
+        uploadsInFlight.add(key);
+        const btn = document.getElementById("ffSubmitBtn");
+        if (btn) btn.disabled = true;
+        try {
+          const file = new File([blob], fname, { type: "image/png" });
+          const res = await crewUpload(qbo, code, file, null, key);
+          const item = { document_id: res.document_id, filename: res.filename || fname,
+                         source_document_id: prev ? prev.source_document_id : d.id,
+                         markup: baseFromSaved ? null : markup };
+          const cur = Array.isArray(answers[key]) ? [...answers[key]] : [];
+          if (prev && cur[editIdx] === prev) { cur[editIdx] = item; discardFile(prev.document_id); }
+          else cur.push(item);
+          answers[key] = cur;
+          persist();
+          refreshFiles(key);
+        } catch (err) {
+          if (handleAuthError(err)) throw err;
+          throw new Error(err.message || String(err));
+        } finally {
+          uploadsInFlight.delete(key);
+          if (btn && uploadsInFlight.size === 0) btn.disabled = false;
+        }
+      },
+    });
+  }
+
   // Remove-file is delegated (rows re-render).
   form.addEventListener("click", (e) => {
+    const dwOpen = e.target.closest("[data-dw-open]");
+    if (dwOpen) {
+      const d = (tpl.drawings || []).find((x) => String(x.id) === dwOpen.getAttribute("data-dw-open"));
+      if (d) openDrawing(dwOpen.getAttribute("data-dw-q"), d);
+      return;
+    }
+    const mk = e.target.closest("[data-mk-open]");
+    if (mk) {
+      const key = mk.getAttribute("data-mk-open");
+      const idx = Number(mk.getAttribute("data-idx"));
+      const item = (answers[key] || [])[idx];
+      if (!item) return;
+      const d = (tpl.drawings || []).find((x) => x.id === item.source_document_id) || null;
+      openDrawing(key, d, idx);
+      return;
+    }
     const rm = e.target.closest("[data-rmfile]");
     if (!rm) return;
     const key = rm.getAttribute("data-rmfile");
     const idx = Number(rm.getAttribute("data-idx"));
     const cur = Array.isArray(answers[key]) ? answers[key] : [];
+    const item = cur[idx];
+    if (item && item.source_document_id != null) {
+      if (!confirm("Remove this marked drawing? It will also be deleted from the project's Documents.")) return;
+      discardFile(item.document_id);
+    }
     answers[key] = cur.filter((_, i) => i !== idx);
     persist();
-    renderer.redrawFiles(key);
+    refreshFiles(key);
   });
 
   // Bind controls + restore branch UIs for drafted yes/no answers.
   renderer.attach(form);
+  fillDrawingThumbs(form, tpl.drawings, (id) => drawingBlob(qbo, id));
+  fillMarkedThumbs(form, (id) => formFileBlob(qbo, id));
 
   form.onsubmit = async (e) => {
     e.preventDefault();
@@ -918,6 +1032,12 @@ function renderForm(data, tpl, readOnly) {
 
     btn.disabled = true; btn.textContent = "Submitting…"; msg.innerHTML = "";
     const reportDate = document.getElementById("ffReportDate")?.value || null;
+    if (reportDate && (reportDate > todayIso || (!notStarted && startIso && reportDate < startIso))) {
+      btn.disabled = false; btn.textContent = `Submit ${FORM_SHORT[code] || "form"}`;
+      msg.innerHTML = `<div class="ff-err">Pick a date between ${escapeHtml(fmtUS(startIso || todayIso))} and today.</div>`;
+      document.getElementById("ffReportDate")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     try {
       const res = await portalApi("/forms/submit", {
         method: "POST",

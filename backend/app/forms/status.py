@@ -94,10 +94,12 @@ _DEFAULT_CADENCE = {
     "truck_loading": "as_needed",
     "wire_guidance_trailer": "as_needed",
     "gear_request": "as_needed",
+    "daily_jha": "daily",
 }
 # Event-driven forms default to not-required — the PM opts a project in.
 _DEFAULT_NOT_REQUIRED = {
     "truck_unloading", "truck_loading", "wire_guidance_trailer", "gear_request",
+    "daily_jha",
 }
 
 

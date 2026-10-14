@@ -204,17 +204,24 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
   function attachDocDropTargets(host) {
     let hover = null;
     const clear = () => { if (hover) { hover.classList.remove("doc-drop-hover"); hover = null; } };
+    const isFiles = (e) => !!e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+    const disarm = () => { host.classList.remove("doc-drop-armed"); clear(); };
+    host.addEventListener("dragenter", (e) => { if (isFiles(e)) host.classList.add("doc-drop-armed"); });
     host.addEventListener("dragover", (e) => {
+      if (isFiles(e)) host.classList.add("doc-drop-armed");
       const row = e.target.closest("[data-drop]");
       if (!row) { clear(); return; }
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
       if (hover !== row) { clear(); row.classList.add("doc-drop-hover"); hover = row; }
     });
-    host.addEventListener("dragleave", (e) => { if (hover && !hover.contains(e.relatedTarget)) clear(); });
+    host.addEventListener("dragleave", (e) => {
+      if (!host.contains(e.relatedTarget)) { disarm(); return; }
+      if (hover && !hover.contains(e.relatedTarget)) clear();
+    });
     host.addEventListener("drop", (e) => {
       const row = e.target.closest("[data-drop]");
-      clear();
+      disarm();
       if (!row) return;
       e.preventDefault();
       handleDocDrop(e.dataTransfer && e.dataTransfer.files,
@@ -276,7 +283,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
 
   function showDocuments() {
     const body = document.getElementById("tabBody");
-    body.innerHTML = `<div class="px-3 pt-2 text-[11px] text-black/45">Tip: drag files from your computer onto any folder row to upload</div><div id="docTree"></div>`;
+    body.innerHTML = `<div class="doc-drop-hint"><span class="doc-drop-hint-icon">⇪</span><span><b>Drag &amp; drop</b> files from your computer onto any folder below — or use the folder's <b>Upload</b> button.</span></div><div id="docTree"></div>`;
     renderTree();
     attachDocHandlers();
     const host = document.getElementById("docTree");
@@ -696,6 +703,10 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
   function goTab(t) {
     if (t === activeTab) return;
     activeTab = t; renderTabs();
+    // Fresh element per tab: panels attach click handlers to their host, and a
+    // reused host would keep the previous tab's handlers firing.
+    const oldBody = document.getElementById("tabBody");
+    if (oldBody) oldBody.replaceWith(oldBody.cloneNode(false));
     if (t === "overview") showOverview();
     else if (t === "assignment") showAssignment();
     else if (t === "kickoff") showKickoff();

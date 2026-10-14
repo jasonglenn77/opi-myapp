@@ -16,6 +16,10 @@ export async function mountKickoffPanel(container, entityId, opts = {}) {
   const ro = !!opts.readOnly;
   const roNote = ro ? `<div class="pm-ro-note mb-3">Read-only view — Kickoff &amp; Process is managed in the PM Portal.</div>` : "";
   let data, view = "overview", formKey = null, form = null, responses = {}, heldDate = "";
+  // info: per-field provenance {shared, source, by, at, prev}; suggestions:
+  // auto-fill values for empty fields {value, source, where}; otherLabel: the
+  // other checklist's name (shared items stay in sync with it).
+  let info = {}, suggestions = {}, otherLabel = "";
   const noteOpen = new Set();
 
   const load = async () => { data = await api(`/kickoff/project/${encodeURIComponent(entityId)}`); };
@@ -111,26 +115,69 @@ export async function mountKickoffPanel(container, entityId, opts = {}) {
   }
 
   // ── form view ──────────────────────────────────────────────────────────────
+  // Stored timestamps are UTC (server clock) — show the viewer's local date.
+  const fmtWhen = (v) => {
+    if (!v) return "";
+    const d = new Date(String(v).replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(v)) ? "" : "Z"));
+    return Number.isNaN(d.getTime()) ? String(v).slice(0, 10) : d.toLocaleDateString();
+  };
+  function provenanceHtml(key) {
+    const bits = [];
+    const inf = info[key];
+    const sug = suggestions[key];
+    if (sug && responses[key] === sug.value && !(inf && inf.source)) {
+      bits.push(`<span class="kk-prov kk-auto">✦ ${escapeHtml(sug.source)} — saves with the form</span>`);
+    } else if (inf && inf.source) {
+      const fromOther = inf.shared && inf.source === otherLabel;
+      const isAuto = inf.source.startsWith("Auto-filled");
+      if (fromOther || isAuto) {
+        bits.push(`<span class="kk-prov ${isAuto ? "kk-auto" : "kk-from"}">${fromOther ? "⇄ From " : ""}${escapeHtml(inf.source)}${inf.by ? ` · ${escapeHtml(inf.by)}` : ""}${inf.at ? ` · ${escapeHtml(fmtWhen(inf.at))}` : ""}</span>`);
+      }
+    }
+    if (inf && inf.prev) {
+      const pv = inf.prev;
+      const shown = pv.value === "Y" ? "Yes" : pv.value === "N" ? "No" : pv.value;
+      bits.push(`<span class="kk-prov kk-was" title="Value before the last change">was: <b>${escapeHtml(shown)}</b>${pv.source ? ` · ${escapeHtml(pv.source)}` : ""}${pv.by ? ` · ${escapeHtml(pv.by)}` : ""}${pv.at ? ` · ${escapeHtml(fmtWhen(pv.at))}` : ""}</span>`);
+    }
+    return bits.length ? `<div class="kk-provrow">${bits.join("")}</div>` : "";
+  }
+  const sharedTag = (f) => f.shared ? `<span class="kk-shared" title="This item is on both checklists — an answer here also fills it on the ${escapeHtml(otherLabel)} checklist">⇄ both</span>` : "";
+  const labelHtml = (f) => `<div class="min-w-0 flex-1 text-xs text-ink-900">${escapeHtml(f.label)} ${sharedTag(f)}${f.hint ? `<div class="text-[10px] text-black/45 mt-0.5">${escapeHtml(f.hint)}</div>` : ""}</div>`;
+
   function fieldHtml(f) {
+    if (f.type === "label") {
+      return `<div class="pt-2 pb-0.5 text-[11px] font-bold text-black/55">${escapeHtml(f.label)}:</div>`;
+    }
     const val = responses[f.key] || "";
     const noteVal = responses[`${f.key}__note`] || "";
     const dis = ro ? "disabled" : "";
     if (f.type === "yn" || f.type === "yn_note") {
       const btn = (v, label) => `<button type="button" data-yn="${f.key}" data-yn-val="${v}" ${dis} class="px-3 py-1 text-xs font-semibold border ${val === v ? (v === "Y" ? "bg-kpi-completed-bg border-kpi-completed-bd text-kpi-completed-text" : "bg-red-50 border-red-200 text-red-700") : "bg-white border-black/15 text-black/55" + (ro ? "" : " hover:bg-black/5")} ${v === "Y" ? "rounded-l-lg" : "rounded-r-lg -ml-px"}">${label}</button>`;
       return `
-        <div class="flex items-center gap-3 py-1.5">
-          <div class="min-w-0 flex-1 text-xs text-ink-900">${escapeHtml(f.label)}</div>
-          <div class="inline-flex shrink-0">${btn("Y", "Yes")}${btn("N", "No")}</div>
-          ${f.type === "yn_note" ? `<input type="text" data-field-note="${f.key}" value="${escapeHtml(noteVal)}" placeholder="Note" ${dis} class="input text-xs py-1 w-32 shrink-0">` : ""}
+        <div class="py-1.5">
+          <div class="flex items-center gap-3">
+            ${labelHtml(f)}
+            <div class="inline-flex shrink-0">${btn("Y", "Yes")}${btn("N", "No")}</div>
+            ${f.type === "yn_note" ? `<input type="text" data-field-note="${f.key}" value="${escapeHtml(noteVal)}" placeholder="${escapeHtml(f.note_label || "Note")}" ${dis} class="input text-xs py-1 w-32 shrink-0">` : ""}
+          </div>
+          ${provenanceHtml(f.key)}${f.type === "yn_note" ? provenanceHtml(`${f.key}__note`) : ""}
         </div>`;
     }
     if (f.type === "textarea") {
-      return `<div class="py-1.5"><div class="text-xs text-ink-900 mb-1">${escapeHtml(f.label)}</div><textarea data-field="${f.key}" rows="3" ${dis} class="input text-xs py-1.5 w-full">${escapeHtml(val)}</textarea></div>`;
+      return `<div class="py-1.5"><div class="text-xs text-ink-900 mb-1">${escapeHtml(f.label)}</div><textarea data-field="${f.key}" rows="3" ${dis} class="input text-xs py-1.5 w-full">${escapeHtml(val)}</textarea>${provenanceHtml(f.key)}</div>`;
+    }
+    let input;
+    if (f.type === "select") {
+      input = `<select data-field="${f.key}" ${dis} class="input text-xs py-1 w-48 sm:w-64 shrink-0"><option value="">—</option>${(f.options || []).map((o) => `<option ${o === val ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}</select>`;
+    } else if (f.type === "date") {
+      input = `<input type="date" data-field="${f.key}" value="${escapeHtml(String(val).slice(0, 10))}" ${dis} class="input text-xs py-1 w-48 sm:w-64 shrink-0">`;
+    } else {
+      input = `<input type="text" data-field="${f.key}" value="${escapeHtml(val)}" ${dis} class="input text-xs py-1 w-48 sm:w-64 shrink-0">`;
     }
     return `
-      <div class="flex items-center gap-3 py-1.5">
-        <div class="min-w-0 flex-1 text-xs text-ink-900">${escapeHtml(f.label)}</div>
-        <input type="text" data-field="${f.key}" value="${escapeHtml(val)}" ${dis} class="input text-xs py-1 w-48 sm:w-64 shrink-0">
+      <div class="py-1.5">
+        <div class="flex items-center gap-3">${labelHtml(f)}${input}</div>
+        ${provenanceHtml(f.key)}
       </div>`;
   }
 
@@ -150,6 +197,7 @@ export async function mountKickoffPanel(container, entityId, opts = {}) {
             ${ro ? "" : `<button type="button" id="kSave" class="btn-primary text-xs px-4 py-2">Save form</button>`}
           </div>
         </div>
+        <div class="kk-legend">Items marked <span class="kk-shared">⇄ both</span> are on the Customer and Crew checklists — answering one fills the other. <span class="kk-prov kk-auto">✦ Auto-filled</span> values come from the project's data; <span class="kk-prov kk-was">was:</span> shows the answer before the last change.</div>
         <div class="space-y-3">
           ${form.sections.map(sectionHtml).join("")}
         </div>
@@ -173,7 +221,10 @@ export async function mountKickoffPanel(container, entityId, opts = {}) {
   async function openForm(key) {
     try {
       const d = await api(`/kickoff/project/${encodeURIComponent(entityId)}/form/${key}`);
-      formKey = key; form = d.form; responses = d.responses || {}; heldDate = d.held_date || ""; view = "form";
+      formKey = key; form = d.form; heldDate = d.held_date || ""; view = "form";
+      info = d.info || {}; suggestions = d.suggestions || {}; otherLabel = d.other_form_label || "";
+      // Empty auto-fillable fields start with the suggestion (saved on Save form).
+      responses = { ...Object.fromEntries(Object.entries(suggestions).map(([k, v]) => [k, v.value])), ...(d.responses || {}) };
       render();
     } catch (err) { alert(`Could not open form: ${err.message}`); }
   }
@@ -188,7 +239,12 @@ export async function mountKickoffPanel(container, entityId, opts = {}) {
 
   async function saveForm(btn) {
     const heldEl = container.querySelector("#kHeld");
-    const payload = { responses: collectForm(), held_date: heldEl ? heldEl.value : null };
+    const values = collectForm();
+    const sources = {};
+    for (const [k, sg] of Object.entries(suggestions)) {
+      if (values[k] === sg.value) sources[k] = `auto:${sg.where}`;
+    }
+    const payload = { responses: values, held_date: heldEl ? heldEl.value : null, sources };
     const msg = container.querySelector("#kMsg");
     [btn].forEach(b => b && (b.disabled = true));
     try {

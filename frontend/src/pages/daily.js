@@ -123,6 +123,7 @@ export async function mountDailyPanel(container, entityId, opts = {}) {
     if (tog) {
       const key = tog.getAttribute("data-toggle");
       const it = data.groups.flatMap(g => g.items).find(x => x.key === key);
+      if (!it) return;
       try { await postItem(key, { done: !it.done }); await reload(); }
       catch (err) { alert(`Could not update: ${err.message}`); }
       return;

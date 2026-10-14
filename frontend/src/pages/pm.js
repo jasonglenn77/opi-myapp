@@ -8,10 +8,11 @@
 //                                     the SAME panels/endpoints the office
 //                                     workspace used (office is read-only now).
 // No project profitability anywhere on these pages (crew/PM surface).
-import { api, hasCapability } from "../api.js";
+import { api, hasCapability, getToken } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { createFormRenderer } from "../utils/form-render.js";
+import { openMarkupViewer, fillDrawingThumbs } from "../utils/drawing-markup.js";
 import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
 
@@ -258,11 +259,29 @@ async function pmProjectDetail(routeFn, qboId) {
 
   const body = () => document.getElementById("pmTabBody");
 
+  // Unreviewed crew submissions → badge on the Forms tab. Refreshed on open
+  // and whenever a submission is marked reviewed anywhere on the page.
+  let toReview = 0;
+  const refreshReviewBadge = async () => {
+    try {
+      const r = await api(`/forms/submissions?project_qbo_id=${encodeURIComponent(qboId)}`);
+      const n = (r.submissions || []).filter((x) => x.status !== "reviewed").length;
+      if (n !== toReview) { toReview = n; renderTabs(); }
+    } catch (_) { /* badge is best-effort */ }
+  };
+  const onReviewed = () => refreshReviewBadge();
+  window.addEventListener("pm-form-reviewed", onReviewed);
+  window.addEventListener("hashchange", () => window.removeEventListener("pm-form-reviewed", onReviewed), { once: true });
+  refreshReviewBadge();
+
   function renderTabs() {
     const bar = document.getElementById("pmTabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 whitespace-nowrap ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("overview", "Overview") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("forms", "Forms") + btn("documents", "Documents") + btn("financials", "Financials") + btn("receipts", "Receipts") + btn("crew", "Crew");
+    const formsLabel = toReview
+      ? `<span class="pm-tab-alert">Forms <span class="pm-tab-count" title="${toReview} submission${toReview === 1 ? "" : "s"} to review">${toReview}</span></span>`
+      : "Forms";
+    bar.innerHTML = btn("overview", "Overview") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("forms", formsLabel) + btn("documents", "Documents") + btn("financials", "Financials") + btn("receipts", "Receipts") + btn("crew", "Crew");
     bar.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
       const t = b.getAttribute("data-tab");
       if (t === activeTab) return;
@@ -273,9 +292,12 @@ async function pmProjectDetail(routeFn, qboId) {
   const switchTab = (t) => { activeTab = t; renderTabs(); showTab(); };
 
   function showTab() {
-    const el = body();
-    if (!el) return;
-    el.innerHTML = "";
+    const old = body();
+    if (!old) return;
+    // Fresh element per tab: panels attach click handlers to their host, and a
+    // reused host would keep the previous tab's handlers firing.
+    const el = old.cloneNode(false);
+    old.replaceWith(el);
     if (activeTab === "overview") mountPmOverview(el, qboId, switchTab);
     else if (activeTab === "kickoff") mountKickoffPanel(el, qboId);
     else if (activeTab === "daily") mountDailyPanel(el, qboId);
@@ -444,7 +466,7 @@ async function mountPmOverview(container, qboId, switchTab) {
     ? `<span class="pm-chip pm-chip-lane-pm">PM</span>`
     : `<span class="pm-chip pm-chip-lane-crew">Crew</span>`;
   const trackRow = ({ laneKind, title, sub, chips, goto }) => `
-    <button type="button" class="pm-track-row" data-goto="${goto}">
+    <div role="button" tabindex="0" class="pm-track-row" data-goto="${goto}">
       ${lane(laneKind)}
       <div class="min-w-0 flex-1">
         <div class="text-xs font-bold text-ink-900 truncate">${escapeHtml(title)}</div>
@@ -452,7 +474,7 @@ async function mountPmOverview(container, qboId, switchTab) {
       </div>
       <div class="flex items-center gap-1 shrink-0 flex-wrap justify-end">${chips || ""}</div>
       <span class="text-black/25 text-lg shrink-0">›</span>
-    </button>`;
+    </div>`;
 
   const kick = trk.kickoff || {};
   const kickChip = kick.status === "complete"
@@ -486,7 +508,7 @@ async function mountPmOverview(container, qboId, switchTab) {
             ? ` · ${f.submissions_count} submission${f.submissions_count === 1 ? "" : "s"} · last ${escapeHtml(fmtDate(f.last_submitted_at))}`
             : " · no submissions yet"}`,
       chips: `${f.red_flags ? `<span class="pm-chip pm-chip-flag">⚑ ${f.red_flags}</span>` : ""}
-              ${f.needs_review_count ? `<span class="pm-chip pm-chip-review">${f.needs_review_count} to review</span>` : ""}
+              ${f.submissions_count ? `<button type="button" class="pm-review-btn${f.needs_review_count ? " due" : ""}" data-reviewform="${escapeHtml(f.form_code)}" data-reviewtitle="${escapeHtml(f.title || f.form_code)}">${f.needs_review_count ? `Review ${f.needs_review_count}` : "View submissions"}</button>` : ""}
               ${formProgressHtml(f)}
               ${formStatusChip(f)}`,
     })),
@@ -504,8 +526,18 @@ async function mountPmOverview(container, qboId, switchTab) {
       <div class="grid grid-cols-1 gap-2">${rows.join("")}</div>
     </div>`;
 
-  container.querySelectorAll("[data-goto]").forEach((b) =>
-    b.addEventListener("click", (e) => { e.stopPropagation(); switchTab(b.getAttribute("data-goto")); }));
+  container.querySelectorAll("[data-reviewform]").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openFormReviewList(qboId, b.getAttribute("data-reviewform"), b.getAttribute("data-reviewtitle"),
+                         () => mountPmOverview(container, qboId, switchTab));
+    }));
+  container.querySelectorAll("[data-goto]").forEach((b) => {
+    b.addEventListener("click", (e) => { e.stopPropagation(); switchTab(b.getAttribute("data-goto")); });
+    if (b.getAttribute("role") === "button") b.addEventListener("keydown", (e) => {
+      if (e.target === b && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); switchTab(b.getAttribute("data-goto")); }
+    });
+  });
   // Financial rows → Financials tab, scrolled to that row's section. The soft
   // receipts note nested inside a row keeps its own [data-goto] behavior.
   container.querySelectorAll("[data-finjump]").forEach((el) => {
@@ -769,7 +801,11 @@ async function handleDocDrop(fileList, folderLabel, uploadOne, refetch) {
 function wireDocDropTargets(host, uploadTo, afterUpload) {
   let hover = null;
   const clear = () => { if (hover) { hover.classList.remove("doc-drop-hover"); hover = null; } };
+  const isFiles = (e) => !!e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+  const disarm = () => { host.classList.remove("doc-drop-armed"); clear(); };
+  host.ondragenter = (e) => { if (isFiles(e)) host.classList.add("doc-drop-armed"); };
   host.ondragover = (e) => {
+    if (isFiles(e)) host.classList.add("doc-drop-armed");
     const row = e.target.closest("[data-drop]");
     if (!row) { clear(); return; }
     e.preventDefault();
@@ -777,11 +813,12 @@ function wireDocDropTargets(host, uploadTo, afterUpload) {
     if (hover !== row) { clear(); row.classList.add("doc-drop-hover"); hover = row; }
   };
   host.ondragleave = (e) => {
+    if (!host.contains(e.relatedTarget)) { disarm(); return; }
     if (hover && !hover.contains(e.relatedTarget)) clear();
   };
   host.ondrop = (e) => {
     const row = e.target.closest("[data-drop]");
-    clear();
+    disarm();
     if (!row) return;
     e.preventDefault();
     const folder = row.getAttribute("data-drop");
@@ -847,7 +884,7 @@ async function mountPmDocuments(container, qboId) {
   };
 
   const render = () => {
-    container.innerHTML = `<div class="px-3 pt-2 text-[11px] text-black/45">Tip: drag files from your computer onto any folder row to upload</div><div class="pb-2">${tree.map((n) => renderNode(n, 0)).join("")}</div>`;
+    container.innerHTML = `<div class="doc-drop-hint"><span class="doc-drop-hint-icon">⇪</span><span><b>Drag &amp; drop</b> files from your computer onto any folder below — or use the folder's <b>Upload</b> button.</span></div><div class="pb-2">${tree.map((n) => renderNode(n, 0)).join("")}</div>`;
   };
 
   const refetch = async () => {
@@ -909,6 +946,8 @@ async function mountPmDocuments(container, qboId) {
 
 // ── crew form submissions: review queue, detail modal, per-project settings ──
 // (Phase 2 — backed by /api/forms/*; the crew fills these at #/field.)
+// Forms listed under "Safety Forms" in the project Forms tab.
+const SAFETY_FORMS = new Set(["daily_jha"]);
 const FORM_TITLES = {
   kickoff_update: "Kickoff Update",
   daily_update: "Daily Update",
@@ -917,6 +956,7 @@ const FORM_TITLES = {
   truck_loading: "Truck Loading",
   wire_guidance_trailer: "WG Trailer",
   gear_request: "Gear Request",
+  daily_jha: "Daily JHA (Safety)",
 };
 const CADENCE_LABEL = {
   one_time: "One-time",
@@ -1030,6 +1070,49 @@ async function mountFormsQueue(host, showAll, onItems) {
 
 // Detail modal: answers grouped by the template's sections, media as open-able
 // document links, "Mark reviewed" for unreviewed submissions.
+// One form's submissions for one project (Overview › Tracking "Review"):
+// needs-review first, each opening the same review modal as Form Submissions.
+async function openFormReviewList(qboId, formCode, title, onChange) {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4";
+  overlay.innerHTML = `<div class="pm-modal-card"><div class="pm-modal-body"><div class="text-sm text-black/40 py-4">Loading submissions…</div></div></div>`;
+  document.body.appendChild(overlay);
+  let changed = false;
+  const close = () => { overlay.remove(); if (changed && onChange) onChange(); };
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  const render = async () => {
+    let subs = [];
+    try {
+      const r = await api(`/forms/submissions?project_qbo_id=${encodeURIComponent(qboId)}&form_code=${encodeURIComponent(formCode)}`);
+      subs = r.submissions || [];
+    } catch (e) {
+      overlay.querySelector(".pm-modal-card").innerHTML = `<div class="pm-modal-body"><div class="text-sm text-red-700 py-4">Failed to load: ${escapeHtml(e?.message || String(e))}</div></div>`;
+      return;
+    }
+    const todo = subs.filter((x) => x.status !== "reviewed");
+    const done = subs.filter((x) => x.status === "reviewed");
+    overlay.querySelector(".pm-modal-card").innerHTML = `
+      <div class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10 flex items-start gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-base font-extrabold text-ink-900">${escapeHtml(title || formCode)}</div>
+          <div class="text-[11px] text-black/45 mt-0.5">${todo.length} to review · ${done.length} reviewed</div>
+        </div>
+        <button type="button" data-rl-close class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5 shrink-0">Close</button>
+      </div>
+      <div class="pm-modal-body">
+        ${todo.length ? `<div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Needs review</div>
+          <div class="grid grid-cols-1 gap-2 mb-4">${todo.map((x) => submissionRowHtml(x, { showStatus: true })).join("")}</div>` : ""}
+        ${done.length ? `<div class="text-[10px] font-bold uppercase tracking-wide text-black/40 mb-1.5">Reviewed</div>
+          <div class="grid grid-cols-1 gap-2">${done.map((x) => submissionRowHtml(x, { showStatus: true })).join("")}</div>` : ""}
+        ${subs.length ? "" : `<div class="text-sm text-black/45 py-4">No submissions yet.</div>`}
+      </div>`;
+    overlay.querySelector("[data-rl-close]").addEventListener("click", close);
+    overlay.querySelectorAll("[data-sub]").forEach((b) => b.addEventListener("click", () =>
+      openSubmissionModal(b.getAttribute("data-sub"), () => { changed = true; render(); })));
+  };
+  render();
+}
+
 async function openSubmissionModal(subId, onChange) {
   const overlay = document.createElement("div");
   overlay.className = "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4";
@@ -1058,9 +1141,18 @@ async function openSubmissionModal(subId, onChange) {
   const docChips = (v) => v.map((x) => {
     const id = typeof x === "number" ? x : x.document_id;
     const name = typeof x === "object" && x.filename ? x.filename : `file #${id}`;
-    return `<button type="button" data-doc="${id}" class="inline-flex items-center gap-1 rounded-lg border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-50 mr-1 mb-1">📎 ${escapeHtml(name)}</button>`;
+    return `<button type="button" data-doc="${id}" data-docname="${escapeHtml(name)}" class="inline-flex items-center gap-1 rounded-lg border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-50 mr-1 mb-1">📎 ${escapeHtml(name)}</button>`;
   }).join("");
+  const isImageName = (n) => /\.(png|jpe?g|gif|webp|heic)$/i.test(String(n || ""));
+  const docTiles = (v) => `<div class="dw-list">${v.map((x) => {
+    const id = typeof x === "number" ? x : x.document_id;
+    const name = typeof x === "object" && x.filename ? x.filename : `file #${id}`;
+    return `<button type="button" data-doc="${id}" data-docname="${escapeHtml(name)}" class="dw-card" style="text-align:left;padding:0" title="Open">
+      <div class="dw-thumb">${isImageName(name) ? `<img data-docimg="${id}" alt="" />` : `<span class="dm-thumb-fallback">FILE</span>`}</div>
+      <div class="dw-name">${escapeHtml(name)}</div></button>`;
+  }).join("")}</div>`;
   const valueHtml = (q, v) => {
+    if (looksLikeDocs(v) && q && (q.key === "marked_drawings" || q.type === "signature")) return docTiles(v);
     if (looksLikeDocs(v)) return `<div class="mt-0.5">${docChips(v)}</div>`;
     const sv = String(v ?? "");
     if (q && q.type === "yes_no") {
@@ -1124,16 +1216,16 @@ async function openSubmissionModal(subId, onChange) {
     </div>`;
 
   overlay.querySelector("#pmSubClose").addEventListener("click", close);
-  overlay.querySelectorAll("[data-doc]").forEach((b) => b.addEventListener("click", async () => {
-    try {
-      const res = await api(`/documents/file/${b.getAttribute("data-doc")}/url`);
-      if (res.url) window.open(res.url, "_blank");
-    } catch (err) { alert(`Could not open file: ${err.message}`); }
-  }));
+  overlay.querySelectorAll("[data-docimg]").forEach(async (img) => {
+    try { const r = await api(`/documents/file/${img.getAttribute("data-docimg")}/url`); if (r.url) img.src = r.url; } catch (_) {}
+  });
+  overlay.querySelectorAll("[data-doc]").forEach((b) => b.addEventListener("click", () =>
+    openFormFile(sub.project_qbo_id, b.getAttribute("data-doc"), b.getAttribute("data-docname") || "")));
   overlay.querySelector("#pmMarkReviewed")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
       await api(`/forms/submissions/${sub.id}/review`, { method: "PATCH" });
+      window.dispatchEvent(new CustomEvent("pm-form-reviewed", { detail: { id: sub.id } }));
       close();
       if (onChange) onChange();
     } catch (err) {
@@ -1249,17 +1341,23 @@ async function mountPmFormsTab(container, qboId) {
   const render = () => {
     container.innerHTML = `
       <div class="p-4 sm:p-5">
-        <div class="text-sm font-extrabold text-ink-900 mb-1">Forms</div>
-        <div class="text-[11px] text-black/45 mb-2">Which forms this project's crew must submit, how often, and on which days. Preview / Edit shows the form as the crew sees it and lets you remove standard questions, add project questions, and toggle the Daily Update sections. Changes apply the next time a crew opens a form.</div>
-        <div class="rounded-xl border border-black/10 divide-y divide-black/5 mb-2">
-          ${statusRows.map(formRow).join("")}
-        </div>
-        <div id="pmFormsMsg" class="text-xs min-h-[1rem]"></div>
-
-        <div class="text-sm font-extrabold text-ink-900 mt-4 mb-2">Submissions</div>
+        <div class="text-sm font-extrabold text-ink-900 mb-2">Submissions</div>
         ${subs.length
           ? `<div class="grid grid-cols-1 gap-2">${submissionGroups()}</div>`
           : `<div class="rounded-xl border border-dashed border-black/15 px-4 py-4 text-center text-xs text-black/40">No form submissions for this project yet. Crews submit from their #/field link.</div>`}
+
+        <div class="text-sm font-extrabold text-ink-900 mt-5 mb-1">Forms</div>
+        <div class="text-[11px] text-black/45 mb-2">Which forms this project's crew must submit, how often, and on which days. Preview / Edit shows the form as the crew sees it and lets you remove standard questions, add project questions, and toggle the Daily Update sections. Changes apply the next time a crew opens a form.</div>
+        <div class="rounded-xl border border-black/10 divide-y divide-black/5 mb-2">
+          ${statusRows.filter((f) => !SAFETY_FORMS.has(f.form_code)).map(formRow).join("")}
+        </div>
+        ${statusRows.some((f) => SAFETY_FORMS.has(f.form_code)) ? `
+        <div class="text-sm font-extrabold text-ink-900 mt-5 mb-1">Safety Forms</div>
+        <div class="text-[11px] text-black/45 mb-2">Safety paperwork the crew completes on site — same controls as the forms above.</div>
+        <div class="rounded-xl border border-black/10 divide-y divide-black/5 mb-2">
+          ${statusRows.filter((f) => SAFETY_FORMS.has(f.form_code)).map(formRow).join("")}
+        </div>` : ""}
+        <div id="pmFormsMsg" class="text-xs min-h-[1rem]"></div>
       </div>`;
     bind();
   };
@@ -1372,6 +1470,19 @@ async function openFormEditor(qboId, formCode, onSaved) {
     return;
   }
 
+  // Marked Drawings: drawings attached from "2 Drawings and Calcs" (staged too).
+  const hasDrawingQ = JSON.stringify(rawTpl.definition || {}).includes('"marked_drawings"');
+  let attached = [...(settings.forms?.[formCode]?.drawings || [])];
+  const drawingMeta = new Map();
+  if (hasDrawingQ) {
+    try {
+      const dl = await api(`/forms/drawings/${encodeURIComponent(qboId)}`);
+      (dl.files || []).forEach((f) => drawingMeta.set(f.id, f));
+    } catch (_) { /* picker retries on open */ }
+    attached = attached.filter((id) => drawingMeta.has(id));
+  }
+  const loadDrawing = (id) => fetchDrawingBlob(qboId, id);
+
   // Staged state — nothing saves until "Save changes" (one PUT).
   const toggles = { ...(settings.toggles || {}) };
   const customAll = (settings.custom_questions || []).map((c) => ({ ...c }));
@@ -1402,7 +1513,8 @@ async function openFormEditor(qboId, formCode, onSaved) {
       const tg = sec.toggle || "always";
       sec.enabled = tg === "always" ? true : !!toggles[tg];
     }
-    return { ...rawTpl, definition: def };
+    return { ...rawTpl, definition: def,
+             drawings: attached.map((id) => drawingMeta.get(id)).filter(Boolean) };
   };
 
   overlay.querySelector(".pm-modal-card").innerHTML = `
@@ -1426,15 +1538,39 @@ async function openFormEditor(qboId, formCode, onSaved) {
   const edMsg = (t) => { const el = overlay.querySelector("#pmEdMsg"); if (el) el.textContent = t; };
 
   const renderBody = () => {
-    const renderer = createFormRenderer(buildTpl(), {
+    const tpl = buildTpl();
+    const renderer = createFormRenderer(tpl, {
       editor: true, removedKeys: [...removed], answers,
     });
     host.innerHTML = renderer.html() || `<div class="ff-note">This form has no sections.</div>`;
     renderer.attach(host);
+    if (tpl.drawings.length) fillDrawingThumbs(host, tpl.drawings, loadDrawing);
   };
 
   // One delegated handler — the renderer re-renders on every staged change.
   host.addEventListener("click", (e) => {
+    const dwAttach = e.target.closest("[data-dw-attach]");
+    if (dwAttach) {
+      openDrawingPicker(qboId, attached, (ids, files) => {
+        files.forEach((f) => drawingMeta.set(f.id, f));
+        attached = ids.filter((id) => drawingMeta.has(id));
+        renderBody();
+      });
+      return;
+    }
+    const dwRm = e.target.closest("[data-dw-rm]");
+    if (dwRm) {
+      const id = Number(dwRm.getAttribute("data-dw-rm"));
+      attached = attached.filter((x) => x !== id); renderBody(); return;
+    }
+    const dwOpen = e.target.closest("[data-dw-open]");
+    if (dwOpen) {
+      const d = drawingMeta.get(Number(dwOpen.getAttribute("data-dw-open")));
+      if (d) openMarkupViewer({ title: `${d.filename} — preview (crew view; nothing is saved)`,
+                                filename: d.filename, contentType: d.content_type,
+                                loadBlob: () => loadDrawing(d.id) });
+      return;
+    }
     const rm = e.target.closest("[data-rmq]");
     if (rm) { removed.add(rm.getAttribute("data-rmq")); renderBody(); return; }
     const rs = e.target.closest("[data-restoreq]");
@@ -1488,7 +1624,8 @@ async function openFormEditor(qboId, formCode, onSaved) {
         body: JSON.stringify({
           toggles,
           custom_questions: customAll,
-          forms: { [formCode]: { removed_questions: [...removed] } },
+          forms: { [formCode]: { removed_questions: [...removed],
+                                 ...(hasDrawingQ ? { drawings: attached } : {}) } },
         }),
       });
       close();
@@ -1500,6 +1637,146 @@ async function openFormEditor(qboId, formCode, onSaved) {
   });
 
   renderBody();
+}
+
+// A submitted form file: images + PDFs open in the in-app viewer (with an
+// "Open in new tab" escape hatch); anything else (videos) opens in a new tab.
+async function openFormFile(qboId, docId, name) {
+  const newTab = async () => {
+    try {
+      const res = await api(`/documents/file/${docId}/url`);
+      if (res.url) window.open(res.url, "_blank");
+    } catch (err) { alert(`Could not open file: ${err.message}`); }
+  };
+  const isPdfName = /\.pdf$/i.test(name);
+  if (!(isPdfName || /\.(png|jpe?g|gif|webp)$/i.test(name))) { newTab(); return; }
+  openMarkupViewer({
+    title: name || "File", filename: name, viewOnly: true,
+    contentType: isPdfName ? "application/pdf" : "image/*",
+    loadBlob: async () => {
+      const res = await fetch(`/api/forms/file/${docId}?project_qbo_id=${encodeURIComponent(qboId)}`,
+                              { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error(`couldn't load (${res.status})`);
+      return res.blob();
+    },
+    actions: [{ label: "Open in new tab ↗", onClick: newTab }],
+  });
+}
+
+// Drawing bytes through the app (same origin — the viewer needs them for PDF
+// rendering and for exporting the marked copy).
+async function fetchDrawingBlob(qboId, docId) {
+  const res = await fetch(`/api/forms/drawing-file/${docId}?project_qbo_id=${encodeURIComponent(qboId)}`,
+                          { headers: { Authorization: `Bearer ${getToken()}` } });
+  if (!res.ok) throw new Error(`Couldn't load the drawing (${res.status})`);
+  return res.blob();
+}
+
+// Attach picker for Marked Drawings: every image/PDF in the project's
+// "2 Drawings and Calcs" folder with thumbnails, multi-select, plus a
+// drag-and-drop / upload zone that files new drawings into that folder.
+// onDone(selectedIds, allFiles) on "Attach selected".
+function openDrawingPicker(qboId, selectedIds, onDone) {
+  const selected = new Set(selectedIds);
+  let files = [];
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 flex items-center justify-center bg-black/40 p-4";
+  overlay.style.zIndex = "1050";
+  overlay.innerHTML = `
+    <div class="pm-modal-card" style="max-width:880px">
+      <div class="shrink-0 px-5 pt-4 pb-3 border-b border-black/10 flex items-start gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-base font-extrabold text-ink-900">Attach drawings — "2 Drawings and Calcs"</div>
+          <div class="text-[11px] text-black/45 mt-0.5">Pick the drawings the crew should mark up on the Daily Update. Crews only ever see the drawings you attach here.</div>
+        </div>
+        <button type="button" data-dwp-close class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5 shrink-0">Close</button>
+      </div>
+      <div class="pm-modal-body">
+        <div class="dwp-drop" data-dwp-drop>
+          <b>Drag &amp; drop</b> drawings here (PDF or image), or
+          <label>choose files<input type="file" accept="application/pdf,image/*" multiple data-dwp-file style="display:none" /></label>
+          — they're saved to the project's "2 Drawings and Calcs" folder.
+          <div data-dwp-up class="mt-1 text-xs font-semibold"></div>
+        </div>
+        <div data-dwp-grid><div class="text-sm text-black/40 py-4">Loading drawings…</div></div>
+      </div>
+      <div class="shrink-0 px-5 py-3 border-t border-black/10 flex items-center gap-2">
+        <div data-dwp-count class="text-xs text-black/55 min-w-0 flex-1"></div>
+        <button type="button" data-dwp-close class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Cancel</button>
+        <button type="button" data-dwp-ok class="btn-primary text-xs px-3 py-2">Attach selected</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  const grid = overlay.querySelector("[data-dwp-grid]");
+  const upMsg = overlay.querySelector("[data-dwp-up]");
+  const count = () => {
+    overlay.querySelector("[data-dwp-count]").textContent =
+      `${selected.size} selected · ${files.length} drawing${files.length === 1 ? "" : "s"} in the folder`;
+  };
+
+  const renderGrid = () => {
+    grid.innerHTML = files.length
+      ? `<div class="dwp-grid">${files.map((f) => `
+          <button type="button" class="dwp-item${selected.has(f.id) ? " on" : ""}" data-dwp-id="${f.id}">
+            <span class="dwp-check">${selected.has(f.id) ? "✓" : ""}</span>
+            <div class="dw-thumb" data-dthumb="${f.id}"><span class="dm-thumb-fallback">…</span></div>
+            <div class="dw-name" title="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</div>
+          </button>`).join("")}</div>`
+      : `<div class="text-sm text-black/50 py-6 text-center">No drawings in "2 Drawings and Calcs" yet — drop or choose files above to add them.</div>`;
+    fillDrawingThumbs(grid, files, (id) => fetchDrawingBlob(qboId, id));
+    count();
+  };
+  const reload = async () => {
+    const d = await api(`/forms/drawings/${encodeURIComponent(qboId)}`);
+    files = d.files || [];
+    renderGrid();
+  };
+
+  const upload = async (list) => {
+    const ok = [...list].filter((f) => /^image\//.test(f.type) || f.type === "application/pdf" || /\.pdf$/i.test(f.name));
+    if (!ok.length) { upMsg.textContent = "Only PDFs and images can be attached as drawings."; return; }
+    const before = new Set(files.map((f) => f.id));
+    for (let i = 0; i < ok.length; i++) {
+      upMsg.textContent = `Uploading ${i + 1} of ${ok.length}: ${ok[i].name}…`;
+      const fd = new FormData();
+      fd.append("file", ok[i]);
+      try {
+        await api(`/documents/project/${encodeURIComponent(qboId)}?folder=2_drawings_calcs`, { method: "POST", body: fd });
+      } catch (err) { upMsg.textContent = `Upload failed for ${ok[i].name}: ${err.message || err}`; return; }
+    }
+    upMsg.textContent = `✓ ${ok.length} file${ok.length === 1 ? "" : "s"} saved to "2 Drawings and Calcs" and selected.`;
+    await reload();
+    files.forEach((f) => { if (!before.has(f.id)) selected.add(f.id); });
+    renderGrid();
+  };
+
+  const drop = overlay.querySelector("[data-dwp-drop]");
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer?.files || []); });
+  overlay.querySelector("[data-dwp-file]").addEventListener("change", (e) => { upload(e.target.files || []); e.target.value = ""; });
+
+  overlay.addEventListener("click", (e) => {
+    if (e.target.closest("[data-dwp-close]")) { close(); return; }
+    const it = e.target.closest("[data-dwp-id]");
+    if (it) {
+      const id = Number(it.getAttribute("data-dwp-id"));
+      selected.has(id) ? selected.delete(id) : selected.add(id);
+      it.classList.toggle("on", selected.has(id));
+      it.querySelector(".dwp-check").textContent = selected.has(id) ? "✓" : "";
+      count(); return;
+    }
+    if (e.target.closest("[data-dwp-ok]")) {
+      onDone(files.filter((f) => selected.has(f.id)).map((f) => f.id), files);
+      close();
+    }
+  });
+
+  reload().catch((err) => {
+    grid.innerHTML = `<div class="text-sm text-red-700 py-4">Couldn't load the drawings folder: ${escapeHtml(err.message || String(err))}</div>`;
+  });
 }
 
 // ── Crew tab (Crew Portal step 3): the crew setup surface for this project ──

@@ -5372,3 +5372,89 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
 .qm-fx-btn:hover { background:#eef2f7; }
 .qm-fx-primary { background:#1d4ed8; border-color:#1d4ed8; color:#fff; }
 .qm-fx-primary:hover { background:#1e40af; }
+
+/* Documents tree: visible drag-and-drop hint + every folder outlined while files are dragged over. */
+.doc-drop-hint { display:flex; align-items:center; gap:8px; margin:8px 12px 4px; padding:7px 10px;
+                 border:1px dashed #93c5fd; border-radius:8px; background:#eff6ff; color:#1e3a8a; font-size:12px; }
+.doc-drop-hint-icon { font-size:15px; line-height:1; }
+.doc-drop-armed [data-drop] { outline:1px dashed #93c5fd; outline-offset:-2px; background:#f8fbff; }
+.doc-drop-armed [data-drop].doc-drop-hover { outline:2px dashed #2563eb; outline-offset:-2px; background:#dbeafe; }
+
+/* Drawing markup viewer (utils/drawing-markup.js) — full-screen, touch-first. */
+.dm-overlay { position:fixed; inset:0; z-index:1100; display:flex; flex-direction:column; background:#1f2937; color:#fff; }
+.dm-top { display:flex; align-items:center; gap:8px; padding:10px 12px; background:#111827; border-bottom:1px solid rgba(255,255,255,.08); }
+.dm-title { flex:1; min-width:0; font-weight:800; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dm-page { background:#fff; color:#111; border-radius:8px; padding:6px 8px; font-size:13px; }
+.dm-btn { border:1px solid rgba(255,255,255,.25); background:transparent; color:#fff; border-radius:10px; padding:8px 12px; font-size:13px; font-weight:700; white-space:nowrap; }
+.dm-primary { background:#16a34a; border-color:#16a34a; }
+.dm-primary:disabled { opacity:.45; }
+.dm-stage { position:relative; flex:1; overflow:hidden; touch-action:none; background:#374151; cursor:crosshair; }
+.dm-stage.dm-panning { cursor:grab; }
+.dm-world { position:absolute; left:0; top:0; transform-origin:0 0; box-shadow:0 6px 30px rgba(0,0,0,.45); }
+.dm-world canvas { position:absolute; left:0; top:0; display:block; }
+.dm-status { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; font-size:14px; color:#e5e7eb; pointer-events:none; }
+.dm-status[hidden] { display:none; }
+.dm-tools { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); background:#111827; border-top:1px solid rgba(255,255,255,.08); }
+.dm-group { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.dm-tool { min-height:40px; min-width:40px; padding:6px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.2); background:#1f2937; color:#fff; font-size:13px; font-weight:700; }
+.dm-tool.on { background:#2563eb; border-color:#2563eb; }
+.dm-swatch { display:flex; align-items:center; gap:6px; min-height:40px; padding:4px 10px 4px 6px; border-radius:10px; border:2px solid transparent; background:#1f2937; color:#e5e7eb; font-size:11px; font-weight:700; }
+.dm-swatch span { width:22px; height:22px; border-radius:6px; background:var(--sw); display:block; }
+.dm-swatch em { font-style:normal; }
+.dm-swatch.on { border-color:#fff; }
+@media (max-width:560px) { .dm-swatch em { display:none; } .dm-swatch { padding:4px 6px; } }
+
+/* Marked Drawings question: attached drawing cards + PM attach controls. */
+.dw-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; margin:6px 0 10px; }
+.dw-card { border:1px solid rgba(0,0,0,.12); border-radius:12px; background:#fff; color:#111; overflow:hidden; display:flex; flex-direction:column; }
+.dw-thumb { aspect-ratio:4/3; background:#f3f4f6; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+.dw-thumb img { width:100%; height:100%; object-fit:contain; background:#fff; }
+.dm-thumb-fallback { font-size:12px; font-weight:800; color:#6b7280; }
+.dw-name { font-size:12px; font-weight:700; padding:6px 8px 2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dw-actions { display:flex; gap:6px; padding:4px 8px 8px; }
+.dw-open { flex:1; border:none; border-radius:9px; background:#2563eb; color:#fff; font-size:12px; font-weight:800; padding:8px 6px; }
+.dw-rm { border:1px solid rgba(0,0,0,.15); border-radius:9px; background:#fff; color:#b91c1c; font-size:12px; font-weight:700; padding:6px 9px; }
+.dw-attach { display:inline-flex; align-items:center; gap:6px; border:1px dashed #2563eb; border-radius:10px; background:#eff6ff; color:#1d4ed8; font-size:13px; font-weight:800; padding:9px 12px; }
+.dw-empty { font-size:12px; color:#6b7280; margin:4px 0 8px; }
+.dw-or { font-size:11px; font-weight:700; color:#6b7280; text-transform:uppercase; letter-spacing:.04em; margin:10px 0 4px; }
+
+/* PM attach picker */
+.dwp-drop { border:2px dashed #93c5fd; border-radius:12px; background:#f8fbff; color:#1e3a8a; text-align:center; padding:16px; font-size:13px; margin-bottom:12px; }
+.dwp-drop.over { background:#dbeafe; border-color:#2563eb; }
+.dwp-drop label { color:#1d4ed8; font-weight:800; text-decoration:underline; cursor:pointer; }
+.dwp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; }
+.dwp-item { position:relative; border:2px solid rgba(0,0,0,.1); border-radius:12px; overflow:hidden; background:#fff; color:#111; cursor:pointer; text-align:left; padding:0; }
+.dwp-item.on { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
+.dwp-check { position:absolute; top:6px; left:6px; width:22px; height:22px; border-radius:6px; background:#fff; border:2px solid #9ca3af; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:900; color:#fff; }
+.dwp-item.on .dwp-check { background:#2563eb; border-color:#2563eb; }
+.dm-legend { width:100%; display:flex; flex-wrap:wrap; gap:4px 12px; font-size:11px; color:#d1d5db; }
+.dm-legend span { display:inline-flex; align-items:center; gap:5px; }
+.dm-legend i { width:10px; height:10px; border-radius:3px; display:inline-block; }
+.dw-saved-note { font-size:12px; color:#065f46; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:10px; padding:8px 10px; margin:0 0 10px; }
+
+.pm-review-btn { border:1px solid #f59e0b; background:#fffbeb; color:#92400e; border-radius:999px; font-size:10px; font-weight:800; padding:2px 9px; cursor:pointer; white-space:nowrap; }
+.pm-review-btn:hover { background:#fef3c7; }
+.pm-review-btn:not(.due) { border-color:rgba(0,0,0,.15); background:#fff; color:#1d4ed8; }
+
+.ff-none { display:block; width:100%; margin-top:8px; border:2px solid #d1d5db; border-radius:12px; background:#fff; color:#374151; font-size:15px; font-weight:700; padding:12px; }
+.ff-none.on { border-color:#2563eb; background:#eff6ff; color:#1d4ed8; }
+.ff-none:disabled { opacity:.6; }
+
+.pm-tab-alert { display:inline-flex; align-items:center; gap:5px; color:#b45309; }
+.pm-tab-count { display:inline-flex; align-items:center; justify-content:center; min-width:17px; height:17px; padding:0 5px; border-radius:999px; background:#f59e0b; color:#fff; font-size:10px; font-weight:800; line-height:1; }
+
+/* Signature pad (Completion › Customer sign-off). */
+.ff-sig { position:relative; border:2px solid #d1d5db; border-radius:12px; background:#fff; }
+.ff-sigpad { display:block; width:100%; height:180px; touch-action:none; cursor:crosshair; }
+.ff-sigline { position:absolute; left:16px; right:16px; bottom:34px; border-top:1px dashed #9ca3af; font-size:11px; color:#9ca3af; padding-top:3px; pointer-events:none; }
+.ff-sigbtns { display:grid; grid-template-columns:1fr 2fr; gap:8px; margin-top:8px; }
+.ff-sigbtns .ff-btn, .ff-sigbtns .ff-btn2 { margin:0; }
+
+/* Kickoff checklists: shared-item tag + provenance notes. */
+.kk-shared { display:inline-flex; align-items:center; margin-left:4px; padding:0 5px; border-radius:999px; background:#eef2ff; color:#4338ca; font-size:9px; font-weight:800; vertical-align:middle; white-space:nowrap; }
+.kk-provrow { display:flex; flex-wrap:wrap; gap:4px 8px; margin-top:3px; }
+.kk-prov { display:inline-flex; align-items:center; gap:3px; border-radius:6px; padding:1px 6px; font-size:10px; font-weight:600; }
+.kk-from { background:#eff6ff; color:#1d4ed8; }
+.kk-auto { background:#ecfdf5; color:#047857; }
+.kk-was { background:#fffbeb; color:#92400e; }
+.kk-legend { font-size:11px; color:rgba(0,0,0,.55); background:rgba(0,0,0,.025); border:1px solid rgba(0,0,0,.08); border-radius:10px; padding:7px 10px; margin-bottom:10px; line-height:1.7; }

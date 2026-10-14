@@ -32,7 +32,7 @@ import json
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -41,7 +41,9 @@ from app.audit import record_audit
 from app.auth import require_capability
 from app.permissions import PAGE_PM_PORTAL
 from app.crewauth.routes import get_user_or_crew, actor_for_audit, require_crew_project
-from app.documents.routes import store_document_bytes
+from app.documents.routes import store_document_bytes, _linked_opportunity_id
+from app.permissions import has_capability, PAGE_CUSTOMERS
+from app.s3 import s3_client
 from app.forms.status import (
     CADENCES, CADENCE_INTERVAL, default_cadence, default_required, form_status,
 )
@@ -58,7 +60,19 @@ FORM_UPLOAD_FOLDER = {
     "truck_loading": "6_project_management/2_construction/3_bols",
     "wire_guidance_trailer": "6_project_management/2_construction/2_active_pictures",
     "gear_request": "7_notes",   # no media questions today; custom Qs are text
+    "daily_jha": "6_project_management",
 }
+
+# Question-specific filing (overrides the form's folder above).
+QUESTION_UPLOAD_FOLDER = {
+    "marked_drawings": "6_project_management/2_construction/4_drawing_updates",
+}
+
+# Drawings a PM can attach to a form come from this Documents folder; crews can
+# open ONLY the attached ones (they never browse the folder itself).
+DRAWINGS_FOLDER = "2_drawings_calcs"
+DRAWING_CT_PREFIXES = ("image/",)
+DRAWING_CT_EXACT = ("application/pdf",)
 
 TOGGLE_KEYS = ("jha", "anchoring", "wire_guidance")
 DEFAULT_TOGGLES = {k: False for k in TOGGLE_KEYS}
@@ -139,10 +153,42 @@ def _forms_with_defaults(forms, codes):
             if isinstance(skips, list) else []
         removed = cfg.get("removed_questions")
         removed = [k for k in removed if isinstance(k, str)] if isinstance(removed, list) else []
+        drawings = cfg.get("drawings")
+        drawings = [int(d) for d in drawings if isinstance(d, int) and not isinstance(d, bool)] \
+            if isinstance(drawings, list) else []
         out[code] = {"required": bool(cfg.get("required", default_required(code))),
                      "cadence": cadence, "exclude_weekdays": excl,
-                     "skipped_dates": skips, "removed_questions": removed}
+                     "skipped_dates": skips, "removed_questions": removed,
+                     "drawings": drawings}
     return out
+
+
+def _drawing_docs(conn, project_qbo_id, ids=None):
+    """Files in the project's '2 Drawings and Calcs' folder (the folder is
+    owned by the linked opportunity once one exists — same merge the
+    Documents tab does). Optionally restricted to `ids`."""
+    owners = [("project", str(project_qbo_id)), ("job", str(project_qbo_id))]
+    opp = _linked_opportunity_id(conn, project_qbo_id)
+    if opp is not None:
+        owners.append(("opportunity", str(opp)))
+    clauses = " OR ".join(f"(entity_type=:t{i} AND entity_id=:e{i})" for i in range(len(owners)))
+    params = {"f": DRAWINGS_FOLDER}
+    for i, (t, e) in enumerate(owners):
+        params[f"t{i}"], params[f"e{i}"] = t, e
+    rows = conn.execute(text(f"""
+        SELECT id, original_filename, content_type, size_bytes, created_at, s3_bucket, s3_key
+        FROM documents WHERE folder = :f AND ({clauses})
+        ORDER BY created_at DESC, id DESC
+    """), params).mappings().all()
+    if ids is not None:
+        want = {int(i) for i in ids}
+        rows = [r for r in rows if r["id"] in want]
+    return rows
+
+
+def _drawing_view(r):
+    return {"id": r["id"], "filename": r["original_filename"],
+            "content_type": r["content_type"], "size": int(r["size_bytes"] or 0)}
 
 
 def _iso_date(s):
@@ -290,6 +336,8 @@ def _merged_templates(conn, project_qbo_id):
         t["exclude_weekdays"] = cfg["exclude_weekdays"]
         t["skipped_dates"] = cfg["skipped_dates"]
         t["removed_questions"] = cfg["removed_questions"]
+        t["drawings"] = ([_drawing_view(r) for r in _drawing_docs(conn, project_qbo_id, cfg["drawings"])]
+                         if cfg["drawings"] else [])
         # Crew card hint "off day today" (server-local date, same convention
         # as the status engine). Only meaningful for recurring cadences.
         t["off_today"] = (t["cadence"] in CADENCE_INTERVAL
@@ -571,6 +619,20 @@ def put_project_settings(project_qbo_id: str, body: ProjectFormSettings,
                         f"forms[{code}].removed_questions: these questions raise "
                         f"red flags and cannot be removed: {', '.join(flagged)}"))
                 cur["removed_questions"] = sorted(set(rq))
+            if "drawings" in cfg:
+                dw = cfg["drawings"]
+                if not isinstance(dw, list) or any(
+                        not isinstance(d, int) or isinstance(d, bool) for d in dw):
+                    raise HTTPException(status_code=400, detail=(
+                        f"forms[{code}].drawings must be a list of document ids"))
+                with engine.connect() as conn:
+                    ok = {r["id"] for r in _drawing_docs(conn, project_qbo_id, dw)}
+                bad = sorted(set(dw) - ok)
+                if bad:
+                    raise HTTPException(status_code=400, detail=(
+                        f"forms[{code}].drawings: not in this project's "
+                        f"'2 Drawings and Calcs' folder: {', '.join(map(str, bad))}"))
+                cur["drawings"] = list(dict.fromkeys(dw))
             new_forms[code] = cur
 
     with engine.begin() as conn:
@@ -617,6 +679,7 @@ def project_form_status(project_qbo_id: str = Query(...),
 # ── media upload (into the project's Documents tree) ────────────────────────
 @router.post("/upload")
 async def upload_form_media(project_qbo_id: str = Query(...), form_code: str = Query(...),
+                            question_key: Optional[str] = Query(default=None),
                             file: UploadFile = File(...), actor=Depends(get_user_or_crew)):
     """Store a form photo/video/PDF through the SAME S3 + documents-table path
     the Documents tab uses, filed in the form's project folder. Returns the
@@ -624,6 +687,7 @@ async def upload_form_media(project_qbo_id: str = Query(...), form_code: str = Q
     folder = FORM_UPLOAD_FOLDER.get(form_code)
     if not folder:
         raise HTTPException(status_code=400, detail="Unknown form_code")
+    folder = QUESTION_UPLOAD_FOLDER.get(question_key or "", folder)
     ct = (file.content_type or "").lower()
     if not (ct.startswith(ALLOWED_CT_PREFIXES) or ct in ALLOWED_CT_EXACT):
         raise HTTPException(status_code=400, detail="Only images, videos and PDFs are allowed")
@@ -645,6 +709,142 @@ async def upload_form_media(project_qbo_id: str = Query(...), form_code: str = Q
                  {"project_qbo_id": project_qbo_id, "form_code": form_code,
                   "folder": folder, "size_bytes": len(body)})
     return {"ok": True, "document_id": doc_id, "folder": folder, "filename": file.filename}
+
+
+# ── drawings (Marked Drawings) ──────────────────────────────────────────────
+@router.get("/drawings/{project_qbo_id}")
+def list_drawings(project_qbo_id: str, user=Depends(require_capability(PAGE_PM_PORTAL))):
+    """The PM's attach picker: every image/PDF in the project's
+    '2 Drawings and Calcs' folder."""
+    with engine.connect() as conn:
+        if not _project_meta(conn, project_qbo_id):
+            raise HTTPException(status_code=404, detail="Project not found")
+        rows = _drawing_docs(conn, project_qbo_id)
+    return {"folder": DRAWINGS_FOLDER, "files": [
+        _drawing_view(r) for r in rows
+        if (r["content_type"] or "").lower().startswith(DRAWING_CT_PREFIXES)
+        or (r["content_type"] or "").lower() in DRAWING_CT_EXACT]}
+
+
+@router.get("/drawing-file/{doc_id}")
+def drawing_file(doc_id: int, project_qbo_id: str = Query(...), actor=Depends(get_user_or_crew)):
+    """Stream one drawing through the app (same-origin, so the markup viewer
+    can render PDFs and export the marked copy). Crews: only drawings the PM
+    attached to one of this project's forms, on an assigned project. Users:
+    any file in the project's drawings folder (PM portal / office)."""
+    with engine.connect() as conn:
+        if not _project_meta(conn, project_qbo_id):
+            raise HTTPException(status_code=404, detail="Project not found")
+        if actor.get("kind") == "crew":
+            require_crew_project(conn, actor, project_qbo_id)
+            _, _, forms, _ = _load_settings(conn, project_qbo_id)
+            attached = set()
+            for cfg in (forms or {}).values():
+                if isinstance(cfg, dict) and isinstance(cfg.get("drawings"), list):
+                    attached.update(d for d in cfg["drawings"] if isinstance(d, int))
+            if doc_id not in attached:
+                raise HTTPException(status_code=403, detail="This drawing isn't shared with crews")
+        else:
+            u = actor.get("user") or {}
+            if not (has_capability(u, PAGE_PM_PORTAL) or has_capability(u, PAGE_CUSTOMERS)):
+                raise HTTPException(status_code=403, detail="Insufficient permissions")
+        rows = _drawing_docs(conn, project_qbo_id, [doc_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    r = rows[0]
+    obj = s3_client.get_object(Bucket=r["s3_bucket"], Key=r["s3_key"])
+    return Response(content=obj["Body"].read(),
+                    media_type=r["content_type"] or "application/octet-stream",
+                    headers={"Cache-Control": "private, max-age=600"})
+
+
+# ── form files (in-app viewer) ──────────────────────────────────────────────
+MARKED_FOLDER = QUESTION_UPLOAD_FOLDER["marked_drawings"]
+
+
+def _project_doc(conn, project_qbo_id, doc_id):
+    """A document owned by this project (or its linked opportunity), else None."""
+    owners = [("project", str(project_qbo_id)), ("job", str(project_qbo_id))]
+    opp = _linked_opportunity_id(conn, project_qbo_id)
+    if opp is not None:
+        owners.append(("opportunity", str(opp)))
+    clauses = " OR ".join(f"(entity_type=:t{i} AND entity_id=:e{i})" for i in range(len(owners)))
+    params = {"id": doc_id}
+    for i, (t, e) in enumerate(owners):
+        params[f"t{i}"], params[f"e{i}"] = t, e
+    return conn.execute(text(f"""
+        SELECT id, folder, original_filename, content_type, s3_bucket, s3_key, created_at
+        FROM documents WHERE id = :id AND ({clauses})
+    """), params).mappings().first()
+
+
+def _in_submitted_answers(conn, project_qbo_id, doc_id):
+    """True when a SUBMITTED form of this project references the document."""
+    rows = conn.execute(text("""
+        SELECT answers FROM form_submissions WHERE project_qbo_id = :p
+    """), {"p": project_qbo_id}).scalars().all()
+    for a in rows:
+        try:
+            ans = json.loads(a) if isinstance(a, (str, bytes)) else (a or {})
+        except Exception:
+            continue
+        for v in (ans or {}).values():
+            if isinstance(v, list) and any(
+                    (isinstance(x, dict) and x.get("document_id") == doc_id) or x == doc_id for x in v):
+                return True
+    return False
+
+
+def _file_actor_check(conn, actor, project_qbo_id, doc):
+    """Users: PM portal / office. Crews: assigned project, and only their own
+    marked drawings (the '4 Drawing Updates' folder)."""
+    if actor.get("kind") == "crew":
+        require_crew_project(conn, actor, project_qbo_id)
+        if doc["folder"] != MARKED_FOLDER:
+            raise HTTPException(status_code=403, detail="Not available to crews")
+    else:
+        u = actor.get("user") or {}
+        if not (has_capability(u, PAGE_PM_PORTAL) or has_capability(u, PAGE_CUSTOMERS)):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+@router.get("/file/{doc_id}")
+def form_file(doc_id: int, project_qbo_id: str = Query(...), actor=Depends(get_user_or_crew)):
+    """Stream a form file through the app (same origin) for the in-app viewer:
+    submission photos/PDFs for the PM, marked drawings for the crew."""
+    with engine.connect() as conn:
+        doc = _project_doc(conn, project_qbo_id, doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="File not found")
+        _file_actor_check(conn, actor, project_qbo_id, doc)
+    obj = s3_client.get_object(Bucket=doc["s3_bucket"], Key=doc["s3_key"])
+    return Response(content=obj["Body"].read(),
+                    media_type=doc["content_type"] or "application/octet-stream",
+                    headers={"Cache-Control": "private, max-age=600"})
+
+
+@router.delete("/file/{doc_id}")
+def delete_form_file(doc_id: int, project_qbo_id: str = Query(...), actor=Depends(get_user_or_crew)):
+    """Discard a marked drawing that hasn't been submitted (the crew replaced
+    or removed it before submitting). Submitted evidence is never deleted."""
+    with engine.begin() as conn:
+        doc = _project_doc(conn, project_qbo_id, doc_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="File not found")
+        if doc["folder"] != MARKED_FOLDER:
+            raise HTTPException(status_code=403, detail="Only unsent marked drawings can be removed here")
+        _file_actor_check(conn, actor, project_qbo_id, doc)
+        require_crew_project(conn, actor, project_qbo_id, write=True)
+        if _in_submitted_answers(conn, project_qbo_id, doc_id):
+            raise HTTPException(status_code=409, detail="This drawing is part of a submitted form and is kept")
+        conn.execute(text("DELETE FROM documents WHERE id = :id"), {"id": doc_id})
+    try:
+        s3_client.delete_object(Bucket=doc["s3_bucket"], Key=doc["s3_key"])
+    except Exception:
+        pass
+    record_audit(actor_for_audit(actor), "form.file_delete", "document", doc_id,
+                 doc["original_filename"], {"project_qbo_id": project_qbo_id, "folder": doc["folder"]})
+    return {"ok": True}
 
 
 # ── submissions ─────────────────────────────────────────────────────────────
