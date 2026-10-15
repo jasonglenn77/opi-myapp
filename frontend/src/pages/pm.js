@@ -472,7 +472,7 @@ async function mountPmOverview(container, qboId, switchTab) {
         <div class="text-xs font-bold text-ink-900 truncate">${escapeHtml(title)}</div>
         ${sub ? `<div class="text-[11px] text-black/50 truncate">${sub}</div>` : ""}
       </div>
-      <div class="flex items-center gap-1 shrink-0 flex-wrap justify-end">${chips || ""}</div>
+      <div class="pm-track-chips flex items-center gap-1 shrink-0 flex-wrap justify-end">${chips || ""}</div>
       <span class="text-black/25 text-lg shrink-0">›</span>
     </div>`;
 

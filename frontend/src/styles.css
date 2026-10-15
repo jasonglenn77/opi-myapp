@@ -892,7 +892,6 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
   select,
   input:not([type=checkbox]):not([type=radio]):not([type=range]),
   [role=button] { min-height: 40px; }
-  button:not(.pm-switch):not(.dwp-item):not(.dw-card) { min-width: 40px; }
   input[type=checkbox], input[type=radio] { width: 22px; height: 22px; }
   textarea { font-size: 16px; }
 }
@@ -913,4 +912,21 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
 }
 @media (pointer: coarse) and (max-width: 360px) {
   .pm-wd button { width:32px; min-width:32px !important; }
+}
+
+/* Tab bars scroll sideways; their tabs never shrink below their label. */
+#pmTabBar > button, #tabBar > button { flex-shrink:0; }
+#tabBar { overflow-x:auto; }
+
+/* iPhone/iPad Safari: native date fields keep a fixed intrinsic width and
+   ignore width:100%, so they poke out of narrow cards. Drop the native box
+   styling (the date picker still opens on tap). */
+input[type="date"] { -webkit-appearance:none; appearance:none; min-width:0; max-width:100%; box-sizing:border-box; }
+input[type="date"]::-webkit-date-and-time-value { text-align:left; margin:0; }
+.ff-input[type="date"] { display:block; width:100%; min-height:48px; }
+
+/* Overview tracking rows: badges/progress wrap under the title on phones. */
+@media (max-width: 640px) {
+  .pm-track-row { flex-wrap:wrap; }
+  .pm-track-row > .pm-track-chips { flex-shrink:1; min-width:0; max-width:100%; justify-content:flex-start; }
 }
