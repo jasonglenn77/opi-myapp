@@ -53,14 +53,28 @@ const opStatusBadge = (s) => {
 // linked here (e.g. the Pipeline's project link) can set `opi_entity_back`
 // scoped to this exact entity so we send the user back where they came from,
 // preserving that page's remembered view.
+const BACK_LABELS = {
+  "#/projects": "All Projects", "#/tracker": "Ashley's Tracker", "#/customers": "Customers",
+  "#/pipeline": "Pipeline", "#/schedule": "Schedules", "#/assignment": "Assignments",
+  "#/crew-ops": "Crew Operations", "#/financials": "Financials", "#/cashflow": "Cash Flow",
+  "#/pm": "PM Portal",
+};
 function resolveBackLink(entityType, entityId) {
+  // The page the user actually came from (tracked by the router) wins.
+  try {
+    const prev = sessionStorage.getItem("opi_prev_route") || "";
+    const base = prev.split("?")[0];
+    const label = BACK_LABELS[base] || (base.startsWith("#/pm/") ? "PM Portal" : null);
+    if (label && !prev.startsWith("#/entity/")) return { hash: prev, label };
+  } catch (_) {}
+  // Fallback (e.g. after a reload): a hint left by the page that linked here.
   try {
     const b = JSON.parse(sessionStorage.getItem("opi_entity_back") || "null");
     if (b && b.entity === `${entityType}/${entityId}` && b.hash && b.label) {
       return { hash: b.hash, label: b.label };
     }
   } catch (_) {}
-  return { hash: "#/customers", label: "Customers" };
+  return entityType === "project" ? { hash: "#/projects", label: "All Projects" } : { hash: "#/customers", label: "Customers" };
 }
 
 export async function entityDetailPage(routeFn, { entityType, entityId }) {
@@ -142,7 +156,6 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     <div class="w-full">
       <div class="mb-3 flex items-center gap-4">
         <a href="${back.hash}" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">← Back to ${escapeHtml(back.label)}</a>
-        ${isProject ? `<a href="#/projects" id="edGoProjects" class="inline-flex items-center gap-1 text-xs font-semibold text-white/60 hover:text-white">Go to Projects →</a>` : ""}
       </div>
       <div class="card flex flex-col overflow-hidden" style="height: calc(100vh - 150px); min-height: 420px;">
         <div class="shrink-0 px-4 sm:px-5 pt-4 border-b border-black/10">

@@ -91,6 +91,18 @@ def _ms_out(m):
             "amount": _num(m["amount"]), "status": m["status"], "note": m["note"]}
 
 
+def _ms_entity(conn, mid=None, sid=None):
+    """(entity_id, project name) for a milestone id or schedule id — stamped on
+    audit entries so a project's billing history can be listed."""
+    r = conn.execute(text(f"""
+        SELECT s.entity_id, qc.display_name FROM project_invoice_schedules s
+        {"JOIN project_invoice_milestones m ON m.schedule_id = s.id" if mid else ""}
+        LEFT JOIN qbo_customers qc ON qc.qbo_id = s.entity_id
+        WHERE {"m.id = :i" if mid else "s.id = :i"}
+    """), {"i": mid or sid}).first()
+    return (r[0], r[1]) if r else (None, None)
+
+
 def _load(conn, entity_id):
     sched = conn.execute(text(
         "SELECT * FROM project_invoice_schedules WHERE entity_id = :e"), {"e": entity_id}).mappings().first()
@@ -168,6 +180,10 @@ def generate(entity_id: str, req: GenerateReq, user=Depends(get_current_user)):
     return get_invoice_schedule(entity_id, user)
 
 
+def req_via(req):
+    return getattr(req, "via", None)
+
+
 class MilestonePatch(BaseModel):
     label: Optional[str] = None
     invoice_date: Optional[str] = None
@@ -179,12 +195,14 @@ class MilestonePatch(BaseModel):
     amount: Optional[float] = None
     status: Optional[str] = None
     note: Optional[str] = None
+    via: Optional[str] = None   # which screen made the edit (audit only)
 
 
 @router.patch("/milestone/{mid}")
 def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user)):
     _require(user)
     fields = req.model_dump(exclude_unset=True)
+    fields.pop("via", None)
     if not fields:
         return {"ok": True}
     sets, params = ["edited = 1"], {"id": mid}
@@ -197,10 +215,12 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
         # The UPDATE bumps updated_at (ON UPDATE CURRENT_TIMESTAMP), which is what
         # invalidates the cash-flow schedule caches on data edits.
         conn.execute(text(f"UPDATE project_invoice_milestones SET {', '.join(sets)} WHERE id = :id"), params)
+        ent, pname = _ms_entity(conn, mid=mid)
     changes = diff_fields(dict(old) if old else {}, {k: params[k] for k in fields}, list(fields))
     if changes:
         record_audit(user, "billing.milestone_update", "invoice_milestone", mid,
-                     (old or {}).get("label"), {"changes": changes})
+                     (old or {}).get("label"),
+                     {"changes": changes, "entity_id": ent, "project": pname, "via": req_via(req)})
     return {"ok": True}
 
 
@@ -210,14 +230,25 @@ def add_milestone(sid: int, user=Depends(get_current_user)):
     with engine.begin() as conn:
         nxt = conn.execute(text("SELECT COALESCE(MAX(seq),0)+1 FROM project_invoice_milestones WHERE schedule_id = :s"),
                            {"s": sid}).scalar()
-        conn.execute(text("INSERT INTO project_invoice_milestones (schedule_id, seq, label, status) VALUES (:s,:seq,'New invoice','pending')"),
-                     {"s": sid, "seq": nxt})
-    return {"ok": True}
+        new_id = conn.execute(text("INSERT INTO project_invoice_milestones (schedule_id, seq, label, status) VALUES (:s,:seq,'New invoice','pending')"),
+                              {"s": sid, "seq": nxt}).lastrowid
+        ent, pname = _ms_entity(conn, sid=sid)
+    record_audit(user, "billing.milestone_add", "invoice_milestone", new_id, "New invoice",
+                 {"entity_id": ent, "project": pname, "schedule_id": sid})
+    return {"ok": True, "id": new_id}
 
 
 @router.delete("/milestone/{mid}")
 def delete_milestone(mid: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
+        old = conn.execute(text("SELECT * FROM project_invoice_milestones WHERE id = :id"),
+                           {"id": mid}).mappings().first()
+        ent, pname = _ms_entity(conn, mid=mid)
         conn.execute(text("DELETE FROM project_invoice_milestones WHERE id = :id"), {"id": mid})
+    if old:
+        record_audit(user, "billing.milestone_delete", "invoice_milestone", mid, old["label"],
+                     {"entity_id": ent, "project": pname, "deleted": {
+                         k: (str(old[k]) if old[k] is not None else None)
+                         for k in ("label", "pct", "amount", "invoice_date", "due_date", "expected_paid_date")}})
     return {"ok": True}

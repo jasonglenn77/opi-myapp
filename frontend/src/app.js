@@ -15,6 +15,7 @@ import { cashflowPage } from "./pages/cashflow.js";
 import { crewPortalPage } from "./pages/crew.js";
 import { crewFormsPage } from "./pages/crew-forms.js";
 import { crewOpsPage } from "./pages/crew-ops.js";
+import { trackerPage } from "./pages/tracker.js";
 import { pmPage } from "./pages/pm.js";
 import { customersPage } from "./pages/customers.js";
 import { contactsPage } from "./pages/contacts.js";
@@ -37,6 +38,7 @@ const ROUTE_CAPS = {
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
   "#/crew-ops":   "page.assignment",
+  "#/tracker":    "page.customers",
   "#/pm":         "page.pm_portal",
   "#/teams":      "page.teams",
   "#/users":      "page.users",
@@ -72,8 +74,20 @@ function renderNoAccess() {
   });
 }
 
+// The page the user was on before the current one — the project workspace's
+// "← Back" returns there (an in-app history that survives re-renders).
+let _currentHash = null;
+function trackPreviousRoute(hash) {
+  if (hash === _currentHash) return;
+  if (_currentHash) {
+    try { sessionStorage.setItem("opi_prev_route", _currentHash); } catch (_) {}
+  }
+  _currentHash = hash;
+}
+
 async function route() {
   const hash = location.hash || "#/projects";
+  trackPreviousRoute(hash);
 
   // PUBLIC route: crew field forms (#/field) are passcode-gated inside the
   // page itself (crew tokens, not user tokens) — same pattern as #/set-password.
@@ -168,6 +182,7 @@ async function route() {
   if (hash === "#/schedule") return schedulePage(route);
   if (hash === "#/assignment") return assignmentPage(route);
   if (hash === "#/crew-ops") return crewOpsPage(route);
+  if (hash === "#/tracker") return trackerPage(route);
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);

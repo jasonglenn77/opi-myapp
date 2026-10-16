@@ -43,6 +43,7 @@ from app.crew.routes import router as crew_router
 from app.customers.routes import router as customers_router
 from app.documents.routes import router as documents_router
 from app.kickoff.routes import router as kickoff_router
+from app.tracker.routes import router as tracker_router
 from app.daily.routes import router as daily_router
 from app.payments.routes import router as payments_router
 from app.invoices.routes import router as invoices_router
@@ -68,6 +69,7 @@ app.include_router(cashflow_router)
 app.include_router(crew_router)
 app.include_router(customers_router)
 app.include_router(documents_router)
+app.include_router(tracker_router)
 app.include_router(kickoff_router)
 app.include_router(daily_router)
 app.include_router(payments_router)
