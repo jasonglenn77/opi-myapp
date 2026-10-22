@@ -12,10 +12,12 @@ import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
 import { estimatePage } from "./pages/estimate.js";
 import { cashflowPage } from "./pages/cashflow.js";
+import { revenuePage } from "./pages/revenue.js";
 import { crewPortalPage } from "./pages/crew.js";
 import { crewFormsPage } from "./pages/crew-forms.js";
 import { crewOpsPage } from "./pages/crew-ops.js";
 import { trackerPage } from "./pages/tracker.js";
+import { reviewPage } from "./pages/review.js";
 import { pmPage } from "./pages/pm.js";
 import { customersPage } from "./pages/customers.js";
 import { contactsPage } from "./pages/contacts.js";
@@ -32,6 +34,7 @@ const ROUTE_CAPS = {
   "#/projects":   "page.dashboard",
   "#/financials": "page.financials",
   "#/cashflow":   "page.cashflow",
+  "#/revenue":    "page.cashflow",
   "#/customers":  "page.customers",
   "#/pipeline":   "page.estimate",
   "#/estimate":   "page.estimate",
@@ -39,6 +42,7 @@ const ROUTE_CAPS = {
   "#/assignment": "page.assignment",
   "#/crew-ops":   "page.assignment",
   "#/tracker":    "page.customers",
+  "#/review":     "page.customers",
   "#/pm":         "page.pm_portal",
   "#/teams":      "page.teams",
   "#/users":      "page.users",
@@ -155,6 +159,7 @@ async function route() {
   if (hash === "#/projects") return projectsHubPage(route);
   if (hash === "#/financials") return projectsPage(route);
   if (hash === "#/cashflow") return cashflowPage(route);
+  if (hash === "#/revenue") return revenuePage(route);
   if (hash === "#/customers") return customersPage(route);
   if (hash === "#/contacts") return contactsPage(route);
   if (hash === "#/pipeline") return pipelinePage(route);
@@ -183,6 +188,7 @@ async function route() {
   if (hash === "#/assignment") return assignmentPage(route);
   if (hash === "#/crew-ops") return crewOpsPage(route);
   if (hash === "#/tracker") return trackerPage(route);
+  if (hash === "#/review") return reviewPage(route);
   if (hash === "#/users") return usersPage(route);
   if (hash === "#/teams") return teamsPage(route);
   if (hash === "#/quickbooks") return quickBooksPage(route);

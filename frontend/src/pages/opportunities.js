@@ -5,6 +5,7 @@
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+import { driveSourceHtml } from "../utils/drive-link.js";
 import { customerCombobox, contactFormModal } from "./contacts.js";
 import { copyPdfModel } from "../utils/estimate-bridge.js";
 
@@ -77,7 +78,7 @@ export async function pipelinePage(routeFn) {
     </div>`;
   setShell({
     title: "Pipeline",
-    subtitle: "RFQ → quote → sent → won / lost. New quotes are built in-app via Start quote; the metrics workbook opens in Drive.",
+    subtitle: "Mirrors the B151 Rolling Revenue tab — updated every night and whenever you click Refresh. Quoting-metrics workbooks open in Drive.",
     bodyHtml: body, showLogout: true, routeFn,
   });
 
@@ -268,13 +269,15 @@ export async function pipelinePage(routeFn) {
     const n = daysSince(ref);
     return n != null && n > 30;
   };
+  const COMM_NAMES = { ES: "email sent", ER: "email received", PC: "phone call", LVM: "voicemail" };
   const followupCell = (o) => {
     const stale = isStale(o);
     const flag = stale ? `<div class="text-[9px] font-bold uppercase tracking-wide text-red-600">⏰ follow up</div>` : "";
-    if (o.last_contact_date || o.follow_up_count)
-      return `<button data-log="${o.id}" class="text-left group">
+    // B151 columns: Last Contact Made · Follow Up Qty · Last Communication Type.
+    if (o.last_contact_date || o.follow_up_count || o.last_comm_type)
+      return `<button data-log="${o.id}" class="text-left group" title="Last contact ${ymd(o.last_contact_date)} · ${o.follow_up_count || 0} follow-up${o.follow_up_count === 1 ? "" : "s"} · last by ${escapeHtml(COMM_NAMES[o.last_comm_type] || o.last_comm_type || "—")} (from the B151). Click for the log.">
         <div class="tabular-nums ${stale ? "text-red-600 font-semibold" : "text-black/70"} group-hover:underline">${ymd(o.last_contact_date)}</div>
-        <div class="text-[10px] text-black/40">${o.follow_up_count || 0}× ${escapeHtml(o.last_comm_type || "")}</div>${flag}
+        <div class="text-[10px] text-black/45">${o.follow_up_count || 0} follow-up${o.follow_up_count === 1 ? "" : "s"}${o.last_comm_type ? ` · <b>${escapeHtml(o.last_comm_type)}</b>` : ""}</div>${flag}
       </button>`;
     return `<button data-log="${o.id}" class="text-left"><span class="text-[11px] ${stale ? "text-red-600" : "text-blue-600"} font-semibold hover:underline">+ log</span>${flag}</button>`;
   };
@@ -283,7 +286,7 @@ export async function pipelinePage(routeFn) {
   const COLS = [
     { key: "stage", label: "Stage", td: (o) => stageBadge(o) },
     { key: "pipeline_status", label: "Status", td: (o) => opiStatusCell(o) },
-    { key: "last_contact_date", label: "Follow-up", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
+    { key: "last_contact_date", label: "Last contact", cls: "whitespace-nowrap", td: (o) => followupCell(o) },
     { key: "quote", label: "Quote", nosort: true, td: (o) => caret(o) + quoteCell(o) },
     { key: "quoted_by", label: "By", cls: "text-black/60", td: (o) => escapeHtml(dash(o.quoted_by || o.estimator_name)) },
     { key: "rfq_received_date", label: "RFQ", cls: "tabular-nums text-black/60", td: (o) => ymd(o.rfq_received_date) },
@@ -293,6 +296,7 @@ export async function pipelinePage(routeFn) {
     { key: "title", label: "Job", cls: "text-black/70 max-w-[16rem] truncate", td: (o) => `${escapeHtml(dash(o.title))}${o.notes ? ` <span class="align-middle cursor-help text-black/30 hover:text-black/60" title="${escapeHtml(o.notes)}">🗒</span>` : ""}${o.project_name ? `<div class="text-[10px] text-emerald-700">→ <a href="#/entity/project/${escapeHtml(o.project_qbo_id)}" data-goproject="${escapeHtml(o.project_qbo_id)}" class="hover:underline font-semibold">${escapeHtml(o.project_name)}</a> <button data-linkproj="${o.id}" class="text-black/30 hover:text-black/60" title="Change or unlink project">✎</button></div>` : (o.status === "won" ? `<div><button data-linkproj="${o.id}" class="text-[9px] font-bold uppercase tracking-wide rounded px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200" title="Won but not linked to a QuickBooks project yet — click to link">⚠ link project</button></div>` : "")}` },
     { key: "labor_days", label: "Labor", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.labor_days) },
     { key: "travel_days", label: "Travel", align: "right", cls: "tabular-nums text-black/60", td: (o) => num(o.travel_days) },
+    { key: "ohp_amount", label: "OH&P $", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_amount == null ? "—" : money(o.ohp_amount) },
     { key: "ohp_pct", label: "OH&P %", align: "right", cls: "tabular-nums text-black/60", td: (o) => o.ohp_pct == null ? "—" : Math.round(o.ohp_pct) + "%" },
     { key: "contract_value", label: "Value", align: "right", cls: "tabular-nums text-black/70", td: (o) => valueCell(o) },
     { key: "target_start_date", label: "Start", cls: "tabular-nums text-black/60", td: (o) => ymd(o.target_start_date) },
@@ -380,6 +384,38 @@ export async function pipelinePage(routeFn) {
     portal.querySelector("input")?.focus();
   }
 
+  // ── B151 mirror: this page follows the B151 "2. Rolling Revenue" tab (nightly +
+  // on demand). The refresh runs server-side; poll the run log until it lands.
+  let b151Run = null, b151Busy = false;
+  const agoTxt = (iso) => {
+    if (!iso) return "never";
+    const m = Math.round((Date.now() - new Date(String(iso).replace(" ", "T") + "Z").getTime()) / 60000);
+    return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+  };
+  const b151Line = () => !b151Run ? "" : b151Run.ok
+    ? `B151 synced ${agoTxt(b151Run.finished_at)}`
+    : `<span class="text-red-600" title="${escapeHtml(b151Run.error || "")}">B151 sync failed ${agoTxt(b151Run.started_at)}</span>`;
+  const loadB151Run = async () => {
+    try { b151Run = (await api(`/review/runs`)).b151 || null; } catch (_) { b151Run = null; }
+    const el = filtersEl.querySelector("[data-b151]"); if (el) el.innerHTML = b151Line();
+  };
+  const refreshB151 = async () => {
+    const before = b151Run?.started_at;
+    b151Busy = true; renderFilters();
+    try {
+      await api(`/review/refresh?source=b151`, { method: "POST" });
+      for (let n = 0; n < 72; n++) {           // up to ~6 min
+        await new Promise((r) => setTimeout(r, 5000));
+        if (!document.body.contains(listEl)) return;
+        const r = (await api(`/review/runs`)).b151;
+        if (r && r.started_at !== before && r.finished_at) { b151Run = r; break; }
+      }
+      if (b151Run && !b151Run.ok) alert("B151 refresh failed: " + (b151Run.error || "unknown error"));
+    } catch (e) { alert("B151 refresh failed: " + (e?.message || e)); }
+    b151Busy = false;
+    await load(); loadMetrics();
+  };
+
   const renderFilters = () => {
     const stages = [...new Set(allRows.map(o => o.pipeline_status).filter(Boolean))].sort();
     const pills = [["open", "Open"], ...Object.entries(STATUS_META).map(([k, v]) => [k, v.label]), ["", "All"]];
@@ -391,6 +427,8 @@ export async function pipelinePage(routeFn) {
       `<button data-showinactive class="rounded-full px-2.5 py-1 text-xs font-semibold border ${showInactive ? "bg-slate-600 text-white border-slate-600" : "border-black/15 text-black/50 hover:bg-black/5"}" title="Include archived (inactive) opportunities">Inactive</button>` +
       `<input data-search value="${escapeHtml(searchQ)}" placeholder="Search…" class="input text-xs py-1 px-2 ml-auto w-52">` +
       `<span data-count class="text-xs text-black/40 whitespace-nowrap"></span>` +
+      `<span data-b151 class="text-[11px] text-black/40 whitespace-nowrap">${b151Line()}</span>` +
+      `<button data-b151refresh class="rounded-full px-2.5 py-1 text-xs font-semibold border border-black/15 text-black/70 hover:bg-black/5 whitespace-nowrap" ${b151Busy ? "disabled" : ""} title="Re-read the B151 Rolling Revenue tab from Google Drive and update this page (it also updates automatically every night)">${b151Busy ? "Reading the B151…" : "↻ Refresh from B151"}</button>` +
       `<button data-new class="btn-primary text-xs px-3 py-1.5 whitespace-nowrap">+ New</button>`;
     filtersEl.querySelectorAll("[data-sf]").forEach(b => b.addEventListener("click", () => {
       const k = b.getAttribute("data-sf");
@@ -400,6 +438,7 @@ export async function pipelinePage(routeFn) {
     filtersEl.querySelector("[data-stage]").addEventListener("change", (e) => { stageFilter = e.target.value; page = 0; render(); });
     filtersEl.querySelector("[data-unlinked]").addEventListener("click", () => { unlinkedOnly = !unlinkedOnly; page = 0; renderFilters(); render(); });
     filtersEl.querySelector("[data-showinactive]").addEventListener("click", () => { showInactive = !showInactive; page = 0; renderFilters(); render(); });
+    filtersEl.querySelector("[data-b151refresh]").addEventListener("click", refreshB151);
     filtersEl.querySelector("[data-new]").addEventListener("click", () =>
       newOpportunityModal({ estimators, pipelineStatuses, onSaved: () => { loadMetrics(); load(); } }));
     const sb = filtersEl.querySelector("[data-search]");
@@ -652,6 +691,7 @@ export async function pipelinePage(routeFn) {
 
   loadMetrics();
   load();
+  loadB151Run();
   requestAnimationFrame(sizeCard);   // after first paint, once layout settles
 }
 
@@ -905,7 +945,10 @@ function opportunityDocsModal(opp, onDone) {
     const files = data.files || {};
     total = Object.values(files).reduce((s, arr) => s + arr.length, 0);
     onDone && onDone(total);
-    bodyEl.innerHTML = (data.tree || []).map(node => {
+    // Flatten sub-folders (6 Project Management/2 Construction/...) so files filed
+    // there (e.g. Drive-synced project content on a quote) are listed too.
+    const flat = (nodes, d = 0) => nodes.flatMap(n => [{ ...n, label: (d ? " ".repeat(d) + "↳ " : "") + n.label }, ...flat(n.children || [], d + 1)]);
+    bodyEl.innerHTML = flat(data.tree || []).map(node => {
       const list = files[node.key] || [];
       return `
         <div data-drop="${escapeHtml(node.key)}" class="border border-black/10 rounded-xl mb-2 border-dashed border-transparent" style="border-color:rgba(0,0,0,0.1)">
@@ -918,7 +961,7 @@ function opportunityDocsModal(opp, onDone) {
             <div class="flex items-center justify-between px-3 py-1.5">
               <button data-dl="${f.id}" class="text-left text-blue-700 hover:underline truncate mr-2">${escapeHtml(f.filename)}</button>
               <div class="flex items-center gap-2 shrink-0">
-                <span class="text-[10px] text-black/40">${fmtBytes(f.size_bytes)}</span>
+                <span class="text-[10px] text-black/40">${f.from_drive ? driveSourceHtml(f) + " · " : ""}${f.link_only ? "Google file" : fmtBytes(f.size_bytes)}</span>
                 <button data-rm="${f.id}" class="text-[10px] text-black/35 hover:text-red-600 hover:underline">remove</button>
               </div>
             </div>`).join("")}</div>` : `<div class="px-3 py-3 text-[11px] text-black/35 text-center">Drag files here, or use <b class="font-semibold">Upload</b>.</div>`}

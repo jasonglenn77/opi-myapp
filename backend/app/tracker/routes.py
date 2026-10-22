@@ -343,7 +343,7 @@ def pm_schedule(user=Depends(get_current_user)):
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT m.id AS pm_id, m.first_name, m.last_name, m.color,
-                   qc.qbo_id, qc.display_name, psi.id AS item_id, psi.status,
+                   qc.qbo_id, qc.display_name, pc.display_name AS customer, psi.id AS item_id, psi.status,
                    psi.start_date, psi.end_date,
                    DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY) AS true_end,
                    MAX(spm.is_primary) AS is_primary
@@ -351,9 +351,10 @@ def pm_schedule(user=Depends(get_current_user)):
             JOIN project_schedule_items psi ON psi.id = spm.schedule_item_id
             JOIN projects p ON p.id = psi.project_id
             JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            LEFT JOIN qbo_customers pc ON pc.qbo_id = qc.parent_qbo_id
             JOIN project_managers m ON m.id = spm.project_manager_id
             WHERE spm.unassigned_at IS NULL AND m.is_active = 1
-            GROUP BY m.id, m.first_name, m.last_name, m.color, qc.qbo_id, qc.display_name,
+            GROUP BY m.id, m.first_name, m.last_name, m.color, qc.qbo_id, qc.display_name, pc.display_name,
                      psi.id, psi.status, psi.start_date, psi.end_date, true_end
             ORDER BY m.first_name, m.last_name, psi.start_date
         """)).mappings().all()
@@ -364,12 +365,305 @@ def pm_schedule(user=Depends(get_current_user)):
             "initials": _initials(r["first_name"], r["last_name"]), "color": r["color"], "items": []})
         start, end = _d(r["start_date"]), _d(r["true_end"] or r["end_date"])
         pm["items"].append({
-            "entity_id": str(r["qbo_id"]), "name": r["display_name"], "item_id": r["item_id"],
+            "entity_id": str(r["qbo_id"]), "name": r["display_name"], "customer": r["customer"],
+            "item_id": r["item_id"],
             "status": r["status"] or "needs_attention", "primary": bool(r["is_primary"]),
             "start": start, "end": end,
             "days": ((date.fromisoformat(end) - date.fromisoformat(start)).days + 1) if start and end else None,
         })
     return {"today": date.today().isoformat(), "pms": sorted(pms.values(), key=lambda p: p["name"])}
+
+
+# ── Progress Invoice sheet (Ashley's workbook, column for column) ───────────
+# A–I mirror QuickBooks' "Estimates & Progress Invoicing Summary by Customer"
+# report (open = TxnStatus 'Accepted' estimates, grouped by the project's fully
+# qualified customer name, with a "Total for …" row per group). J–O are the
+# columns Ashley types in from the Job Schedule; here they come from the app's
+# assignment data (schedule items + PMs), the synced Job Schedule (job name)
+# and the pipeline (labor days).
+SHEET_HEAD = ["", "Date", "Num", "Status", "Customer", "Amount", "Invoiced amount", "% invoiced",
+              "Remaining amount", "Job Name", "PM", "Invoice Dates", "Start Date", "End Date", "Job Days"]
+
+
+def _open_estimates(conn):
+    """Open (Accepted) estimates with QBO's progress-invoiced amount: the sum of
+    the latest version of every invoice whose LinkedTxn points at the estimate."""
+    ests = conn.execute(text("""
+        SELECT t.qbo_id, t.doc_number, t.txn_date, t.total_amt, t.customer_qbo_id,
+               qc.display_name, COALESCE(JSON_UNQUOTE(JSON_EXTRACT(qc.raw_json, '$.FullyQualifiedName')),
+                                         qc.display_name) AS fqn
+        FROM qbo_transactions t JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id
+        WHERE t.entity_type = 'Estimate' AND t.total_amt > 0
+          AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) = 'Accepted'
+    """)).mappings().all()
+    linked = conn.execute(text("""
+        WITH latest AS (
+          SELECT qt.total_amt, qt.raw_json,
+                 ROW_NUMBER() OVER (PARTITION BY qt.qbo_id ORDER BY qt.id DESC) AS rn
+          FROM qbo_transactions qt WHERE qt.entity_type = 'Invoice'
+        )
+        SELECT jt.txn_id, SUM(l.total_amt) AS amt
+        FROM latest l, JSON_TABLE(l.raw_json, '$.LinkedTxn[*]' COLUMNS (
+               txn_id VARCHAR(32) PATH '$.TxnId', txn_type VARCHAR(32) PATH '$.TxnType')) jt
+        WHERE l.rn = 1 AND jt.txn_type = 'Estimate'
+        GROUP BY jt.txn_id
+    """)).all()
+    inv = {str(r[0]): float(r[1] or 0) for r in linked}
+    return [{**dict(e), "invoiced": inv.get(str(e["qbo_id"]), 0.0)} for e in ests]
+
+
+def _job_names(conn):
+    """Project # -> the Job Schedule's short job name ("Exxon - Baytown"), from
+    the synced Job Schedule's most common description for that job."""
+    try:
+        rows = conn.execute(text("""
+            SELECT job, descr, COUNT(*) AS n FROM gsync_schedule_days
+            WHERE job IS NOT NULL AND descr IS NOT NULL GROUP BY job, descr
+        """)).all()
+    except Exception:
+        return {}
+    best = {}
+    for job, descr, n in rows:
+        if n > best.get(job, ("", 0))[1]:
+            best[job] = (descr, n)
+    return {j: " - ".join(p.strip() for p in d.split(" - ")[:2]) for j, (d, _) in best.items()}
+
+
+def _labor_days(conn):
+    """Quote # -> labor days from the pipeline (B151) — the Job Schedule's 'Job Days'."""
+    rows = conn.execute(text("""
+        SELECT quote_number, MAX(labor_days) FROM opportunities
+        WHERE quote_number IS NOT NULL GROUP BY quote_number
+    """)).all()
+    return {str(r[0]).strip(): float(r[1]) for r in rows if r[1] is not None}
+
+
+def _fallback_job_name(name):
+    """'5082 - Exxon - Baytown, TX' -> 'Exxon - TX' when the Job Schedule has no entry."""
+    parts = [p.strip() for p in (name or "").split(" - ")]
+    if len(parts) >= 3:
+        st = parts[-1].rsplit(",", 1)
+        return f"{parts[1]} - {st[1].strip() if len(st) == 2 else parts[-1]}"
+    return parts[-1] if parts else ""
+
+
+def _num_val(v):
+    return int(v) if v is not None and float(v).is_integer() else v
+
+
+def _sheet(q="", pm="", status=""):
+    rows = {r["entity_id"]: r for r in (_build() or [])}
+    with engine.connect() as conn:
+        ests = _open_estimates(conn)
+        jobs = _job_names(conn)
+        labor = _labor_days(conn)
+    q = (q or "").strip().lower()
+    groups = {}
+    for e in ests:
+        eid = str(e["customer_qbo_id"])
+        r = rows.get(eid) or {}
+        if pm and not any(str(p["id"]) == str(pm) for p in r.get("pms", [])):
+            continue
+        if status and (r.get("status") or "needs_attention") != status:
+            continue
+        name = e["display_name"] or ""
+        number = name.split(" - ")[0].strip() if " - " in name else ""
+        doc = (e["doc_number"] or "").strip()
+        job = jobs.get(number) or _fallback_job_name(name)
+        if q and q not in f"{e['fqn']} {name} {doc} {job}".lower():
+            continue
+        # L: this estimate's invoice dates still to send (Billing & Schedule plan)
+        est = next((x for x in r.get("estimates", []) if str(x["qbo_id"]) == str(e["qbo_id"])), None)
+        inv_dates = sorted({m["invoice_date"] for m in (est or {}).get("milestones", [])
+                            if m["tier"] in ("scheduled", "partial") and m.get("invoice_date")})
+        # O: the estimate's own labor days; a change order without its own → N/A
+        days = labor.get(doc)
+        if not days:
+            base = doc.split(" - ")[0].strip()      # "4456 - 1" is still job 4456
+            days = "N/A" if doc and base != number else (labor.get(number) or "?")
+        amt = round(float(e["total_amt"] or 0), 2)
+        invd = round(e["invoiced"], 2)
+        pms = r.get("pms", [])
+        groups.setdefault(e["fqn"], []).append({
+            "entity_id": eid, "estimate_qbo_id": str(e["qbo_id"]),
+            "date": e["txn_date"].strftime("%m/%d/%Y") if e["txn_date"] else "",
+            "_sort": str(e["txn_date"] or ""),
+            "num": doc, "status": "Accepted", "customer": name,
+            "amount": amt, "invoiced": invd or None,
+            "pct": round(invd / amt, 4) if amt else 0, "remaining": round(amt - invd, 2),
+            "job_name": job,
+            "pm": "/".join(p["initials"] for p in pms) or "?", "pm_ids": [str(p["id"]) for p in pms],
+            "invoice_dates": inv_dates, "start": r.get("start"), "end": r.get("end"),
+            "job_days": _num_val(days) if not isinstance(days, str) else days,
+            "sched_status": r.get("status") or "needs_attention",
+        })
+    out = []
+    for fqn in sorted(groups, key=lambda s: s.lower()):
+        items = sorted(groups[fqn], key=lambda x: (x["_sort"], x["num"]), reverse=True)
+        for x in items:
+            x.pop("_sort", None)
+        out.append({"name": fqn, "rows": items,
+                    "amount": round(sum(x["amount"] for x in items), 2),
+                    "invoiced": round(sum(x["invoiced"] or 0 for x in items), 2)})
+    return out
+
+
+def _md(iso):
+    y, m, d = iso.split("-")
+    return f"{int(m)}/{int(d)}"
+
+
+def _xlsx(groups):
+    """Build the workbook the way Ashley's file looks: QBO report styling on
+    A–I (Arial 8, bold group/total rows, $ totals with a top rule), Calibri 11
+    centered on J–O, header rule, frozen header + filter; plus Sheet2, the
+    per-PM job list."""
+    import io
+    from datetime import datetime
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, Side
+
+    thin = Side(style="thin")
+    a8, a8b = Font(name="Arial", size=8), Font(name="Arial", size=8, bold=True)
+    c11, c11b = Font(name="Calibri", size=11), Font(name="Calibri", size=11, bold=True)
+    wrap, center = Alignment(wrap_text=True), Alignment(horizontal="center", vertical="center")
+
+    def dt(iso):
+        return datetime.strptime(iso, "%Y-%m-%d") if iso else "?"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    for col, w in zip("ABCDEFGHIJK", (85.75, 9.25, 7.5, 8.375, 47.0, 16.125, None, 9.25, 18.625, 21.25, 11.25)):
+        if w:
+            ws.column_dimensions[col].width = w
+    ws.append(SHEET_HEAD)
+    for i in range(2, 16):
+        c = ws.cell(1, i)
+        c.border = Border(bottom=thin)
+        if i <= 9:
+            c.font, c.alignment = Font(name="Arial", size=9, bold=True), Alignment(horizontal="center", wrap_text=True)
+        else:
+            c.font, c.alignment = c11b, Alignment(horizontal="center")
+    r = 1
+    for g in groups:
+        r += 1
+        c = ws.cell(r, 1, g["name"])
+        c.font, c.alignment = a8, Alignment(horizontal="left", wrap_text=True)
+        top = r + 1
+        for x in g["rows"]:
+            r += 1
+            ds = x["invoice_dates"]
+            vals = [None, x["date"], x["num"], x["status"], x["customer"], x["amount"], x["invoiced"], x["pct"],
+                    x["remaining"], x["job_name"], x["pm"],
+                    (dt(ds[0]) if len(ds) == 1 else ", ".join(_md(d) for d in ds) if ds else "?"),
+                    dt(x["start"]), dt(x["end"]), x["job_days"]]
+            for i, v in enumerate(vals, start=1):
+                c = ws.cell(r, i, v)
+                if 2 <= i <= 9:
+                    c.font, c.alignment = a8, wrap
+                    if i in (6, 7, 9):
+                        c.number_format = "#,##0.00"
+                    elif i == 8:
+                        c.number_format = "#,##0.00%"
+                elif i >= 10:
+                    c.font = c11
+                    if i > 10:
+                        c.alignment = center
+                    if isinstance(v, datetime):
+                        c.number_format = "mm-dd-yy"
+        r += 1
+        c = ws.cell(r, 1, f"Total for {g['name']}")
+        c.font, c.alignment = a8b, Alignment(horizontal="left", wrap_text=True)
+        for col in ("F", "G"):
+            c = ws[f"{col}{r}"]
+            c.value = f"=SUM({col}{top}:{col}{r - 1})"
+            c.font, c.alignment, c.number_format = a8b, wrap, '"$"#,##0.00'
+            c.border = Border(top=thin)
+    if groups:
+        r += 1
+        ws.cell(r, 1, "TOTAL").font = a8b
+        for col in ("F", "G"):
+            c = ws[f"{col}{r}"]
+            c.value = f'=SUMIF(A2:A{r - 1},"Total for*",{col}2:{col}{r - 1})'
+            c.font, c.number_format = a8b, '"$"#,##0.00'
+            c.border = Border(top=thin, bottom=Side(style="double"))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:O{max(r, 1)}"
+
+    # Sheet2: one block per PM — Job Name, PM, Start, End, Job Days + a count.
+    ws2 = wb.create_sheet("Sheet2")
+    for col, w in (("A", 21.25), ("B", 3.5), ("C", 9.625), ("E", 7.5)):
+        ws2.column_dimensions[col].width = w
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    jobs = {}
+    for g in groups:
+        for x in g["rows"]:
+            j = jobs.setdefault((x["pm"], x["job_name"]), x)
+            if not isinstance(j["job_days"], (int, float)) and isinstance(x["job_days"], (int, float)):
+                jobs[(x["pm"], x["job_name"])] = x
+    r = 0
+    for pm_i in sorted({k[0] for k in jobs}, key=lambda i: (i == "?", i)):   # unassigned last
+        items = [v for k, v in jobs.items() if k[0] == pm_i]
+        r += 1
+        for i, h in enumerate(SHEET_HEAD[9:10] + SHEET_HEAD[10:11] + SHEET_HEAD[12:15], start=1):
+            c = ws2.cell(r, i, h)
+            c.font, c.alignment, c.border = c11b, Alignment(horizontal="center"), box
+        for x in items:
+            r += 1
+            for i, v in enumerate([x["job_name"], x["pm"], dt(x["start"]), dt(x["end"]), x["job_days"]], start=1):
+                c = ws2.cell(r, i, v)
+                c.font, c.border = c11, box
+                if i > 1:
+                    c.alignment = center
+                if isinstance(v, datetime):
+                    c.number_format = "mm-dd-yy"
+        r += 1
+        ws2.cell(r, 1, len(items))
+        r += 2
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _csv(groups):
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(SHEET_HEAD)
+    for g in groups:
+        w.writerow([g["name"]] + [""] * 14)
+        for x in g["rows"]:
+            ds = x["invoice_dates"]
+            w.writerow(["", x["date"], x["num"], x["status"], x["customer"], f"{x['amount']:.2f}",
+                        f"{x['invoiced']:.2f}" if x["invoiced"] else "", f"{x['pct'] * 100:.2f}%",
+                        f"{x['remaining']:.2f}", x["job_name"], x["pm"],
+                        ", ".join(_md(d) for d in ds) if ds else "?",
+                        x["start"] or "?", x["end"] or "?", x["job_days"]])
+        w.writerow([f"Total for {g['name']}", "", "", "", "", f"{g['amount']:.2f}", f"{g['invoiced']:.2f}"] + [""] * 8)
+    return buf.getvalue()
+
+
+@router.get("/progress-sheet")
+def progress_sheet(q: str = "", pm: str = "", status: str = "", user=Depends(get_current_user)):
+    _require(user)
+    return {"today": date.today().isoformat(), "columns": SHEET_HEAD, "groups": _sheet(q, pm, status)}
+
+
+@router.get("/progress-sheet/export")
+def progress_sheet_export(fmt: str = "xlsx", q: str = "", pm: str = "", status: str = "",
+                          user=Depends(get_current_user)):
+    _require(user)
+    from fastapi.responses import Response
+    groups = _sheet(q, pm, status)
+    stamp = date.today().strftime("%m-%d-%y")
+    if fmt == "csv":
+        return Response(content=_csv(groups).encode("utf-8-sig"), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="Progress Invoice {stamp}.csv"'})
+    return Response(content=_xlsx(groups),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="Progress Invoice {stamp}.xlsx"'})
 
 
 def _warm():

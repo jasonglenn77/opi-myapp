@@ -10,7 +10,7 @@
 // have something to send, collect, or a payment that's late.
 //
 // PM Schedule view: per-PM timeline (overlaps + gaps) and table.
-import { api } from "../api.js";
+import { api, getToken } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
@@ -43,6 +43,9 @@ export async function trackerPage(routeFn) {
     rows: [], today: "", soonDays: 14,
     pm: prefs.pm || "",
     pmView: prefs.pmView || "timeline", pmData: null,
+    invView: prefs.invView || "tracker",   // tracker | sheet (Ashley's workbook layout)
+    sheet: null,
+    pmStatuses: Array.isArray(prefs.pmStatuses) ? prefs.pmStatuses : [], pmQ: prefs.pmQ || "",
     tlStart: null, tlMonths: 6,
   };
 
@@ -68,7 +71,8 @@ export async function trackerPage(routeFn) {
     if (ss) { st.q = ss.q || ""; (ss.expanded || []).forEach((id) => st.expanded.add(id)); st.status = ss.status || ""; }
   } catch (_) {}
   const persist = () => {
-    savePrefs({ view: st.view, scope: st.scope, pm: st.pm, sort: st.sort, pmView: st.pmView });
+    savePrefs({ view: st.view, scope: st.scope, pm: st.pm, sort: st.sort, pmView: st.pmView,
+      invView: st.invView, pmStatuses: st.pmStatuses, pmQ: st.pmQ });
     try { sessionStorage.setItem(SESSION, JSON.stringify({ q: st.q, expanded: [...st.expanded], status: st.status })); } catch (_) {}
   };
 
@@ -306,12 +310,20 @@ export async function trackerPage(routeFn) {
       </div>`;
   }
 
+  const invToggle = () => `
+    <div class="at-seg" role="group" title="Switch between the tracker and Ashley's Progress Invoice workbook layout">
+      <button type="button" class="${st.invView === "tracker" ? "on" : ""}" data-invview="tracker">Tracker</button>
+      <button type="button" class="${st.invView === "sheet" ? "on" : ""}" data-invview="sheet">Workbook</button>
+    </div>`;
+
   function renderInvoicing() {
+    if (st.invView === "sheet") { renderSheet(); return; }
     const rows = visibleRows();
     const body = document.getElementById("atBody");
     body.innerHTML = `
       ${kpis(rows)}
       <div class="at-filters">
+        ${invToggle()}
         <input type="search" class="at-search" placeholder="Search project, customer or estimate #…" value="${escapeHtml(st.q)}" data-q>
         <div class="at-seg" role="group">
           ${[["relevant", "Active + open items"], ["attention", "Needs attention"], ["all", "All projects"]].map(([k, l]) => `<button type="button" class="${st.scope === k ? "on" : ""}" data-scope="${k}">${l}</button>`).join("")}
@@ -338,6 +350,111 @@ export async function trackerPage(routeFn) {
       </div>`;
   }
 
+  // ── Workbook view: Ashley's "Progress Invoice" sheet, column for column ────
+  // A–I = QuickBooks' Estimates & Progress Invoicing Summary by Customer (open
+  // estimates grouped by project, "Total for …" rows); J–O = the Job Schedule
+  // columns she adds (job name, PM, invoice dates, start/end, job days), from
+  // the app's assignment data. Styled like the spreadsheet; exports to .xlsx/.csv.
+  const COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"];
+  const num2 = (v) => (v == null ? "" : Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const xlDate = (iso) => { if (!iso) return "?"; const [y, m, d] = iso.split("-"); return `${m}-${d}-${y.slice(2)}`; };
+  const invDates = (ds) => (!ds.length ? "?" : ds.length === 1 ? xlDate(ds[0]) : ds.map(fmtMD).join(", "));
+
+  function sheetGroups() {
+    const q = st.q.trim().toLowerCase();
+    return st.sheet.groups.map((g) => ({
+      ...g,
+      rows: g.rows.filter((x) => {
+        if (st.pm && !x.pm_ids.includes(st.pm)) return false;
+        if (st.status && x.sched_status !== st.status) return false;
+        if (q && !`${g.name} ${x.customer} ${x.num} ${x.job_name}`.toLowerCase().includes(q)) return false;
+        return true;
+      }),
+    })).filter((g) => g.rows.length);
+  }
+
+  function sheetHtml(groups) {
+    let n = 1;
+    const rn = () => `<td class="ws-rn">${++n}</td>`;
+    const body = groups.map((g) => {
+      const amt = g.rows.reduce((s, x) => s + x.amount, 0), inv = g.rows.reduce((s, x) => s + (x.invoiced || 0), 0);
+      return `
+        <tr class="ws-grp">${rn()}<td class="ws-a">${escapeHtml(g.name)}</td>${"<td></td>".repeat(14)}</tr>
+        ${g.rows.map((x) => `
+          <tr class="ws-row" data-goproj="${escapeHtml(x.entity_id)}" title="Open ${escapeHtml(x.customer)} in the tracker">${rn()}
+            <td></td><td>${escapeHtml(x.date)}</td><td>${escapeHtml(x.num)}</td><td>${escapeHtml(x.status)}</td>
+            <td>${escapeHtml(x.customer)}</td><td class="ws-n">${num2(x.amount)}</td><td class="ws-n">${num2(x.invoiced)}</td>
+            <td class="ws-n">${num2(x.pct * 100)}%</td><td class="ws-n">${num2(x.remaining)}</td>
+            <td class="ws-c">${escapeHtml(x.job_name)}</td><td class="ws-c ws-ctr">${escapeHtml(x.pm)}</td>
+            <td class="ws-c ws-ctr">${escapeHtml(invDates(x.invoice_dates))}</td>
+            <td class="ws-c ws-ctr">${xlDate(x.start)}</td><td class="ws-c ws-ctr">${xlDate(x.end)}</td>
+            <td class="ws-c ws-ctr">${escapeHtml(String(x.job_days ?? "?"))}</td>
+          </tr>`).join("")}
+        <tr class="ws-tot">${rn()}<td class="ws-a">Total for ${escapeHtml(g.name)}</td>${"<td></td>".repeat(4)}
+          <td class="ws-n ws-rule">$${num2(amt)}</td><td class="ws-n ws-rule">$${num2(inv)}</td>${"<td></td>".repeat(8)}</tr>`;
+    }).join("");
+    const all = groups.flatMap((g) => g.rows);
+    const tAmt = all.reduce((s, x) => s + x.amount, 0), tInv = all.reduce((s, x) => s + (x.invoiced || 0), 0);
+    return `
+      <div class="ws-wrap">
+        <table class="ws-table">
+          <colgroup><col class="ws-col-rn">${COLS.map((c) => `<col class="ws-col-${c}">`).join("")}</colgroup>
+          <thead>
+            <tr class="ws-letters"><th class="ws-corner"></th>${COLS.map((c) => `<th>${c}</th>`).join("")}</tr>
+            <tr class="ws-head"><th class="ws-rn">1</th>${st.sheet.columns.map((h, i) => `<th class="${i >= 9 ? "ws-c" : ""}">${escapeHtml(h)}</th>`).join("")}</tr>
+          </thead>
+          <tbody>
+            ${body || `<tr><td class="ws-rn">2</td><td colspan="15" class="ws-empty">No open estimates match these filters.</td></tr>`}
+            ${all.length ? `<tr class="ws-tot ws-grand"><td class="ws-rn">${n + 1}</td><td class="ws-a">TOTAL</td>${"<td></td>".repeat(4)}
+              <td class="ws-n ws-rule ws-dbl">$${num2(tAmt)}</td><td class="ws-n ws-rule ws-dbl">$${num2(tInv)}</td>${"<td></td>".repeat(8)}</tr>` : ""}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  async function renderSheet() {
+    const body = document.getElementById("atBody");
+    if (!st.sheet) {
+      body.innerHTML = `<div class="at-filters">${invToggle()}</div><div class="at-card at-pad at-muted">Loading the Progress Invoice sheet…</div>`;
+      try { st.sheet = await api("/tracker/progress-sheet"); }
+      catch (e) { body.innerHTML = `<div class="at-filters">${invToggle()}</div><div class="at-card at-pad" style="color:#b91c1c">Couldn't load: ${escapeHtml(e?.message || String(e))}</div>`; return; }
+      if (st.invView !== "sheet" || st.view !== "invoicing") return;
+    }
+    const groups = sheetGroups();
+    const est = groups.reduce((s, g) => s + g.rows.length, 0);
+    body.innerHTML = `
+      <div class="at-filters">
+        ${invToggle()}
+        <input type="search" class="at-search" placeholder="Search project, customer, estimate # or job name…" value="${escapeHtml(st.q)}" data-q>
+        <select class="at-select" data-pm><option value="">All PMs</option>${pmOptions().map(([id, nm]) => `<option value="${id}" ${st.pm === id ? "selected" : ""}>${escapeHtml(nm)}</option>`).join("")}</select>
+        <select class="at-select" data-status><option value="">All statuses</option>${Object.entries(STATUS).map(([k, [l]]) => `<option value="${k}" ${st.status === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <span class="ws-export">
+          <button type="button" class="at-btn" data-export="xlsx">Export Excel</button>
+          <button type="button" class="at-btn" data-export="csv">CSV</button>
+        </span>
+      </div>
+      <div class="at-legend">
+        <span class="at-muted">${groups.length} project${groups.length === 1 ? "" : "s"} · ${est} open estimate${est === 1 ? "" : "s"} · A–I from QuickBooks estimates &amp; linked invoices · J–O from the app's assignments · click a row to open it in the tracker</span>
+      </div>
+      ${sheetHtml(groups)}`;
+  }
+
+  async function exportSheet(btn) {
+    const fmt = btn.getAttribute("data-export");
+    const qs = new URLSearchParams({ fmt, q: st.q.trim(), pm: st.pm, status: st.status });
+    const orig = btn.textContent; btn.disabled = true; btn.textContent = "Exporting…";
+    try {
+      const res = await fetch(`/api/tracker/progress-sheet/export?${qs}`, { headers: { Authorization: "Bearer " + getToken() } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || `Progress Invoice.${fmt}`;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await res.blob()); a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } catch (e) { toast(`Export failed: ${e?.message || e}`, true); }
+    btn.disabled = false; btn.textContent = orig;
+  }
+
   // ── PM Schedule view ───────────────────────────────────────────────────────
   async function renderPm() {
     const body = document.getElementById("atBody");
@@ -356,6 +473,7 @@ export async function trackerPage(routeFn) {
           <button type="button" class="${st.pmView === "timeline" ? "on" : ""}" data-pmview="timeline">Timeline</button>
           <button type="button" class="${st.pmView === "table" ? "on" : ""}" data-pmview="table">Table</button>
         </div>
+        <input type="search" class="at-search" placeholder="Search job #, project or customer…" value="${escapeHtml(st.pmQ)}" data-pmq>
         <select class="at-select" data-pmsel><option value="">All PMs</option>${st.pmData.pms.map((p) => `<option value="${p.id}" ${st.pm === String(p.id) ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select>
         ${st.pmView === "timeline" ? `
           <div class="at-seg" role="group">
@@ -365,10 +483,25 @@ export async function trackerPage(routeFn) {
           </div>
           <select class="at-select" data-tlmonths>${[3, 6, 12].map((n) => `<option value="${n}" ${st.tlMonths === n ? "selected" : ""}>${n} months</option>`).join("")}</select>` : ""}
       </div>
+      <div class="pms-status" role="group" aria-label="Filter by status">
+        <span class="pms-status-l">Status</span>
+        <button type="button" class="pms-st ${st.pmStatuses.length ? "" : "on"}" data-pmst="">All</button>
+        ${Object.entries(STATUS).map(([k, [l, c]]) => `<button type="button" class="pms-st ${st.pmStatuses.includes(k) ? `on ${c}` : ""}" data-pmst="${k}">${l}</button>`).join("")}
+      </div>
       ${st.pmView === "timeline" ? timelineHtml() : pmTableHtml()}`;
   }
 
-  const pmList = () => st.pmData.pms.filter((p) => !st.pm || String(p.id) === st.pm);
+  // PM filter + status chips + search apply to both the timeline and the table;
+  // with a status/search filter on, PMs left with nothing are hidden.
+  const pmList = () => {
+    const q = st.pmQ.trim().toLowerCase();
+    const sts = new Set(st.pmStatuses);
+    const filtered = !!(q || sts.size);
+    return st.pmData.pms.filter((p) => !st.pm || String(p.id) === st.pm)
+      .map((p) => ({ ...p, items: p.items.filter((i) => (!sts.size || sts.has(i.status))
+        && (!q || `${i.name} ${i.customer || ""}`.toLowerCase().includes(q))) }))
+      .filter((p) => !filtered || p.items.length);
+  };
 
   function pmTableHtml() {
     return pmList().map((p) => {
@@ -385,7 +518,7 @@ export async function trackerPage(routeFn) {
               </tr>`).join("")}</tbody>
           </table></div>
         </div>`;
-    }).join("") || `<div class="at-card at-pad at-muted">No PM assignments.</div>`;
+    }).join("") || `<div class="at-card at-pad at-muted">No PM assignments${st.pmQ || st.pmStatuses.length ? " match these filters" : ""}.</div>`;
   }
 
   function timelineHtml() {
@@ -451,7 +584,7 @@ export async function trackerPage(routeFn) {
             <div class="at-tl-head"><div class="at-lane-h at-tl-corner"></div><div class="at-tl-axis">${months.join("")}</div></div>
             <div class="at-tl-lanes">
               ${todayLeft >= 0 && todayLeft <= 100 ? `<div class="at-tl-today" style="left:calc(var(--lbl) + (100% - var(--lbl)) * ${todayLeft / 100})"><span>Today</span></div>` : ""}
-              ${lanes || `<div class="at-pad at-muted">No PM assignments.</div>`}
+              ${lanes || `<div class="at-pad at-muted">No PM assignments${st.pmQ || st.pmStatuses.length ? " match these filters" : ""}.</div>`}
             </div>
           </div>
         </div>
@@ -582,6 +715,16 @@ export async function trackerPage(routeFn) {
     }
     const pmv = t.closest("[data-pmview]");
     if (pmv) { st.pmView = pmv.getAttribute("data-pmview"); persist(); renderPm(); return; }
+    const pst = t.closest("[data-pmst]");
+    if (pst) {
+      const k = pst.getAttribute("data-pmst");
+      st.pmStatuses = !k ? [] : st.pmStatuses.includes(k) ? st.pmStatuses.filter((x) => x !== k) : [...st.pmStatuses, k];
+      persist(); renderPm(); return;
+    }
+    const iv = t.closest("[data-invview]");
+    if (iv) { st.invView = iv.getAttribute("data-invview"); persist(); renderInvoicing(); return; }
+    const ex = t.closest("[data-export]");
+    if (ex) { exportSheet(ex); return; }
     const nav = t.closest("[data-tlnav]");
     if (nav) {
       const k = Number(nav.getAttribute("data-tlnav"));
@@ -593,7 +736,7 @@ export async function trackerPage(routeFn) {
     if (go) {
       const id = go.getAttribute("data-goproj");
       const row = st.rows.find((r) => r.entity_id === id);
-      st.view = "invoicing"; st.expanded.add(id);
+      st.view = "invoicing"; st.invView = "tracker"; st.expanded.add(id);
       if (row && !row.relevant) st.scope = "all";
       st.q = row ? row.name : ""; persist(); render();
       root.querySelector(`[data-row="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "center" });
@@ -615,6 +758,15 @@ export async function trackerPage(routeFn) {
       root._qT = setTimeout(() => {
         const pos = e.target.selectionStart; renderInvoicing();
         const q = root.querySelector("[data-q]"); if (q) { q.focus(); q.setSelectionRange(pos, pos); }
+      }, 200);
+      return;
+    }
+    if (e.target.matches("[data-pmq]")) {
+      st.pmQ = e.target.value; persist();
+      clearTimeout(root._qT);
+      root._qT = setTimeout(() => {
+        const pos = e.target.selectionStart; renderPm();
+        const q = root.querySelector("[data-pmq]"); if (q) { q.focus(); q.setSelectionRange(pos, pos); }
       }, 200);
       return;
     }

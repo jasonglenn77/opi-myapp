@@ -11,6 +11,7 @@
 import { api, hasCapability, getToken } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+import { driveSourceHtml } from "../utils/drive-link.js";
 import { createFormRenderer } from "../utils/form-render.js";
 import { openMarkupViewer, fillDrawingThumbs } from "../utils/drawing-markup.js";
 import { mountKickoffPanel } from "./kickoff.js";
@@ -114,6 +115,7 @@ async function pmHome(routeFn) {
         <div class="mt-1.5 flex items-center gap-2 flex-wrap">
           ${statusBadge(p.status)}
           <span class="text-[11px] text-black/45 tabular-nums">${escapeHtml(windowText(p))}</span>
+          ${p.leads_due ? `<span class="pm-chip pm-chip-flag" title="${p.leads_due} crew line${p.leads_due === 1 ? "" : "s"} in progress or starting within 7 days with no crew lead">Pick crew lead${p.leads_due > 1 ? ` · ${p.leads_due}` : ""}</span>` : ""}
         </div>
         ${data.scope === "all" && p.pm_names ? `<div class="mt-1 text-[10px] text-black/40 truncate">PM: ${escapeHtml(p.pm_names)}${p.is_mine ? " · yours" : ""}</div>` : ""}
       </div>
@@ -337,13 +339,15 @@ function overUnderHtml(ou, scheduled) {
 
 async function mountPmOverview(container, qboId, switchTab) {
   container.innerHTML = `<div class="p-4 text-sm text-black/40">Loading overview…</div>`;
-  let d, rc = null;
+  let d, rc = null, cl = null;
   try {
     // Receipts feed the SOFT overlay on the expense burndown (pending = not
     // yet allocated in QBO). Best-effort: the overview renders without it.
-    [d, rc] = await Promise.all([
+    [d, rc, cl] = await Promise.all([
       api(`/pm/project/${encodeURIComponent(qboId)}/overview`),
       api(`/receipts?project_qbo_id=${encodeURIComponent(qboId)}`).catch(() => null),
+      // Lead-TBD prompt (best-effort): crew lines starting soon with no lead.
+      api(`/pm/project/${encodeURIComponent(qboId)}/crew-leads`).catch(() => null),
     ]);
   } catch (e) {
     container.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load overview: ${escapeHtml(e?.message || String(e))}</div>`;
@@ -516,6 +520,12 @@ async function mountPmOverview(container, qboId, switchTab) {
 
   container.innerHTML = `
     <div class="p-4 sm:p-5">
+      ${cl && cl.leads_due ? `
+      <button type="button" class="pm-lead-due mb-4" data-goto="crew">
+        <span class="pm-chip pm-chip-flag">Pick crew lead</span>
+        <span class="min-w-0 flex-1 text-left">${cl.leads_due} crew line${cl.leads_due === 1 ? " has" : "s have"} no lead yet — in progress or starting within ${cl.due_days} days.</span>
+        <span class="shrink-0">Set lead ›</span>
+      </button>` : ""}
       <div class="text-sm font-extrabold text-ink-900 mb-2">Assignment</div>
       ${assignmentHtml}
 
@@ -851,7 +861,7 @@ async function mountPmDocuments(container, qboId) {
       ${FILE_ICON}
       <div class="min-w-0 flex-1">
         <div class="truncate text-xs font-medium text-ink-900" title="${escapeHtml(f.filename || "")}">${escapeHtml(f.filename || "(unnamed)")}</div>
-        <div class="text-[10px] text-black/45">${fmtBytes(f.size_bytes)}${f.created_at ? " · " + fmtDate(f.created_at) : ""}${f.uploaded_by ? " · " + escapeHtml(f.uploaded_by) : ""}</div>
+        <div class="text-[10px] text-black/45">${f.link_only ? "Google file" : fmtBytes(f.size_bytes)}${f.created_at ? " · " + fmtDate(f.created_at) : ""}${f.uploaded_by ? " · " + escapeHtml(f.uploaded_by) : ""}${f.from_drive ? " · " + driveSourceHtml(f) : ""}</div>
       </div>
       <button type="button" data-dl="${f.id}" title="Open" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/45 hover:bg-black/5 hover:text-blue-600">${DOWNLOAD_ICON}</button>
     </div>`;
@@ -1783,13 +1793,63 @@ function openDrawingPicker(qboId, selectedIds, onDone) {
 // Crew assignment block + per-crew passcode control (the same /crew-auth
 // endpoints Teams uses — now also open to page.pm_portal, scoped server-side
 // to the PM's own projects' crews) + copy-invite + "Open crew view" (pmview).
+// Crew lead picker (Crew tab): per schedule item, each assigned company
+// (crew boss) with a lead dropdown (the company's active leads + "Lead TBD").
+// Read-only text when the user can't edit (not this project's PM).
+function crewLeadsHtml(cl, crewCount) {
+  const none = `<div class="rounded-xl border border-dashed border-black/15 px-4 py-4 text-center text-xs text-black/40">No crew assigned yet — the office assigns crews on the Assignment page.</div>`;
+  if (!cl) return crewCount ? `<div class="text-[11px] text-red-700">Couldn't load the crew lead picker.</div>` : none;
+  const items = (cl.items || []).filter((it) => (it.crews || []).length);
+  if (!items.length) return none;
+  const win = (it) => (it.start_date || it.end_date)
+    ? `${fmtDate(it.start_date) || "—"} → ${fmtDate(it.end_date) || "—"}` : "Dates TBD";
+  const row = (c) => {
+    const co = c.company || {};
+    const leads = (cl.leads_by_company || {})[String(co.id)] || [];
+    const curId = c.lead ? String(c.lead.id) : "";
+    const known = !curId || leads.some((l) => String(l.id) === curId);
+    const opts = `<option value="">Lead TBD</option>`
+      + leads.map((l) => `<option value="${l.id}" ${String(l.id) === curId ? "selected" : ""}>${escapeHtml(l.name)}</option>`).join("")
+      + (!known ? `<option value="${escapeHtml(curId)}" selected>${escapeHtml(c.lead.name || "")} (inactive)</option>` : "");
+    const picker = cl.can_edit
+      ? `<select class="pm-lead-select" data-lead-row="${c.row_id}" aria-label="Crew lead for ${escapeHtml(co.name || "crew")}">${opts}</select>`
+      : `<span class="text-xs ${c.lead ? "text-ink-900 font-semibold" : "text-black/45"}">${escapeHtml(c.lead ? c.lead.name : "Lead TBD")}</span>`;
+    return `
+      <div class="pm-lead-row">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <span class="text-xs font-bold text-ink-900">${escapeHtml(co.name || "Crew")}</span>
+            ${c.slot_code ? `<span class="text-[10px] font-bold text-black/45">${escapeHtml(c.slot_code)}</span>` : ""}
+            ${c.is_primary ? `<span class="text-[10px] font-bold text-blue-700">primary</span>` : ""}
+            ${c.lead_due ? `<span class="pm-chip pm-chip-flag">Pick crew lead</span>` : ""}
+          </div>
+          <div class="text-[11px] text-black/45">Crew boss${co.boss_name ? `: ${escapeHtml(co.boss_name)}` : ""}</div>
+        </div>
+        <div class="pm-lead-pick">${picker}</div>
+      </div>`;
+  };
+  return `
+    ${cl.can_edit ? "" : `<div class="text-[11px] text-black/45 mb-2">Only this project's PM can change the crew lead.</div>`}
+    <div class="rounded-xl border border-black/10 divide-y divide-black/5">
+      ${items.map((it) => `
+        <div class="px-3 py-2">
+          <div class="flex items-center gap-2 flex-wrap mb-1">
+            <span class="text-[11px] font-bold text-black/55 tabular-nums">${escapeHtml(win(it))}</span>
+            ${statusBadge(it.status)}
+          </div>
+          ${it.crews.map(row).join("")}
+        </div>`).join("")}
+    </div>`;
+}
+
 async function mountPmCrewTab(container, qboId) {
   container.innerHTML = `<div class="p-4 text-sm text-black/40">Loading crew setup…</div>`;
-  let ov = null, pcs = null, pcErr = null;
+  let ov = null, pcs = null, pcErr = null, cl = null;
   try {
-    [ov, pcs] = await Promise.all([
+    [ov, pcs, cl] = await Promise.all([
       api(`/pm/project/${encodeURIComponent(qboId)}/overview`),
       api(`/crew-auth/passcodes`).catch((e) => { pcErr = e; return null; }),
+      api(`/pm/project/${encodeURIComponent(qboId)}/crew-leads`).catch(() => null),
     ]);
   } catch (e) {
     container.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load crew setup: ${escapeHtml(e?.message || String(e))}</div>`;
@@ -1893,21 +1953,10 @@ async function mountPmCrewTab(container, qboId) {
 
   container.innerHTML = `
     <div class="p-4 sm:p-5">
-      <div class="text-sm font-extrabold text-ink-900 mb-2">Crew assignment</div>
-      ${crews.length
-        ? `<div class="pm-ov-grid">${crews.map((c) => {
-            // CR3: "Company · Boss · Lead" ("… · lead TBD" when lead-less)
-            const co = c.company || {};
-            const bits = [co.name || c.name || "—"];
-            if (co.boss_name) bits.push(co.boss_name);
-            bits.push(c.lead_name || (co.id != null && String(co.id) === String(c.id) ? null : c.name) || "lead TBD");
-            return `
-            <div class="pm-ov-row">
-              <div class="pm-ov-label">Work crew</div>
-              <div class="pm-ov-value">${escapeHtml(bits.join(" · "))}${c.slot_code ? ` <span class="text-[10px] font-bold text-black/45">${escapeHtml(c.slot_code)}</span>` : ""}${c.is_primary ? ` <span class="text-[10px] font-bold text-blue-700">primary</span>` : ""}${c.assigned_at ? ` <span class="text-black/40">· assigned ${escapeHtml(fmtDate(c.assigned_at))}</span>` : ""}</div>
-            </div>`; }).join("")}
-           </div>`
-        : `<div class="rounded-xl border border-dashed border-black/15 px-4 py-4 text-center text-xs text-black/40">No crew assigned yet — the office assigns crews on the Assignment page.</div>`}
+      <div class="text-sm font-extrabold text-ink-900 mb-1">Crew assignment</div>
+      <div class="text-[11px] text-black/45 mb-2">The office assigns the crew boss (company) and dates. Pick the crew LEAD each boss is sending — or leave it "Lead TBD" until you know.</div>
+      <div id="pmCrewLeads">${crewLeadsHtml(cl, crews.length)}</div>
+      <div id="pmCrewLeadMsg" class="text-xs min-h-[1rem] mt-1"></div>
 
       <div class="text-sm font-extrabold text-ink-900 mt-5 mb-1">Field passcodes</div>
       <div class="text-[11px] text-black/45 mb-2">One 4-6 digit code per crew lead opens #/field on their phones (their projects only); the company's Boss code opens ALL of that company's projects. A code is typed once and can never be shown again — read it aloud. Setting a new code rotates (kills) the old one everywhere.</div>
@@ -1973,6 +2022,27 @@ async function mountPmCrewTab(container, qboId) {
       let detail = err?.message || String(err);
       try { const o = JSON.parse(detail); if (o && o.detail) detail = o.detail; } catch (_) {}
       msg(`Failed to deactivate: ${detail}`, false);
+    }
+  }));
+  // Crew lead picker: saves on change (lead_crew_id only), then re-mounts so
+  // the passcode rows reflect the new lead.
+  container.querySelectorAll("[data-lead-row]").forEach((sel) => sel.addEventListener("change", async () => {
+    const leadMsg = container.querySelector("#pmCrewLeadMsg");
+    const lead = sel.value ? Number(sel.value) : null;
+    sel.disabled = true;
+    try {
+      await api(`/pm/project/${encodeURIComponent(qboId)}/crew-lead`, {
+        method: "POST",
+        body: JSON.stringify({ row_id: Number(sel.getAttribute("data-lead-row")), lead_crew_id: lead }),
+      });
+      await mountPmCrewTab(container, qboId);
+      const m = container.querySelector("#pmCrewLeadMsg");
+      if (m) { m.textContent = lead ? "Crew lead saved." : "Crew lead cleared (TBD)."; m.className = "text-xs min-h-[1rem] mt-1 text-emerald-700"; }
+    } catch (err) {
+      sel.disabled = false;
+      let detail = err?.message || String(err);
+      try { const o = JSON.parse(detail); if (o && o.detail) detail = o.detail; } catch (_) {}
+      if (leadMsg) { leadMsg.textContent = `Couldn't save the crew lead: ${detail}`; leadMsg.className = "text-xs min-h-[1rem] mt-1 text-red-700"; }
     }
   }));
   container.querySelector("#pmCopyInvite")?.addEventListener("click", async (e) => {

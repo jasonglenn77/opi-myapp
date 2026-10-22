@@ -108,8 +108,9 @@ export function crewFieldsFor(ctx, activeList) {
 
 // ── crew time-off warnings (0063, OPI feedback 2026-10-07 #3) ──────────────
 // ctx.time_off (from /assignment/bundle) = every crew_time_off row:
-// {id, crew_id, company_id, level: 'company'|'lead', name, start_date,
-//  end_date, reason}. When the host passes the line's window (start/end/
+// {id, company_id, company_name, crew_count (null = all), count_label,
+//  lead_ids, start_date, end_date, reason, + 0063 compat level/name} (0070
+//  count model, app/crew/timeoff.py). When the host passes the line's window (start/end/
 // overage), each entry whose picked company or lead is marked off inside
 // start..true-end (end + overage days) gets a NON-BLOCKING amber warning —
 // saving stays allowed. Warnings recompute whenever the host re-renders the
@@ -148,9 +149,9 @@ export function timeOffOverlaps(ctx, entry, win) {
   const overage = Number(win.overage || 0);
   if (overage > 0) { we = new Date(we.getFullYear(), we.getMonth(), we.getDate() + overage); }
   return rows.filter((t) => {
-    const match = t.level === "company"
-      ? (entry.company_id != null && String(t.crew_id) === String(entry.company_id))
-      : (entry.lead_crew_id != null && String(t.crew_id) === String(entry.lead_crew_id));
+    // 0070 count model: every row belongs to a company (N crews out, or all)
+    // — warn whenever the picked company has crews out in the window.
+    const match = entry.company_id != null && String(t.company_id) === String(entry.company_id);
     if (!match) return false;
     const ts = _toYmdDate(t.start_date), te = _toYmdDate(t.end_date);
     return !!(ts && te && ts <= we && te >= ws);
@@ -161,7 +162,7 @@ function timeOffWarningHtml(ctx, entry, win) {
   const hits = timeOffOverlaps(ctx, entry, win);
   if (!hits.length) return "";
   return hits.map((t) => `
-    <div class="nwd-hint" style="margin:6px 0 0;">⚠ ${escapeHtml(t.name)} is marked off ${escapeHtml(timeOffRangeLabel(t.start_date, t.end_date))}${t.reason ? ` (${escapeHtml(t.reason)})` : ""}</div>`).join("");
+    <div class="nwd-hint" style="margin:6px 0 0;">⚠ ${escapeHtml(t.company_name || t.name)}: ${escapeHtml((t.count_label || "crew").replace(/^All crews/, "all crews"))} off ${escapeHtml(timeOffRangeLabel(t.start_date, t.end_date))}${t.reason ? ` (${escapeHtml(t.reason)})` : ""}</div>`).join("");
 }
 
 // ── editor markup ───────────────────────────────────────────────────────────

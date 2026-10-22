@@ -17,11 +17,14 @@ counted). `?all=1` returns every project (Jason's expand-to-all toggle).
 
 Kickoff & Daily Log & Documents on the PM project detail page reuse the
 existing /api/kickoff, /api/daily and /api/documents endpoints (their gates
-were widened to accept page.pm_portal). No write endpoints here in Phase 1.
+were widened to accept page.pm_portal). The one PM write here is the crew
+LEAD picker (POST /project/{id}/crew-lead) — lead_crew_id only.
 """
 from datetime import date
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.db import engine
@@ -99,6 +102,25 @@ def pm_projects(all: int = 0, user=Depends(require_capability(PAGE_PM_PORTAL))):
             ORDER BY w.start_date IS NULL, w.start_date, qc.display_name
         """), {"pm": pm_id}).mappings().all()
 
+        # Lead-TBD crew lines per project (company assigned, no lead yet) —
+        # feeds the "Pick crew lead" prompt on cards starting soon / running.
+        tbd_rows = conn.execute(text("""
+            SELECT qc.qbo_id, psi.status, psi.start_date, psi.end_date
+            FROM project_schedule_item_work_crews swc
+            JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
+            JOIN projects p ON p.id = psi.project_id
+            JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+            LEFT JOIN work_crews wc ON wc.id = swc.work_crew_id
+            WHERE swc.unassigned_at IS NULL
+              AND swc.lead_crew_id IS NULL
+              AND (swc.company_id IS NOT NULL OR wc.parent_id IS NULL)
+        """)).mappings().all()
+        leads_due = {}
+        for t in tbd_rows:
+            if _lead_due(t["status"], t["start_date"], t["end_date"]):
+                k = str(t["qbo_id"])
+                leads_due[k] = leads_due.get(k, 0) + 1
+
         # Root-customer names via one pass over the (small) customer tree.
         parents = {r["qbo_id"]: (r["display_name"], r["parent_qbo_id"]) for r in
                    conn.execute(text(
@@ -131,6 +153,7 @@ def pm_projects(all: int = 0, user=Depends(require_capability(PAGE_PM_PORTAL))):
             "end_date": str(r["end_date"]) if r["end_date"] else None,
             "pm_names": r["pm_names"] or None,
             "is_mine": mine,
+            "leads_due": leads_due.get(str(r["qbo_id"]), 0),
         }
         (active if st in ACTIVE_STATUSES else upcoming).append(item)
 
@@ -398,3 +421,157 @@ def pm_project_financials(qbo_id: str, user=Depends(require_capability(PAGE_PM_P
         "crew": crew,         # installment schedule + actual Contract-Labor bills
         "expenses": exp,      # per-category weekly schedule vs actual QBO spend
     }
+
+
+# ── Crew leads (PM picks the LEAD; the office picks the company) ─────────────
+# The office usually assigns only the Crew Boss (company) on the Assignment
+# page; the boss decides which lead runs the job and the PM often learns it on
+# day one. The PM sets/changes ONLY lead_crew_id on an existing active crew
+# row here (projects.service.set_crew_lead) — never dates or companies.
+LEAD_DUE_DAYS = 7   # "Pick crew lead" prompt window before an item's start
+
+
+def _lead_due(status, start_date, end_date, today=None):
+    """A lead-TBD line needs attention when the item is in progress, or starts
+    within LEAD_DUE_DAYS and hasn't ended. Done/canceled items never do."""
+    from datetime import timedelta
+    st = (status or "").lower()
+    if st in DONE_STATUSES:
+        return False
+    if st in ACTIVE_STATUSES:
+        return True
+    today = today or date.today()
+    if not start_date:
+        return False
+    return start_date <= today + timedelta(days=LEAD_DUE_DAYS) and (end_date is None or end_date >= today)
+
+
+def _pm_can_edit_leads(conn, user, qbo_customer_id):
+    """Office editors (assignment.edit_any) on any project; otherwise only a PM
+    actively assigned to an item of THIS project (the PM pages' scope)."""
+    from app.permissions import ASSIGNMENT_EDIT_ANY, has_capability
+    if has_capability(user, ASSIGNMENT_EDIT_ANY):
+        return True
+    pm_id = user.get("project_manager_id")
+    if not pm_id:
+        return False
+    return bool(conn.execute(text("""
+        SELECT 1
+        FROM projects p
+        JOIN project_schedule_items psi ON psi.project_id = p.id
+        JOIN project_schedule_item_project_managers spm ON spm.schedule_item_id = psi.id
+        WHERE p.qbo_customer_id = :qc AND spm.project_manager_id = :pm
+          AND spm.unassigned_at IS NULL
+        LIMIT 1
+    """), {"qc": int(qbo_customer_id), "pm": int(pm_id)}).scalar())
+
+
+def _qbo_customer_pk(conn, qbo_id):
+    return conn.execute(text("SELECT id FROM qbo_customers WHERE qbo_id = :e LIMIT 1"),
+                        {"e": qbo_id}).scalar()
+
+
+@router.get("/project/{qbo_id}/crew-leads")
+def pm_crew_leads(qbo_id: str, user=Depends(require_capability(PAGE_PM_PORTAL))):
+    """Per schedule item: its active crew rows (company/boss + lead or TBD +
+    slot) and each company's ACTIVE leads for the picker. `can_edit` says
+    whether this user may change leads here; `lead_due` flags a TBD lead on an
+    item in progress or starting within LEAD_DUE_DAYS."""
+    from app.projects.history import load_crews_map, derive_company_lead
+    with engine.connect() as conn:
+        qc = _qbo_customer_pk(conn, qbo_id)
+        if not qc:
+            raise HTTPException(status_code=404, detail="Project not found")
+        rows = conn.execute(text("""
+            SELECT psi.id AS item_id, psi.status, psi.start_date, psi.end_date, psi.sort_order,
+                   swc.id AS row_id, swc.work_crew_id, swc.company_id, swc.lead_crew_id,
+                   swc.slot_code, swc.is_primary
+            FROM projects p
+            JOIN project_schedule_items psi ON psi.project_id = p.id
+            LEFT JOIN project_schedule_item_work_crews swc
+                   ON swc.schedule_item_id = psi.id AND swc.unassigned_at IS NULL
+            WHERE p.qbo_customer_id = :qc
+            ORDER BY psi.start_date IS NULL, psi.start_date, psi.sort_order, psi.id,
+                     swc.is_primary DESC, swc.id
+        """), {"qc": qc}).mappings().all()
+        crews_map = load_crews_map(conn)
+        bosses = {int(r["id"]): r["boss_name"] for r in conn.execute(text(
+            "SELECT id, boss_name FROM work_crews WHERE parent_id IS NULL")).mappings().all()}
+        leads_by_co = {}
+        for r in conn.execute(text("""
+            SELECT id, name, parent_id FROM work_crews
+            WHERE parent_id IS NOT NULL AND is_active = 1
+            ORDER BY sort_order, name
+        """)).mappings().all():
+            leads_by_co.setdefault(int(r["parent_id"]), []).append({"id": r["id"], "name": r["name"]})
+        can_edit = _pm_can_edit_leads(conn, user, qc)
+
+    items, by_id, companies = [], {}, {}
+    for r in rows:
+        it = by_id.get(r["item_id"])
+        if it is None:
+            it = {"id": r["item_id"], "status": r["status"],
+                  "start_date": str(r["start_date"]) if r["start_date"] else None,
+                  "end_date": str(r["end_date"]) if r["end_date"] else None,
+                  "crews": []}
+            it["_due"] = _lead_due(r["status"], r["start_date"], r["end_date"])
+            by_id[r["item_id"]] = it
+            items.append(it)
+        if r["row_id"] is None:
+            continue
+        co_id, lead_id = r["company_id"], r["lead_crew_id"]
+        if co_id is None:
+            co_id, lead_id = derive_company_lead(crews_map, r["work_crew_id"])
+        co = crews_map.get(int(co_id)) if co_id else None
+        ld = crews_map.get(int(lead_id)) if lead_id else None
+        if co_id and int(co_id) not in companies:
+            companies[int(co_id)] = leads_by_co.get(int(co_id), [])
+        it["crews"].append({
+            "row_id": r["row_id"],
+            "company": {"id": co_id, "name": co["name"] if co else None,
+                        "code": co["code"] if co else None,
+                        "boss_name": bosses.get(int(co_id)) if co_id else None},
+            "lead": {"id": lead_id, "name": ld["name"]} if ld else None,
+            "slot_code": r["slot_code"], "is_primary": bool(r["is_primary"]),
+            "lead_due": ld is None and it["_due"],
+        })
+    for it in items:
+        it.pop("_due", None)
+    return {
+        "can_edit": can_edit,
+        "due_days": LEAD_DUE_DAYS,
+        "items": items,
+        "leads_by_company": {str(k): v for k, v in companies.items()},
+        "leads_due": sum(1 for it in items for c in it["crews"] if c["lead_due"]),
+    }
+
+
+class CrewLeadRequest(BaseModel):
+    row_id: int                       # project_schedule_item_work_crews.id (active)
+    lead_crew_id: Optional[int] = None  # None = lead TBD
+
+
+@router.post("/project/{qbo_id}/crew-lead")
+def pm_set_crew_lead(qbo_id: str, req: CrewLeadRequest,
+                     user=Depends(require_capability(PAGE_PM_PORTAL))):
+    """Set/clear the crew LEAD on one active assignment row of this project.
+    Only lead_crew_id changes (company, slot, dates untouched); history +
+    project_events + audit_log record the PM as actor."""
+    from app.projects.service import set_crew_lead
+    from app.audit import record_audit
+    with engine.connect() as conn:
+        qc = _qbo_customer_pk(conn, qbo_id)
+        if not qc:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if not _pm_can_edit_leads(conn, user, qc):
+            raise HTTPException(status_code=403, detail="Only this project's PM can change its crew lead")
+    try:
+        res = set_crew_lead(req.row_id, req.lead_crew_id, int(user["id"]), qbo_customer_id=qc)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if res.get("changed"):
+        record_audit(user, "assignment.set_lead", "schedule_item", res["schedule_item_id"],
+                     res.get("new_label"),
+                     {"changes": {"crew": [res.get("old_label"), res.get("new_label")]},
+                      "project_qbo_id": str(qbo_id), "via": "pm_portal"})
+    return res

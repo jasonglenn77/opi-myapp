@@ -86,14 +86,15 @@ def store_document_bytes(entity_type, entity_id, folder, filename, body,
                "fn": filename, "ct": content_type, "sz": len(body), "u": user_id}).lastrowid
 
 
-def _gated_tree(entity_type: str, linked: bool = False):
+def _gated_tree(entity_type: str, linked: bool = False, used_keys=None):
     """Which folders an entity shows. Estimates: the 5 estimate-stage folders.
     Opportunities: 5 folders normally, but ALL 9 once linked to a project (it's a
-    project now). Jobs/projects: all 9."""
-    if entity_type == "estimate":
-        return [n for n in FOLDER_TREE if n.get("stage") == "estimate"]
-    if entity_type == "opportunity" and not linked:
-        return [n for n in FOLDER_TREE if n.get("stage") == "estimate"]
+    project now). Jobs/projects: all 9. `used_keys` (folders that already hold
+    files, e.g. Drive-synced project content on a quote with no project yet)
+    adds those project-stage folders so nothing filed is hidden."""
+    if entity_type == "estimate" or (entity_type == "opportunity" and not linked):
+        used_tops = {k.split("/")[0] for k in (used_keys or ())}
+        return [n for n in FOLDER_TREE if n.get("stage") == "estimate" or n["key"] in used_tops]
     return FOLDER_TREE
 
 
@@ -189,6 +190,7 @@ def get_entity_documents(entity_type: str, entity_id: str, user=Depends(get_curr
             params[f"i{k}"] = i
         rows = conn.execute(text(f"""
             SELECT d.id, d.folder, d.original_filename, d.content_type, d.size_bytes, d.created_at,
+                   d.source_drive_id, d.drive_path, d.drive_link, d.s3_key,
                    TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS uploaded_by
             FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by_user_id
             WHERE {clauses}
@@ -200,9 +202,13 @@ def get_entity_documents(entity_type: str, entity_id: str, user=Depends(get_curr
             "id": r["id"], "filename": r["original_filename"], "content_type": r["content_type"],
             "size_bytes": int(r["size_bytes"] or 0), "created_at": str(r["created_at"]) if r["created_at"] else None,
             "uploaded_by": (r["uploaded_by"] or "").strip() or None,
+            # Google Drive sync provenance (app/gsync/docs_sync.py)
+            "from_drive": bool(r["source_drive_id"]), "drive_path": r["drive_path"],
+            "drive_link": r["drive_link"], "link_only": bool(r["source_drive_id"]) and not r["s3_key"],
         })
     return {"entity": {"type": entity_type, "id": entity_id, **meta},
-            "tree": _gated_tree(entity_type, linked=linked), "files": files_by_folder}
+            "tree": _gated_tree(entity_type, linked=linked, used_keys=files_by_folder.keys()),
+            "files": files_by_folder}
 
 
 @router.post("/{entity_type}/{entity_id}")
@@ -235,7 +241,10 @@ async def upload_document(entity_type: str, entity_id: str, folder: str = Query(
                 if opp is not None:
                     own_type, own_id = "opportunity", str(opp)
 
-        if folder not in _all_keys(_gated_tree(entity_type, linked=linked)):
+        used = [r[0] for r in conn.execute(text(
+            "SELECT DISTINCT folder FROM documents WHERE entity_type = :t AND entity_id = :i"),
+            {"t": entity_type, "i": entity_id})] if entity_type in ("opportunity", "estimate") and not linked else None
+        if folder not in _all_keys(_gated_tree(entity_type, linked=linked, used_keys=used)):
             raise HTTPException(status_code=400, detail="Unknown folder for this entity")
 
         key = build_document_key(own_type, own_id, folder, file.filename or "file")
@@ -254,10 +263,12 @@ async def upload_document(entity_type: str, entity_id: str, folder: str = Query(
 def document_url(doc_id: int, user=Depends(get_current_user)):
     _require(user)
     with engine.connect() as conn:
-        r = conn.execute(text("SELECT s3_key, original_filename FROM documents WHERE id=:id"),
+        r = conn.execute(text("SELECT s3_key, original_filename, drive_link FROM documents WHERE id=:id"),
                          {"id": doc_id}).mappings().first()
     if not r:
         raise HTTPException(status_code=404, detail="Document not found")
+    if not r["s3_key"] and r["drive_link"]:      # link-only Drive row (export too big, shortcut, form)
+        return {"url": r["drive_link"], "filename": r["original_filename"], "drive_link_only": True}
     return {"url": signed_file_url(r["s3_key"]), "filename": r["original_filename"]}
 
 
@@ -265,13 +276,21 @@ def document_url(doc_id: int, user=Depends(get_current_user)):
 def delete_document(doc_id: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
-        r = conn.execute(text("SELECT s3_bucket, s3_key FROM documents WHERE id=:id"),
+        r = conn.execute(text("SELECT s3_bucket, s3_key, source_drive_id, drive_path FROM documents WHERE id=:id"),
                          {"id": doc_id}).mappings().first()
         if not r:
             raise HTTPException(status_code=404, detail="Document not found")
         try:
-            s3_client.delete_object(Bucket=r["s3_bucket"], Key=r["s3_key"])
+            if r["s3_key"]:
+                s3_client.delete_object(Bucket=r["s3_bucket"], Key=r["s3_key"])
         except Exception:
             pass  # row removal proceeds even if S3 delete fails
+        if r["source_drive_id"]:
+            # Copied from Google Drive: remember the delete so the nightly Drive
+            # sync doesn't copy the file back.
+            conn.execute(text("""
+                INSERT INTO drive_file_state (drive_id, status, path) VALUES (:d, 'deleted_in_app', :p)
+                ON DUPLICATE KEY UPDATE status = 'deleted_in_app', error = NULL"""),
+                {"d": r["source_drive_id"], "p": (r["drive_path"] or "")[:1024]})
         conn.execute(text("DELETE FROM documents WHERE id=:id"), {"id": doc_id})
     return {"ok": True}

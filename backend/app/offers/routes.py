@@ -16,7 +16,11 @@ from sqlalchemy import text, bindparam
 
 from app.db import engine
 from app.auth import get_current_user
-from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_CREW_PORTAL
+from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_CREW_PORTAL, PAGE_SCHEDULE
+from app.crew.timeoff import (
+    load_time_off as _load_time_off, serialize as _ser_time_off,
+    off_on_day as _off_on_day, max_off_in_window as _max_off_in_window,
+)
 
 router = APIRouter(prefix="/api/offers", tags=["offers"])
 
@@ -125,6 +129,150 @@ def list_for_project(entity_id: str, user=Depends(get_current_user)):
             "suggested_labor": labor, "suggested_scope": scope, "crews": crews}
 
 
+def _load_crew_world(conn):
+    """Shared by crew-roster + crew-availability: active companies, their
+    active leads, live bookings (assignment rows, v2 company/lead/slot columns
+    with the legacy work_crew_id derivation as fallback) and 0070 time-off,
+    each grouped by company id."""
+    from collections import defaultdict
+    companies = conn.execute(text("""
+        SELECT id, name, code, boss_name, crew_capacity, vendor_qbo_id
+        FROM work_crews
+        WHERE parent_id IS NULL AND (is_active = 1 OR is_active IS NULL)
+        ORDER BY sort_order, name
+    """)).mappings().all()
+    leads = conn.execute(text("""
+        SELECT id, name, code, parent_id
+        FROM work_crews
+        WHERE parent_id IS NOT NULL AND (is_active = 1 OR is_active IS NULL)
+        ORDER BY sort_order, id
+    """)).mappings().all()
+    scheds = conn.execute(text("""
+        SELECT COALESCE(swc.company_id, wc.parent_id, wc.id) AS company_id,
+               swc.slot_code,
+               COALESCE(ld.name, CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END) AS lead_name,
+               qc.qbo_id AS entity_id, qc.display_name AS project_name,
+               psi.id AS schedule_item_id,
+               psi.start_date, psi.end_date,
+               COALESCE(psi.travel_days, 0) AS travel_days,
+               DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY) AS true_end
+        FROM project_schedule_item_work_crews swc
+        JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
+        JOIN projects p ON p.id = psi.project_id
+        JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
+        JOIN work_crews wc ON wc.id = swc.work_crew_id
+        LEFT JOIN work_crews ld ON ld.id = swc.lead_crew_id
+        WHERE swc.unassigned_at IS NULL AND psi.start_date IS NOT NULL
+          AND COALESCE(psi.status, '') <> 'canceled'
+    """)).mappings().all()
+    time_off = _load_time_off(conn)
+
+    leads_by_co = defaultdict(list)
+    for l in leads:
+        leads_by_co[int(l["parent_id"])].append({"id": l["id"], "name": l["name"], "code": l["code"]})
+    by_co = defaultdict(list)
+    for s_ in scheds:
+        if s_["company_id"] is not None:
+            by_co[int(s_["company_id"])].append(s_)
+    to_by_co = defaultdict(list)
+    for t in time_off:
+        to_by_co[int(t["company_id"])].append(t)
+    return companies, leads_by_co, by_co, to_by_co
+
+
+def _require_schedule_or_office(user):
+    if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_SCHEDULE)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+@router.get("/crew-availability")
+def crew_availability(start: str, end: str, crews_needed: Optional[int] = None,
+                      user=Depends(get_current_user)):
+    """Schedules-page "Crew availability" search (estimators asking the office
+    whether crews are free before a project exists). Per Crew Boss company and
+    per day of start..end: capacity (crew_capacity override, else active-lead
+    count — same as crew-roster), booked = distinct crew lines busy that day
+    (assignment start - travel-before .. true end + travel-after, the same span
+    the Schedule grid draws), off = crews out on 0070 time-off, free =
+    max(0, capacity - booked - off). Summary: min_free (free on EVERY day —
+    "crews available for the whole range") and min_free_weekdays (Mon-Fri
+    only). Booking rule shares _load_crew_world with crew-roster."""
+    _require_schedule_or_office(user)
+    from datetime import date, timedelta
+
+    try:
+        ws = date.fromisoformat(str(start)[:10])
+        we = date.fromisoformat(str(end)[:10])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid dates (YYYY-MM-DD)")
+    if we < ws:
+        ws, we = we, ws
+    if (we - ws).days > 186:
+        raise HTTPException(status_code=400, detail="Pick a range of 6 months or less")
+    days = [ws + timedelta(days=i) for i in range((we - ws).days + 1)]
+
+    with engine.connect() as conn:
+        companies, leads_by_co, by_co, to_by_co = _load_crew_world(conn)
+
+    out = []
+    for c in companies:
+        cid = int(c["id"])
+        capacity = int(c["crew_capacity"] if c["crew_capacity"] is not None
+                       else len(leads_by_co.get(cid, [])))
+        # booking spans (travel split like the grid: ceil before, floor after)
+        spans = []
+        for b in by_co.get(cid, []):
+            b_end = b["true_end"] or b["end_date"]
+            if not (b["start_date"] and b_end):
+                continue
+            tr = int(b["travel_days"] or 0)
+            s_ = b["start_date"] - timedelta(days=(tr + 1) // 2)
+            e_ = b_end + timedelta(days=tr // 2)
+            if e_ < ws or s_ > we:
+                continue
+            key = b["slot_code"] or f"?{b['schedule_item_id']}?{b['lead_name'] or ''}"
+            spans.append((s_, e_, key, b))
+        to_rows = [t for t in to_by_co.get(cid, []) if t["end_date"] >= ws and t["start_date"] <= we]
+
+        per_day = []
+        for d in days:
+            busy = {k for (s_, e_, k, _) in spans if s_ <= d <= e_}
+            off = _off_on_day(to_rows, d, capacity)
+            per_day.append({
+                "date": d.isoformat(), "weekday": d.weekday(),
+                "booked": len(busy), "off": off,
+                "free": max(0, capacity - len(busy) - off),
+            })
+        frees = [x["free"] for x in per_day]
+        wk = [x["free"] for x in per_day if x["weekday"] < 5]
+        bookings, seen = [], set()
+        for (s_, e_, k, b) in sorted(spans, key=lambda x: (x[2], x[0])):
+            sig = (k, str(b["entity_id"]))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            bookings.append({
+                "slot": b["slot_code"], "lead": b["lead_name"],
+                "project": b["project_name"], "entity_id": str(b["entity_id"]),
+                "from": str(s_), "thru": str(e_),
+            })
+        min_free = min(frees) if frees else 0
+        min_wk = min(wk) if wk else min_free
+        out.append({
+            "id": cid, "name": c["name"], "code": c["code"], "boss_name": c["boss_name"],
+            "capacity": capacity,
+            "days": per_day,
+            "min_free": min_free,
+            "min_free_weekdays": min_wk,
+            "max_free": max(frees) if frees else 0,
+            "meets_need": (min_wk >= int(crews_needed)) if crews_needed else None,
+            "bookings": bookings,
+            "time_off": [_ser_time_off(t) for t in to_rows],
+        })
+    return {"start": ws.isoformat(), "end": we.isoformat(),
+            "crews_needed": crews_needed, "companies": out}
+
+
 @router.get("/crew-roster")
 def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = None,
                 end: Optional[str] = None, user=Depends(get_current_user)):
@@ -150,71 +298,12 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
     ps, pe = _d(start), _d(end)
 
     with engine.connect() as conn:
-        companies = conn.execute(text("""
-            SELECT id, name, code, boss_name, crew_capacity, vendor_qbo_id
-            FROM work_crews
-            WHERE parent_id IS NULL AND (is_active = 1 OR is_active IS NULL)
-            ORDER BY sort_order, name
-        """)).mappings().all()
-        leads = conn.execute(text("""
-            SELECT id, name, parent_id
-            FROM work_crews
-            WHERE parent_id IS NOT NULL AND (is_active = 1 OR is_active IS NULL)
-            ORDER BY sort_order, id
-        """)).mappings().all()
+        companies, leads_by_co, by_co, to_by_co = _load_crew_world(conn)
         earned = {str(r["v"]): float(r["amt"] or 0) for r in conn.execute(text("""
             SELECT vendor_qbo_id AS v, ROUND(SUM(total_amt), 2) AS amt FROM qbo_transactions
             WHERE entity_type = 'Bill' AND txn_date >= :c AND vendor_qbo_id IS NOT NULL
             GROUP BY vendor_qbo_id
         """), {"c": cutoff}).mappings().all()}
-        # Bookings come from the ASSIGNMENT rows (company_id/lead/slot — the v2
-        # columns; legacy rows fall back to the work_crew_id derivation).
-        # 0063 CREW TIME-OFF rows (all — overlap filtering happens per window
-        # below). AVAILABILITY RULE (OPI feedback 2026-10-07 #3):
-        #   * COMPANY-level time-off (row points at the parent crew)
-        #     overlapping the occupancy window => the company contributes 0
-        #     available crews for that window (card shows "Unavailable
-        #     <range> · <reason>"), whatever capacity/slots say;
-        #   * LEAD-level time-off (row points at a child crew) overlapping
-        #     => minus 1 available per distinct off lead, floored at 0 —
-        #     applied the same whether capacity is lead-derived (auto) or an
-        #     explicit override (CR5-A effective capacity), and the lead is
-        #     listed as off on the card.
-        time_off_all = conn.execute(text("""
-            SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
-                   wc.name AS crew_name, wc.parent_id,
-                   COALESCE(wc.parent_id, wc.id) AS company_id
-            FROM crew_time_off cto
-            JOIN work_crews wc ON wc.id = cto.crew_id
-            ORDER BY cto.start_date, cto.id
-        """)).mappings().all()
-        scheds = conn.execute(text("""
-            SELECT COALESCE(swc.company_id, wc.parent_id, wc.id) AS company_id,
-                   swc.slot_code,
-                   COALESCE(ld.name, CASE WHEN wc.parent_id IS NOT NULL THEN wc.name END) AS lead_name,
-                   qc.qbo_id AS entity_id, qc.display_name AS project_name,
-                   psi.start_date, psi.end_date,
-                   DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY) AS true_end
-            FROM project_schedule_item_work_crews swc
-            JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
-            JOIN projects p ON p.id = psi.project_id
-            JOIN qbo_customers qc ON qc.id = p.qbo_customer_id
-            JOIN work_crews wc ON wc.id = swc.work_crew_id
-            LEFT JOIN work_crews ld ON ld.id = swc.lead_crew_id
-            WHERE swc.unassigned_at IS NULL AND psi.start_date IS NOT NULL
-              AND COALESCE(psi.status, '') <> 'canceled'
-        """)).mappings().all()
-
-    leads_by_co = defaultdict(list)
-    for l in leads:
-        leads_by_co[int(l["parent_id"])].append({"id": l["id"], "name": l["name"]})
-    by_co = defaultdict(list)
-    for s in scheds:
-        if s["company_id"] is not None:
-            by_co[int(s["company_id"])].append(s)
-    to_by_co = defaultdict(list)
-    for t in time_off_all:
-        to_by_co[int(t["company_id"])].append(t)
 
     today = date.today()
     out = []
@@ -247,39 +336,26 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
         occupied_rows.sort(key=lambda x: (x["slot"] or "~", x["thru"]))
         capacity = c["crew_capacity"] if c["crew_capacity"] is not None else len(leads_by_co.get(cid, []))
 
-        # 0063 time-off overlapping the same occupancy window [ws, we]
-        # (we None = open-ended, today onward). See AVAILABILITY RULE above.
-        time_off_rows, off_lead_ids, company_off = [], set(), False
-        for t in to_by_co.get(cid, []):
-            if we is not None and t["start_date"] > we:
-                continue
-            if t["end_date"] < ws:
-                continue
-            is_company_level = t["parent_id"] is None
-            if is_company_level:
-                company_off = True
-            else:
-                off_lead_ids.add(int(t["crew_id"]))
-            time_off_rows.append({
-                "id": t["id"], "crew_id": t["crew_id"],
-                "level": "company" if is_company_level else "lead",
-                "name": t["crew_name"],
-                "start_date": str(t["start_date"]), "end_date": str(t["end_date"]),
-                "reason": t["reason"],
-            })
+        # 0063/0070 time-off overlapping the same occupancy window [ws, we]
+        # (we None = open-ended, today onward). AVAILABILITY RULE (count
+        # model): the company loses the PEAK number of crews out on any one
+        # day of the window (a NULL-count row = all its crews), floored at 0.
+        to_rows = [t for t in to_by_co.get(cid, [])
+                   if t["end_date"] >= ws and (we is None or t["start_date"] <= we)]
+        time_off_rows = [_ser_time_off(t) for t in to_rows]
+        off_n = _max_off_in_window(to_rows, ws, we, capacity)
+        company_off = bool(to_rows) and int(capacity) > 0 and off_n >= int(capacity)
 
         available = None
         if ps and pe:
-            if company_off:
-                available = 0                       # whole company unavailable
-            else:
-                available = max(0, int(capacity) - len(occupied_rows) - len(off_lead_ids))
+            available = max(0, int(capacity) - len(occupied_rows) - off_n)
         out.append({
             "id": c["id"], "name": c["name"], "boss_name": c["boss_name"],
             "prefix": c["code"], "capacity": int(capacity),
             "available": available,
             "occupied": occupied_rows,
             "time_off": time_off_rows,
+            "crews_off": off_n,
             "company_off": company_off,
             "leads": leads_by_co.get(cid, []),
             "earned_365": round(earned.get(str(c["vendor_qbo_id"]), 0), 2),

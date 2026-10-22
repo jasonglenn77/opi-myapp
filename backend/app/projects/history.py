@@ -80,9 +80,10 @@ def crew_label(crews_map, work_crew_id, company_id=None, lead_crew_id=None, slot
     return parts
 
 
-def used_slot_codes(conn, project_id):
+def used_slot_codes(conn, project_id, exclude_item_id=None):
     """Slot codes currently occupied by ACTIVE assignment rows anywhere in
-    this project (the ordinal namespace is the project, not the item)."""
+    this project (the ordinal namespace is the project, not the item).
+    exclude_item_id leaves out one item's rows (the item being re-saved)."""
     rows = conn.execute(text("""
         SELECT swc.slot_code
         FROM project_schedule_item_work_crews swc
@@ -90,7 +91,8 @@ def used_slot_codes(conn, project_id):
         WHERE psi.project_id = :pid
           AND swc.unassigned_at IS NULL
           AND swc.slot_code IS NOT NULL
-    """), {"pid": int(project_id)}).scalars().all()
+          AND (:ex IS NULL OR swc.schedule_item_id <> :ex)
+    """), {"pid": int(project_id), "ex": exclude_item_id}).scalars().all()
     return {str(s) for s in rows}
 
 

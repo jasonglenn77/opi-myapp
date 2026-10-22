@@ -5,6 +5,7 @@
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+import { driveSourceHtml } from "../utils/drive-link.js";
 import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
@@ -102,7 +103,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
       ${FILE_ICON}
       <div class="min-w-0 flex-1">
         <div class="truncate text-xs font-medium text-ink-900" title="${escapeHtml(f.filename || "")}">${escapeHtml(f.filename || "(unnamed)")}</div>
-        <div class="text-[10px] text-black/45">${fmtBytes(f.size_bytes)}${f.created_at ? " · " + fmtDate(f.created_at) : ""}${f.uploaded_by ? " · " + escapeHtml(f.uploaded_by) : ""}</div>
+        <div class="text-[10px] text-black/45">${f.link_only ? "Google file" : fmtBytes(f.size_bytes)}${f.created_at ? " · " + fmtDate(f.created_at) : ""}${f.uploaded_by ? " · " + escapeHtml(f.uploaded_by) : ""}${f.from_drive ? " · " + driveSourceHtml(f) : ""}</div>
       </div>
       <button type="button" data-dl="${f.id}" title="Download" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/45 hover:bg-black/5 hover:text-blue-600">${DOWNLOAD_ICON}</button>
       <button type="button" data-del="${f.id}" data-dname="${escapeHtml(f.filename || "")}" title="Delete" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/40 hover:bg-red-50 hover:text-red-600">${TRASH_ICON}</button>

@@ -24,5 +24,8 @@ fi
 docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_customers_sync(triggered_by='cron'), default=str))"
 docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_transactions_sync(triggered_by='cron'), default=str))"
 rc=$?
+# Then Google Drive: re-read the B151 + Job Schedule, mirror the B151 into the
+# Pipeline and link quotes to the freshly synced QBO projects (Data Review page).
+docker exec myapp-backend python -m app.gsync.run --cron || echo "[$(ts)] gsync failed (see gsync_runs)"
 echo "[$(ts)] qbo-cron-sync: done (exit ${rc})"
 exit ${rc}

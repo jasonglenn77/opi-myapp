@@ -2212,21 +2212,11 @@ def schedule(
     range_start_minus = (visible_start - timedelta(days=4)).isoformat()
     range_end_plus = (visible_end + timedelta(days=21)).isoformat()
 
-    # 0063 CREW TIME-OFF: ranges overlapping the visible window, one entry per
-    # row. company_id lets the page hang the grey "Unavailable" block row under
-    # the right company whether the row points at the company (level
-    # 'company' — whole company off) or at one lead (level 'lead').
-    time_off_sql = text("""
-      SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
-             wc.name AS crew_name, wc.parent_id,
-             COALESCE(wc.parent_id, wc.id) AS company_id,
-             COALESCE(pc.name, wc.name) AS company_name
-      FROM myapp.crew_time_off cto
-      JOIN myapp.work_crews wc ON wc.id = cto.crew_id
-      LEFT JOIN myapp.work_crews pc ON pc.id = wc.parent_id
-      WHERE cto.start_date <= :vend AND cto.end_date >= :vstart
-      ORDER BY cto.start_date, cto.id
-    """)
+    # 0063/0070 CREW TIME-OFF: ranges overlapping the visible window (count
+    # model — N crews of a company out, NULL = all; optional named leads).
+    # The page greys N of that company's crew lines per day. Shared loader:
+    # app/crew/timeoff.py.
+    from app.crew.timeoff import load_time_off, serialize as _ser_time_off
 
     with engine.connect() as conn:
         crews_rows = conn.execute(crews_sql).mappings().all()
@@ -2237,10 +2227,11 @@ def schedule(
                 "range_end_plus": range_end_plus,
             },
         ).mappings().all()
-        time_off_rows = conn.execute(time_off_sql, {
-            "vstart": visible_start.isoformat(),
-            "vend": visible_end.isoformat(),
-        }).mappings().all()
+        time_off_rows = load_time_off(
+            conn, "cto.start_date <= :vend AND cto.end_date >= :vstart", {
+                "vstart": visible_start.isoformat(),
+                "vend": visible_end.isoformat(),
+            })
 
     crews = [dict(r) for r in crews_rows]
 
@@ -2276,15 +2267,8 @@ def schedule(
     assignments = filter_visible(assignments, user, key="qbo_customer_id")
 
     # 0063: crew time-off is crew-level data (like the crews list) — no
-    # project scoping. label = the person/company shown on the grey block.
-    time_off = [{
-        "id": r["id"], "crew_id": r["crew_id"],
-        "company_id": int(r["company_id"]),
-        "level": "lead" if r["parent_id"] is not None else "company",
-        "label": r["crew_name"], "company": r["company_name"],
-        "start_date": str(r["start_date"]), "end_date": str(r["end_date"]),
-        "reason": r["reason"],
-    } for r in time_off_rows]
+    # project scoping.
+    time_off = [_ser_time_off(r) for r in time_off_rows]
 
     return {
         "week_start": visible_start.isoformat(),

@@ -44,6 +44,7 @@ from app.payments.routes import (
 )
 from app.projects.routes import _operational_status, _latest_status
 from app.offers.routes import _offer_rows, _estimate_suggestions
+from app.billing.align import align_project, record_alignment
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -539,6 +540,17 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
             """), {"s": sid, "seq": seq, "l": label, "p": pct, "iv": inv_d, "du": due_d, "a": amt})
 
 
+def _align_invoice_schedules(conn, entity_id):
+    """Best-effort: align this project's schedules to its actual QBO invoices
+    (billing/align.py) inside a savepoint, so a failure never breaks the tab.
+    Returns audit entries to record once the transaction commits."""
+    try:
+        with conn.begin_nested():
+            return align_project(conn, entity_id)
+    except Exception:
+        return []
+
+
 def _compose_estimates(conn, entity_id):
     """The per-estimate billing view: each accepted estimate with its invoice
     schedule (tiered against QBO), plus the pending tray and a needs-review count.
@@ -553,7 +565,8 @@ def _compose_estimates(conn, entity_id):
     # and each estimate's own crew payment installments — both shown per estimate.
     actuals_by_est = {}
     for a in _actual_invoices(conn, entity_id):
-        actuals_by_est.setdefault(str(a.get("estimate_doc") or ""), []).append(a)
+        # keyed by the estimate's QBO id (doc numbers can repeat across estimates)
+        actuals_by_est.setdefault(str(a.get("estimate_qbo_id") or ""), []).append(a)
     crew_map = _load_schedules(conn, entity_id)  # keyed by estimate_qbo_id
 
     # load per-estimate invoice schedules + milestones
@@ -563,7 +576,7 @@ def _compose_estimates(conn, entity_id):
         {"e": entity_id}).mappings().all():
         ms = conn.execute(text("""
             SELECT id, seq, label, pct, invoice_date, due_date, expected_paid_date,
-                   amount, status, note, edited
+                   amount, status, note, edited, qbo_invoice_id
             FROM project_invoice_milestones WHERE schedule_id=:sid ORDER BY seq, id
         """), {"sid": s["id"]}).mappings().all()
         scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
@@ -573,9 +586,34 @@ def _compose_estimates(conn, entity_id):
     # with sent invoices shows Sent·A/R and one with none shows To bill, instead
     # of one project-wide pool spilling across estimates. Invoices with no
     # estimate link fold into the first accepted estimate as a catch-all.
-    def _tier_est(ms, est_invoiced, est_collected):
+    def _tier_est(ms, est_invoiced, est_collected, est_actuals=()):
+        # Milestones aligned to a specific QBO invoice (billing/align.py sets
+        # qbo_invoice_id) take THAT invoice's status; the rest burn down against
+        # whatever invoiced/collected isn't already claimed by a linked milestone.
         out, cum = {}, 0.0
-        for m in sorted(ms, key=lambda m: (str(m["invoice_date"] or "9999"), m["seq"] or 0)):
+        by_q = {str(a.get("qbo_id")): a for a in est_actuals if a.get("qbo_id")}
+        rest = []
+        for m in ms:
+            a = by_q.pop(str(m.get("qbo_invoice_id")), None) if m.get("qbo_invoice_id") else None
+            if a is None:
+                rest.append(m)
+                continue
+            amt = float(m["amount"] or 0)
+            inv_amt, bal = float(a["amount"] or 0), float(a["balance"] or 0)
+            covered = min(amt, inv_amt)
+            paid = max(0.0, min(covered, inv_amt - bal))
+            est_invoiced -= inv_amt
+            est_collected -= (inv_amt - bal)
+            if bal <= 0.01:
+                tier, label = "realized", "Paid"
+            elif paid > EPS:
+                tier, label = "committed", f"Partial · ${round(bal):,} due"
+            else:
+                tier, label = "committed", "Sent · A/R"
+            out[m["id"]] = {"tier": tier, "label": label, "covered": round(covered, 2),
+                            "paid": round(paid, 2), "remaining": round(amt - covered, 2),
+                            "doc": a.get("doc_number")}
+        for m in sorted(rest, key=lambda m: (str(m["invoice_date"] or "9999"), m["seq"] or 0)):
             amt = float(m["amount"] or 0)
             covered = min(amt, max(0.0, est_invoiced - cum))   # sent (invoiced)
             paid = min(amt, max(0.0, est_collected - cum))     # collected (paid)
@@ -603,6 +641,7 @@ def _compose_estimates(conn, entity_id):
             "amount": float(m["amount"] or 0), "tier": t["tier"], "edited": bool(m["edited"]),
             "covered": t["covered"], "paid": t["paid"], "remaining": t["remaining"],
             "status_label": t["label"], "status": m["status"],
+            "qbo_invoice_id": m.get("qbo_invoice_id"), "qbo_invoice_doc": t.get("doc"),
         }
 
     unlinked = actuals_by_est.get("", [])
@@ -618,7 +657,7 @@ def _compose_estimates(conn, entity_id):
         if e["status"] != "accepted":
             continue
         sid, ms = scheds.get(e["qbo_id"], (None, []))
-        est_actuals = list(actuals_by_est.get(str(e["doc_number"] or ""), []))
+        est_actuals = list(actuals_by_est.get(str(e["qbo_id"]), []))
         est_invoiced = round(sum(a["amount"] for a in est_actuals), 2)
         est_collected = round(sum(a["amount"] - a["balance"] for a in est_actuals), 2)
         if first_accepted and unlinked:          # fold unlinked invoices into the first estimate
@@ -626,7 +665,7 @@ def _compose_estimates(conn, entity_id):
             est_collected = round(est_collected + unlinked_coll, 2)
             est_actuals = est_actuals + unlinked
         first_accepted = False
-        tb = _tier_est(ms, est_invoiced, est_collected)
+        tb = _tier_est(ms, est_invoiced, est_collected, est_actuals)
         milestones = [_ms_out(m, tb) for m in ms]
         if not e["confirmed"]:
             needs_review += 1
@@ -736,18 +775,29 @@ def _linked_estimate_doc(raw_json, est_docs):
     return None
 
 
+def _linked_estimate_id(raw_json, est_docs):
+    """QBO id of this project's estimate a doc was created from (LinkedTxn)."""
+    try:
+        for l in (json.loads(raw_json or "{}").get("LinkedTxn") or []):
+            if l.get("TxnType") == "Estimate" and str(l.get("TxnId")) in est_docs:
+                return str(l.get("TxnId"))
+    except Exception:
+        pass
+    return None
+
+
 def _actual_invoices(conn, entity_id):
     """The real QBO invoices for this project — shown next to the planned
     milestones so office staff can compare plan vs. actual, tagged by estimate #."""
     est_docs = _estimate_docs(conn, entity_id)
     rows = conn.execute(text("""
         WITH latest AS (
-          SELECT qt.doc_number, qt.txn_date, qt.due_date, qt.total_amt, qt.balance_amt, qt.raw_json,
+          SELECT qt.qbo_id, qt.doc_number, qt.txn_date, qt.due_date, qt.total_amt, qt.balance_amt, qt.raw_json,
                  ROW_NUMBER() OVER (PARTITION BY COALESCE(qt.doc_number, qt.qbo_id) ORDER BY qt.id DESC) AS rn
           FROM qbo_transactions qt
           WHERE qt.entity_type = 'Invoice' AND qt.customer_qbo_id = :e
         )
-        SELECT doc_number, txn_date, due_date, total_amt, balance_amt, raw_json
+        SELECT qbo_id, doc_number, txn_date, due_date, total_amt, balance_amt, raw_json
         FROM latest WHERE rn = 1 ORDER BY txn_date, doc_number
     """), {"e": entity_id}).mappings().all()
     out = []
@@ -755,8 +805,9 @@ def _actual_invoices(conn, entity_id):
         total = float(r["total_amt"] or 0)
         bal = float(r["balance_amt"] or 0)
         out.append({
-            "doc_number": r["doc_number"],
+            "qbo_id": str(r["qbo_id"]), "doc_number": r["doc_number"],
             "estimate_doc": _linked_estimate_doc(r["raw_json"], est_docs),
+            "estimate_qbo_id": _linked_estimate_id(r["raw_json"], est_docs),
             "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
             "due_date": str(r["due_date"]) if r["due_date"] else None,
             "amount": round(total, 2), "balance": round(bal, 2),
@@ -1328,8 +1379,10 @@ def regenerate(entity_id: str, force: bool = False, user=Depends(get_current_use
         # invoices — per estimate schedule; rebuild each unless a milestone was hand-edited
         for isid in conn.execute(text("SELECT id FROM project_invoice_schedules WHERE entity_id=:e"),
                                  {"e": entity_id}).scalars().all():
+            # aligned-to-QBO rows (qbo_invoice_id) count as kept, like hand edits
             inv_edited = conn.execute(text(
-                "SELECT MAX(edited) FROM project_invoice_milestones WHERE schedule_id=:s"), {"s": isid}).scalar()
+                "SELECT MAX(edited OR qbo_invoice_id IS NOT NULL) FROM project_invoice_milestones WHERE schedule_id=:s"),
+                {"s": isid}).scalar()
             if force or not inv_edited:
                 conn.execute(text("DELETE FROM project_invoice_milestones WHERE schedule_id=:s"), {"s": isid})
                 conn.execute(text("DELETE FROM project_invoice_schedules WHERE id=:s"), {"s": isid})
@@ -1682,6 +1735,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         _ensure_estimate_billing(conn, entity_id, _default_crew_for_project(conn, entity_id, meta))
         _apply_assignment_default_crew(conn, entity_id)   # #4: single assigned company fills blanks
         _ensure_invoice_schedules(conn, entity_id, ctx)   # per estimate (35/35/30)
+        align_audits = _align_invoice_schedules(conn, entity_id)  # follow actual QBO invoices
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
         _ensure_expense_installments(conn, entity_id, ctx)
@@ -1724,6 +1778,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         # split exists, so single-crew bundles are byte-identical to before.
         crew_splits = _crew_splits(conn, entity_id)
 
+    record_alignment(align_audits)
     kpis = {
         "contract": inv["summary"]["total"],
         "collected": inv["summary"]["paid"],

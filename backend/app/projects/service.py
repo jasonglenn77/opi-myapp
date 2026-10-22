@@ -177,14 +177,9 @@ def get_assignment_bundle(qbo_customer_id: int):
         # 0063 CREW TIME-OFF: every row (small table, hard-deleted) so the
         # shared crew editor can warn — non-blocking — when the picked
         # company/lead is marked off inside the line's start..true-end window.
-        time_off_rows = conn.execute(text("""
-            SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
-                   wc.name AS crew_name, wc.parent_id,
-                   COALESCE(wc.parent_id, wc.id) AS company_id
-            FROM crew_time_off cto
-            JOIN work_crews wc ON wc.id = cto.crew_id
-            ORDER BY cto.start_date, cto.id
-        """)).mappings().all()
+        # 0070: count model (N crews of a company) via the shared loader.
+        from app.crew.timeoff import load_time_off, serialize as _ser_time_off
+        time_off_rows = load_time_off(conn)
 
     # CR3: company-first picker feed — one entry per company with its active
     # leads nested ("MTY · Jesse Rosales Jr." rendering is the frontend's job).
@@ -212,14 +207,7 @@ def get_assignment_bundle(qbo_customer_id: int):
         "project_managers": [dict(r) for r in pms],
         "work_crews": [dict(r) for r in crews if r["parent_id"] is not None] + [dict(r) for r in crews if r["parent_id"] is None],
         "companies": companies,
-        "time_off": [{
-            "id": r["id"], "crew_id": r["crew_id"],
-            "company_id": int(r["company_id"]),
-            "level": "lead" if r["parent_id"] is not None else "company",
-            "name": r["crew_name"],
-            "start_date": str(r["start_date"]), "end_date": str(r["end_date"]),
-            "reason": r["reason"],
-        } for r in time_off_rows],
+        "time_off": [_ser_time_off(r) for r in time_off_rows],
     }
 
 def _json(conn, v):
@@ -374,11 +362,13 @@ def _normalize_crew_entries(req, crews_map):
                     raise ValueError(f"Unknown lead_crew_id {lead_id}")
                 if lead["parent_id"] is None or int(lead["parent_id"]) != company_id:
                     raise ValueError("lead_crew_id must be a lead of the selected company")
-            key = (company_id, lead_id)
-            if key in seen:
-                continue  # dedupe identical company+lead pairs
-            seen.add(key)
             slot = (e.slot_code or "").strip().upper()[:12] or None
+            # dedupe identical company+lead pairs; lead-less entries are told
+            # apart by their slot (JR1 + JR2 both "lead TBD" are two crews)
+            key = (company_id, lead_id) if lead_id is not None else (company_id, None, slot)
+            if key in seen:
+                continue
+            seen.add(key)
             entries.append({
                 "company_id": company_id, "lead_crew_id": lead_id,
                 "slot_code": slot, "is_primary": bool(e.is_primary),
@@ -464,7 +454,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             prior_primary_pm = next((int(x["project_manager_id"]) for x in pm_rows if x["is_primary"]), None)
 
             crew_rows = conn.execute(text("""
-                SELECT work_crew_id, is_primary, company_id, lead_crew_id, slot_code
+                SELECT id, work_crew_id, is_primary, company_id, lead_crew_id, slot_code
                 FROM project_schedule_item_work_crews
                 WHERE schedule_item_id = :sid
                   AND unassigned_at IS NULL
@@ -527,13 +517,18 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             })
             sid = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
 
-        conn.execute(text("""
-            UPDATE project_schedule_item_project_managers
-            SET unassigned_at = NOW(), unassigned_by_user_id = :uid, is_primary = 0
-            WHERE schedule_item_id = :sid AND unassigned_at IS NULL
-        """), {"sid": sid, "uid": actor_user_id})
+        # Only rewrite the PM rows when the set or the primary actually changed:
+        # re-inserting identical rows on every save bloated the history.
+        pms_changed = (is_create or {int(x) for x in pm_ids} != set(prior_pm_ids)
+                       or (int(primary_pm) if primary_pm is not None else None) != prior_primary_pm)
+        if pms_changed:
+            conn.execute(text("""
+                UPDATE project_schedule_item_project_managers
+                SET unassigned_at = NOW(), unassigned_by_user_id = :uid, is_primary = 0
+                WHERE schedule_item_id = :sid AND unassigned_at IS NULL
+            """), {"sid": sid, "uid": actor_user_id})
 
-        for pm_id in pm_ids:
+        for pm_id in (pm_ids if pms_changed else []):
             conn.execute(text("""
                 INSERT INTO project_schedule_item_project_managers
                   (schedule_item_id, project_manager_id, is_primary, assigned_by_user_id)
@@ -545,12 +540,6 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 "is_primary": 1 if primary_pm is not None and int(pm_id) == int(primary_pm) else 0,
                 "uid": actor_user_id,
             })
-
-        conn.execute(text("""
-            UPDATE project_schedule_item_work_crews
-            SET unassigned_at = NOW(), unassigned_by_user_id = :uid, is_primary = 0
-            WHERE schedule_item_id = :sid AND unassigned_at IS NULL
-        """), {"sid": sid, "uid": actor_user_id})
 
         # Crew Model v2 (CR3): entries are company(+lead)+slot — either explicit
         # (req.crew_assignments) or derived from a legacy work_crew_ids payload.
@@ -575,10 +564,10 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             prior_by_pair.setdefault((co, ld), r["slot_code"])
             prior_by_company.setdefault(co, []).append(r["slot_code"])
 
-        taken_slots = used_slot_codes(conn, project_id)
+        taken_slots = used_slot_codes(conn, project_id, exclude_item_id=sid)
         # Reserve slots this save will re-use BEFORE suggesting codes for new
-        # entries (this item's old rows were just unassigned, so
-        # used_slot_codes no longer sees them).
+        # entries (this item's own rows are excluded above since they are
+        # being replaced).
         for e in crew_entries:
             pre = e["slot_code"] or prior_by_pair.get((e["company_id"], e["lead_crew_id"]))
             if pre:
@@ -599,6 +588,33 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                 slot_code = suggest_slot_code(crews_map, e["company_id"], taken_slots)
             if slot_code:
                 taken_slots.add(slot_code)
+            new_crew_rows.append({"work_crew_id": int(e["work_crew_id"]),
+                                  "company_id": e["company_id"],
+                                  "lead_crew_id": e["lead_crew_id"], "slot_code": slot_code,
+                                  "is_primary": 1 if e["is_primary"] else 0})
+
+        # Diff against the active rows: unchanged assignments stay put (no
+        # unassign + identical re-insert on every save); only removed rows are
+        # unassigned and only new ones inserted.
+        def _ckey(r):
+            return (int(r["work_crew_id"]), r.get("company_id"), r.get("lead_crew_id"),
+                    r.get("slot_code"), 1 if r.get("is_primary") else 0)
+        keep = list(prior_crew_rows)
+        to_insert = []
+        for r in new_crew_rows:
+            hit = next((p for p in keep if _ckey(p) == _ckey(r)), None)
+            if hit is not None:
+                keep.remove(hit)
+            else:
+                to_insert.append(r)
+        crews_changed = bool(keep or to_insert)
+        for gone in keep:
+            conn.execute(text("""
+                UPDATE project_schedule_item_work_crews
+                SET unassigned_at = NOW(), unassigned_by_user_id = :uid, is_primary = 0
+                WHERE id = :id AND unassigned_at IS NULL
+            """), {"id": gone["id"], "uid": actor_user_id})
+        for r in to_insert:
             conn.execute(text("""
                 INSERT INTO project_schedule_item_work_crews
                   (schedule_item_id, work_crew_id, company_id, lead_crew_id, slot_code,
@@ -607,16 +623,13 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
                   (:sid, :cid, :company_id, :lead_crew_id, :slot_code, :is_primary, :uid)
             """), {
                 "sid": sid,
-                "cid": int(e["work_crew_id"]),
-                "company_id": e["company_id"],
-                "lead_crew_id": e["lead_crew_id"],
-                "slot_code": slot_code,
-                "is_primary": 1 if e["is_primary"] else 0,
+                "cid": r["work_crew_id"],
+                "company_id": r["company_id"],
+                "lead_crew_id": r["lead_crew_id"],
+                "slot_code": r["slot_code"],
+                "is_primary": r["is_primary"],
                 "uid": actor_user_id,
             })
-            new_crew_rows.append({"work_crew_id": int(e["work_crew_id"]),
-                                  "company_id": e["company_id"],
-                                  "lead_crew_id": e["lead_crew_id"], "slot_code": slot_code})
 
         new_item = conn.execute(text("""
             SELECT id, project_id, status, start_date, end_date, wire_guidance, travel_days, overage_days, equipment_type, notes, non_working, is_extra_row, sort_order
@@ -640,14 +653,16 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             "primary_work_crew_id": primary_crew,
         }
 
-        _log_project_event(
-            conn,
-            project_id=project_id,
-            actor_user_id=actor_user_id,
-            event_type="project_schedule_item_created" if is_create else "project_schedule_item_updated",
-            old_value=old_value,
-            new_value=new_value,
-        )
+        item_changed = dict(prior_item or {}) != dict(new_item or {})
+        if is_create or item_changed or pms_changed or crews_changed:
+            _log_project_event(
+                conn,
+                project_id=project_id,
+                actor_user_id=actor_user_id,
+                event_type="project_schedule_item_created" if is_create else "project_schedule_item_updated",
+                old_value=old_value,
+                new_value=new_value,
+            )
 
         # Assignment-line history (Crew Model v2 CR1) — ADDITIVE to the
         # project_events row above. Readable crew/PM labels, {field:[old,new]}.
@@ -667,6 +682,104 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             record_item_history(conn, sid, "updated", actor_user_id, changes)
 
     return {"ok": True, "project_id": project_id, "schedule_item_id": sid}
+
+
+def set_crew_lead(crew_row_id: int, lead_crew_id, actor_user_id: int,
+                  qbo_customer_id: int = None) -> Dict[str, Any]:
+    """Narrow write path (PM portal): set/clear ONLY the crew LEAD on one
+    active assignment row. Company, slot, primary flag, dates and every other
+    field are untouched. Same history semantics as save_schedule_item: the old
+    row is unassigned and a new row inserted (work_crew_id dual-written = lead
+    or company), plus a schedule-item history row and a project_events row.
+    `qbo_customer_id` (optional) pins the row to that project.
+    Returns {"ok", "changed", "schedule_item_id", "old_label", "new_label"}."""
+    lead_id = int(lead_crew_id) if lead_crew_id else None
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT swc.id, swc.schedule_item_id, swc.work_crew_id, swc.company_id,
+                   swc.lead_crew_id, swc.slot_code, swc.is_primary,
+                   psi.project_id, p.qbo_customer_id
+            FROM project_schedule_item_work_crews swc
+            JOIN project_schedule_items psi ON psi.id = swc.schedule_item_id
+            JOIN projects p ON p.id = psi.project_id
+            WHERE swc.id = :id AND swc.unassigned_at IS NULL
+            LIMIT 1
+        """), {"id": int(crew_row_id)}).mappings().first()
+        if not row:
+            raise ValueError("Unknown or no-longer-active crew assignment")
+        if qbo_customer_id is not None and int(row["qbo_customer_id"]) != int(qbo_customer_id):
+            raise ValueError("Crew assignment does not belong to this project")
+
+        crews_map = load_crews_map(conn)
+        company_id = row["company_id"]
+        old_lead = row["lead_crew_id"]
+        if company_id is None:  # legacy row: derive from work_crew_id
+            company_id, old_lead = derive_company_lead(crews_map, row["work_crew_id"])
+        if company_id is None:
+            raise ValueError("Crew assignment has no company")
+        company_id = int(company_id)
+        if lead_id is not None:
+            lead = crews_map.get(lead_id)
+            if not lead or lead["parent_id"] is None or int(lead["parent_id"]) != company_id:
+                raise ValueError("lead_crew_id must be a lead of the assigned company")
+            active = conn.execute(text("SELECT is_active FROM work_crews WHERE id = :id"),
+                                  {"id": lead_id}).scalar()
+            if not active and lead_id != (int(old_lead) if old_lead else None):
+                raise ValueError("That crew lead is inactive")
+
+        sid = int(row["schedule_item_id"])
+        old_label = crew_label(crews_map, row["work_crew_id"], row["company_id"],
+                               row["lead_crew_id"], row["slot_code"])
+        new_label = crew_label(crews_map, lead_id if lead_id is not None else company_id,
+                               company_id, lead_id, row["slot_code"])
+        if (int(old_lead) if old_lead else None) == lead_id and row["company_id"] is not None:
+            return {"ok": True, "changed": False, "schedule_item_id": sid,
+                    "old_label": old_label, "new_label": new_label}
+
+        # All active crew labels on the item, before/after (history shows the
+        # whole crew list, same as save_schedule_item).
+        item_rows = conn.execute(text("""
+            SELECT id, work_crew_id, company_id, lead_crew_id, slot_code
+            FROM project_schedule_item_work_crews
+            WHERE schedule_item_id = :sid AND unassigned_at IS NULL
+            ORDER BY is_primary DESC, work_crew_id
+        """), {"sid": sid}).mappings().all()
+        old_labels = [crew_label(crews_map, r["work_crew_id"], r["company_id"],
+                                 r["lead_crew_id"], r["slot_code"]) for r in item_rows]
+        new_labels = [new_label if int(r["id"]) == int(row["id"]) else lbl
+                      for r, lbl in zip(item_rows, old_labels)]
+
+        conn.execute(text("""
+            UPDATE project_schedule_item_work_crews
+            SET unassigned_at = NOW(), unassigned_by_user_id = :uid, is_primary = 0
+            WHERE id = :id AND unassigned_at IS NULL
+        """), {"id": int(row["id"]), "uid": actor_user_id})
+        new_wc = lead_id if lead_id is not None else company_id
+        conn.execute(text("""
+            INSERT INTO project_schedule_item_work_crews
+              (schedule_item_id, work_crew_id, company_id, lead_crew_id, slot_code,
+               is_primary, assigned_by_user_id)
+            VALUES
+              (:sid, :cid, :company_id, :lead_crew_id, :slot_code, :is_primary, :uid)
+        """), {
+            "sid": sid, "cid": new_wc, "company_id": company_id,
+            "lead_crew_id": lead_id, "slot_code": row["slot_code"],
+            "is_primary": 1 if row["is_primary"] else 0, "uid": actor_user_id,
+        })
+
+        _log_project_event(
+            conn, project_id=int(row["project_id"]), actor_user_id=actor_user_id,
+            event_type="project_schedule_item_updated",
+            old_value={"schedule_item_id": sid, "work_crew_id": int(row["work_crew_id"]),
+                       "company_id": company_id, "lead_crew_id": old_lead},
+            new_value={"schedule_item_id": sid, "work_crew_id": new_wc,
+                       "company_id": company_id, "lead_crew_id": lead_id},
+        )
+        record_item_history(conn, sid, "updated", actor_user_id,
+                            {"crews": [old_labels, new_labels]})
+
+    return {"ok": True, "changed": True, "schedule_item_id": sid,
+            "old_label": old_label, "new_label": new_label}
 
 def delete_schedule_item(schedule_item_id: int, actor_user_id: int):
     with engine.begin() as conn:

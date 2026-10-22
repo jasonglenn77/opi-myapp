@@ -12,6 +12,7 @@ import {
 import {
   entryLabel, toDraftEntry, crewFieldsFor, crewEditorBodyHtml,
   handleCrewEditorClick, handleCrewEditorChange, handleCrewEditorInput,
+  timeOffRangeLabel,
 } from "../utils/crew-editor.js";
 // 0062: shared "Days off" (non-working days) control + day checks.
 import {
@@ -446,6 +447,400 @@ export async function schedulePage(routeFn) {
     });
   }
 
+  // ── 0070: "Crew time off" modal (toolbar) ────────────────────────────────
+  // Count model: pick a Crew Boss (company), HOW MANY of its crews are out
+  // (or all), a date range, an optional note and — optionally — the specific
+  // lead(s). Lists every entry (upcoming first; past behind a toggle) with
+  // Edit / Delete. Every add/edit/delete re-renders the grid behind the
+  // modal (onChange) so the greyed lines update live.
+  function apiErr(e, fallback) {
+    let msg = e?.message || fallback;
+    try { const p = JSON.parse(msg); if (p && p.detail) msg = String(p.detail); } catch { /* not JSON */ }
+    return msg;
+  }
+
+  function openTimeOffModal({ companies, children, onChange }) {
+    document.getElementById("schToModal")?.remove();
+    const capOf = (co) => co.crew_capacity != null
+      ? Number(co.crew_capacity)
+      : children.filter(ch => String(ch.parent_id) === String(co.id)).length;
+    const leadsOf = (coId) => children
+      .filter(ch => String(ch.parent_id) === String(coId))
+      .sort((a, b) => String(a.code || "").localeCompare(String(b.code || ""), undefined, { numeric: true }));
+    const coName = (id) => (companies.find(c => String(c.id) === String(id)) || {}).name || "";
+
+    let entries = [];
+    let editingId = null;
+    let showPast = false;
+    let filterCo = "";
+
+    const overlay = document.createElement("div");
+    overlay.id = "schToModal";
+    overlay.className = "schm-overlay";
+    overlay.innerHTML = `
+      <div class="schm-card schto-card">
+        <div class="schm-head">
+          <div>
+            <div class="schm-title">Crew time off</div>
+            <div class="schm-sub">How many of a Crew Boss's crews are unavailable. Naming the specific lead(s) is optional.</div>
+          </div>
+          <button type="button" class="schm-x" data-to-close="1" aria-label="Close">✕</button>
+        </div>
+        <div class="schm-body">
+          <div class="schto-form" data-to-form></div>
+          <div class="schto-listhead">
+            <span class="schto-listtitle">Entries</span>
+            <select class="input text-xs py-1.5 schto-filter" data-to-filter>
+              <option value="">All Crew Bosses</option>
+              ${companies.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}
+            </select>
+            <label class="schto-chk"><input type="checkbox" data-to-past /> Show past</label>
+          </div>
+          <div data-to-list><div class="ah-loading">Loading…</div></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", onKey);
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+
+    // draft for the form (new or editing)
+    let draft = blankDraft();
+    function blankDraft() {
+      return { company_id: "", crew_count: 1, all_crews: false, lead_ids: [],
+               start_date: "", end_date: "", reason: "" };
+    }
+
+    function renderForm() {
+      const host = overlay.querySelector("[data-to-form]");
+      const co = companies.find(c => String(c.id) === String(draft.company_id));
+      const cap = co ? capOf(co) : 0;
+      const leads = co ? leadsOf(co.id) : [];
+      host.innerHTML = `
+        <div class="schto-formhead">${editingId ? `Editing entry — ${escapeHtml(coName(draft.company_id))}` : "Add time off"}</div>
+        <div class="schto-grid">
+          <div class="schto-f schto-f-wide"><span class="schm-l">Crew Boss</span>
+            <select class="input text-xs py-1.5" data-to-f="company_id">
+              <option value="">— pick a Crew Boss —</option>
+              ${companies.map(c => `<option value="${c.id}" ${String(c.id) === String(draft.company_id) ? "selected" : ""}>${escapeHtml(c.name)}${c.code ? ` (${escapeHtml(c.code)})` : ""} · ${capOf(c)} crew${capOf(c) === 1 ? "" : "s"}</option>`).join("")}
+            </select></div>
+          <div class="schto-f"><span class="schm-l">Crews unavailable</span>
+            <div class="schto-nrow">
+              <input type="number" min="1" step="1" class="input text-xs py-1.5 schto-n" data-to-f="crew_count"
+                value="${draft.all_crews ? "" : escapeHtml(String(draft.crew_count || ""))}" ${draft.all_crews ? "disabled" : ""} />
+              <label class="schto-chk"><input type="checkbox" data-to-f="all_crews" ${draft.all_crews ? "checked" : ""} /> All${co ? ` ${cap}` : ""}</label>
+            </div></div>
+          <div class="schto-f"><span class="schm-l">Start</span>
+            <input type="date" class="input text-xs py-1.5" data-to-f="start_date" value="${escapeHtml(draft.start_date)}" /></div>
+          <div class="schto-f"><span class="schm-l">End</span>
+            <input type="date" class="input text-xs py-1.5" data-to-f="end_date" value="${escapeHtml(draft.end_date)}" /></div>
+          <div class="schto-f schto-f-wide"><span class="schm-l">Note (optional)</span>
+            <input type="text" maxlength="160" class="input text-xs py-1.5" data-to-f="reason" value="${escapeHtml(draft.reason)}" placeholder="e.g. vacation, out of town" /></div>
+        </div>
+        ${co ? `
+          <div class="schto-leads">
+            <div class="schm-l">Specific crew lead(s) — optional</div>
+            ${leads.length ? `<div class="schto-leadlist">${leads.map(l => `
+              <label class="schto-lead"><input type="checkbox" data-to-lead="${l.id}" ${draft.lead_ids.map(String).includes(String(l.id)) ? "checked" : ""} />
+                <span>${l.code ? `<b>${escapeHtml(l.code)}</b> · ` : ""}${escapeHtml(l.name)}</span></label>`).join("")}</div>`
+              : `<div class="ah-loading">No active leads for this Crew Boss.</div>`}
+          </div>` : ""}
+        <div class="schto-foot">
+          <span class="schm-msg" data-to-msg></span>
+          ${editingId ? `<button type="button" class="schm-addbtn" data-to-cancel="1">Cancel edit</button>` : ""}
+          <button type="button" class="btn-primary text-xs px-3 py-1.5" data-to-save="1">${editingId ? "Save changes" : "Add time off"}</button>
+        </div>`;
+    }
+
+    function setMsg(text, ok) {
+      const el = overlay.querySelector("[data-to-msg]");
+      if (el) { el.textContent = text || ""; el.style.color = ok ? "#047857" : "#b91c1c"; }
+    }
+
+    function renderList() {
+      const host = overlay.querySelector("[data-to-list]");
+      const todayYmd = ymd(new Date());
+      let rows = entries.filter(r => showPast || r.end_date >= todayYmd);
+      if (filterCo) rows = rows.filter(r => String(r.company_id) === String(filterCo));
+      const pastHidden = entries.filter(r => r.end_date < todayYmd).length;
+      host.innerHTML = rows.length ? rows.map(r => `
+        <div class="schto-row ${r.end_date < todayYmd ? "schto-row-past" : ""} ${String(r.id) === String(editingId) ? "schto-row-edit" : ""}">
+          <div class="schto-rowmain">
+            <span class="schto-co">${escapeHtml(r.company_name || "")}</span>
+            <span class="schto-cnt">${escapeHtml(r.count_label || "")}</span>
+            <span class="schto-range">${escapeHtml(timeOffRangeLabel(r.start_date, r.end_date))}${r.start_date.slice(0, 4) !== String(new Date().getFullYear()) ? ` ${r.start_date.slice(0, 4)}` : ""}</span>
+            ${r.reason ? `<span class="schto-note">${escapeHtml(r.reason)}</span>` : ""}
+            ${r.added_by ? `<span class="schto-meta">added by ${escapeHtml(r.added_by)}${r.created_at ? ` · ${escapeHtml(r.created_at.slice(0, 10))}` : ""}</span>` : ""}
+          </div>
+          <div class="schto-rowbtns">
+            <button type="button" class="schm-addbtn" data-to-edit="${r.id}">Edit</button>
+            <button type="button" class="schto-del" data-to-del="${r.id}">Delete</button>
+          </div>
+        </div>`).join("")
+        : `<div class="ah-loading" style="padding:8px 0;">No ${showPast ? "" : "current or upcoming "}time off${filterCo ? ` for ${escapeHtml(coName(filterCo))}` : ""}.${!showPast && pastHidden ? ` (${pastHidden} past hidden)` : ""}</div>`;
+    }
+
+    async function refresh() {
+      try {
+        entries = (await api("/crew-time-off")).time_off || [];
+      } catch (e) {
+        overlay.querySelector("[data-to-list]").innerHTML =
+          `<div class="schm-ro">Failed to load time off: ${escapeHtml(apiErr(e, "error"))}</div>`;
+        return;
+      }
+      renderList();
+    }
+
+    async function save() {
+      if (!draft.company_id) { setMsg("Pick a Crew Boss.", false); return; }
+      if (!draft.start_date || !draft.end_date) { setMsg("Start and end dates are required.", false); return; }
+      if (draft.end_date < draft.start_date) { setMsg("End must be on or after start.", false); return; }
+      const n = Number(draft.crew_count);
+      if (!draft.all_crews && (!Number.isFinite(n) || n < 1)) { setMsg("How many crews are unavailable?", false); return; }
+      const body = {
+        company_id: Number(draft.company_id),
+        all_crews: !!draft.all_crews,
+        crew_count: draft.all_crews ? null : Math.max(n, draft.lead_ids.length),
+        lead_ids: draft.lead_ids.map(Number),
+        start_date: draft.start_date, end_date: draft.end_date,
+        reason: (draft.reason || "").trim() || null,
+      };
+      setMsg("Saving…", true);
+      try {
+        if (editingId) await api(`/crew-time-off/${editingId}`, { method: "PUT", body: JSON.stringify(body) });
+        else await api("/crew-time-off", { method: "POST", body: JSON.stringify(body) });
+      } catch (e) { setMsg(apiErr(e, "Save failed"), false); return; }
+      const keepCo = draft.company_id;
+      editingId = null;
+      draft = blankDraft();
+      draft.company_id = keepCo;
+      renderForm();
+      setMsg("Saved.", true);
+      await refresh();
+      try { await onChange(); } catch { /* grid refresh is best-effort */ }
+    }
+
+    overlay.addEventListener("click", async (e) => {
+      if (e.target.closest("[data-to-close]")) { close(); return; }
+      if (e.target.closest("[data-to-save]")) { await save(); return; }
+      if (e.target.closest("[data-to-cancel]")) {
+        editingId = null; draft = blankDraft(); renderForm(); renderList(); return;
+      }
+      const ed = e.target.closest("[data-to-edit]");
+      if (ed) {
+        const r = entries.find(x => String(x.id) === ed.getAttribute("data-to-edit"));
+        if (!r) return;
+        editingId = r.id;
+        draft = {
+          company_id: String(r.company_id),
+          crew_count: r.crew_count == null ? 1 : r.crew_count,
+          all_crews: r.crew_count == null,
+          lead_ids: (r.lead_ids || []).map(String),
+          start_date: r.start_date, end_date: r.end_date, reason: r.reason || "",
+        };
+        renderForm(); renderList();
+        overlay.querySelector("[data-to-form]")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        return;
+      }
+      const del = e.target.closest("[data-to-del]");
+      if (del) {
+        const r = entries.find(x => String(x.id) === del.getAttribute("data-to-del"));
+        if (!r || !confirm(`Delete time off for ${r.company_name} (${r.count_label}, ${timeOffRangeLabel(r.start_date, r.end_date)})?`)) return;
+        try {
+          await api(`/crew-time-off/${r.id}`, { method: "DELETE" });
+        } catch (err) { alert("Failed to delete: " + apiErr(err, "error")); return; }
+        if (String(editingId) === String(r.id)) { editingId = null; draft = blankDraft(); renderForm(); }
+        await refresh();
+        try { await onChange(); } catch { /* best-effort */ }
+      }
+    });
+
+    overlay.addEventListener("change", (e) => {
+      const f = e.target.closest("[data-to-f]");
+      if (f) {
+        const k = f.getAttribute("data-to-f");
+        if (k === "all_crews") { draft.all_crews = f.checked; renderForm(); return; }
+        if (k === "company_id") {
+          draft.company_id = f.value; draft.lead_ids = [];
+          renderForm(); return;
+        }
+        if (k === "crew_count") { draft.crew_count = parseInt(f.value, 10) || ""; return; }
+        draft[k] = f.value;
+        // convenience: a start with no end yet → end = start
+        if (k === "start_date" && f.value && (!draft.end_date || draft.end_date < f.value)) {
+          draft.end_date = f.value;
+          const endEl = overlay.querySelector('[data-to-f="end_date"]');
+          if (endEl) endEl.value = f.value;
+        }
+        return;
+      }
+      const lead = e.target.closest("[data-to-lead]");
+      if (lead) {
+        const id = lead.getAttribute("data-to-lead");
+        draft.lead_ids = draft.lead_ids.map(String).filter(x => x !== id);
+        if (lead.checked) draft.lead_ids.push(id);
+        // the count is at least the number of named leads
+        if (!draft.all_crews && (Number(draft.crew_count) || 0) < draft.lead_ids.length) {
+          draft.crew_count = draft.lead_ids.length;
+          const nEl = overlay.querySelector('[data-to-f="crew_count"]');
+          if (nEl) nEl.value = String(draft.crew_count);
+        }
+        return;
+      }
+      if (e.target.closest("[data-to-past]")) { showPast = e.target.checked; renderList(); return; }
+      if (e.target.closest("[data-to-filter]")) { filterCo = e.target.value; renderList(); }
+    });
+    overlay.addEventListener("input", (e) => {
+      const f = e.target.closest('[data-to-f="reason"], [data-to-f="crew_count"]');
+      if (!f) return;
+      const k = f.getAttribute("data-to-f");
+      draft[k] = k === "crew_count" ? (parseInt(f.value, 10) || "") : f.value;
+    });
+
+    renderForm();
+    refresh();
+  }
+
+  // ── 0070: "Crew availability" slide-over ────────────────────────────────
+  // Estimators ask the office whether crews are free for a range before a
+  // project exists. GET /offers/crew-availability (shares the crew-roster
+  // booking loader) → per Crew Boss and per day: capacity − booked lines
+  // (incl. travel/overage) − crews on time off. "Whole range" = the minimum
+  // free on any (week)day of the range.
+  const availState = { start: "", end: "", need: "", weekends: false };
+
+  function openAvailabilityPane() {
+    document.getElementById("schAvailPane")?.remove();
+    if (!availState.start) {
+      const nm = addDays(mondayOf(new Date()), 7);
+      availState.start = ymd(nm);
+      availState.end = ymd(addDays(nm, 4));
+    }
+    const wrap = document.createElement("div");
+    wrap.id = "schAvailPane";
+    wrap.className = "schav-wrap";
+    wrap.innerHTML = `
+      <div class="schav-backdrop" data-av-close="1"></div>
+      <aside class="schav-pane" role="dialog" aria-label="Crew availability">
+        <div class="schav-head">
+          <div>
+            <div class="schav-title">Crew availability</div>
+            <div class="schav-sub">Free crews per Crew Boss — booked lines (incl. travel/overage) and crew time off are subtracted.</div>
+          </div>
+          <button type="button" class="schm-x" data-av-close="1" aria-label="Close">✕</button>
+        </div>
+        <div class="schav-form">
+          <label class="schav-f"><span class="schm-l">From</span>
+            <input type="date" class="input text-xs py-1.5" data-av="start" value="${escapeHtml(availState.start)}" /></label>
+          <label class="schav-f"><span class="schm-l">To</span>
+            <input type="date" class="input text-xs py-1.5" data-av="end" value="${escapeHtml(availState.end)}" /></label>
+          <label class="schav-f schav-f-n"><span class="schm-l">Crews needed</span>
+            <input type="number" min="1" step="1" class="input text-xs py-1.5" data-av="need" value="${escapeHtml(availState.need)}" placeholder="any" /></label>
+          <label class="schto-chk schav-wk"><input type="checkbox" data-av="weekends" ${availState.weekends ? "checked" : ""} /> Count weekends</label>
+          <button type="button" class="btn-primary text-xs px-3 py-1.5 schav-go" data-av-go="1">Check</button>
+        </div>
+        <div class="schav-results" data-av-results></div>
+      </aside>`;
+    document.body.appendChild(wrap);
+    const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", onKey);
+
+    const DOW = ["M", "T", "W", "T", "F", "S", "S"];
+    const md = (iso) => { const p = String(iso).slice(0, 10).split("-"); return `${Number(p[1])}/${Number(p[2])}`; };
+
+    let runSeq = 0;   // latest request wins (inputs fire change → run rapidly)
+    async function run() {
+      const seq = ++runSeq;
+      const res = wrap.querySelector("[data-av-results]");
+      wrap.querySelectorAll("[data-av]").forEach(f => {
+        const k = f.getAttribute("data-av");
+        availState[k] = k === "weekends" ? f.checked : f.value;
+      });
+      const { start, end } = availState;
+      if (!start || !end) { res.innerHTML = `<div class="schm-ro">Pick a From and To date.</div>`; return; }
+      if (end < start) { res.innerHTML = `<div class="schm-ro">To must be on or after From.</div>`; return; }
+      res.innerHTML = `<div class="ah-loading" style="padding:12px 16px;">Checking crews…</div>`;
+      const need = parseInt(availState.need, 10) || 0;
+      let d;
+      try {
+        d = await api(`/offers/crew-availability?start=${start}&end=${end}${need ? `&crews_needed=${need}` : ""}`);
+      } catch (e) {
+        if (seq === runSeq) res.innerHTML = `<div class="schm-ro" style="margin:12px 16px;">Failed to load availability: ${escapeHtml(apiErr(e, "error"))}</div>`;
+        return;
+      }
+      if (seq !== runSeq) return;
+      const useWk = !availState.weekends;
+      const comps = (d.companies || []).map(c => {
+        const days = c.days || [];
+        const counted = useWk ? days.filter(x => x.weekday < 5) : days;
+        const minFree = counted.length ? Math.min(...counted.map(x => x.free)) : 0;
+        return { ...c, minFree, counted };
+      });
+      comps.sort((a, b) => (b.capacity > 0) - (a.capacity > 0) || b.minFree - a.minFree || String(a.name).localeCompare(String(b.name)));
+      const totalFree = comps.reduce((s, c) => s + c.minFree, 0);
+      const meeting = need ? comps.filter(c => c.minFree >= need).length : comps.filter(c => c.minFree > 0).length;
+      const rangeTxt = `${md(d.start)}–${md(d.end)}${useWk ? " (weekdays)" : ""}`;
+      const cards = comps.map(c => {
+        const ok = need ? c.minFree >= need : c.minFree > 0;
+        const badge = c.capacity === 0
+          ? `<span class="schav-badge schav-b-none">no crews set</span>`
+          : `<span class="schav-badge ${ok ? "schav-b-ok" : "schav-b-no"}">${c.minFree} of ${c.capacity} free all range</span>`;
+        const strip = (c.days || []).map(x => {
+          const wkend = x.weekday >= 5;
+          const lvl = x.free <= 0 ? "schav-d0" : (need && x.free < need ? "schav-dlow" : "schav-dok");
+          const tip = `${md(x.date)}: ${x.free} free of ${c.capacity}` +
+            `${x.booked ? ` · ${x.booked} booked` : ""}${x.off ? ` · ${x.off} off` : ""}`;
+          return `<div class="schav-day ${lvl} ${wkend ? "schav-wkend" : ""}" title="${escapeHtml(tip)}">
+            <span class="schav-dow">${DOW[x.weekday]}${Number(x.date.slice(8, 10))}</span><span class="schav-n">${x.free}</span></div>`;
+        }).join("");
+        const offs = (c.time_off || []).map(t =>
+          `<div class="schav-li schav-li-off">Off: ${escapeHtml(t.count_label)} · ${escapeHtml(timeOffRangeLabel(t.start_date, t.end_date))}${t.reason ? ` · ${escapeHtml(t.reason)}` : ""}</div>`).join("");
+        const books = (c.bookings || []).map(b =>
+          `<div class="schav-li"><b>${escapeHtml(b.slot || "—")}</b>${b.lead ? ` · ${escapeHtml(b.lead)}` : ` · <span class="schav-tbd">lead TBD</span>`} — ${escapeHtml(b.project || "")} <span class="schav-dim">${md(b.from)}–${md(b.thru)}</span></div>`).join("");
+        const detailN = (c.bookings || []).length + (c.time_off || []).length;
+        return `
+          <div class="schav-card ${c.capacity === 0 ? "schav-card-dim" : ""}">
+            <div class="schav-chead">
+              <span class="schav-cname">${escapeHtml(c.name)}${c.code ? ` <span class="schav-dim">${escapeHtml(c.code)}</span>` : ""}${c.boss_name ? ` <span class="schav-dim">· ${escapeHtml(c.boss_name)}</span>` : ""}</span>
+              ${badge}
+            </div>
+            ${c.capacity ? `<div class="schav-strip">${strip}</div>` : ""}
+            ${detailN ? `<details class="schav-det"><summary>${(c.bookings || []).length} booked line${(c.bookings || []).length === 1 ? "" : "s"}${(c.time_off || []).length ? ` · ${(c.time_off || []).length} time off` : ""}</summary>${offs}${books}</details>` : ""}
+          </div>`;
+      }).join("");
+      res.innerHTML = `
+        <div class="schav-sum">
+          <b>${totalFree}</b> crew${totalFree === 1 ? "" : "s"} free for all of ${escapeHtml(rangeTxt)} ·
+          <b>${meeting}</b> Crew Boss${meeting === 1 ? "" : "es"} ${need ? `with ${need}+ free` : "with at least 1 free"}
+        </div>
+        <div class="schav-legend"><span class="schav-day schav-dok schav-lg"></span>free <span class="schav-day schav-dlow schav-lg"></span>fewer than needed <span class="schav-day schav-d0 schav-lg"></span>none · hover a day for booked / off</div>
+        ${cards || `<div class="ah-loading" style="padding:12px 16px;">No Crew Bosses found.</div>`}`;
+    }
+
+    wrap.addEventListener("click", (e) => {
+      if (e.target.closest("[data-av-close]")) { close(); return; }
+      if (e.target.closest("[data-av-go]")) run();
+    });
+    wrap.addEventListener("change", (e) => {
+      const f = e.target.closest("[data-av]");
+      if (!f) return;
+      const k = f.getAttribute("data-av");
+      availState[k] = k === "weekends" ? f.checked : f.value;
+      if (k === "start" && f.value && (!availState.end || availState.end < f.value)) {
+        availState.end = f.value;
+        const endEl = wrap.querySelector('[data-av="end"]');
+        if (endEl) endEl.value = f.value;
+      }
+      run();
+    });
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.closest("[data-av]")) run();
+    });
+    run();
+  }
+
   // --- fetch + render
   async function loadAndRender() {
     // CR4: keep the grid's scroll position across re-renders (modal saves
@@ -464,18 +859,18 @@ export async function schedulePage(routeFn) {
 
     const crews = data.crews || [];
     const assignments = data.assignments || [];
-    // 0063 CREW TIME-OFF: rows overlapping the visible window, grouped per
-    // company — rendered as a grey "Unavailable" block row under the company
-    // (visible even when the company has no project bars this month).
+    // 0063/0070 CREW TIME-OFF: rows overlapping the visible window, grouped
+    // per company — each greys crew_count of that company's lines per day.
     const timeOff = data.time_off || [];
+    const toUpcoming = timeOff.length;   // entries touching this month (toolbar badge)
     const toByCompany = new Map();
     for (const t of timeOff) {
       const k = String(t.company_id);
       if (!toByCompany.has(k)) toByCompany.set(k, []);
       toByCompany.get(k).push(t);
     }
-    // Quick-add is for admin/teams-capable users only (same holders as the
-    // Teams page's Work Crews editing); hidden otherwise.
+    // The "Crew time off" toolbar button is for admin/teams-capable users only
+    // (same holders as the Teams page's Work Crews editing); hidden otherwise.
     let canTimeOff = false;
     try { await fetchMe(); canTimeOff = hasCapability("page.teams"); } catch { /* hidden */ }
 
@@ -678,7 +1073,16 @@ export async function schedulePage(routeFn) {
       const n = Number(slot.slice(prefix.length));
       return Number.isFinite(n) ? n : 9998;
     }
-    const rowList = [];   // {key, label, companyId, companyName}
+    // 0070 CREW TIME-OFF (count model): per company per day, K crews out →
+    // grey K of the company's crew lines. Pick order per day: (1) lines whose
+    // code matches a NAMED lead on the time-off row (lead code JR3 → line
+    // JR3) while that line is free that day, (2) other FREE lines (nothing
+    // drawn that day), highest-numbered first, (3) only when K exceeds the
+    // free lines, BUSY lines, named ones first then highest-first (drawn
+    // as a conflict: hatched behind the bar + "Off" chip). A NULL crew_count
+    // (whole company) greys every line. offCells: "coId|slot" → ymd → rows.
+    const offCells = new Map();
+    const fullSlotsByCo = new Map();     // companyId -> sorted line list
     for (const p of parentsSorted) {
       const prefix = p.code || "";
       // CR5 A1: effective capacity — explicit override when set (0 honored),
@@ -687,46 +1091,63 @@ export async function schedulePage(routeFn) {
         ? Number(p.crew_capacity)
         : (childCountByParent.get(String(p.id)) || 0);
       const seen = new Set(slotsSeen.get(String(p.id)) || []);
-      if (state.crewView === "all" && prefix) {
-        for (let i = 1; i <= cap; i++) seen.add(`${prefix}${i}`);
+      if (prefix) for (let i = 1; i <= cap; i++) seen.add(`${prefix}${i}`);
+      const all = [...seen].sort((x, y) => slotOrd(prefix, x) - slotOrd(prefix, y) || String(x).localeCompare(String(y)));
+      fullSlotsByCo.set(String(p.id), { all, cap, prefix });
+
+      const entries = toByCompany.get(String(p.id)) || [];
+      if (!entries.length) continue;
+      const lines = all.filter(s => s !== "—");
+      for (let d = new Date(monthStart); d <= monthEnd; d = addDays(d, 1)) {
+        const ds = ymd(d);
+        const hits = entries.filter(t => t.start_date <= ds && t.end_date >= ds);
+        if (!hits.length) continue;
+        let k = 0;
+        for (const t of hits) k += t.crew_count == null ? lines.length : Number(t.crew_count || 0);
+        k = Math.min(k, lines.length);
+        if (!k) continue;
+        const busy = (s) => ((map.get(`${p.id}|${s}`) || new Map()).get(ds) || []).length > 0;
+        const named = [];
+        for (const t of hits) for (const l of (t.leads || [])) {
+          if (l.code && lines.includes(l.code) && !named.includes(l.code)) named.push(l.code);
+        }
+        const desc = [...lines].reverse();
+        const order = [...named.filter(s => !busy(s)), ...desc.filter(s => !busy(s)), ...named, ...desc.filter(s => busy(s))];
+        const picked = [...new Set(order)].slice(0, k);
+        for (const s of picked) {
+          const key = `${p.id}|${s}`;
+          if (!offCells.has(key)) offCells.set(key, new Map());
+          offCells.get(key).set(ds, hits);
+        }
       }
-      const slots = [...seen].sort((x, y) => slotOrd(prefix, x) - slotOrd(prefix, y) || String(x).localeCompare(String(y)));
-      for (const s of slots) {
+    }
+
+    const rowList = [];   // {key, label, companyId, companyName}
+    for (const p of parentsSorted) {
+      const { all, cap, prefix } = fullSlotsByCo.get(String(p.id));
+      const seen = new Set(slotsSeen.get(String(p.id)) || []);
+      for (const s of all) {
         const key = `${p.id}|${s}`;
         const hasItems = map.has(key) && [...map.get(key).values()].some(arr => arr.length);
-        if (state.crewView !== "all" && !hasItems) continue;
+        const hasOff = offCells.has(key);
+        // "Show All" = every line up to capacity (+ any seen slot); condensed
+        // = only lines with bars or greyed time-off this month.
+        const inAll = seen.has(s) || slotOrd(prefix, s) <= cap;
+        if (state.crewView === "all" ? !inAll : !(hasItems || hasOff)) continue;
         rowList.push({ key, label: s === "—" ? `${prefix || p.name}·?` : s, companyId: p.id, companyName: p.name });
       }
     }
     const visibleCrews = rowList;
 
-    // 0063: the grey "Unavailable" block row for one company + one week —
-    // empty string when none of the company's time-off touches the week.
-    // Label on each block: "<company or lead> — time off: <reason>".
-    function timeOffRowHtml(p, week) {
-      const entries = toByCompany.get(String(p.id)) || [];
-      if (!entries.length) return "";
-      const dayHits = week.map(d => {
-        const ds = ymd(d);
-        return entries.filter(t => t.start_date <= ds && t.end_date >= ds);
-      });
-      if (!dayHits.some(h => h.length)) return "";
-      const tds = dayHits.map(hits => {
-        if (!hits.length) return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top"></td>`;
-        const html = hits.map(t => {
-          const label = `${t.label || p.name} — time off${t.reason ? `: ${t.reason}` : ""}`;
-          return `
-            <div class="nwd-cell mb-px" title="${escapeHtml(label)}">
-              <div class="text-[10px] leading-tight font-semibold nwd-cell-label break-words">${escapeHtml(label)}</div>
-            </div>`;
-        }).join("");
-        return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top">${html}</td>`;
-      }).join("");
-      return `
-        <tr>
-          <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top" style="color:#4b5563;" title="${escapeHtml(p.name)} — crew time off">Off</td>
-          ${tds}
-        </tr>`;
+    // 0070: tooltip payload for an Unavailable (time-off) cell.
+    function offTipAttr(rows, companyName) {
+      return encodeURIComponent(JSON.stringify({
+        company: companyName,
+        rows: rows.map(t => ({
+          label: t.count_label || "", start: t.start_date, end: t.end_date,
+          note: t.reason || "", by: t.added_by || "", at: (t.created_at || "").slice(0, 10),
+        })),
+      }));
     }
 
     // Build the fixed day-of-week header row (Mon–Sun)
@@ -739,7 +1160,20 @@ export async function schedulePage(routeFn) {
       </tr>
     `;
 
-    function renderAssignmentCell(items, currentDate) {
+    // off = 0070 time-off rows greying this line on this day (or null).
+    function renderAssignmentCell(items, currentDate, off = null, companyName = "") {
+      if (off && off.length) {
+        const tip = offTipAttr(off, companyName);
+        if (items.length === 0) {
+          return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top schto-offtd">
+            <div class="schto-off" data-off-tip="${tip}"><span class="schto-off-lbl">Unavailable</span></div></td>`;
+        }
+        // Conflict: more crews out than free lines — the bar stays visible on
+        // a hatched cell with an "Off" chip.
+        const inner = renderAssignmentCell(items, currentDate)
+          .replace(/^<td class="([^"]*)">/, `<td class="$1 schto-offtd schto-conflict"><div class="schto-offchip" data-off-tip="${tip}">Off · conflict</div>`);
+        return inner;
+      }
       if (items.length === 0) return `<td class="px-1 py-0.5 border-b border-r border-black/10 align-top"></td>`;
 
       const html = items.map(it => {
@@ -875,33 +1309,28 @@ export async function schedulePage(routeFn) {
           </tr>`;
       }
 
-      // 0063: rows stay grouped per company (rowList order already is) so the
-      // grey time-off row can sit under that company's slot rows — and render
-      // even when the company has no visible project bars this month. The
-      // "+ time off" quick-add sits under the company's first slot label in
-      // the month's FIRST week block (admin/teams-capable users only).
+      // Rows grouped per company (rowList order). 0070: time-off greys whole
+      // crew lines (offCells) — managed from the toolbar "Crew time off"
+      // modal, no per-row button.
       const crewRows = parentsSorted.map(p => {
         const companyRows = visibleCrews.filter(c => String(c.companyId) === String(p.id));
-        const rowsHtml = companyRows.map((c, ci) => {
+        return companyRows.map((c) => {
           const inner = map.get(c.key) || new Map();
+          const offInner = offCells.get(c.key) || null;
 
           const tds = week.map(d => {
             const items = inner.get(ymd(d)) || [];
-            return renderAssignmentCell(items, d);
+            const off = offInner ? (offInner.get(ymd(d)) || null) : null;
+            return renderAssignmentCell(items, d, off, p.name);
           }).join("");
-
-          const addBtn = (canTimeOff && ci === 0 && weekIdx === 0)
-            ? `<div><button type="button" class="cto-add" data-cto-add="${p.id}" data-cto-name="${escapeHtml(p.name)}" title="Add time off — ${escapeHtml(p.name)}">+ time off</button></div>`
-            : "";
 
           return `
             <tr>
-              <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top" title="${escapeHtml(c.companyName || "")}">${escapeHtml(c.label)}${addBtn}</td>
+              <td class="text-[10px] px-1 py-0.5 font-extrabold border-b border-black/10 bg-white/60 whitespace-nowrap align-top" title="${escapeHtml(c.companyName || "")}">${escapeHtml(c.label)}</td>
               ${tds}
             </tr>
           `;
         }).join("");
-        return rowsHtml + timeOffRowHtml(p, week);
       }).join("");
 
       if (!crewRows && !ncRow) {
@@ -927,7 +1356,7 @@ export async function schedulePage(routeFn) {
               <div class="text-base font-extrabold">Schedule</div>
               <div class="text-xs text-black/60">Month view (Mon–Sun) by company crew slot (JR1…) ·
                 <span style="display:inline-block;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:0 2px;font-size:8px;font-weight:800;vertical-align:middle;">TBD</span>
-                = lead not assigned yet · <span class="nwd-legend"></span> = day off / crew time off · click a project to view/edit its assignment</div>
+                = lead not assigned yet · <span class="nwd-legend"></span> = day off · <span class="schto-legend"></span> = crew unavailable (time off) · click a project to view/edit its assignment</div>
             </div>
             <div class="flex items-center gap-2 flex-wrap justify-end">
               <div class="text-xs font-semibold text-black/60 whitespace-nowrap">${escapeHtml(monthLabel)}</div>
@@ -958,6 +1387,8 @@ export async function schedulePage(routeFn) {
               >
                 ${state.crewView === "all" ? "Show Condensed" : "Show All"}
               </button>
+              <button id="schAvailBtn" type="button" class="schto-tbtn" title="How many crews each Crew Boss has free for a date range">Crew availability</button>
+              ${canTimeOff ? `<button id="schTimeOffBtn" type="button" class="schto-tbtn" title="Add / edit crews that are unavailable (vacation etc.)">Crew time off${toUpcoming ? ` (${toUpcoming})` : ""}</button>` : ""}
               <button id="prevMonth" class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">← Prev</button>
               <button id="todayBtn" class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">Today</button>
               <button id="nextMonth" class="rounded-xl border border-black/15 px-3 py-1.5 text-xs font-semibold hover:bg-black/5">Next →</button>
@@ -1071,14 +1502,6 @@ export async function schedulePage(routeFn) {
       scrollHost.scrollLeft = prevScroll.left;
     }
     scrollHost?.addEventListener("click", (e) => {
-      // 0063: "+ time off" quick-add (admin/teams users only — the button
-      // only renders for them; the server re-checks regardless).
-      const addBtn = e.target.closest("[data-cto-add]");
-      if (addBtn) {
-        openTimeOffQuickAdd(addBtn, addBtn.getAttribute("data-cto-add"),
-                            addBtn.getAttribute("data-cto-name") || "");
-        return;
-      }
       const el = e.target.closest("[data-proj-open]");
       if (!el) return;
       const qid = el.getAttribute("data-proj-open");
@@ -1087,67 +1510,25 @@ export async function schedulePage(routeFn) {
       openAssignModal(qid, el.getAttribute("data-proj-pname") || "");
     });
 
-    // 0063: quick-add mini form — lead select optional (blank = the whole
-    // company is off), start, end, reason → POST /crew-time-off → redraw.
-    function openTimeOffQuickAdd(btn, companyId, companyName) {
-      document.getElementById("ctoPop")?.remove();
-      const leads = children.filter(ch => String(ch.parent_id) === String(companyId));
-      const pop = document.createElement("div");
-      pop.id = "ctoPop";
-      pop.className = "nwd-pop";
-      pop.innerHTML = `
-        <div class="nwd-title">Time off — ${escapeHtml(companyName)}</div>
-        <select data-cto-lead class="input text-xs py-1.5 w-full" style="margin-bottom:6px;">
-          <option value="">Whole company (${escapeHtml(companyName)})</option>
-          ${leads.map(l => `<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("")}
-        </select>
-        <div class="nwd-addrow">
-          <input type="date" data-cto-start class="input text-xs py-1.5" style="flex:1;min-width:0;" />
-          <input type="date" data-cto-end class="input text-xs py-1.5" style="flex:1;min-width:0;" />
-        </div>
-        <input type="text" data-cto-reason maxlength="160" placeholder="Reason (optional)" class="input text-xs py-1.5 w-full" style="margin-bottom:8px;" />
-        <div data-cto-msg style="font-size:11px;color:#b91c1c;min-height:14px;margin-bottom:4px;"></div>
-        <div class="nwd-foot">
-          <button type="button" class="nwd-addbtn" data-cto-cancel="1">Cancel</button>
-          <button type="button" class="btn-primary text-xs px-3 py-1.5" data-cto-save="1">Add</button>
-        </div>`;
-      document.body.appendChild(pop);
-      const r = btn.getBoundingClientRect();
-      pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 310))}px`;
-      pop.style.top = `${Math.max(8, Math.min(r.bottom + 6, window.innerHeight - pop.offsetHeight - 8))}px`;
-      const closePop = () => {
-        pop.remove();
-        document.removeEventListener("mousedown", onOutside, true);
-        document.removeEventListener("keydown", onEsc);
-      };
-      const onOutside = (ev) => { if (!pop.contains(ev.target) && ev.target !== btn) closePop(); };
-      const onEsc = (ev) => { if (ev.key === "Escape") closePop(); };
-      document.addEventListener("mousedown", onOutside, true);
-      document.addEventListener("keydown", onEsc);
-      pop.querySelector("[data-cto-cancel]").addEventListener("click", closePop);
-      pop.querySelector("[data-cto-save]").addEventListener("click", async () => {
-        const msg = pop.querySelector("[data-cto-msg]");
-        const leadVal = pop.querySelector("[data-cto-lead]").value;
-        const s = pop.querySelector("[data-cto-start]").value;
-        const en = pop.querySelector("[data-cto-end]").value;
-        const reason = pop.querySelector("[data-cto-reason]").value.trim();
-        msg.style.color = "#b91c1c";
-        if (!s || !en) { msg.textContent = "Start and end dates are required."; return; }
-        if (en < s) { msg.textContent = "End must be on or after start."; return; }
-        msg.style.color = "#047857"; msg.textContent = "Saving…";
-        try {
-          await api("/crew-time-off", { method: "POST", body: JSON.stringify({
-            crew_id: Number(leadVal || companyId), start_date: s, end_date: en,
-            reason: reason || null }) });
-          closePop();
-          await loadAndRender();
-        } catch (err) {
-          let friendly = err?.message || "Save failed";
-          try { const p2 = JSON.parse(friendly); if (p2 && p2.detail) friendly = String(p2.detail); } catch { /* not JSON */ }
-          msg.style.color = "#b91c1c"; msg.textContent = friendly;
-        }
+    // 0070: Unavailable (time-off) cell tooltip — company, count/leads,
+    // range, note, who added it and when.
+    document.querySelectorAll("[data-off-tip]").forEach(el => {
+      el.addEventListener("mouseenter", e => {
+        let data;
+        try { data = JSON.parse(decodeURIComponent(el.getAttribute("data-off-tip") || "")); } catch { return; }
+        const rows = (data.rows || []).map(r => `
+          <div class="mt-1 text-black/70"><span class="font-semibold">${escapeHtml(r.label)}</span> · ${escapeHtml(timeOffRangeLabel(r.start, r.end))}</div>
+          ${r.note ? `<div class="text-black/60">Note: ${escapeHtml(r.note)}</div>` : ""}
+          ${r.by ? `<div class="text-black/45 text-[11px]">Added by ${escapeHtml(r.by)}${r.at ? ` on ${escapeHtml(r.at)}` : ""}</div>` : ""}`).join("");
+        showTip(`<div class="font-extrabold mb-0.5" style="color:#4b5563;">Unavailable — ${escapeHtml(data.company || "")}</div>${rows}`,
+                e.clientX, e.clientY);
       });
-    }
+      el.addEventListener("mouseleave", hideTip);
+    });
+
+    document.getElementById("schTimeOffBtn")?.addEventListener("click", () =>
+      openTimeOffModal({ companies: parentsSorted, children, onChange: loadAndRender }));
+    document.getElementById("schAvailBtn")?.addEventListener("click", () => openAvailabilityPane());
 
     // --- Wire navigation buttons
     document.getElementById("prevMonth").onclick = () => {

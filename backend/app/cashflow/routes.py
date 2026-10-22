@@ -41,6 +41,24 @@ def credit_cards(_user=Depends(require_capability("page.cashflow"))):
     return service.get_credit_cards()
 
 
+@router.get("/revenue-forecast")
+def revenue_forecast(
+    start_month: Optional[str] = Query(None, description="First month YYYY-MM (defaults to this month)"),
+    months: int = Query(12, ge=1, le=60),
+    _user=Depends(require_capability("page.cashflow")),
+):
+    """B151 Rolling Summary rebuilt from app data: monthly earned revenue
+    (won projects + probability-weighted pipeline), GP, overhead, owner comp."""
+    from . import revenue_forecast as RF
+    sm = None
+    if start_month:
+        try:
+            sm = datetime.strptime(start_month + "-01", "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start_month must be YYYY-MM")
+    return RF.build(start=sm, months=months)
+
+
 @router.get("/forecast")
 def forecast(
     start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to the coming Friday)"),

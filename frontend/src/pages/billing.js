@@ -34,6 +34,10 @@ function pill(label) {
   const cls = PILL[label] || (String(label).startsWith("Partial") ? "text-amber-700 bg-amber-50 border border-amber-200" : PILL.Allocated);
   return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${cls}">${escapeHtml(label)}</span>`;
 }
+// Milestone aligned to an actual QBO invoice (billing/align.py) — its dates,
+// amount and status follow that invoice; the status pill names it on hover
+// (zero extra width: the milestone table is already at full card width).
+const qboTitle = (m) => m.qbo_invoice_doc ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc)} — dates, amount and status follow the invoice"` : "";
 const editedChip = (e) => e ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
 
 // Assignment-workflow glue (#4): corner toast after the offer-accept confirm —
@@ -224,7 +228,7 @@ function render(container, entityId, d) {
       <td class="py-1 px-2">${eInput("milestone", m.id, "due_date", m.due_date, "date")}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "expected_paid_date", m.expected_paid_date, "date")}</td>
       <td class="py-1 px-2 text-right"><input data-edit="milestone" data-id="${m.id}" data-field="amount" type="number" step="0.01" value="${m.amount != null ? Math.round(m.amount * 100) / 100 : ""}" class="${EDIT_BASE} w-[6.5rem] text-right tabular-nums font-semibold ml-auto"></td>
-      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(m.status_label)}${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
+      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap"><span${qboTitle(m)}>${pill(m.status_label)}</span>${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`;
   const invEstimateCard = (a) => {
     const nr = !a.confirmed;

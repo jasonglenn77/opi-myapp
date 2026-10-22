@@ -1445,6 +1445,14 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
         except Exception:
             # Never let the summary refresh fail a successful sync.
             pass
+        # Align per-estimate invoice schedules to the fresh QBO invoices (sent /
+        # paid dates + status, restructure when billing deviated from the plan).
+        # Best-effort; run_after_sync never raises.
+        try:
+            from app.billing.align import run_after_sync
+            run_after_sync()
+        except Exception:
+            pass
         # Refresh the chart of accounts too, so cash-flow opening balances stay
         # current. Best-effort: never let it fail an otherwise-successful sync.
         try:

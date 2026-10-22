@@ -59,6 +59,8 @@ from app.crewauth.routes import router as crewauth_router
 from app.forms.routes import router as forms_router
 from app.crewportal.routes import router as crewportal_router
 from app.receipts.routes import router as receipts_router
+from app.gsync.routes import router as review_router
+from app.gsync.docs_routes import router as drive_docs_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -86,6 +88,8 @@ app.include_router(crewauth_router)
 app.include_router(forms_router)
 app.include_router(crewportal_router)
 app.include_router(receipts_router)
+app.include_router(review_router)
+app.include_router(drive_docs_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -1458,18 +1462,25 @@ def disable_work_crew(crew_id: int, admin=Depends(require_admin)):
 
 
 # -----------------------------
-# Crew time-off (0063, OPI feedback 2026-10-07 #3)
+# Crew time-off (0063 → 0070 count model)
 # -----------------------------
-# crew_id = a COMPANY (parent row: whole company off) or a LEAD (child row:
-# that one crew off). Gate mirrors the work-crews endpoints (admin / the
-# page.teams holders those imply) BUT, like the CR2 passcode manager, a
-# page.pm_portal user may also create/delete — scoped to crews on THEIR
-# projects via crewauth._manageable_crew_ids (None = unrestricted).
+# A row = company_id has crew_count crews out for start..end (NULL count =
+# the whole company), optionally naming the specific lead(s) (lead_ids).
+# Legacy callers (Teams panel) still POST {crew_id}: a company id = whole
+# company, a lead id = 1 crew of its company with that lead named. Gate
+# mirrors the work-crews endpoints (admin / page.teams) BUT, like the CR2
+# passcode manager, a page.pm_portal user may also manage — scoped to crews
+# on THEIR projects via crewauth._manageable_crew_ids (None = unrestricted).
+# Shared read/count logic lives in app/crew/timeoff.py.
 
 class CrewTimeOffCreateRequest(BaseModel):
-    crew_id: int
-    start_date: str          # YYYY-MM-DD
-    end_date: str            # YYYY-MM-DD, inclusive, >= start_date
+    company_id: Optional[int] = None   # the Crew Boss company (work_crews parent)
+    crew_id: Optional[int] = None      # legacy 0063: company OR lead id
+    crew_count: Optional[int] = None   # crews out; ignored when all_crews
+    all_crews: bool = False            # whole company off (stored as NULL count)
+    lead_ids: Optional[list] = None    # optional specific leads out
+    start_date: str                    # YYYY-MM-DD
+    end_date: str                      # YYYY-MM-DD, inclusive, >= start_date
     reason: Optional[str] = None
 
 
@@ -1484,72 +1495,21 @@ def _time_off_manager(user=Depends(get_current_user)):
     raise HTTPException(status_code=403, detail="Insufficient permissions")
 
 
-def _time_off_rows(conn, where, params):
-    rows = conn.execute(text(f"""
-        SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
-               cto.created_at,
-               wc.name AS crew_name, wc.parent_id,
-               COALESCE(wc.parent_id, wc.id) AS company_id,
-               COALESCE(pc.name, wc.name) AS company_name,
-               TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) AS added_by_name,
-               u.email AS added_by_email
-        FROM crew_time_off cto
-        JOIN work_crews wc ON wc.id = cto.crew_id
-        LEFT JOIN work_crews pc ON pc.id = wc.parent_id
-        LEFT JOIN users u ON u.id = cto.created_by_user_id
-        WHERE {where}
-    """), params).mappings().all()
+def _sort_time_off(rows):
+    """Upcoming-first: current/future ranges by start date, past ranges last
+    (most recent past first)."""
     from datetime import date
-    today = date.today()
-    out = [{
-        "id": r["id"], "crew_id": r["crew_id"],
-        "level": "lead" if r["parent_id"] is not None else "company",
-        "company_id": int(r["company_id"]),
-        "company_name": r["company_name"],
-        "crew_name": r["crew_name"],
-        "start_date": str(r["start_date"]), "end_date": str(r["end_date"]),
-        "reason": r["reason"],
-        "added_by": (r["added_by_name"] or "").strip() or r["added_by_email"],
-        "created_at": str(r["created_at"]) if r["created_at"] else None,
-        "_past": r["end_date"] < today,
-    } for r in rows]
-    # Upcoming-first: current/future ranges by start date, past ranges last
-    # (most recent past first).
-    upcoming = sorted((r for r in out if not r["_past"]),
+    today = date.today().isoformat()
+    upcoming = sorted((r for r in rows if r["end_date"] >= today),
                       key=lambda x: (x["start_date"], x["id"]))
-    past = sorted((r for r in out if r["_past"]),
+    past = sorted((r for r in rows if r["end_date"] < today),
                   key=lambda x: (x["start_date"], x["id"]), reverse=True)
-    out = upcoming + past
-    for x in out:
-        x.pop("_past", None)
-    return out
+    return upcoming + past
 
 
-@app.get("/api/crew-time-off")
-def list_crew_time_off(crew_id: Optional[int] = None, user=Depends(_time_off_manager)):
-    """All time-off (or one crew's). crew_id of a COMPANY also returns its
-    leads' rows so the Teams panel shows the whole company in one list. A
-    pm_portal-scoped user only sees rows for crews on their projects."""
-    from .crewauth.routes import _manageable_crew_ids
-    from .db import engine
-    with engine.connect() as conn:
-        allowed = _manageable_crew_ids(conn, user)
-        if crew_id is not None:
-            rows = _time_off_rows(
-                conn, "cto.crew_id = :cid OR wc.parent_id = :cid", {"cid": int(crew_id)})
-        else:
-            rows = _time_off_rows(conn, "1=1", {})
-    if allowed is not None:
-        rows = [r for r in rows if int(r["crew_id"]) in allowed
-                or int(r["company_id"]) in allowed]
-    return {"time_off": rows}
-
-
-@app.post("/api/crew-time-off")
-def create_crew_time_off(req: CrewTimeOffCreateRequest, user=Depends(_time_off_manager)):
+def _normalize_time_off(conn, req: CrewTimeOffCreateRequest):
+    """Validate + resolve a create/update body to the stored columns."""
     from datetime import date
-    from .crewauth.routes import _manageable_crew_ids
-    from .db import engine
 
     def _d(s, label):
         try:
@@ -1561,56 +1521,169 @@ def create_crew_time_off(req: CrewTimeOffCreateRequest, user=Depends(_time_off_m
         raise HTTPException(status_code=400, detail="End date must be on or after the start date")
     reason = (req.reason or "").strip() or None
     if reason and len(reason) > 160:
-        raise HTTPException(status_code=400, detail="Reason is too long (max 160 characters)")
+        raise HTTPException(status_code=400, detail="Note is too long (max 160 characters)")
 
-    with engine.connect() as conn:
-        crew = conn.execute(text(
-            "SELECT id, name, parent_id FROM work_crews WHERE id = :id"),
+    crew_count = req.crew_count
+    all_crews = bool(req.all_crews)
+    lead_ids = []
+    for x in (req.lead_ids or []):
+        try:
+            lead_ids.append(int(x))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid lead id")
+    company_id = req.company_id
+    if company_id is None:
+        if req.crew_id is None:
+            raise HTTPException(status_code=400, detail="Pick a Crew Boss")
+        legacy = conn.execute(text(
+            "SELECT id, parent_id FROM work_crews WHERE id = :id"),
             {"id": int(req.crew_id)}).mappings().first()
-        if not crew:
+        if not legacy:
             raise HTTPException(status_code=404, detail="Crew not found")
+        if legacy["parent_id"] is None:
+            company_id = int(legacy["id"])
+            if crew_count is None and not lead_ids:
+                all_crews = True
+        else:
+            company_id = int(legacy["parent_id"])
+            if int(legacy["id"]) not in lead_ids:
+                lead_ids.append(int(legacy["id"]))
+
+    company = conn.execute(text(
+        "SELECT id, name, parent_id FROM work_crews WHERE id = :id"),
+        {"id": int(company_id)}).mappings().first()
+    if not company or company["parent_id"] is not None:
+        raise HTTPException(status_code=404, detail="Crew Boss company not found")
+    lead_ids = list(dict.fromkeys(lead_ids))
+    if lead_ids:
+        ph = ",".join(str(i) for i in lead_ids)
+        ok = conn.execute(text(
+            f"SELECT COUNT(*) FROM work_crews WHERE parent_id = :c AND id IN ({ph})"),
+            {"c": int(company_id)}).scalar()
+        if int(ok or 0) != len(lead_ids):
+            raise HTTPException(status_code=400, detail="Picked leads must belong to that Crew Boss")
+    if all_crews:
+        crew_count = None
+    else:
+        if crew_count is None:
+            crew_count = len(lead_ids) or None
+        if crew_count is None:
+            raise HTTPException(status_code=400, detail="How many crews are unavailable?")
+        crew_count = int(crew_count)
+        if crew_count < 1 or crew_count > 50:
+            raise HTTPException(status_code=400, detail="Number of crews must be between 1 and 50")
+        if len(lead_ids) > crew_count:
+            crew_count = len(lead_ids)
+    return {
+        "company_id": int(company_id), "company_name": company["name"],
+        "crew_count": crew_count, "lead_ids": lead_ids,
+        "start_date": sd.isoformat(), "end_date": ed.isoformat(), "reason": reason,
+    }
+
+
+def _check_time_off_scope(conn, user, company_id):
+    from .crewauth.routes import _manageable_crew_ids
+    allowed = _manageable_crew_ids(conn, user)
+    if allowed is not None and int(company_id) not in allowed:
+        raise HTTPException(status_code=403,
+                            detail="You can only manage time off for crews assigned to your projects")
+
+
+def _time_off_audit_payload(v):
+    return {"company_id": v["company_id"], "crew_count": v["crew_count"],
+            "lead_ids": v["lead_ids"], "start_date": str(v["start_date"]),
+            "end_date": str(v["end_date"]), "reason": v["reason"]}
+
+
+@app.get("/api/crew-time-off")
+def list_crew_time_off(crew_id: Optional[int] = None, company_id: Optional[int] = None,
+                       user=Depends(_time_off_manager)):
+    """All time-off (or one company's — crew_id is the legacy name; a lead id
+    resolves to its company). A pm_portal-scoped user only sees rows for
+    companies on their projects."""
+    from .crewauth.routes import _manageable_crew_ids
+    from .crew.timeoff import load_time_off, serialize
+    from .db import engine
+    cid = company_id if company_id is not None else crew_id
+    with engine.connect() as conn:
         allowed = _manageable_crew_ids(conn, user)
-        if allowed is not None and int(req.crew_id) not in allowed:
-            raise HTTPException(status_code=403,
-                                detail="You can only manage time off for crews assigned to your projects")
+        if cid is not None:
+            co = conn.execute(text("SELECT COALESCE(parent_id, id) FROM work_crews WHERE id = :id"),
+                              {"id": int(cid)}).scalar()
+            rows = load_time_off(conn, "COALESCE(cto.company_id, cto.crew_id) = :cid",
+                                 {"cid": int(co or cid)})
+        else:
+            rows = load_time_off(conn)
+    out = [serialize(r) for r in rows]
+    if allowed is not None:
+        out = [r for r in out if int(r["company_id"]) in allowed]
+    return {"time_off": _sort_time_off(out)}
+
+
+@app.post("/api/crew-time-off")
+def create_crew_time_off(req: CrewTimeOffCreateRequest, user=Depends(_time_off_manager)):
+    from .db import engine
+    with engine.connect() as conn:
+        v = _normalize_time_off(conn, req)
+        _check_time_off_scope(conn, user, v["company_id"])
     with engine.begin() as conn:
         new_id = conn.execute(text("""
-            INSERT INTO crew_time_off (crew_id, start_date, end_date, reason, created_by_user_id)
-            VALUES (:c, :s, :e, :r, :u)
-        """), {"c": int(req.crew_id), "s": sd.isoformat(), "e": ed.isoformat(),
-               "r": reason, "u": user.get("id")}).lastrowid
+            INSERT INTO crew_time_off (crew_id, company_id, crew_count, lead_ids,
+                                       start_date, end_date, reason, created_by_user_id)
+            VALUES (:co, :co, :n, :leads, :s, :e, :r, :u)
+        """), {"co": v["company_id"], "n": v["crew_count"],
+               "leads": json.dumps(v["lead_ids"]) if v["lead_ids"] else None,
+               "s": v["start_date"], "e": v["end_date"],
+               "r": v["reason"], "u": user.get("id")}).lastrowid
 
-    record_audit(user, "crew.time_off_add", "crew_time_off", new_id, crew["name"],
-                 {"crew_id": int(req.crew_id),
-                  "level": "lead" if crew["parent_id"] is not None else "company",
-                  "start_date": sd.isoformat(), "end_date": ed.isoformat(),
-                  "reason": reason})
+    record_audit(user, "crew.time_off_add", "crew_time_off", new_id, v["company_name"],
+                 _time_off_audit_payload(v))
     return {"ok": True, "id": int(new_id)}
+
+
+@app.put("/api/crew-time-off/{time_off_id}")
+def update_crew_time_off(time_off_id: int, req: CrewTimeOffCreateRequest,
+                         user=Depends(_time_off_manager)):
+    from .crew.timeoff import load_time_off
+    from .db import engine
+    with engine.connect() as conn:
+        old = load_time_off(conn, "cto.id = :id", {"id": time_off_id})
+        if not old:
+            raise HTTPException(status_code=404, detail="Time-off entry not found")
+        old = old[0]
+        _check_time_off_scope(conn, user, old["company_id"])
+        v = _normalize_time_off(conn, req)
+        _check_time_off_scope(conn, user, v["company_id"])
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE crew_time_off
+            SET crew_id = :co, company_id = :co, crew_count = :n, lead_ids = :leads,
+                start_date = :s, end_date = :e, reason = :r,
+                updated_by_user_id = :u, updated_at = NOW()
+            WHERE id = :id
+        """), {"co": v["company_id"], "n": v["crew_count"],
+               "leads": json.dumps(v["lead_ids"]) if v["lead_ids"] else None,
+               "s": v["start_date"], "e": v["end_date"], "r": v["reason"],
+               "u": user.get("id"), "id": time_off_id})
+    old_payload = _time_off_audit_payload({**old, "lead_ids": [l["id"] for l in old["leads"]]})
+    record_audit(user, "crew.time_off_edit", "crew_time_off", time_off_id, v["company_name"],
+                 {"before": old_payload, "after": _time_off_audit_payload(v)})
+    return {"ok": True}
 
 
 @app.delete("/api/crew-time-off/{time_off_id}")
 def delete_crew_time_off(time_off_id: int, user=Depends(_time_off_manager)):
-    from .crewauth.routes import _manageable_crew_ids
+    from .crew.timeoff import load_time_off
     from .db import engine
     with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT cto.id, cto.crew_id, cto.start_date, cto.end_date, cto.reason,
-                   wc.name AS crew_name, wc.parent_id
-            FROM crew_time_off cto JOIN work_crews wc ON wc.id = cto.crew_id
-            WHERE cto.id = :id
-        """), {"id": time_off_id}).mappings().first()
-        if not row:
+        rows = load_time_off(conn, "cto.id = :id", {"id": time_off_id})
+        if not rows:
             raise HTTPException(status_code=404, detail="Time-off entry not found")
-        allowed = _manageable_crew_ids(conn, user)
-        if allowed is not None and int(row["crew_id"]) not in allowed:
-            raise HTTPException(status_code=403,
-                                detail="You can only manage time off for crews assigned to your projects")
+        row = rows[0]
+        _check_time_off_scope(conn, user, row["company_id"])
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM crew_time_off WHERE id = :id"), {"id": time_off_id})
 
-    record_audit(user, "crew.time_off_remove", "crew_time_off", time_off_id, row["crew_name"],
-                 {"crew_id": row["crew_id"],
-                  "level": "lead" if row["parent_id"] is not None else "company",
-                  "start_date": str(row["start_date"]), "end_date": str(row["end_date"]),
-                  "reason": row["reason"]})
+    record_audit(user, "crew.time_off_remove", "crew_time_off", time_off_id, row["company_name"],
+                 _time_off_audit_payload({**row, "lead_ids": [l["id"] for l in row["leads"]]}))
     return {"ok": True}
