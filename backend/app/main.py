@@ -1266,9 +1266,8 @@ def list_work_crews(_admin=Depends(require_admin)):
         d["active_lead_count"] = int(d.get("active_lead_count") or 0)
         # effective capacity is a company (parent-row) concept
         if d.get("parent_id") is None:
-            d["effective_capacity"] = (int(d["crew_capacity"])
-                                       if d.get("crew_capacity") is not None
-                                       else d["active_lead_count"])
+            # Lines = the crew count on Team Management (leads are names only)
+            d["effective_capacity"] = int(d["crew_capacity"] or 0)
         else:
             d["effective_capacity"] = None
         out.append(d)

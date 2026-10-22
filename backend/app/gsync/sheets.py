@@ -349,11 +349,40 @@ def _font(c):
         return None
 
 
+# Crew line labels per calendar tab (GT, GT2 ... GT7), filled by
+# parse_job_schedule - empty lines included, so a boss's line count is the
+# number of rows the office keeps for it, not just the busy ones.
+LINES_BY_TAB = {}
+
+
+def crew_line_counts(today=None):
+    """{company code: number of crew lines} from the tab covering `today`
+    (sheet ABR/ABM = app AB; a code with no digit is line 1)."""
+    today = today or dt.date.today()
+    tab = None
+    for name, t in LINES_BY_TAB.items():
+        year, mons = t["months"]
+        if today.month in mons and today.year == year:
+            tab = t
+            break
+    if not tab:
+        return {}
+    counts = {}
+    for c in tab["lines"]:
+        m = re.fullmatch(r"([A-Z]+?)(\d*)", c)
+        if not m:
+            continue
+        pre = "AB" if m.group(1) in ("ABR", "ABM") else m.group(1)
+        counts.setdefault(pre, set()).add(int(m.group(2) or 1) or 1)
+    return {k: max(v) for k, v in counts.items()}
+
+
 def parse_job_schedule(xlsx_bytes, since=None):
     """Day cells for calendar tabs that reach `since` or later."""
     op = _openpyxl()
     wb = op.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
     recs = {}
+    LINES_BY_TAB.clear()
     for name in wb.sheetnames:
         tm = _tab_months(name)
         if not tm:
@@ -393,6 +422,7 @@ def parse_job_schedule(xlsx_bytes, since=None):
                 crew = str(vals[5 * d] or "").strip().upper()
                 if not re.fullmatch(r"[A-Z]{2,4}\d?", crew):
                     continue
+                LINES_BY_TAB.setdefault(name, {"months": (year, mons), "lines": set()})["lines"].add(crew)
                 job, desc, ex = (_val(vals[5 * d + k]) for k in (1, 2, 3))
                 job = str(job) if job is not None else None
                 desc = str(desc) if desc is not None else None

@@ -190,8 +190,8 @@ def crew_availability(start: str, end: str, crews_needed: Optional[int] = None,
                       user=Depends(get_current_user)):
     """Schedules-page "Crew availability" search (estimators asking the office
     whether crews are free before a project exists). Per Crew Boss company and
-    per day of start..end: capacity (crew_capacity override, else active-lead
-    count — same as crew-roster), booked = distinct crew lines busy that day
+    per day of start..end: capacity (the crew count on Team Management — same
+    as crew-roster), booked = distinct crew lines busy that day
     (assignment start - travel-before .. true end + travel-after, the same span
     the Schedule grid draws), off = crews out on 0070 time-off, free =
     max(0, capacity - booked - off). Summary: min_free (free on EVERY day —
@@ -217,8 +217,7 @@ def crew_availability(start: str, end: str, crews_needed: Optional[int] = None,
     out = []
     for c in companies:
         cid = int(c["id"])
-        capacity = int(c["crew_capacity"] if c["crew_capacity"] is not None
-                       else len(leads_by_co.get(cid, [])))
+        capacity = int(c["crew_capacity"] or 0)     # the crew count on Team Management
         # booking spans (travel split like the grid: ceil before, floor after)
         spans = []
         for b in by_co.get(cid, []):
@@ -278,7 +277,7 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
                 end: Optional[str] = None, user=Depends(get_current_user)):
     """Crew Model v2 (CR3) browse-crews panel: ONE CARD PER COMPANY —
     "MTY · Jesse Rosales Jr. · X of Y crews available". Y = crew_capacity
-    (fallback: active-lead count); X = Y minus the slots occupied by that
+    (the crew count on Team Management); X = Y minus the slots occupied by that
     company's assignments overlapping the project's window (true end = end +
     overage days; the project's own assignments don't count against it).
     Each card carries the occupied-slot list ("JR1 · Gustavo Ramirez — 6304
@@ -334,7 +333,7 @@ def crew_roster(project_qbo_id: Optional[str] = None, start: Optional[str] = Non
                 "thru": str(b_end),
             })
         occupied_rows.sort(key=lambda x: (x["slot"] or "~", x["thru"]))
-        capacity = c["crew_capacity"] if c["crew_capacity"] is not None else len(leads_by_co.get(cid, []))
+        capacity = int(c["crew_capacity"] or 0)     # the crew count on Team Management
 
         # 0063/0070 time-off overlapping the same occupancy window [ws, we]
         # (we None = open-ended, today onward). AVAILABILITY RULE (count

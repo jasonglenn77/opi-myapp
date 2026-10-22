@@ -461,9 +461,7 @@ export async function schedulePage(routeFn) {
 
   function openTimeOffModal({ companies, children, onChange }) {
     document.getElementById("schToModal")?.remove();
-    const capOf = (co) => co.crew_capacity != null
-      ? Number(co.crew_capacity)
-      : children.filter(ch => String(ch.parent_id) === String(co.id)).length;
+    const capOf = (co) => Number(co.crew_capacity || 0);   // the crew count on Team Management
     const leadsOf = (coId) => children
       .filter(ch => String(ch.parent_id) === String(coId))
       .sort((a, b) => String(a.code || "").localeCompare(String(b.code || ""), undefined, { numeric: true }));
@@ -1058,7 +1056,7 @@ export async function schedulePage(routeFn) {
     }
 
     // --- Build the visible rows: per company, its slots (JR1…). "Show All"
-    // pads every company up to its crew_capacity (fallback: lead count);
+    // pads every company up to its crew count (Team Management);
     // condensed = only slots that have items this month.
     function slotOrd(prefix, slot) {
       if (!slot || !prefix || !slot.startsWith(prefix)) return 9999;
@@ -1076,11 +1074,9 @@ export async function schedulePage(routeFn) {
     const fullSlotsByCo = new Map();     // companyId -> sorted line list
     for (const p of parentsSorted) {
       const prefix = p.code || "";
-      // CR5 A1: effective capacity — explicit override when set (0 honored),
-      // else auto = the live active-lead count.
-      const cap = p.crew_capacity != null
-        ? Number(p.crew_capacity)
-        : (childCountByParent.get(String(p.id)) || 0);
+      // Lines = the crew count set on Team Management (mirrors the Job
+      // Schedule's lines while OPI schedules in Google). Leads don't add lines.
+      const cap = Number(p.crew_capacity || 0);
       const seen = new Set(slotsSeen.get(String(p.id)) || []);
       if (prefix) for (let i = 1; i <= cap; i++) seen.add(`${prefix}${i}`);
       const all = [...seen].sort((x, y) => slotOrd(prefix, x) - slotOrd(prefix, y) || String(x).localeCompare(String(y)));

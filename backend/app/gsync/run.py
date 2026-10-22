@@ -74,6 +74,26 @@ def refresh_b151(who="manual", dry_run=False, actor=None):
         raise
 
 
+def sync_crew_capacity(counts, who="sync"):
+    """While OPI runs the Job Schedule in Google, each crew boss's crew count
+    (Team Management) mirrors the number of lines the sheet keeps for it; the
+    Schedules page draws exactly that many lines (JR1...JRn). Changes audited."""
+    if not counts:
+        return {}
+    changed = {}
+    with engine.begin() as conn:
+        for r in conn.execute(text(
+                "SELECT id, code, crew_capacity FROM work_crews WHERE parent_id IS NULL AND code IS NOT NULL")).mappings():
+            n = counts.get(r["code"])
+            if n and n != r["crew_capacity"]:
+                conn.execute(text("UPDATE work_crews SET crew_capacity = :n WHERE id = :id"), {"n": n, "id": r["id"]})
+                changed[r["code"]] = [r["crew_capacity"], n]
+    if changed:
+        record_audit({"email": f"gsync:{who}"}, "crew.capacity_from_job_schedule", "work_crew", None,
+                     "Crew counts updated from the Job Schedule", {"changes": changed})
+    return {"counts": counts, "changed": changed}
+
+
 def refresh_schedule(who="manual"):
     run_id = _start("job_schedule", who)
     try:
@@ -83,6 +103,7 @@ def refresh_schedule(who="manual"):
             sheets.store_job_schedule(conn, recs)
         summary = {"cells": len(recs), "from": str(min(r["day"] for r in recs)) if recs else None,
                    "to": str(max(r["day"] for r in recs)) if recs else None}
+        summary["crew_lines"] = sync_crew_capacity(sheets.crew_line_counts(), who)
         _finish(run_id, True, summary, modified=meta.get("modifiedTime"))
         return summary
     except Exception as e:
