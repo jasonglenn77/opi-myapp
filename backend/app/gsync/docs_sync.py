@@ -62,8 +62,20 @@ CLI (inside the backend container):
   python -m app.gsync.docs_sync --dry-run                 # full plan, counts only
   python -m app.gsync.docs_sync --apply                   # full backfill / resume
   python -m app.gsync.docs_sync --apply --incremental     # changes since last run
+  python -m app.gsync.docs_sync --reconcile [--reuse-walk] [--only-job N] [--no-record]
+                                                          # Drive vs app quality check (read-only)
   options: --limit N  --only-job NNNN  --only-path TEXT  --only-file DRIVEID
            --prefix KEYPREFIX  --workers N  --budget-min M  --reuse-walk  --quiet
+Removed in Drive: a copied file that is trashed/deleted/moved out of Customers
+(Changes API removed/trashed, its folder gone, or missing from the weekly full
+walk) stays in the app; its row gets drive_removed_at + drive_removed_reason
+(cleared if the file comes back) and Data Review lists it (removed_in_drive).
+A file moved to another folder is re-filed instead.
+
+Reconcile: reconcile() compares Drive with the documents rows per project
+folder (missing / changed / misfiled / extra) after every complete full walk
+(weekly + right after the backfill); gsync_runs source 'drive_reconcile'.
+
 Progress + summary: gsync_runs (source 'drive_docs'); per-file errors:
 drive_file_state (retried by the next run). Only one run at a time
 (MySQL GET_LOCK), so cron and a manual run cannot overlap.
@@ -752,7 +764,7 @@ def _load_docs():
         out = {}
         for r in conn.execute(text("""
                 SELECT id, source_drive_id, entity_type, entity_id, folder, drive_path, drive_parent_id, drive_md5,
-                       drive_modified, s3_key, original_filename
+                       drive_modified, s3_key, original_filename, size_bytes, drive_removed_at
                 FROM documents WHERE source_drive_id IS NOT NULL ORDER BY id""")).mappings():
             out.setdefault(r["source_drive_id"], dict(r))
         skips = {r[0] for r in conn.execute(text(
@@ -841,7 +853,8 @@ def _do(t):
             conn.execute(text("""
                 UPDATE documents SET entity_type = :t, entity_id = :i, folder = :f, s3_bucket = :b, s3_key = :k,
                   original_filename = :fn, content_type = :ct, size_bytes = :sz, drive_md5 = :m5, drive_modified = :mod,
-                  drive_path = :dp, drive_link = :dl, drive_parent_id = :par
+                  drive_path = :dp, drive_link = :dl, drive_parent_id = :par, drive_removed_at = NULL,
+                  drive_removed_reason = NULL
                 WHERE id = :id"""), {**p, "id": ex["id"]})
         else:
             conn.execute(text("""
@@ -853,7 +866,7 @@ def _do(t):
                   original_filename = VALUES(original_filename), content_type = VALUES(content_type),
                   size_bytes = VALUES(size_bytes), drive_md5 = VALUES(drive_md5), drive_modified = VALUES(drive_modified),
                   drive_path = VALUES(drive_path), drive_link = VALUES(drive_link),
-                  drive_parent_id = VALUES(drive_parent_id)"""), p)
+                  drive_parent_id = VALUES(drive_parent_id), drive_removed_at = NULL, drive_removed_reason = NULL"""), p)
         conn.execute(text("DELETE FROM drive_file_state WHERE drive_id = :d AND status = 'error'"), {"d": t["id"]})
     if ex and ex.get("s3_key") and ex["s3_key"] != key:
         try:
@@ -884,6 +897,43 @@ def _needs_move(t):
     ex = t.get("existing")
     return ex and (ex["entity_type"], str(ex["entity_id"]), ex["folder"], ex["drive_path"] or "", ex["drive_parent_id"]) != \
         (t["etype"], str(t["eid"]), t["folder"], t["drive_path"][:1024], t["parent"])
+
+
+REMOVED_REASONS = {
+    "trashed": "moved to the Drive trash",
+    "deleted": "deleted from Drive",
+    "moved_out": "moved out of the Customers folder",
+    "folder_removed": "its Drive folder was trashed, deleted or moved out of Customers",
+    "missing": "no longer found in its Drive folder (weekly re-check)",
+}
+
+
+def _mark_removed(cands, docs):
+    """Stamp drive_removed_at on rows whose Drive file is gone. The app keeps
+    the copy; an already-stamped row keeps its first date. Returns count."""
+    by_reason = collections.defaultdict(list)
+    for did, reason in cands.items():
+        ex = docs.get(did)
+        if ex and not ex.get("drive_removed_at"):
+            by_reason[reason].append(ex["id"])
+    n = 0
+    with engine.begin() as conn:
+        for reason, ids in by_reason.items():
+            for i in range(0, len(ids), 1000):
+                n += conn.execute(text("""UPDATE documents SET drive_removed_at = UTC_TIMESTAMP(),
+                                            drive_removed_reason = :r
+                                          WHERE id IN :ids AND drive_removed_at IS NULL""").bindparams(
+                    bindparam("ids", expanding=True)), {"r": reason, "ids": ids[i:i + 1000]}).rowcount
+    return n
+
+
+def _clear_removed(ids):
+    """A file stamped removed is back in Drive (restored from the trash)."""
+    with engine.begin() as conn:
+        for i in range(0, len(ids), 1000):
+            conn.execute(text("""UPDATE documents SET drive_removed_at = NULL, drive_removed_reason = NULL
+                                 WHERE id IN :ids""").bindparams(bindparam("ids", expanding=True)),
+                         {"ids": ids[i:i + 1000]})
 
 
 class Progress:
@@ -999,8 +1049,8 @@ def _template_md5(tree, files):
 
 
 def _changes(token, quiet):
-    """All changes since `token`: (changed folders, changed files, removed ids, new token)."""
-    folders, files, removed = {}, {}, set()
+    """All changes since `token`: (changed folders, changed files, {removed id: 'trashed' | 'deleted'}, new token)."""
+    folders, files, removed = {}, {}, {}
     tok, new = token, None
     while tok:
         d = _drive_get("/changes", {"pageToken": tok, "pageSize": 1000, "fields": CHANGE_FIELDS,
@@ -1009,7 +1059,7 @@ def _changes(token, quiet):
         for c in d.get("changes", []):
             f = c.get("file") or {}
             if c.get("removed") or f.get("trashed"):
-                removed.add(c.get("fileId"))
+                removed[c.get("fileId")] = "trashed" if f.get("trashed") else "deleted"
                 folders.pop(c.get("fileId"), None)
                 files.pop(c.get("fileId"), None)
                 continue
@@ -1055,7 +1105,7 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
         t0 = _now()
         deadline = t0 + budget_min * 60 if budget_min else None
         summary = {"mode": mode, "prefix": prefix, "filtered": filtered}
-        removed = set()
+        removed = {}
 
         if mode == "full":
             cache = _walk_cache_path()
@@ -1119,6 +1169,7 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
                         return False
             return True
 
+        gone = {}          # documents rows whose Drive file is gone: {drive id: reason}
         tasks = []
         for f in files:
             if filtered and not keep(f):
@@ -1127,6 +1178,8 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
             if t:
                 t["full_path"] = ((tree.path(f[6]) or "") + "/" + f[1]).strip("/")
                 tasks.append(t)
+            elif mode == "incremental" and f[0] in docs:
+                gone[f[0]] = "moved_out"          # moved to a folder outside Customers
 
         planned_ids = {t["id"] for t in tasks}
         # re-home existing rows not in this plan (incremental), by their parent folder
@@ -1138,10 +1191,42 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
                 tgt = res.resolve(ex["drive_parent_id"], (ex["drive_path"] or ex["original_filename"] or "").split("/")[-1])
                 if tgt:
                     rehome.append({"id": did, "existing": ex, "parent": ex["drive_parent_id"], **tgt})
-        if mode == "full" and not filtered:
-            summary["removed_in_drive"] = sum(1 for d in docs if d not in planned_ids)
+                elif mode == "incremental" and did not in removed:
+                    gone[did] = "folder_removed"      # its folder was trashed / moved out of Customers
+
+        # files removed in Drive: the app keeps its copy, the row is stamped (Data Review asks to confirm)
+        if mode == "full":
+            walked = {f[0] for f in files}
+
+            def in_scope(did, ex):
+                if not filtered:
+                    return True
+                if only_file:
+                    return did == only_file
+                par = ex["drive_parent_id"]
+                if not (only_job or only_path) or not par or tree.path(par) is None:
+                    return False
+                if only_path and only_path.lower() not in (tree.path(par) or "").lower():
+                    return False
+                if only_job:
+                    r = tree.root_of(par)
+                    return bool(r and only_job in res.match(r)["nums"])
+                return True
+            miss = {did: "missing" for did, ex in docs.items() if did not in walked and in_scope(did, ex)}
+            # a walk that came back far smaller than what the app already holds is
+            # more likely a Drive/API problem than a mass deletion: don't stamp
+            if not filtered and docs and len(files) < len(docs) * 0.5:
+                summary["removal_guard"] = (f"walk found {len(files)} files but the app holds {len(docs)} Drive "
+                                            "copies - removals not recorded this run")
+                miss = {}
+            gone.update(miss)
         else:
-            summary["removed_in_drive"] = sum(1 for r in removed if r in docs)
+            gone.update({r: why for r, why in removed.items() if r in docs})
+        new_gone = {d: w for d, w in gone.items() if not docs[d].get("drive_removed_at")}
+        restores = [t["existing"]["id"] for t in tasks if t["existing"] and t["existing"].get("drive_removed_at")]
+        summary["removed_in_drive"] = len(new_gone)
+        summary["removed_reasons"] = dict(collections.Counter(new_gone.values()))
+        summary["restored_in_drive"] = len(restores)
 
         acts = collections.Counter(t["action"] for t in tasks)
         abytes = collections.Counter()
@@ -1203,11 +1288,15 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
                 _log(f"move failed {t['id']}: {e}", quiet)
         left = execute(work, workers, deadline, prog)
         prog.stop.set()
+        if restores:
+            _clear_removed(restores)
+        marked = _mark_removed(new_gone, docs) if new_gone else 0
         auto = _auto_resolve_holds(res)
         _refresh_hold_counts()
         done = prog.snapshot()
         done.pop("running", None)
-        summary.update({"result": done, "deferred": left, "auto_linked_holds": auto, "partial": bool(left)})
+        summary.update({"result": done, "deferred": left, "auto_linked_holds": auto, "partial": bool(left),
+                        "removed_marked": marked})
         with engine.begin() as conn:
             set_state(conn, "template_md5", json.dumps(tmpl))
             if not filtered and not left:
@@ -1217,6 +1306,13 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
                     if not backfill_done:
                         set_state(conn, "backfill_completed_at", datetime.utcnow().isoformat(timespec="seconds"))
         summary["elapsed_s"] = int(_now() - t0)
+        if mode == "full" and not filtered and not left:
+            # post-sync quality check (weekly, and right after the backfill completes)
+            try:
+                rc = reconcile(folders, files, who=f"{who}:after_full_sync", quiet=quiet)
+                summary["reconcile"] = rc.get("totals")
+            except Exception as e:
+                summary["reconcile"] = {"error": f"{type(e).__name__}: {e}"}
         _finish_run(run_id, done.get("errors", 0) == 0, summary,
                     error=f"{done.get('errors')} file(s) failed - see drive_file_state" if done.get("errors") else None)
         return summary
@@ -1227,6 +1323,155 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
     finally:
         if lock:
             _release(lock)
+
+
+RECON_SOURCE = "drive_reconcile"
+RECON_KEEP = 1500          # mismatched folders kept in the run summary (largest first)
+
+
+def reconcile(folders=None, files=None, only_job=None, reuse_walk=False, who="cli", record=True, quiet=False):
+    """Post-backfill quality check: Drive vs the app's documents rows, per Drive
+    project folder (or holding group). Read-only apart from the gsync_runs row.
+
+    For every folder: Drive files/bytes that should be in the app (junk, known
+    blank templates and files deleted in the app excluded) vs the documents
+    rows, and the differences:
+      missing   in Drive, no documents row (should have been copied)
+      errors    missing, but a copy error is recorded (drive_file_state)
+      changed   Drive md5 (or modified time for Google files) differs from the copy
+      misfiled  the row sits on a different record/folder than the folder's match
+      extra     a row whose Drive file is no longer in Drive (extra_unflagged =
+                the sync has not stamped it drive_removed_at yet)
+      stale_flag  stamped removed but the file is back in Drive
+    Called after every complete full sync (weekly + right after the backfill)
+    with the walk already in memory; the CLI walks Drive (or --reuse-walk).
+    Recorded in gsync_runs (source 'drive_reconcile'); Data Review shows one
+    item per mismatched folder (review_docs.py)."""
+    t0 = _now()
+    if folders is None:
+        cache = _walk_cache_path()
+        if reuse_walk and os.path.exists(cache) and _now() - os.path.getmtime(cache) < 36 * 3600:
+            w = json.load(open(cache, encoding="utf-8"))
+            folders, files = w["folders"], [tuple(x) for x in w["files"]]
+            _log(f"reconcile: reusing walk cache {cache}", quiet)
+        else:
+            folders, files = walk(quiet)
+    tree = Tree(folders)
+    tree.compute_roots()
+    tmpl = _template_md5(tree, files)
+    with engine.connect() as conn:
+        matcher = Matcher(conn)
+        errs = {r[0] for r in conn.execute(text("SELECT drive_id FROM drive_file_state WHERE status = 'error'"))}
+        holds = {r[0]: str(r[1]) for r in conn.execute(text("SELECT drive_folder_id, id FROM drive_unmatched_folders"))}
+    res = Resolver(tree, matcher)
+    docs, skips = _load_docs()
+
+    def in_job(key):
+        return not only_job or (key in tree.roots and only_job in res.match(key)["nums"])
+
+    agg = collections.defaultdict(collections.Counter)
+    ex_missing = collections.defaultdict(list)
+    ex_extra = collections.defaultdict(list)
+    app_ent = {}
+    walked = set()
+    for f in files:
+        walked.add(f[0])
+        t = plan_file(f, res, docs, skips, tmpl, "reconcile")
+        if t is None:
+            continue
+        key = t["root"] or t["group"]
+        if not in_job(key):
+            continue
+        a = agg[key]
+        if t["action"].startswith("skip"):
+            a["skipped"] += 1
+            continue
+        a["drive_files"] += 1
+        a["drive_bytes"] += t["size"]
+        ex = t["existing"]
+        if not ex:
+            if f[0] in errs:
+                a["errors"] += 1
+            else:
+                a["missing"] += 1
+                a["missing_bytes"] += t["size"]
+                if len(ex_missing[key]) < 5:
+                    ex_missing[key].append(t["drive_path"])
+            continue
+        a["app_files"] += 1
+        a["app_bytes"] += int(ex["size_bytes"] or 0)
+        if t["action"] != "unchanged":
+            a["changed"] += 1
+        if t["etype"] == "drive_hold":
+            t["eid"] = holds.get(t["group"])
+        if _needs_move(t):
+            a["misfiled"] += 1
+        if ex.get("drive_removed_at"):
+            a["stale_flag"] += 1
+    for did, ex in docs.items():
+        if did in walked:
+            continue
+        par = ex["drive_parent_id"]
+        key = None
+        if par and (par == ROOT or tree.path(par) is not None):
+            key = ROOT if par == ROOT else (tree.root_of(par) or tree.hold_group(par))
+        if key is None:
+            if only_job:
+                continue
+            key = f"app:{ex['entity_type']}:{ex['entity_id']}"
+            app_ent[key] = (ex["entity_type"], str(ex["entity_id"]))
+        elif not in_job(key):
+            continue
+        a = agg[key]
+        a["app_files"] += 1
+        a["app_bytes"] += int(ex["size_bytes"] or 0)
+        a["extra"] += 1
+        if not ex.get("drive_removed_at"):
+            a["extra_unflagged"] += 1
+        if len(ex_extra[key]) < 5:
+            ex_extra[key].append(ex["drive_path"] or ex["original_filename"])
+
+    bad_keys = ("missing", "errors", "changed", "misfiled", "extra_unflagged", "stale_flag")
+    totals = collections.Counter()
+    out = []
+    for key, a in agg.items():
+        totals.update(a)
+        if not any(a[k] for k in bad_keys):
+            continue
+        rec = {"key": key, **{k: int(v) for k, v in a.items()}}
+        if key in app_ent:
+            rec.update(path=None, entity_type=app_ent[key][0], entity_id=app_ent[key][1])
+        else:
+            rec["path"] = tree.path(key) or "(Customers top level)"
+            if key in tree.roots:
+                m = res.match(key)
+                rec.update(entity_type=m["entity_type"], entity_id=m["entity_id"], match=m["kind"],
+                           label=(m["note"] or "")[:200])
+            if not rec.get("entity_type") and key in holds:
+                rec.update(entity_type="drive_hold", entity_id=holds[key])
+        if ex_missing.get(key):
+            rec["missing_examples"] = ex_missing[key]
+        if ex_extra.get(key):
+            rec["extra_examples"] = ex_extra[key]
+        out.append(rec)
+    out.sort(key=lambda r: -(r.get("missing", 0) + r.get("errors", 0) + r.get("changed", 0) + r.get("misfiled", 0)
+                             + r.get("extra_unflagged", 0) + r.get("stale_flag", 0)))
+    summary = {"filtered": bool(only_job), "only_job": only_job, "folders_checked": len(agg),
+               "folders_mismatched": len(out),
+               "totals": {k: int(totals[k]) for k in ("drive_files", "drive_bytes", "app_files", "app_bytes", "missing",
+                                                      "missing_bytes", "errors", "changed", "misfiled", "extra",
+                                                      "extra_unflagged", "stale_flag", "skipped")},
+               "elapsed_s": int(_now() - t0), "folders": out[:RECON_KEEP], "truncated": len(out) > RECON_KEEP}
+    summary["totals"]["folders_mismatched"] = len(out)
+    summary["clean"] = not out
+    if record:
+        with engine.begin() as conn:
+            conn.execute(text("""INSERT INTO gsync_runs (source, triggered_by, finished_at, ok, summary)
+                                 VALUES (:s, :w, NOW(), 1, :m)"""),
+                         {"s": RECON_SOURCE, "w": who, "m": json.dumps(summary, default=str)})
+            summary["run_id"] = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+    _log(f"reconcile: {len(agg)} folders checked, {len(out)} mismatched, totals {summary['totals']}", quiet)
+    return summary
 
 
 def nightly(who="cron"):
@@ -1256,7 +1501,15 @@ def main(argv=None):
     ap.add_argument("--budget-min", type=float)
     ap.add_argument("--reuse-walk", action="store_true", help="reuse the last walk (< 36 h old) instead of re-walking")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--reconcile", action="store_true",
+                    help="Drive vs app quality check only (read-only; recorded in gsync_runs drive_reconcile)")
+    ap.add_argument("--no-record", action="store_true", help="with --reconcile: print only, no gsync_runs row")
     a = ap.parse_args(argv)
+    if a.reconcile:
+        s = reconcile(only_job=a.only_job, reuse_walk=a.reuse_walk, who="cli", record=not a.no_record, quiet=a.quiet)
+        s["folders"] = s["folders"][:20]
+        print(json.dumps(s, indent=1, default=str))
+        return
     mode = "auto" if a.auto else "incremental" if a.incremental else "full"
     s = run(mode=mode, apply=a.apply and not a.dry_run, limit=a.limit, only_job=a.only_job, only_path=a.only_path,
             only_file=a.only_file, prefix=a.prefix, workers=a.workers, budget_min=a.budget_min, who="cli",

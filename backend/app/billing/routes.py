@@ -45,6 +45,7 @@ from app.payments.routes import (
 from app.projects.routes import _operational_status, _latest_status
 from app.offers.routes import _offer_rows, _estimate_suggestions
 from app.billing.align import align_project, record_alignment
+from app.billing.retainage import is_retainage, held as retainage_held, release_dates as retainage_release
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -576,7 +577,7 @@ def _compose_estimates(conn, entity_id):
         {"e": entity_id}).mappings().all():
         ms = conn.execute(text("""
             SELECT id, seq, label, pct, invoice_date, due_date, expected_paid_date,
-                   amount, status, note, edited, qbo_invoice_id
+                   amount, status, note, edited, amount_edited, qbo_invoice_id
             FROM project_invoice_milestones WHERE schedule_id=:sid ORDER BY seq, id
         """), {"sid": s["id"]}).mappings().all()
         scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
@@ -604,15 +605,18 @@ def _compose_estimates(conn, entity_id):
             paid = max(0.0, min(covered, inv_amt - bal))
             est_invoiced -= inv_amt
             est_collected -= (inv_amt - bal)
+            held = float(a.get("retainage") or 0)
             if bal <= 0.01:
                 tier, label = "realized", "Paid"
+            elif held > 0.01:
+                tier, label = "retainage", "Retainage held"
             elif paid > EPS:
                 tier, label = "committed", f"Partial · ${round(bal):,} due"
             else:
                 tier, label = "committed", "Sent · A/R"
             out[m["id"]] = {"tier": tier, "label": label, "covered": round(covered, 2),
                             "paid": round(paid, 2), "remaining": round(amt - covered, 2),
-                            "doc": a.get("doc_number")}
+                            "doc": a.get("doc_number"), "retainage": round(held, 2)}
         for m in sorted(rest, key=lambda m: (str(m["invoice_date"] or "9999"), m["seq"] or 0)):
             amt = float(m["amount"] or 0)
             covered = min(amt, max(0.0, est_invoiced - cum))   # sent (invoiced)
@@ -642,6 +646,8 @@ def _compose_estimates(conn, entity_id):
             "covered": t["covered"], "paid": t["paid"], "remaining": t["remaining"],
             "status_label": t["label"], "status": m["status"],
             "qbo_invoice_id": m.get("qbo_invoice_id"), "qbo_invoice_doc": t.get("doc"),
+            "retainage_held": t.get("retainage") or 0.0,
+            "amount_edited": bool(m.get("amount_edited")),
         }
 
     unlinked = actuals_by_est.get("", [])
@@ -673,6 +679,20 @@ def _compose_estimates(conn, entity_id):
         h_paid = round(sum(mo["paid"] for mo in milestones), 2)
         h_sent_ar = round(sum(mo["covered"] - mo["paid"] for mo in milestones), 2)
         h_tobill = round(sum(mo["remaining"] for mo in milestones), 2)
+        h_ret = round(sum(float(x.get("retainage") or 0) for x in est_actuals), 2)
+        ms_total = round(sum(m["amount"] for m in milestones), 2)
+        # The schedule auto-adds-up (billing/align.py trues the un-overridden rows
+        # up to the current estimate). When it doesn't, say WHY: the user's own
+        # amount overrides, or invoices beyond the estimate.
+        off = round(ms_total - float(e["value"] or 0), 2)
+        if abs(off) <= 0.5 or not milestones:
+            sum_state = "ok"
+        elif off > 0 and est_invoiced > float(e["value"] or 0) + 0.5:
+            sum_state = "overbilled"
+        elif any(m["amount_edited"] for m in milestones):
+            sum_state = "user_override"
+        else:
+            sum_state = "pending_align"
         accepted.append({
             "qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"],
             "labor": e["labor"], "confirmed": e["confirmed"], "crew_id": e["crew_id"],
@@ -680,11 +700,20 @@ def _compose_estimates(conn, entity_id):
             "invoice_subtotal": round(sum(m["amount"] for m in milestones), 2),
             "invoice_actuals": est_actuals,
             "paid": h_paid, "sent_ar": h_sent_ar, "to_bill": h_tobill,
+            "retainage_held": h_ret, "schedule_off": off, "schedule_sum_state": sum_state,
             "crew_schedule_id": (cs["id"] if cs else None),
             "crew_installments": cinsts,
         })
+    # Retainage held on this project's invoices (paid except a held-back 5-15%)
+    # — with how long each has been held and when release is expected.
+    est_doc = {str(e["qbo_id"]): e["doc_number"] for e in ests}
+    ret_invs = [{**h, "estimate_doc": est_doc.get(str(h.get("estimate_qbo_id") or ""))}
+                for h in retainage_held(conn, [entity_id])]
+    rel = retainage_release(conn, [entity_id]).get(str(entity_id)) if ret_invs else None
     return {
         "accepted": accepted, "pending": pending, "needs_review": needs_review,
+        "retainage": {"held": round(sum(x["held"] for x in ret_invs), 2), "invoices": ret_invs,
+                      "release_expected": rel.isoformat() if rel else None},
         "invoiced_qbo": round(invoiced, 2), "collected": collected, "open_ar": round(open_ar, 2),
         "contract_total": round(sum(a["value"] for a in accepted), 2),
     }
@@ -804,6 +833,7 @@ def _actual_invoices(conn, entity_id):
     for r in rows:
         total = float(r["total_amt"] or 0)
         bal = float(r["balance_amt"] or 0)
+        ret = is_retainage(total, bal, r["raw_json"])
         out.append({
             "qbo_id": str(r["qbo_id"]), "doc_number": r["doc_number"],
             "estimate_doc": _linked_estimate_doc(r["raw_json"], est_docs),
@@ -811,7 +841,9 @@ def _actual_invoices(conn, entity_id):
             "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
             "due_date": str(r["due_date"]) if r["due_date"] else None,
             "amount": round(total, 2), "balance": round(bal, 2),
-            "status": "Paid" if bal <= 0.01 else ("Partial" if bal < total else "Open"),
+            "status": "Paid" if bal <= 0.01 else ("Retainage" if ret else "Partial" if bal < total else "Open"),
+            # paid except a held-back 5-15% (billing/retainage.py): held, not overdue A/R
+            "retainage": round(bal, 2) if ret else 0.0,
         })
     return out
 
@@ -1644,7 +1676,8 @@ def update_terms(entity_id: str, body: TermsUpdate, user=Depends(get_current_use
         locked_ids = set()
         for a in _compose_estimates(conn, entity_id).get("accepted", []):
             for m in a.get("milestones", []):
-                if (m.get("status") or "").lower() in ("sent", "paid") or m.get("tier") in ("realized", "committed"):
+                if ((m.get("status") or "").lower() in ("sent", "paid", "partial", "retainage")
+                        or m.get("tier") in ("realized", "committed", "retainage") or m.get("qbo_invoice_id")):
                     locked_ids.add(m["id"])
         scheds = conn.execute(text(
             "SELECT id, contract_value FROM project_invoice_schedules WHERE entity_id=:e"),
@@ -1784,6 +1817,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         "collected": inv["summary"]["paid"],
         "open_ar": inv["summary"]["ar"],
         "unbilled": inv["summary"]["scheduled"],
+        "retainage": estimates.get("retainage", {}).get("held", 0.0),
         "crew_left": crew["summary"]["scheduled"],
         "expenses_left": exp["summary"]["allocated"],
     }

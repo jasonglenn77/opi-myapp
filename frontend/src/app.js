@@ -164,8 +164,13 @@ async function route() {
   if (hash === "#/contacts") return contactsPage(route);
   if (hash === "#/pipeline") return pipelinePage(route);
   if (hash.startsWith("#/entity/")) {
-    const m = hash.match(/^#\/entity\/(estimate|job|project)\/(.+)$/);
-    if (m) return entityDetailPage(route, { entityType: m[1], entityId: decodeURIComponent(m[2]) });
+    const m = hash.match(/^#\/entity\/(estimate|job|project)\/([^?]+)(?:\?tab=([a-z]+))?$/);
+    if (m) {
+      // "?tab=billing" (e.g. Data Review links) opens that tab — same one-shot
+      // hint the Projects hub / Tracker set before navigating.
+      if (m[3]) { try { sessionStorage.setItem("opi_entity_tab", m[3]); } catch (_) {} }
+      return entityDetailPage(route, { entityType: m[1], entityId: decodeURIComponent(m[2]) });
+    }
     location.hash = "#/customers";
     return;
   }

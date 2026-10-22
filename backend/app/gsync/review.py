@@ -549,7 +549,7 @@ def build():
     counts = collections.Counter((i["category"], i["state"]) for i in items)
     return {"items": items,
             "counts": {c: {"open": counts[(c, "open")], "fixed": counts[(c, "fixed")], "ignored": counts[(c, "ignored")]}
-                       for c in ("todo", "pipeline", "schedule", "sheets", "documents", "billing")},
+                       for c in ("todo", "pipeline", "schedule", "sheets", "documents", "old_estimates", "billing")},
             "meta": {**p_meta, **s_meta}}
 
 

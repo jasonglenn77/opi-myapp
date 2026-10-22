@@ -18,6 +18,7 @@ const DOT = {
   committed: '<span class="inline-block w-2.5 h-2.5 rounded-full bg-ink-900 align-middle"></span>',
   partial:   '<span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-500 align-middle"></span>',
   scheduled: '<span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 align-middle"></span>',
+  retainage: '<span class="inline-block w-2.5 h-2.5 rounded-full align-middle bl-ret-dot"></span>',
   estimated: '<span class="inline-block w-2.5 h-2.5 rounded-full border-[1.5px] border-black/40 align-middle"></span>',
 };
 const PILL = {
@@ -30,8 +31,12 @@ const PILL = {
   "Not spent":   "text-rose-700 bg-rose-50 border border-rose-200",
   Allocated:     "text-black/45 bg-transparent border border-black/15",
 };
+// Held retainage (paid except a held-back 5-15%) — its own colour: money that
+// comes at release, not overdue A/R.
+const RET_PILL = "bl-ret-pill";
 function pill(label) {
-  const cls = PILL[label] || (String(label).startsWith("Partial") ? "text-amber-700 bg-amber-50 border border-amber-200" : PILL.Allocated);
+  const cls = PILL[label] || (String(label).startsWith("Partial") ? "text-amber-700 bg-amber-50 border border-amber-200"
+    : String(label).startsWith("Retainage") ? RET_PILL : PILL.Allocated);
   return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${cls}">${escapeHtml(label)}</span>`;
 }
 // Milestone aligned to an actual QBO invoice (billing/align.py) — its dates,
@@ -161,8 +166,8 @@ function render(container, entityId, d) {
   const crewLeft = Math.max(0, crewLaborEst - crewPaid);
 
   // ── roll-up KPIs + burn bars ──
-  const kpi = (label, val, cls = "") =>
-    `<div class="px-4 py-3 bg-white"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1">${label}</div><div class="text-lg font-bold tabular-nums ${cls}">${money(val)}</div></div>`;
+  const kpi = (label, val, cls = "", sub = "") =>
+    `<div class="px-4 py-3 bg-white"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-1">${label}</div><div class="text-lg font-bold tabular-nums ${cls}">${money(val)}</div>${sub ? `<div class="text-[10.5px] text-black/45 tabular-nums">${sub}</div>` : ""}</div>`;
   const burnRow = (label, sub, bar) =>
     `<div class="mb-3"><div class="flex justify-between items-baseline text-[12px] mb-1"><span class="font-semibold text-ink-900">${escapeHtml(label)}</span><span class="text-black/50">${escapeHtml(sub)}</span></div>${bar}</div>`;
   const invBar = burnBar([
@@ -228,7 +233,7 @@ function render(container, entityId, d) {
       <td class="py-1 px-2">${eInput("milestone", m.id, "due_date", m.due_date, "date")}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "expected_paid_date", m.expected_paid_date, "date")}</td>
       <td class="py-1 px-2 text-right"><input data-edit="milestone" data-id="${m.id}" data-field="amount" type="number" step="0.01" value="${m.amount != null ? Math.round(m.amount * 100) / 100 : ""}" class="${EDIT_BASE} w-[6.5rem] text-right tabular-nums font-semibold ml-auto"></td>
-      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap"><span${qboTitle(m)}>${pill(m.status_label)}</span>${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
+      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap"><span${m.tier === "retainage" ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc || "")} is paid except ${money(m.retainage_held)} the customer is holding back (retainage) — expected at release, not overdue"` : qboTitle(m)}>${pill(m.tier === "retainage" ? `Retainage · ${money(m.retainage_held)}` : m.status_label)}</span>${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`;
   const invEstimateCard = (a) => {
     const nr = !a.confirmed;
@@ -239,13 +244,26 @@ function render(container, entityId, d) {
     // Σ reconciliation footer: milestone total vs the estimate's value.
     const msTotal = a.milestones.reduce((s, m) => s + (m.amount || 0), 0);
     const msPct = a.value ? Math.round((msTotal / a.value) * 1000) / 10 : 0;
-    const msOff = Math.abs(msTotal - (a.value || 0)) > 0.5;
-    const sumLine = a.milestones.length ? `<div class="px-4 py-1.5 border-t border-black/[0.06] text-[11px] tabular-nums ${msOff ? "text-amber-700 font-semibold bg-amber-50" : "text-black/45"}">Σ ${money2(msTotal)} of ${money2(a.value)} (${msPct}%)${msOff ? " — milestones don't add up to the estimate" : ""}</div>` : "";
+    // The schedule adds up to the estimate automatically (un-overridden rows
+    // true up on every load); only hand-set amounts can pull it off — then say
+    // so plainly, with the gap and a one-click way back to automatic.
+    const off = Math.round((msTotal - (a.value || 0)) * 100) / 100;
+    const msOff = Math.abs(off) > 0.5;
+    const ss = a.schedule_sum_state || (msOff ? "user_override" : "ok");
+    const gap = `${money2(Math.abs(off))} ${off < 0 ? "short of" : "over"} the estimate`;
+    let sumLine = "";
+    if (a.milestones.length && !msOff) {
+      sumLine = `<div class="px-4 py-1.5 border-t border-black/[0.06] text-[11px] tabular-nums text-black/45" title="The rows you haven't set by hand adjust automatically so the schedule always totals the current QuickBooks estimate">Σ ${money2(msTotal)} of ${money2(a.value)} (${msPct}%) · adds up to the estimate</div>`;
+    } else if (a.milestones.length && ss === "overbilled") {
+      sumLine = `<div class="bl-sum-warn"><span class="bl-sum-ico">!</span><div><b>Invoiced ${gap}.</b> QuickBooks invoices total more than estimate #${escapeHtml(a.doc || "")} (Σ ${money2(msTotal)} of ${money2(a.value)}). Raise the estimate or add a change-order estimate in QuickBooks.</div></div>`;
+    } else if (a.milestones.length) {
+      sumLine = `<div class="bl-sum-warn"><span class="bl-sum-ico">!</span><div><b>You changed this schedule — it's ${gap}.</b> Σ ${money2(msTotal)} of ${money2(a.value)} (${msPct}%). Rows with an amount you set by hand don't adjust automatically; fix an amount, or let the app balance it.</div>${a.schedule_id ? `<button type="button" data-autobal="${a.schedule_id}" class="bl-sum-btn" title="Clear your hand-set amounts on the not-yet-invoiced rows so they adjust to add up to the estimate again (dates and names are kept)">Balance automatically</button>` : ""}</div>`;
+    }
     const acts = a.invoice_actuals || [];
     const actTotal = acts.reduce((s, x) => s + (x.amount || 0), 0);
     const actuals = acts.length ? actualsBlock("Actual invoices in QuickBooks", acts.length,
       `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Date</th><th class="font-bold">Due</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
-       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : x.status === "Partial" ? `Partial · ${money(x.balance)} A/R` : "Sent · A/R")}</td></tr>`).join("")}</tbody>
+       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : x.status === "Retainage" ? `Retainage held · ${money(x.balance)}` : x.status === "Partial" ? `Partial · ${money(x.balance)} A/R` : "Sent · A/R")}</td></tr>`).join("")}</tbody>
        <tfoot><tr class="border-t-2 border-black/15 font-bold"><td class="py-1.5" colspan="3">Total invoiced <span class="font-normal text-black/45">vs ${money(a.value)} est</span></td><td class="py-1.5 text-right tabular-nums">${money(actTotal)}</td><td></td></tr></tfoot></table>`) : "";
     return `<details open class="group card overflow-hidden mb-3 ${nr ? "border-amber-300" : ""}">
       <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
@@ -255,6 +273,7 @@ function render(container, entityId, d) {
         <span class="ml-auto flex items-center gap-2.5 text-[11.5px] tabular-nums flex-wrap justify-end">
           ${a.paid > 0.5 ? `<span class="text-emerald-700 font-semibold">${money(a.paid)} paid</span>` : ""}
           ${a.sent_ar > 0.5 ? `<span class="text-ink-900 font-semibold">${money(a.sent_ar)} sent · A/R</span>` : ""}
+          ${a.retainage_held > 0.5 ? `<span class="bl-ret-txt font-semibold" title="Paid except the retainage the customer is holding back">${money(a.retainage_held)} retainage held</span>` : ""}
           ${a.to_bill > 0.5 ? `<span class="text-emerald-600 font-semibold">${money(a.to_bill)} to bill</span>` : ""}
           <span class="text-[13px] font-bold text-ink-900 border-l border-black/15 pl-2.5">${money(a.value)}</span>
         </span>
@@ -267,6 +286,29 @@ function render(container, entityId, d) {
       ${actuals}
     </details>`;
   };
+
+  // ── RETAINAGE: invoices paid except a held-back portion (billing/retainage.py) ──
+  const ret = est.retainage || { held: 0, invoices: [] };
+  const retHeld = ret.held || 0;
+  const retainageBlock = retHeld > 0.5 ? `
+    <div class="bl-ret-card mb-3">
+      <div class="bl-ret-head">
+        <span class="bl-ret-pill text-[10.5px] font-bold px-2 py-0.5 rounded-full">Retainage</span>
+        <span class="text-[13px] font-bold text-ink-900">${money(retHeld)} held on ${ret.invoices.length} invoice${ret.invoices.length === 1 ? "" : "s"}</span>
+        <span class="text-[11.5px] text-black/55">paid except the part the customer holds back until the job is done — expected at release, not overdue A/R${ret.release_expected ? ` · release expected ~${shortDate(ret.release_expected)}` : ""}</span>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left">
+        <th class="py-1 pl-4 font-bold">Invoice #</th><th class="font-bold">Estimate</th><th class="font-bold">Invoice date</th><th class="text-right font-bold">Invoice</th><th class="text-right font-bold">Held</th><th class="text-right font-bold">%</th><th class="text-right pr-4 font-bold">Held since</th>
+      </tr></thead><tbody>${ret.invoices.map((x) => `<tr class="border-t border-black/[0.05]">
+        <td class="py-1.5 pl-4 tabular-nums font-semibold">${escapeHtml(x.doc || "—")}</td>
+        <td class="tabular-nums text-black/60">${x.estimate_doc ? "#" + escapeHtml(x.estimate_doc) : "—"}</td>
+        <td class="tabular-nums text-black/60">${shortDate(x.txn_date)}</td>
+        <td class="text-right tabular-nums">${money(x.amount)}</td>
+        <td class="text-right tabular-nums font-bold bl-ret-txt">${money(x.held)}</td>
+        <td class="text-right tabular-nums text-black/60">${x.pct}%</td>
+        <td class="text-right pr-4 tabular-nums text-black/60">${shortDate(x.held_since)}${x.age_days != null ? ` <span class="text-black/40">· ${x.age_days}d</span>` : ""}</td>
+      </tr>`).join("")}</tbody></table></div>
+    </div>` : "";
 
   // ── CREW section: rollup payment blocks (header) + per-estimate assignment rows ──
   const rollupBlock = (g) => {
@@ -456,7 +498,7 @@ function render(container, entityId, d) {
       <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
         ${kpi("Contract", est.contract_total)}
         ${kpi("Collected", est.collected, "text-emerald-700")}
-        ${kpi("Open A/R", est.open_ar)}
+        ${kpi("Open A/R", est.open_ar, "", retHeld > 0.5 ? `<span class="bl-ret-txt font-semibold">incl. ${money(retHeld)} retainage</span>` : "")}
         ${kpi("Crew paid", crewPaid, "text-black/60")}
         ${kpi("Crew left", crewLeft, "text-black/60")}
         ${kpi("Expenses", exp.estimate_total, "text-black/60")}
@@ -482,6 +524,7 @@ function render(container, entityId, d) {
           <span class="ml-auto tabular-nums text-[13px] font-bold text-ink-900">${money(est.contract_total)}</span>
         </summary>
         <div class="p-3">
+          ${retainageBlock}
           ${est.accepted.map(invEstimateCard).join("") || `<div class="p-4 text-sm text-black/45">No accepted estimates yet.</div>`}
         </div>
       </details>
@@ -607,6 +650,13 @@ function render(container, entityId, d) {
   });
 
   root?.addEventListener("click", async (e) => {
+    const ab = e.target.closest("[data-autobal]");
+    if (ab) {
+      ab.disabled = true; ab.textContent = "Balancing…";
+      try { await api(`/invoices/schedule/${ab.getAttribute("data-autobal")}/auto-balance`, { method: "POST" }); await reload(); }
+      catch (err) { ab.disabled = false; ab.textContent = "Balance automatically"; alert("Failed: " + (err?.message || "error")); }
+      return;
+    }
     // terms pill lives inside a <details> summary — stop the toggle, open editor
     const tpill = e.target.closest("[data-terms-pill]");
     if (tpill) {
@@ -733,8 +783,8 @@ function openTermsEditor(entityId, d, terms, container) {
   // mirrors the backend lock rule: stored status sent/paid OR QBO burn-down
   // tier realized/committed (fully paid / fully invoiced)
   const nKept = est.accepted.reduce((s, a) =>
-    s + (a.milestones || []).filter((m) => m.status === "sent" || m.status === "paid"
-      || m.tier === "realized" || m.tier === "committed").length, 0);
+    s + (a.milestones || []).filter((m) => ["sent", "paid", "partial", "retainage"].includes(m.status)
+      || ["realized", "committed", "retainage"].includes(m.tier) || m.qbo_invoice_id).length, 0);
   const overlay = document.createElement("div");
   overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
   overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">

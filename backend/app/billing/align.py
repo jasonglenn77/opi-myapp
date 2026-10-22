@@ -21,9 +21,22 @@ the plan should follow them. Rules, per estimate schedule:
     "Invoice #NNNN") plus ONE remaining row for any unbilled balance (keeps the
     original label/dates when an old milestone's amount equals the balance,
     else "Balance to bill" with the last planned row's dates).
-  * Hand-edited rows (edited = 1 — set by every manual PATCH) are never changed
-    unless they ARE an invoice (an invoice's facts win). A restructure that would
-    have to rewrite a hand-edited row is skipped and reported as ambiguous.
+  * The schedule ALWAYS adds up to the CURRENT QBO estimate total: every pass
+    (also with no invoices yet, e.g. the estimate was revised) trues the
+    un-overridden, not-yet-invoiced rows up to the cent (proportionally; the last
+    row absorbs rounding). Only a hand-set AMOUNT / % (amount_edited = 1, set by
+    the PATCH when amount or pct changes) is held fixed — a date/label edit
+    (edited = 1) isn't. If overrides leave nothing to true up, the Billing tab's
+    Σ footer says how far off the user's schedule is.
+  * Hand-set amounts are never changed unless the row IS an invoice (an
+    invoice's facts win). A restructure that would have to rewrite one is
+    skipped and reported as ambiguous (edited_conflict).
+  * An invoice paid except a held-back 5-15% (billing/retainage.py) gets status
+    'retainage' instead of 'partial' — held retainage, not overdue A/R.
+  * Data Review (ambiguous_items): besides the alignment conflicts, partly
+    billed estimates whose unbilled balance is due / undated / on a completed
+    project ('unbilled_balance') and every project holding retainage
+    ('retainage_held').
   * Invoices with no estimate link count toward the project's only accepted
     estimate; with several estimates they're reported, not guessed.
 
@@ -43,17 +56,20 @@ import argparse
 import hashlib
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import text, bindparam
 
 from app.db import engine
 from app.audit import record_audit
+from app.billing import retainage as RET
 
 SYSTEM_ACTOR = {"id": None, "email": "system:billing-align"}
 _ACCEPTED = ("Accepted", "Converted")
 _FIELDS = ("seq", "label", "pct", "invoice_date", "due_date", "expected_paid_date",
            "amount", "status", "qbo_invoice_id")
+BAL_MIN = 0.5          # a schedule is "off" / a balance is "left" above 50 cents
+SOON_DAYS = 14         # unbilled balance planned within this many days needs attention
 
 
 def _tol(a):
@@ -110,10 +126,22 @@ def _load(conn, entity_ids):
     if not entity_ids:
         return {}
     ids = sorted(set(str(e) for e in entity_ids))
-    data = {e: {"name": None, "scheds": {}, "estimates": {}, "invoices": [], "credits": []} for e in ids}
+    data = {e: {"name": None, "scheds": {}, "estimates": {}, "invoices": [], "credits": [],
+                "status": None} for e in ids}
     for r in conn.execute(_in("SELECT qbo_id, display_name FROM qbo_customers WHERE qbo_id IN :ids", ids=1),
                           {"ids": ids}).mappings():
         data[str(r["qbo_id"])]["name"] = r["display_name"]
+    # the project's status = its final assignment row's (same rule as the hub)
+    for r in conn.execute(_in("""
+        SELECT qbo_id, status FROM (
+          SELECT qc.qbo_id, psi.status,
+                 ROW_NUMBER() OVER (PARTITION BY qc.qbo_id ORDER BY psi.start_date IS NULL, psi.start_date DESC,
+                                    psi.sort_order DESC, psi.id DESC) AS rn
+          FROM project_schedule_items psi JOIN projects p ON p.id = psi.project_id
+          JOIN qbo_customers qc ON qc.id = p.qbo_customer_id WHERE qc.qbo_id IN :ids
+        ) x WHERE rn = 1
+    """, ids=1), {"ids": ids}).mappings():
+        data[str(r["qbo_id"])]["status"] = r["status"]
     for s in conn.execute(_in("""
         SELECT id, entity_id, estimate_qbo_id, estimate_doc_number, contract_value
         FROM project_invoice_schedules WHERE entity_id IN :ids AND estimate_qbo_id IS NOT NULL
@@ -123,7 +151,7 @@ def _load(conn, entity_ids):
     if by_sid:
         for m in conn.execute(_in("""
             SELECT id, schedule_id, seq, label, pct, invoice_date, due_date, expected_paid_date,
-                   amount, status, note, edited, qbo_invoice_id
+                   amount, status, note, edited, amount_edited, qbo_invoice_id
             FROM project_invoice_milestones WHERE schedule_id IN :sids ORDER BY seq, id
         """, sids=1), {"sids": list(by_sid)}).mappings():
             by_sid[m["schedule_id"]]["ms"].append(dict(m))
@@ -148,7 +176,8 @@ def _load(conn, entity_ids):
                "due_date": _ds(r["due_date"]), "amount": round(total, 2),
                "balance": round(float(r["balance_amt"] or 0), 2),
                "est_ids": _linked(r["raw_json"], "Estimate"),
-               "pay_ids": _linked(r["raw_json"], "Payment")}
+               "pay_ids": _linked(r["raw_json"], "Payment"),
+               "retainage": RET.is_retainage(total, r["balance_amt"], r["raw_json"])}
         pay_ids.update(inv["pay_ids"])
         data[str(r["customer_qbo_id"])]["invoices"].append(inv)
     pay_dates = {}
@@ -189,8 +218,30 @@ def _inv_status(inv):
     if inv["balance"] <= 0.01:
         return "paid"
     if inv["balance"] < inv["amount"] - 0.01:
-        return "partial"
+        # paid except a held-back 5-15% -> retainage (not overdue A/R)
+        return "retainage" if inv.get("retainage") else "partial"
     return "sent"
+
+
+def _locked(m):
+    """A hand-set amount / % (amount_edited) — the true-up never moves it."""
+    return bool(m.get("amount_edited"))
+
+
+def _true_up(free, target, pct):
+    """Spread `target` over the un-overridden rows in proportion to their current
+    amounts (equal split when they're all zero); the last row absorbs rounding,
+    so the schedule adds up to the cent."""
+    cur = round(sum(float(r["amount"] or 0) for r in free), 2)
+    if abs(cur - target) <= 0.005 and all(r.get("amount") is not None for r in free):
+        return
+    acc = 0.0
+    for i, r in enumerate(free):
+        last = i == len(free) - 1
+        share = (float(r["amount"] or 0) / cur) if cur > 0 else 1.0 / len(free)
+        amt = round(target - acc, 2) if last else round(target * share, 2)
+        acc = round(acc + amt, 2)
+        r.update(amount=amt, pct=pct(amt))
 
 
 def _inv_fields(inv, m):
@@ -236,21 +287,27 @@ def _plan_schedule(sched, est, invs):
     ms = sched["ms"]
     value = float(est["value"])
     sched_changes = {}
-    if invs:
+    pct = lambda a: round(a / value * 100.0, 3) if value else None
+    if invs or value > 0:
         if _r2(sched["contract_value"]) != _r2(value):
             sched_changes["contract_value"] = [_r2(sched["contract_value"]), _r2(value)]
         if (sched["estimate_doc_number"] or None) != (est["doc"] or None):
             sched_changes["estimate_doc_number"] = [sched["estimate_doc_number"], est["doc"]]
 
     if not invs:
-        # unlink rows whose invoice vanished (voided/deleted) — otherwise untouched
+        # unlink rows whose invoice vanished (voided/deleted), then true the
+        # un-overridden rows up so the plan adds up to the CURRENT estimate value
+        # (estimate revised before anything was billed).
         rows = [dict(m) for m in ms]
-        stale = False
         for r in rows:
             if r.get("qbo_invoice_id"):
                 r.update(qbo_invoice_id=None, status="pending")
-                stale = True
-        return ("left_alone", rows if stale else None, {}, None)
+        free = [r for r in rows if not _locked(r)]
+        if value > 0 and free:
+            locked_sum = round(sum(float(r["amount"] or 0) for r in rows if _locked(r)), 2)
+            _true_up(free, round(max(0.0, value - locked_sum), 2), pct)
+        changed = any(_norm(f, r.get(f)) != _norm(f, m.get(f)) for r, m in zip(rows, ms) for f in _FIELDS)
+        return ("left_alone", rows if changed else None, sched_changes, None)
 
     invs = sorted(invs, key=lambda i: (i["txn_date"] or "9999", str(i["doc"] or "")))
     by_q = {i["qbo_id"]: i for i in invs}
@@ -274,7 +331,6 @@ def _plan_schedule(sched, est, invs):
     mby = {m["id"]: m for m in ms}
     invoiced = round(sum(i["amount"] for i in invs), 2)
     remaining = round(value - invoiced, 2)
-    pct = lambda a: round(a / value * 100.0, 3) if value else None
     unmatched = [m for m in ms if m["id"] not in used]
 
     if len(pair) == len(invs):
@@ -289,26 +345,19 @@ def _plan_schedule(sched, est, invs):
                 if r.get("qbo_invoice_id"):
                     r.update(qbo_invoice_id=None, status="pending")
             rows.append(r)
-        free = [r for r in rows if r["id"] not in used and not r["edited"]]
+        free = [r for r in rows if r["id"] not in used and not _locked(r)]
         edited_sum = round(sum(float(r["amount"] or 0) for r in rows
-                               if r["id"] not in used and r["edited"]), 2)
+                               if r["id"] not in used and _locked(r)), 2)
         target = round(remaining - edited_sum, 2)
         free_keys = {id(r) for r in free}
-        if remaining <= 0.5:
+        if remaining <= BAL_MIN:
             rows = [r for r in rows if id(r) not in free_keys]
         elif free:
-            cur = round(sum(float(r["amount"] or 0) for r in free), 2)
-            if target <= 0.5:
+            if target <= BAL_MIN:
                 rows = [r for r in rows if id(r) not in free_keys]
-            elif abs(cur - target) > _tol(target):
-                acc = 0.0
-                for i, r in enumerate(free):
-                    last = i == len(free) - 1
-                    share = (float(r["amount"] or 0) / cur) if cur > 0 else 1.0 / len(free)
-                    amt = round(target - acc, 2) if last else round(target * share, 2)
-                    acc = round(acc + amt, 2)
-                    r.update(amount=amt, pct=pct(amt))
-        elif not [r for r in rows if r["id"] not in used] and remaining > _tol(value):
+            else:
+                _true_up(free, target, pct)
+        elif not [r for r in rows if r["id"] not in used] and remaining > BAL_MIN:
             rows.append({"id": None, "seq": max([r["seq"] or 0 for r in rows] + [0]) + 1,
                          "label": "Balance to bill", "pct": pct(remaining), "invoice_date": None,
                          "due_date": None, "expected_paid_date": None, "amount": remaining,
@@ -317,13 +366,13 @@ def _plan_schedule(sched, est, invs):
         return (cls, rows, sched_changes, note)
 
     # restructure
-    if any(m["edited"] for m in unmatched):
+    if any(_locked(m) for m in unmatched):
         return ("ambiguous", None, {}, "edited_conflict")
     free_ids = [m["id"] for m in unmatched]
     same_shape = len(invs) == len(ms) and abs(remaining) <= _tol(value)
     rows, seq = [], 0
     rem_src = None
-    if remaining > _tol(value):
+    if remaining > BAL_MIN:
         rem_src = next((m for m in unmatched if abs(float(m["amount"] or 0) - remaining) <= _tol(remaining)), None)
         if rem_src is None and unmatched:
             rem_src = unmatched[-1]
@@ -342,7 +391,7 @@ def _plan_schedule(sched, est, invs):
                 r["label"] = f"Full invoice #{inv['doc']}" if full else f"Invoice #{inv['doc'] or inv['qbo_id']}"
         r.update(_inv_fields(inv, mby.get(mid) or {}), seq=seq, pct=pct(inv["amount"]))
         rows.append(r)
-    if remaining > _tol(value):
+    if remaining > BAL_MIN:
         seq += 1
         if rem_src is not None:
             r = dict(rem_src)
@@ -381,6 +430,35 @@ def _diff(sched, rows):
     return ops
 
 
+def _unbilled_balance(rows, invs, proj_status, today=None):
+    """Partly-billed estimate whose unbilled balance needs attention: its
+    remaining (not-yet-invoiced) row(s) are planned in the past / within
+    SOON_DAYS, have no date, or the project is already completed. -> dict|None."""
+    if not invs:
+        return None
+    rest = [r for r in rows if not r.get("qbo_invoice_id")]
+    bal = round(sum(float(r.get("amount") or 0) for r in rest), 2)
+    if bal <= BAL_MIN:
+        return None
+    today = today or date.today()
+    dates = sorted(_ds(r.get("invoice_date")) for r in rest if r.get("invoice_date"))
+    when = dates[0] if dates else None
+    undated = any(not r.get("invoice_date") for r in rest)
+    done = proj_status == "completed"
+    if when and when < today.isoformat():
+        why = "past"
+    elif done:
+        why = "completed"
+    elif undated:
+        why = "no_date"
+    elif when and when <= (today + timedelta(days=SOON_DAYS)).isoformat():
+        why = "soon"
+    else:
+        return None
+    return {"balance": bal, "date": when, "why": why, "labels": [r.get("label") for r in rest],
+            "invoiced": round(sum(i["amount"] for i in invs), 2)}
+
+
 def plan_project(d, eid):
     """-> (results, ambiguous). results: one dict per estimate schedule."""
     ambiguous, results = [], []
@@ -396,6 +474,9 @@ def plan_project(d, eid):
             ambiguous.append(("edited_conflict", eid, {"est": est, "invs": invs, "ms": sched["ms"]}))
         if note == "over-billed":
             ambiguous.append(("overbilled", eid, {"est": est, "invs": invs}))
+        ub = _unbilled_balance(rows if rows is not None else sched["ms"], invs, d.get("status"))
+        if ub:
+            ambiguous.append(("unbilled_balance", eid, {"est": est, "invs": invs, **ub}))
         results.append({"entity_id": eid, "project": d["name"], "schedule_id": sched["id"],
                         "estimate_qbo_id": k, "doc": est["doc"], "value": est["value"],
                         "invoices": len(invs), "cls": cls, "ops": ops,
@@ -415,7 +496,7 @@ def _apply(conn, res, run_id):
     before = [dict((k, _norm(k, v) if k in _FIELDS else v) for k, v in m.items())
               for m in conn.execute(text("""
                   SELECT id, seq, label, pct, invoice_date, due_date, expected_paid_date, amount,
-                         status, note, edited, qbo_invoice_id
+                         status, note, edited, amount_edited, qbo_invoice_id
                   FROM project_invoice_milestones WHERE schedule_id=:s ORDER BY seq, id"""),
                   {"s": sid}).mappings()]
     common = {"entity_id": res["entity_id"], "project": res["project"], "estimate_doc": res["doc"],
@@ -450,7 +531,7 @@ def _apply(conn, res, run_id):
     after = [dict((k, _norm(k, v) if k in _FIELDS else v) for k, v in m.items())
              for m in conn.execute(text("""
                  SELECT id, seq, label, pct, invoice_date, due_date, expected_paid_date, amount,
-                        status, note, edited, qbo_invoice_id
+                        status, note, edited, amount_edited, qbo_invoice_id
                  FROM project_invoice_milestones WHERE schedule_id=:s ORDER BY seq, id"""),
                  {"s": sid}).mappings()]
     audits.insert(0, ("billing.schedule_align", None, f"Estimate #{res['doc']}", {
@@ -645,6 +726,27 @@ def _to_items(amb, names, foreign):
                              link=link, app=[[m["label"], _r2(m["amount"])] for m in x["ms"]],
                              qbo=[[i["doc"], i["amount"]] for i in invs],
                              ref={**ref, "estimate_qbo_id": est["qbo_id"]}))
+        elif typ == "unbilled_balance":
+            est, why = x["est"], x["why"]
+            when = {"past": f"was planned for {_md(x['date'])} and hasn't been invoiced",
+                    "completed": (f"is planned for {_md(x['date'])} but the project is completed" if x["date"]
+                                  else "has no invoice date and the project is completed"),
+                    "no_date": "has no invoice date",
+                    "soon": f"is planned for {_md(x['date'])}"}[why]
+            sev = "high" if why in ("past", "completed") else "medium"
+            labels = ", ".join(dict.fromkeys(l or "Balance to bill" for l in x["labels"]))
+            out.append(_item(typ, f"{eid}:{est['qbo_id']}", sev,
+                             f"{name}: {_money(x['balance'])} left to bill on estimate #{est['doc']}",
+                             f"Partly billed: {len(x['invs'])} invoice(s) total {_money(x['invoiced'])} of the "
+                             f"estimate's {_money(est['value'])}. The remaining {_money(x['balance'])} ({labels}) {when}.",
+                             fix=("Send the final invoice in QuickBooks — or, if the job closed short, "
+                                  "reduce the estimate so the schedule matches what was billed."
+                                  if why in ("past", "completed") else
+                                  "Plan the final invoice: set its date on the project's Billing tab."),
+                             link=f"{link}?tab=billing", app=[x["balance"], x["date"]],
+                             qbo=[x["invoiced"], est["value"]],
+                             ref={**ref, "estimate_qbo_id": est["qbo_id"], "amount": x["balance"],
+                                  "date": x["date"], "why": why}))
         elif typ == "credit_memo":
             cm = x["cm"]
             out.append(_item(typ, cm["qbo_id"], "low",
@@ -668,7 +770,51 @@ def ambiguous_items(conn=None):
     for eid in ids:
         if eid in data:
             amb += plan_project(data[eid], eid)[1]
-    return _to_items(amb, {e: data[e]["name"] for e in data}, foreign)
+    return (_to_items(amb, {e: data[e]["name"] for e in data}, foreign)
+            + retainage_items(conn, {e: data[e].get("status") for e in data}))
+
+
+def retainage_items(conn, statuses=None):
+    """One Data Review item per project holding retainage (type 'retainage_held'):
+    every held invoice with its amount and how long it's been held, so the
+    office can chase the release. Low priority while the job is running;
+    medium once it's completed; high when completed and held over 60 days."""
+    held = RET.held(conn)
+    by = {}
+    for h in held:
+        by.setdefault(h["entity_id"], []).append(h)
+    statuses = dict(statuses or {})
+    missing = [e for e in by if e not in statuses]
+    if missing:
+        d = _load(conn, missing)
+        d.pop("_foreign_est", None)
+        statuses.update({e: v.get("status") for e, v in d.items()})
+    rel = RET.release_dates(conn, list(by))
+    out = []
+    for eid, hs in by.items():
+        total = round(sum(h["held"] for h in hs), 2)
+        oldest = max((h["age_days"] or 0) for h in hs)
+        done = statuses.get(eid) == "completed"
+        sev = ("high" if oldest > 60 else "medium") if done else "low"
+        name = hs[0]["project"] or eid
+        lst = "; ".join(f"#{h['doc']} {_money(h['held'])} of {_money(h['amount'])} ({h['pct']:g}%), "
+                        f"held {h['age_days']}d" if h["age_days"] is not None else
+                        f"#{h['doc']} {_money(h['held'])} of {_money(h['amount'])} ({h['pct']:g}%)" for h in hs)
+        r = rel.get(eid)
+        when = (f"Release expected around {_md(r)} (project end + {RET.RELEASE_DAYS} days)." if r
+                else "No assignment end date, so no expected release date.")
+        out.append(_item("retainage_held", eid, sev,
+                         f"{name}: {_money(total)} retainage held on {len(hs)} invoice(s)",
+                         f"Paid except a held-back portion: {lst}. {when} "
+                         f"{'The project is completed — request the release.' if done else 'Expected after the final invoice; not overdue A/R.'}",
+                         fix=("Ask the customer to release the retainage (send the release / final pay application)."
+                              if done else "Nothing to do until the job is done — then request the release."),
+                         link=f"#/entity/project/{eid}?tab=billing",
+                         qbo=[[h["doc"], h["amount"], h["held"]] for h in hs],
+                         ref={"entity_id": eid, "held": total, "oldest_days": oldest,
+                              "invoices": [h["doc"] for h in hs]},
+                         fp=_fp("retainage", [[h["doc"], h["held"]] for h in hs], done)))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -690,12 +836,13 @@ def undo(run_id):
                 conn.execute(text("""
                     INSERT INTO project_invoice_milestones
                       (id, schedule_id, seq, label, pct, invoice_date, due_date, expected_paid_date,
-                       amount, status, note, edited, qbo_invoice_id)
+                       amount, status, note, edited, amount_edited, qbo_invoice_id)
                     VALUES (:id, :s, :seq, :label, :pct, :invoice_date, :due_date, :expected_paid_date,
-                            :amount, :status, :note, :edited, :qbo_invoice_id)
+                            :amount, :status, :note, :edited, :amount_edited, :qbo_invoice_id)
                 """), {**{k: m.get(k) for k in ("id", "seq", "label", "pct", "invoice_date", "due_date",
                                                 "expected_paid_date", "amount", "status", "note", "edited",
-                                                "qbo_invoice_id")}, "s": sid})
+                                                "qbo_invoice_id")},
+                       "amount_edited": m.get("amount_edited", m.get("edited") or 0), "s": sid})
             for f, (old, _new) in (det.get("schedule_changes") or {}).items():
                 conn.execute(text(f"UPDATE project_invoice_schedules SET {f} = :v WHERE id = :s"),
                              {"v": old, "s": sid})
@@ -742,6 +889,9 @@ def main(argv=None):
             for op in res["ops"]:
                 print(_fmt_op(op))
     items = _to_items(r["ambiguous"], r["names"], r["foreign"])
+    with engine.connect() as conn:
+        items += retainage_items(conn) if not a.project else [
+            i for i in retainage_items(conn) if i["ref"]["entity_id"] == str(a.project)]
     by = {}
     for it in items:
         by.setdefault(it["type"], []).append(it)

@@ -151,6 +151,8 @@ def last_runs():
         d = dict(r)
         if isinstance(d["summary"], str):
             d["summary"] = json.loads(d["summary"])
+        if isinstance(d["summary"], dict):
+            d["summary"].pop("folders", None)      # drive_reconcile per-folder list (large; Data Review items carry it)
         out[d["source"]] = {k: (str(v) if k in ("started_at", "finished_at") and v else v) for k, v in d.items()}
     return out
 

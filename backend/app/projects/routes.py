@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy import text
 from app.db import engine
+from app.billing.retainage import sql_condition as _ret_sql
 from datetime import date, datetime, timedelta
 
 import json
@@ -1059,16 +1060,18 @@ def projects_attention(user=Depends(get_current_user)):
         FROM myapp.project_daily_log WHERE log_date = CURDATE() GROUP BY entity_id
     """)
     # overdue A/R per project: any latest-version invoice with an open balance
-    # past its due date.
-    ar_sql = text("""
+    # past its due date — except held retainage (paid but for a held-back 5-15%,
+    # billing/retainage.py), which is expected at release, not overdue.
+    ar_sql = text(f"""
         SELECT customer_qbo_id AS pid, MAX(DATEDIFF(CURDATE(), due_date)) AS overdue_days,
                ROUND(SUM(balance_amt),2) AS ar_total
         FROM (
-          SELECT qt.customer_qbo_id, qt.balance_amt, qt.due_date,
+          SELECT qt.customer_qbo_id, qt.balance_amt, qt.total_amt, qt.due_date,
                  ROW_NUMBER() OVER (PARTITION BY COALESCE(qt.doc_number,qt.qbo_id) ORDER BY qt.id DESC) rn
           FROM myapp.qbo_transactions qt WHERE qt.entity_type='Invoice' AND qt.customer_qbo_id IS NOT NULL
         ) x
         WHERE rn=1 AND balance_amt > 0.01 AND due_date < CURDATE()
+          AND NOT {_ret_sql("x")}
         GROUP BY customer_qbo_id
     """)
     # on-site setup from the ASSIGNMENT page (project_schedule_items): wire

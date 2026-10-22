@@ -190,7 +190,7 @@ def get_entity_documents(entity_type: str, entity_id: str, user=Depends(get_curr
             params[f"i{k}"] = i
         rows = conn.execute(text(f"""
             SELECT d.id, d.folder, d.original_filename, d.content_type, d.size_bytes, d.created_at,
-                   d.source_drive_id, d.drive_path, d.drive_link, d.s3_key,
+                   d.source_drive_id, d.drive_path, d.drive_link, d.s3_key, d.drive_removed_at, d.drive_removed_reason,
                    TRIM(CONCAT(COALESCE(u.first_name,''),' ',COALESCE(u.last_name,''))) AS uploaded_by
             FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by_user_id
             WHERE {clauses}
@@ -205,6 +205,8 @@ def get_entity_documents(entity_type: str, entity_id: str, user=Depends(get_curr
             # Google Drive sync provenance (app/gsync/docs_sync.py)
             "from_drive": bool(r["source_drive_id"]), "drive_path": r["drive_path"],
             "drive_link": r["drive_link"], "link_only": bool(r["source_drive_id"]) and not r["s3_key"],
+            "drive_removed_at": str(r["drive_removed_at"]) if r["drive_removed_at"] else None,
+            "drive_removed_reason": r["drive_removed_reason"],
         })
     return {"entity": {"type": entity_type, "id": entity_id, **meta},
             "tree": _gated_tree(entity_type, linked=linked, used_keys=files_by_folder.keys()),

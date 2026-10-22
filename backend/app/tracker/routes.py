@@ -27,6 +27,7 @@ from app.billing.routes import (
     _ensure_invoice_schedules, _default_crew_for_project, _project_meta,
 )
 from app.invoices.routes import _project_ctx
+from app.billing.align import _unbilled_balance
 
 router = APIRouter(prefix="/api/tracker", tags=["tracker"])
 
@@ -203,8 +204,11 @@ def _row(eid, proj, sched, pms, est_dates, comp, today):
                 flag = "send_soon"
             elif m["tier"] in ("committed", "partial") and m.get("due_date") and m["due_date"] < today.isoformat():
                 flag = "payment_late"
+            if m["tier"] == "retainage":
+                flag = "retainage"   # held back until release — not a late payment
             mm = {k: m.get(k) for k in ("id", "seq", "label", "pct", "amount", "invoice_date", "due_date",
-                                         "expected_paid_date", "tier", "status_label", "edited", "remaining")}
+                                         "expected_paid_date", "tier", "status_label", "edited", "remaining",
+                                         "retainage_held")}
             mm["flag"] = flag
             mm["estimate_doc"] = a.get("doc")
             ms.append(mm)
@@ -212,18 +216,24 @@ def _row(eid, proj, sched, pms, est_dates, comp, today):
         acts = a.get("invoice_actuals") or []
         e_inv = round(sum(float(x.get("amount") or 0) for x in acts), 2)
         e_open = round(sum(float(x.get("balance") or 0) for x in acts), 2)
+        # partly billed with the rest due / undated / on a completed job (same
+        # rule as Data Review's 'unbilled_balance')
+        ub = _unbilled_balance(a.get("milestones") or [], acts, status, today)
         estimates.append({
             "qbo_id": a["qbo_id"], "doc": a.get("doc"), "date": _d(est_dates.get(str(a["qbo_id"]))),
             "value": a.get("value") or 0, "schedule_id": a.get("schedule_id"),
             "scheduled": a.get("invoice_subtotal") or 0,
             "invoiced": e_inv, "paid": round(e_inv - e_open, 2), "open_ar": e_open,
             "to_bill": round(max(0.0, (a.get("value") or 0) - e_inv), 2),
+            "retainage_held": round(float(a.get("retainage_held") or 0), 2),
+            "unbilled": ({"amount": ub["balance"], "date": ub["date"], "why": ub["why"]} if ub else None),
             "milestones": ms,
             "invoices": [{
                 "doc": x.get("doc_number"), "date": x.get("txn_date"), "due": x.get("due_date"),
                 "amount": x.get("amount"), "balance": x.get("balance"), "status": x.get("status"),
-                "late": bool(float(x.get("balance") or 0) > 0.01 and x.get("due_date")
+                "late": bool(float(x.get("balance") or 0) > 0.01 and x.get("due_date") and not x.get("retainage")
                              and str(x.get("due_date")) < today.isoformat()),
+                "retainage": x.get("retainage") or 0.0,
                 "estimate_doc": x.get("estimate_doc"),
             } for x in acts],
         })
@@ -234,6 +244,15 @@ def _row(eid, proj, sched, pms, est_dates, comp, today):
     collected = round(float(comp.get("collected") or 0), 2)
     remaining = round(max(0.0, contract - invoiced), 2)
     flags = sorted({m["flag"] for m in milestones if m["flag"]})
+    retainage = round(sum(e["retainage_held"] for e in estimates), 2)
+    if retainage > 0.5 and "retainage" not in flags:
+        flags.append("retainage")
+    ubs = [e["unbilled"] for e in estimates if e["unbilled"]]
+    ub_row = ({"amount": round(sum(u["amount"] for u in ubs), 2),
+                 "date": min((u["date"] for u in ubs if u["date"]), default=None),
+                 "why": ("past" if any(u["why"] == "past" for u in ubs) else ubs[0]["why"])} if ubs else None)
+    if ub_row:
+        flags.append("unbilled_balance")
     pending = comp.get("pending") or []
     if pending:
         flags.append("pending_estimate")
@@ -241,7 +260,8 @@ def _row(eid, proj, sched, pms, est_dates, comp, today):
                       key=lambda m: m["invoice_date"])
     nxt = unbilled[0] if unbilled else None
     past = status in PAST_STATUSES
-    relevant = (not past) or open_ar > 0.5 or bool({"overdue_send", "send_soon", "payment_late"} & set(flags))
+    relevant = (not past) or open_ar > 0.5 or bool(
+        {"overdue_send", "send_soon", "payment_late", "unbilled_balance"} & set(flags))
     name = proj["display_name"] or ""
     num = name.split(" - ")[0].strip() if " - " in name else ""
     return {
@@ -250,6 +270,7 @@ def _row(eid, proj, sched, pms, est_dates, comp, today):
         "pms": pms, "start": start, "end": end, "days": days,
         "contract": contract, "invoiced": invoiced, "collected": collected, "open_ar": open_ar,
         "remaining": remaining, "pct_invoiced": round(invoiced / contract * 100, 1) if contract else None,
+        "retainage_held": retainage, "unbilled": ub_row,
         "estimates": estimates, "pending_estimates": pending,
         "next": ({"label": nxt["label"], "date": nxt["invoice_date"], "amount": nxt.get("remaining") or nxt["amount"],
                   "flag": nxt["flag"]} if nxt else None),

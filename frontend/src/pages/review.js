@@ -16,7 +16,8 @@ const CATS = [
   { key: "pipeline", label: "Pipeline", blurb: "The B151 vs QuickBooks estimates. The Pipeline page follows the B151, so most fixes go in the B151 or QuickBooks." },
   { key: "schedule", label: "Schedule", blurb: "The Job Schedule sheet vs each project's Assignment (dates, crews, PM, status). Assignments update from the sheet every night, so most fixes go in the Job Schedule." },
   { key: "sheets", label: "B151 vs Job Schedule", blurb: "The two Google sheets against each other: jobs scheduled but not Won on the B151, Won jobs starting soon that aren't scheduled, and B151 dates that don't match the Job Schedule." },
-  { key: "documents", label: "Documents", blurb: "Google Drive Customers folders vs the app: folders that couldn't be matched to a project or quote (their files are copied and waiting to be linked), projects with no Drive folder, and copy errors.", optional: true },
+  { key: "documents", label: "Documents", blurb: "Google Drive Customers folders vs the app: folders that couldn't be matched to a project or quote (their files are copied and waiting to be linked), projects with no Drive folder, files removed in Drive (the app keeps its copies), the weekly Drive-vs-app check, and copy errors.", optional: true },
+  { key: "old_estimates", label: "Old estimate folders", blurb: "Drive folders whose job # matches only a QuickBooks estimate — mostly 2023–24 jobs that never became a project or Pipeline quote. Their files are copied and kept in the holding area. Grouped by the estimate's year, sorted by customer. Link one if the job did become a project or quote under another number; otherwise Ignore it (the files stay in the holding area).", optional: true },
   { key: "billing", label: "Billing", blurb: "Invoice schedules that couldn't be lined up with the actual QuickBooks invoices automatically.", optional: true },
 ];
 const TYPES = {
@@ -41,6 +42,17 @@ const TYPES = {
   scheduled_not_won: "Scheduled, but not Won on the B151",
   b151_no_dates: "Scheduled, but no dates on the B151",
   won_not_scheduled: "Won and starting soon, not on the Job Schedule",
+  unbilled_balance: "Partly billed — balance to bill",
+  retainage_held: "Retainage held",
+  unmatched_folder: "Drive folder not filed on a project or quote",
+  ambiguous_folder: "Drive folder matches more than one project or quote",
+  project_without_drive_folder: "Project with no Drive folder",
+  quote_folder_mislinked: "Drive folder # and Pipeline link disagree",
+  removed_in_drive: "Files removed from Google Drive (app keeps the copies)",
+  reconcile_mismatch: "Drive vs app check: folder differs",
+  copy_error: "Drive file did not copy",
+  sync_failed: "Drive documents sync failed",
+  estimate_folder: "Old estimate folder",
 };
 const TIP_FIXED = "You've corrected it at the source (the B151, the Job Schedule, QuickBooks or the app). Moves it to \"Marked fixed\" — the button itself changes no data. If the next refresh from Google / QuickBooks still finds the difference, it comes back to Open flagged \"still differs\".";
 const TIP_IGNORE = "This difference is expected — leave it as is. Moves it to \"Ignored\" (add a reason). Nothing is changed. It comes back on its own if the difference changes later.";
@@ -98,7 +110,10 @@ export async function reviewPage(routeFn) {
   function render() {
     const d = st.data, items = visible();
     const groups = new Map();
-    items.forEach((i) => { if (!groups.has(i.type)) groups.set(i.type, []); groups.get(i.type).push(i); });
+    items.forEach((i) => { const g = i.group || i.type; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(i); });
+    // items with an explicit group (Old estimate folders: by year) list newest group first
+    const entries = [...groups.entries()];
+    if (entries.length && entries.every(([, l]) => l[0].group)) entries.sort((a, b) => (a[0] < b[0] ? 1 : -1));
     const cat = CATS.find((c) => c.key === st.cat);
 
     root.innerHTML = `
@@ -123,7 +138,7 @@ export async function reviewPage(routeFn) {
         </select>
         <span class="rv-count">${items.length} item${items.length === 1 ? "" : "s"}</span>
       </div>
-      ${items.length ? [...groups.entries()].map(([type, list]) => groupHtml(type, list)).join("")
+      ${items.length ? entries.map(([type, list]) => groupHtml(type, list)).join("")
         : `<div class="card p-6 text-sm text-black/50">${st.state === "open" ? "Nothing to review here — everything matches." : "No items."}</div>`}`;
   }
 
@@ -133,7 +148,7 @@ export async function reviewPage(routeFn) {
     const shown = all ? list : list.slice(0, LIMIT);
     return `
       <div class="card rv-group">
-        <div class="rv-gh"><span>${escapeHtml(TYPES[type] || type)}</span><span class="rv-gcount">${list.length}</span></div>
+        <div class="rv-gh"><span>${escapeHtml(list[0].group_label || TYPES[type] || type)}</span><span class="rv-gcount">${list.length}</span></div>
         ${shown.map(itemHtml).join("")}
         ${list.length > LIMIT && !all ? `<button type="button" class="rv-more" data-more="${type}">Show all ${list.length}</button>` : ""}
       </div>`;

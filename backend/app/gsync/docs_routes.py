@@ -1,7 +1,8 @@
 """
 Drive documents holding area API (app/gsync/docs_sync.py).
 
-  GET  /api/drive-docs/status                 last sync run + backfill state + holding totals
+  GET  /api/drive-docs/status                 last sync run + backfill state + holding totals + files removed
+                                              in Drive + last Drive-vs-app reconcile (docs_sync.reconcile)
   GET  /api/drive-docs/unmatched?status=open  holding-area folders (open | ignored | linked | all)
   GET  /api/drive-docs/unmatched/{id}         one folder + its held files
   GET  /api/drive-docs/targets?q=             projects + Pipeline quotes to link to
@@ -54,12 +55,20 @@ def status(user=Depends(get_current_user)):
         st = {r[0]: r[1] for r in conn.execute(text(
             "SELECT k, v FROM drive_sync_state WHERE k IN ('backfill_completed_at', 'last_full_walk_at')"))}
         last = conn.execute(text("""SELECT id, started_at, finished_at, ok, summary, error, triggered_by FROM gsync_runs
-                                    WHERE source = 'drive_docs' ORDER BY id DESC LIMIT 1""")).mappings().first()
+                                    WHERE id = (SELECT MAX(id) FROM gsync_runs WHERE source = 'drive_docs')""")).mappings().first()
         hold = conn.execute(text("""SELECT status, COUNT(*) n, SUM(file_count) files, SUM(total_bytes) b
                                     FROM drive_unmatched_folders GROUP BY status""")).mappings().all()
         docs = conn.execute(text("""SELECT COUNT(*) n, SUM(size_bytes) b FROM documents
                                     WHERE source_drive_id IS NOT NULL""")).mappings().first()
         errors = conn.execute(text("SELECT COUNT(*) FROM drive_file_state WHERE status = 'error'")).scalar()
+        removed = conn.execute(text("""SELECT COUNT(*) n, MAX(drive_removed_at) last FROM documents
+                                       WHERE drive_removed_at IS NOT NULL""")).mappings().first()
+        rid = conn.execute(text("""SELECT MAX(id) FROM gsync_runs WHERE source = 'drive_reconcile'""")).scalar()
+        rec = conn.execute(text("""SELECT id, finished_at, triggered_by,
+                                     JSON_EXTRACT(summary, '$.totals') AS totals,
+                                     JSON_EXTRACT(summary, '$.folders_checked') AS checked,
+                                     JSON_EXTRACT(summary, '$.filtered') AS filtered
+                                   FROM gsync_runs WHERE id = :i"""), {"i": rid}).mappings().first() if rid else None
     lr = None
     if last:
         lr = {k: (str(v) if k in ("started_at", "finished_at") and v else v) for k, v in dict(last).items()}
@@ -67,6 +76,13 @@ def status(user=Depends(get_current_user)):
             lr["summary"] = json.loads(lr["summary"])
     return {"backfill_completed_at": st.get("backfill_completed_at"), "last_run": lr,
             "drive_documents": int(docs["n"] or 0), "drive_bytes": int(docs["b"] or 0), "copy_errors": errors,
+            "removed_in_drive": {"documents": int(removed["n"] or 0),
+                                 "last_at": str(removed["last"]) if removed["last"] else None},
+            "reconcile": {"run_id": rec["id"], "finished_at": str(rec["finished_at"]) if rec["finished_at"] else None,
+                          "triggered_by": rec["triggered_by"], "folders_checked": rec["checked"],
+                          "filtered": rec["filtered"] in (True, "true", 1),
+                          "totals": json.loads(rec["totals"]) if isinstance(rec["totals"], str) else rec["totals"]}
+                         if rec else None,
             "holding": {h["status"]: {"folders": h["n"], "files": int(h["files"] or 0), "bytes": int(h["b"] or 0)}
                         for h in hold}}
 
@@ -96,12 +112,13 @@ def get_unmatched(uid: int, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Not found")
         files = conn.execute(text("""
             SELECT id, original_filename AS filename, folder, drive_path, size_bytes, content_type, drive_link,
-                   (s3_key = '') AS link_only, created_at
+                   (s3_key = '') AS link_only, created_at, drive_removed_at, drive_removed_reason
             FROM documents WHERE entity_type = 'drive_hold' AND entity_id = :i
             ORDER BY drive_path LIMIT 2000"""), {"i": str(uid)}).mappings().all()
     return {"folder": _row(r), "files": [{**dict(f), "size_bytes": int(f["size_bytes"] or 0),
                                           "link_only": bool(f["link_only"]),
-                                          "created_at": str(f["created_at"]) if f["created_at"] else None}
+                                          "created_at": str(f["created_at"]) if f["created_at"] else None,
+                                          "drive_removed_at": str(f["drive_removed_at"]) if f["drive_removed_at"] else None}
                                          for f in files]}
 
 
@@ -196,7 +213,7 @@ def link(uid: int, body: LinkIn, user=Depends(get_current_user)):
     record_audit(user, "drive_docs.link_folder", et, eid, label,
                  {"drive_folder_id": h["drive_folder_id"], "path": h["path"], "moved_documents": moved})
     return {"ok": True, "entity_type": et, "entity_id": eid, "label": label, "moved": moved,
-            "link": f"#/entity/{et}/{eid}"}
+            "link": f"#/entity/{et}/{eid}" if et == "project" else "#/pipeline"}
 
 
 def _set_status(uid, status, user, frm):

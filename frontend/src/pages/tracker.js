@@ -24,9 +24,10 @@ const STATUS = {
   needs_attention: ["Needs attention", "at-st-attn"], completed: ["Completed", "at-st-done"], canceled: ["Canceled", "at-st-cxl"],
 };
 const statusPill = (s) => { const [l, c] = STATUS[s] || [s || "—", "at-st-ns"]; return `<span class="at-pill ${c}">${escapeHtml(l)}</span>`; };
-const TIER = { realized: ["Paid", "at-c-paid"], committed: ["Sent", "at-c-sent"], partial: ["Partly sent", "at-c-part"], scheduled: ["To bill", "at-c-bill"] };
+const TIER = { realized: ["Paid", "at-c-paid"], committed: ["Sent", "at-c-sent"], partial: ["Partly sent", "at-c-part"], scheduled: ["To bill", "at-c-bill"], retainage: ["Retainage held", "at-c-ret"] };
 const chipClass = (m) => (m.flag === "overdue_send" ? "at-c-over" : m.flag === "send_soon" ? "at-c-soon" : m.flag === "payment_late" ? "at-c-late" : (TIER[m.tier] || TIER.scheduled)[1]);
-const chipTitle = (m) => `${m.label || "Invoice"} · ${money2(m.amount)} · ${m.invoice_date ? "invoice " + fmtMDY(m.invoice_date) : "no date"} · ${(TIER[m.tier] || TIER.scheduled)[0]}${m.flag === "overdue_send" ? " — past its send date" : m.flag === "send_soon" ? " — send soon" : m.flag === "payment_late" ? " — payment past due" : ""}`;
+const chipTitle = (m) => `${m.label || "Invoice"} · ${money2(m.amount)} · ${m.invoice_date ? "invoice " + fmtMDY(m.invoice_date) : "no date"} · ${(TIER[m.tier] || TIER.scheduled)[0]}${m.flag === "overdue_send" ? " — past its send date" : m.flag === "send_soon" ? " — send soon" : m.flag === "payment_late" ? " — payment past due" : m.flag === "retainage" ? ` — paid except ${money2(m.retainage_held)} retainage held (expected at release, not late)` : ""}`;
+const UNB_WHY = { past: "past its planned date", completed: "project completed", no_date: "no invoice date", soon: "planned soon" };
 
 const PREF = "opi_tracker_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREF) || "{}"); } catch (_) { return {}; } };
@@ -77,7 +78,7 @@ export async function trackerPage(routeFn) {
   };
 
   // ── filtering + sorting ────────────────────────────────────────────────────
-  const ATTN = new Set(["overdue_send", "send_soon", "payment_late"]);
+  const ATTN = new Set(["overdue_send", "send_soon", "payment_late", "unbilled_balance"]);
   function visibleRows() {
     const q = st.q.trim().toLowerCase();
     let rows = st.rows.filter((r) => {
@@ -125,6 +126,8 @@ export async function trackerPage(routeFn) {
     const over = ms.filter((m) => m.flag === "overdue_send");
     const soon = ms.filter((m) => m.flag === "send_soon");
     const late = rows.filter((r) => r.flags.includes("payment_late"));
+    const ret = rows.filter((r) => (r.retainage_held || 0) > 0.5);
+    const unb = rows.filter((r) => r.unbilled);
     const contract = sum((r) => r.contract), invoiced = sum((r) => r.invoiced);
     const card = (label, value, sub, cls = "", act = "") => `
       <button type="button" class="at-kpi ${cls}" ${act ? `data-kpi="${act}"` : "disabled"}>
@@ -136,7 +139,9 @@ export async function trackerPage(routeFn) {
       ${card("Left to bill", money(sum((r) => r.remaining)), "contract − invoiced")}
       ${card(`Send in next ${st.soonDays} days`, soon.length, money(soon.reduce((s, m) => s + (m.remaining ?? m.amount ?? 0), 0)), soon.length ? "at-kpi-soon" : "", "attention")}
       ${card("Past send date", over.length, money(over.reduce((s, m) => s + (m.remaining ?? m.amount ?? 0), 0)), over.length ? "at-kpi-over" : "", "attention")}
-      ${card("Payments past due", late.length, `${money(sum((r) => (r.flags.includes("payment_late") ? r.open_ar : 0)))} open A/R`, late.length ? "at-kpi-late" : "", "attention")}
+      ${card("Payments past due", late.length, `${money(sum((r) => (r.flags.includes("payment_late") ? r.open_ar - (r.retainage_held || 0) : 0)))} open A/R`, late.length ? "at-kpi-late" : "", "attention")}
+      ${card("Balance to bill", unb.length, `${money(sum((r) => (r.unbilled ? r.unbilled.amount : 0)))} on partly-billed jobs`, unb.length ? "at-kpi-soon" : "", "attention")}
+      ${card("Retainage held", ret.length, `${money(sum((r) => r.retainage_held || 0))} · expected at release`)}
     </div>`;
   }
 
@@ -170,8 +175,11 @@ export async function trackerPage(routeFn) {
     if (r.flags.includes("payment_late") && (!r.next || r.next.flag !== "overdue_send")) {
       return `<div class="at-next at-next-late">Payment past due<div class="at-sub">${money(r.open_ar)} open A/R</div></div>`;
     }
+    if (!r.next && r.unbilled) {
+      return `<div class="at-next at-next-unb">Balance to bill · ${money(r.unbilled.amount)}<div class="at-sub">${escapeHtml(UNB_WHY[r.unbilled.why] || "")}</div></div>`;
+    }
     if (!r.next) {
-      if (r.contract && r.remaining < 1) return `<div class="at-next at-next-done">Fully invoiced</div>`;
+      if (r.contract && r.remaining < 1) return `<div class="at-next ${r.retainage_held > 0.5 ? "at-next-ret" : "at-next-done"}">${r.retainage_held > 0.5 ? `Fully invoiced<div class="at-sub">${money(r.retainage_held)} retainage held</div>` : "Fully invoiced"}</div>`;
       return `<span class="at-muted">—</span>`;
     }
     const n = r.next;
@@ -192,7 +200,7 @@ export async function trackerPage(routeFn) {
       <tr class="at-row ${open ? "open" : ""}" data-row="${escapeHtml(r.entity_id)}">
         <td class="at-proj">
           <div class="at-pname"><span class="at-caret">${open ? "▾" : "▸"}</span>${escapeHtml(r.name)}</div>
-          <div class="at-sub">${escapeHtml(r.customer || "")}${r.flags.includes("pending_estimate") ? ` · <span class="at-flag-pend">pending estimate</span>` : ""}</div>
+          <div class="at-sub">${escapeHtml(r.customer || "")}${r.flags.includes("pending_estimate") ? ` · <span class="at-flag-pend">pending estimate</span>` : ""}${r.retainage_held > 0.5 ? ` · <span class="at-flag-ret" title="Invoices paid except the retainage the customer is holding back — expected at release, not overdue">${money(r.retainage_held)} retainage held</span>` : ""}${r.unbilled ? ` · <span class="at-flag-unb" title="Partly billed — the rest is ${escapeHtml(UNB_WHY[r.unbilled.why] || "")}">${money(r.unbilled.amount)} balance to bill</span>` : ""}</div>
         </td>
         <td><button type="button" class="at-stbtn" data-assign="${escapeHtml(r.entity_id)}" title="Change status, dates, PM or crew">${statusPill(r.status)}</button></td>
         <td class="at-nowrap">${pmCell(r)}</td>
@@ -219,7 +227,7 @@ export async function trackerPage(routeFn) {
             <span>Value <b>${money2(e.value)}</b></span>
             <span title="Actual QuickBooks invoices">Invoiced <b>${money2(e.invoiced)}</b></span>
             <span>Paid <b>${money2(e.paid)}</b></span>
-            <span>Open A/R <b class="${e.open_ar > 0.5 ? "at-amber" : ""}">${money2(e.open_ar)}</b></span>
+            <span>Open A/R <b class="${e.open_ar - (e.retainage_held || 0) > 0.5 ? "at-amber" : ""}">${money2(e.open_ar)}</b>${e.retainage_held > 0.5 ? ` <span class="at-flag-ret">(${money2(e.retainage_held)} retainage)</span>` : ""}</span>
             <span>Left to bill <b>${money2(e.to_bill)}</b></span>
           </div>
         </div>
@@ -243,7 +251,7 @@ export async function trackerPage(routeFn) {
         </div>
         <div class="at-est-f">
           ${e.schedule_id ? `<button type="button" class="at-btn" data-addms="${e.schedule_id}" data-ent="${escapeHtml(r.entity_id)}">+ Add invoice line</button>` : `<span class="at-muted">No invoice schedule yet — create it on Billing &amp; Schedule.</span>`}
-          ${e.milestones.length ? `<span class="${off ? "at-warn" : "at-muted"}">Σ ${money2(total)} of ${money2(e.value)}${off ? " — lines don't add up to the estimate" : ""}</span>` : ""}
+          ${e.milestones.length ? `<span class="${off ? "at-warn" : "at-muted"}">Σ ${money2(total)} of ${money2(e.value)}${off ? ` — you changed this schedule: it's ${money2(Math.abs(total - e.value))} ${total < e.value ? "short of" : "over"} the estimate` : " · adds up"}</span>` : ""}
         </div>
         ${invoicesHtml(e)}
       </div>`;
@@ -264,7 +272,7 @@ export async function trackerPage(routeFn) {
               <td><b>${escapeHtml(x.doc || "—")}</b>${!x.estimate_doc ? ` <span class="at-muted">(no estimate link in QuickBooks)</span>` : ""}</td>
               <td>${fmtMDY(x.date)}</td><td>${fmtMDY(x.due)}</td>
               <td class="at-num">${money2(x.amount)}</td><td class="at-num">${money2(x.balance)}</td>
-              <td><span class="at-chip ${x.status === "Paid" ? "at-c-paid" : x.late ? "at-c-late" : "at-c-sent"}">${x.status === "Paid" ? "Paid" : x.late ? `${escapeHtml(x.status)} · past due` : escapeHtml(x.status)}</span></td>
+              <td><span class="at-chip ${x.status === "Paid" ? "at-c-paid" : x.retainage ? "at-c-ret" : x.late ? "at-c-late" : "at-c-sent"}">${x.status === "Paid" ? "Paid" : x.retainage ? "Retainage held" : x.late ? `${escapeHtml(x.status)} · past due` : escapeHtml(x.status)}</span></td>
             </tr>`).join("")}</tbody>
         </table></div>
       </div>`;
@@ -333,7 +341,7 @@ export async function trackerPage(routeFn) {
       </div>
       <div class="at-legend">
         <span class="at-chip at-c-paid">Paid</span><span class="at-chip at-c-sent">Sent</span><span class="at-chip at-c-bill">To bill</span>
-        <span class="at-chip at-c-soon">Send soon</span><span class="at-chip at-c-over">Past send date</span><span class="at-chip at-c-late">Payment late</span>
+        <span class="at-chip at-c-soon">Send soon</span><span class="at-chip at-c-over">Past send date</span><span class="at-chip at-c-late">Payment late</span><span class="at-chip at-c-ret">Retainage held</span>
         <span class="at-muted">· chips are each invoice's date — hover for details · click a project to edit</span>
       </div>
       <div class="at-card">

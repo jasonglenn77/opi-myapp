@@ -61,6 +61,7 @@ export function openDriveLinkModal(itemRef) {
       const fileRows = files.slice(0, 300).map((f) => `
         <div class="dlm-file">
           <div class="dlm-file-name" title="${escapeHtml(f.drive_path || f.filename)}">${escapeHtml(f.drive_path || f.filename)}</div>
+          ${f.drive_removed_at ? `<span class="dlm-removed" title="Removed from Google Drive — the app keeps this copy">Removed in Drive ${escapeHtml(removedDate(f.drive_removed_at))}</span>` : ""}
           <div class="dlm-file-size">${f.link_only ? "link" : fmtBytes(f.size_bytes)}</div>
           <button type="button" class="dlm-link" data-open="${f.id}">Open</button>
         </div>`).join("");
@@ -177,10 +178,26 @@ export function openDriveLinkModal(itemRef) {
   });
 }
 
-/** Small "From Google Drive" line for a documents-tree file row. */
+const REMOVED_WHY = {
+  trashed: "moved to the Drive trash",
+  deleted: "deleted from Drive",
+  moved_out: "moved out of the Customers folder",
+  folder_removed: "its Drive folder was trashed, deleted or moved",
+  missing: "no longer found in its Drive folder",
+};
+function removedDate(iso) {
+  const d = new Date(String(iso).replace(" ", "T") + "Z");
+  return isNaN(d) ? String(iso).slice(0, 10) : d.toLocaleDateString();
+}
+
+/** Small "From Google Drive" line for a documents-tree file row (+ a badge
+ *  when the file was later removed in Drive — the app keeps its copy). */
 export function driveSourceHtml(f) {
   if (!f || !f.from_drive) return "";
   const dir = (f.drive_path || "").split("/").slice(0, -1);
   const short = dir.length > 2 ? "…/" + dir.slice(-2).join("/") : dir.join("/");
-  return `<span class="dlm-src" title="${escapeHtml(f.drive_path || "")}">From Google Drive${short ? " · " + escapeHtml(short) : ""}${f.link_only ? " · link only" : ""}</span>`;
+  const removed = f.drive_removed_at
+    ? ` <span class="dlm-removed" title="${escapeHtml(`Removed in Google Drive (${REMOVED_WHY[f.drive_removed_reason] || "removed"}). The app keeps this copy.`)}">Removed from Google Drive on ${escapeHtml(removedDate(f.drive_removed_at))}</span>`
+    : "";
+  return `<span class="dlm-src" title="${escapeHtml(f.drive_path || "")}">From Google Drive${short ? " · " + escapeHtml(short) : ""}${f.link_only ? " · link only" : ""}</span>${removed}`;
 }

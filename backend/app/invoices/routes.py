@@ -206,6 +206,11 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
     if not fields:
         return {"ok": True}
     sets, params = ["edited = 1"], {"id": mid}
+    # A hand-set amount / % is an override the schedule's automatic true-up
+    # (billing/align.py) must respect; a date/label edit isn't (the row's amount
+    # keeps following the estimate so the schedule still adds up).
+    if "amount" in fields or "pct" in fields:
+        sets.append("amount_edited = 1")
     for k, v in fields.items():
         sets.append(f"{k} = :{k}")
         params[k] = (v if v != "" else None)
@@ -236,6 +241,31 @@ def add_milestone(sid: int, user=Depends(get_current_user)):
     record_audit(user, "billing.milestone_add", "invoice_milestone", new_id, "New invoice",
                  {"entity_id": ent, "project": pname, "schedule_id": sid})
     return {"ok": True, "id": new_id}
+
+
+@router.post("/schedule/{sid}/auto-balance")
+def auto_balance(sid: int, user=Depends(get_current_user)):
+    """'Balance automatically': drop the hand-set amount flag on the schedule's
+    not-yet-invoiced rows, then re-align — so they true up to the current
+    estimate again (dates/labels kept). Invoice rows are untouched."""
+    _require(user)
+    from app.billing.align import align_project, record_alignment
+    with engine.begin() as conn:
+        ent, pname = _ms_entity(conn, sid=sid)
+        if not ent:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        ids = [r[0] for r in conn.execute(text(
+            "SELECT id FROM project_invoice_milestones WHERE schedule_id = :s AND amount_edited = 1 "
+            "AND qbo_invoice_id IS NULL"), {"s": sid}).all()]
+        if ids:
+            conn.execute(text(
+                "UPDATE project_invoice_milestones SET amount_edited = 0 WHERE schedule_id = :s "
+                "AND amount_edited = 1 AND qbo_invoice_id IS NULL"), {"s": sid})
+        audits = align_project(conn, ent)
+    record_audit(user, "billing.schedule_auto_balance", "project", ent, pname,
+                 {"entity_id": ent, "project": pname, "schedule_id": sid, "cleared_overrides": ids})
+    record_alignment(audits)
+    return {"ok": True, "cleared": len(ids)}
 
 
 @router.delete("/milestone/{mid}")

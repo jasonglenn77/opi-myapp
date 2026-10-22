@@ -535,6 +535,7 @@ def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks, split_pas
     sql = text("""
         WITH latest AS (
             SELECT qt.id, qt.customer_qbo_id, qt.doc_number, qt.due_date, qt.balance_amt,
+                   qt.total_amt, qt.raw_json,
                    ROW_NUMBER() OVER (
                        PARTITION BY qt.customer_qbo_id, COALESCE(qt.doc_number, qt.qbo_id)
                        ORDER BY qt.id DESC
@@ -544,15 +545,27 @@ def _inflow_invoices(win_start, beyond_cap, week_ends, win_end, weeks, split_pas
         )
         SELECT COALESCE(qc.display_name, 'Unknown') AS name,
                qc.qbo_id AS link_id, qc.is_project AS is_project,
-               l.due_date, l.balance_amt AS amount
+               l.due_date, l.balance_amt AS amount, l.total_amt, l.raw_json
         FROM latest l
         LEFT JOIN qbo_customers qc ON qc.qbo_id = l.customer_qbo_id
         WHERE l.rn = 1
           AND l.balance_amt > 0
           AND l.due_date <= :bc
     """)
+    from app.billing.retainage import is_retainage, release_dates
     with engine.connect() as conn:
-        rows = conn.execute(sql, {"bc": beyond_cap}).mappings().all()
+        rows = [dict(r) for r in conn.execute(sql, {"bc": beyond_cap}).mappings().all()]
+        # Held retainage (paid except a held-back 5-15%) isn't past-due A/R: it
+        # arrives when the customer releases it. Its own row per project, dated
+        # at the project's end + 30 days; when that's unknown or already behind
+        # us, it goes to "beyond" (expected later, timing unknown) — never Past due.
+        ret = [r for r in rows if is_retainage(r["total_amt"], r["amount"], r["raw_json"])]
+        rel = release_dates(conn, {str(r["link_id"]) for r in ret if r["link_id"]}) if ret else {}
+    first_start = week_ends[0] - timedelta(days=6)
+    for r in ret:
+        d = rel.get(str(r["link_id"]))
+        r["name"] = f"{r['name']} · retainage held"
+        r["due_date"] = d if (d and d >= first_start) else (win_end + timedelta(days=1))
     return _bucket(rows, week_ends, win_end, weeks, split_pastdue)
 
 
