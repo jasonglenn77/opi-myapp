@@ -89,19 +89,142 @@ def _rows_from_values(values):
     return out
 
 
+# Rows linked to a quoting-metrics workbook don't hold their own values: these
+# columns are =IMPORTRANGE(link, "0. ROLL UP Quoting Metrics!<cell>"), which
+# Google evaluates lazily — on any read a share of them comes back blank. So the
+# B151 is read a few times (merging), and whatever is still blank is read from
+# the linked workbook itself (cached by the workbook's modified time).
+IMPORT_CELLS = {
+    "quote": "C39", "requested": "D12", "revised": "O39", "revisions": "P39", "quoted_by": "D39",
+    "contact": "E39", "customer": "F39", "city": "D15", "state": "E15", "description": "G39",
+    "labor_days": "H39", "travel_days": "I39", "start": "J39", "end": "K39",
+    "ohp_amount": "L39", "ohp_pct": "M39", "tcv": "N39",
+}
+ROLLUP_RANGE = "'0. ROLL UP Quoting Metrics'!C12:P39"
+B151_READS = 3
+
+
+def _blank(v):
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _merge_reads(reads):
+    """Cell-wise merge of several reads of the same range: first non-blank wins."""
+    n = max(len(r) for r in reads)
+    out = []
+    for i in range(n):
+        rows = [list(r[i]) if i < len(r) else [] for r in reads]
+        w = max(len(x) for x in rows)
+        merged = []
+        for c in range(w):
+            v = next((x[c] for x in rows if c < len(x) and not _blank(x[c])), "")
+            merged.append(v)
+        out.append(merged)
+    return out
+
+
+def _cell(grid, a1, top_row=12, left_col="C"):
+    col = ord(a1[0]) - ord(left_col)
+    row = int(a1[1:]) - top_row
+    try:
+        return grid[row][col]
+    except (IndexError, TypeError):
+        return None
+
+
+def _workbook_id(url):
+    m = re.search(r"/d/([A-Za-z0-9_-]{20,})", url or "")
+    return m.group(1) if m else None
+
+
+def _fill_from_workbooks(vals, links, budget_s=1800):
+    """Fill blank import columns from each linked workbook's roll-up tab.
+    Returns stats. vals is the merged B151 grid (rows from RR_HEADER_ROW+1)."""
+    import time
+    from sqlalchemy import text as _t
+    from app.db import engine
+    need = {}
+    for i, row in enumerate(vals):
+        rn = RR_HEADER_ROW + 1 + i
+        wid = _workbook_id(links.get(rn))
+        if not wid:
+            continue
+        row = list(row) + [""] * (40 - len(row))
+        if any(_blank(row[RR[k]]) for k in IMPORT_CELLS):
+            need.setdefault(wid, []).append(i)
+    stats = {"rows_needing_workbook": sum(len(v) for v in need.values()), "workbooks": len(need),
+             "fetched": 0, "cached": 0, "failed": 0}
+    if not need:
+        return stats
+    with engine.connect() as conn:
+        cache = {r[0]: (r[1], r[2]) for r in conn.execute(_t(
+            "SELECT file_id, modified, grid FROM gsync_workbook_cache"))}
+    # modified times for every quoting-metrics workbook in one paged search
+    try:
+        mods = {f["id"]: f.get("modifiedTime") for f in gdrive.list_files(
+            "mimeType = 'application/vnd.google-apps.spreadsheet' and name contains 'Quoting Metrics' and trashed = false")}
+    except Exception:
+        mods = {}
+    t0 = time.time()
+    # cached workbooks first so a budget-stopped first run still fills those rows
+    for wid, idxs in sorted(need.items(), key=lambda kv: kv[0] not in cache):
+        grid = None
+        try:
+            mod = mods.get(wid) or gdrive.get(wid).get("modifiedTime")
+            if wid in cache and cache[wid][0] == mod:
+                g = cache[wid][1]
+                grid = json.loads(g) if isinstance(g, str) else g
+                stats["cached"] += 1
+            elif time.time() - t0 < budget_s:
+                grid = gdrive.sheet_values(wid, ROLLUP_RANGE)
+                stats["fetched"] += 1
+                with engine.begin() as conn:
+                    conn.execute(_t("""
+                        INSERT INTO gsync_workbook_cache (file_id, modified, grid) VALUES (:f, :m, :g)
+                        ON DUPLICATE KEY UPDATE modified = VALUES(modified), grid = VALUES(grid), fetched_at = NOW()
+                    """), {"f": wid, "m": mod, "g": json.dumps(grid, default=str)})
+                time.sleep(0.9)       # Sheets API read quota: 60 requests/min
+        except Exception:
+            stats["failed"] += 1
+        if not grid:
+            continue
+        for i in idxs:
+            row = list(vals[i]) + [""] * (40 - len(vals[i]))
+            for k, a1 in IMPORT_CELLS.items():
+                if _blank(row[RR[k]]):
+                    v = _cell(grid, a1)
+                    if k == "revisions" and not (isinstance(v, (int, float)) and v > 0):
+                        v = 0
+                    if not _blank(v):
+                        row[RR[k]] = v
+            vals[i] = row
+    stats["seconds"] = int(time.time() - t0)
+    return stats
+
+
 def fetch_b151_rows(min_expected=0):
-    """The Rolling Revenue rows. Sheets API first (exact cell values); if it's
-    not enabled, the xlsx export — which Google sometimes returns with rows
-    missing on a big sheet, so it's retried and the fullest copy kept."""
+    """The Rolling Revenue rows. Sheets API first (exact cell values, read
+    B151_READS times and merged, blanks then filled from the linked quoting-
+    metrics workbooks); if the API is unavailable, the xlsx export — which
+    shows the same lazily-evaluated blanks, so it's retried and the fullest kept."""
     meta = gdrive.get(B151_ID)
     try:
-        vals = gdrive.sheet_values(B151_ID, f"'2. Rolling Revenue'!A{RR_HEADER_ROW + 1}:AH6000")
-        rows = _rows_from_values(vals)
+        rng = f"'2. Rolling Revenue'!A{RR_HEADER_ROW + 1}:AH6000"
+        reads = [gdrive.sheet_values(B151_ID, rng)]
+        for _ in range(B151_READS - 1):
+            import time
+            time.sleep(15)        # give Google time to evaluate more IMPORTRANGEs
+            reads.append(gdrive.sheet_values(B151_ID, rng))
+        vals = _merge_reads(reads)
         try:
-            _attach_links(rows, gdrive.sheet_links(B151_ID, f"'2. Rolling Revenue'!F{RR_HEADER_ROW + 1}:F6000",
-                                                   RR_HEADER_ROW + 1))
+            links = gdrive.sheet_links(B151_ID, f"'2. Rolling Revenue'!F{RR_HEADER_ROW + 1}:F6000", RR_HEADER_ROW + 1)
         except Exception:
-            pass
+            links = {}
+        fill = _fill_from_workbooks(vals, links) if links else {}
+        rows = _rows_from_values(vals)
+        _attach_links(rows, links)
+        if rows:
+            rows[0].setdefault("_fill_stats", fill)
         return meta, rows, "sheets_api"
     except Exception:
         pass

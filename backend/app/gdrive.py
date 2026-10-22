@@ -139,14 +139,20 @@ def sheet_links(sheet_id, a1_range, first_row):
     """{row: url} for the cell hyperlinks in a one-column range (Sheets API)."""
     h = {"Authorization": f"Bearer {_token()}"}
     r = httpx.get(f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}", headers=h, timeout=180, params={
-        "ranges": a1_range, "fields": "sheets(data(rowData(values(hyperlink))))"})
+        "ranges": a1_range,
+        "fields": "sheets(data(rowData(values(hyperlink,chipRuns,textFormatRuns(format(link))))))"})
     r.raise_for_status()
     out = {}
     for sh in r.json().get("sheets", []):
         for d in sh.get("data", []):
             for i, rd in enumerate(d.get("rowData", [])):
-                v = (rd.get("values") or [{}])[0].get("hyperlink")
-                if v and v.startswith("http"):
+                cell = (rd.get("values") or [{}])[0]
+                # plain hyperlink, a smart chip (richLinkProperties) or a rich-text link
+                cands = [cell.get("hyperlink")]
+                cands += [((c.get("chip") or {}).get("richLinkProperties") or {}).get("uri") for c in cell.get("chipRuns") or []]
+                cands += [((t.get("format") or {}).get("link") or {}).get("uri") for t in cell.get("textFormatRuns") or []]
+                v = next((c for c in cands if c and c.startswith("http")), None)
+                if v:
                     out[first_row + i] = v
     return out
 

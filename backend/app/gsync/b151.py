@@ -164,8 +164,8 @@ def plan(conn, rows):
         for f, v in tgt.items():
             if f in METRIC_FIELDS and (o["metrics_source"] == "app" or o["app_estimate_id"]):
                 continue
-            if f == "workbook_url" and not v:
-                continue
+            if v is None and o[f] is not None:
+                continue   # a blank cell never wipes a value (the sheet's imports load lazily)
             if not _same(o[f], v):
                 ch[f] = v
         st = lifecycle(tgt["pipeline_status"], o["status"])

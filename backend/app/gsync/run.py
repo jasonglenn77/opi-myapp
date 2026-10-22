@@ -51,6 +51,8 @@ def refresh_b151(who="manual", dry_run=False, actor=None):
             sheets.store_b151(conn, rows)
             b151.apply(conn, p)
         summary = {"rows": len(rows), "via": via, **b151.summarize(p)}
+        if rows and rows[0].get("_fill_stats"):
+            summary["workbook_fill"] = rows[0]["_fill_stats"]
         try:
             from app.opportunities.qbo_sync import run as qbo_link
             summary["qbo_links"] = qbo_link(do_apply=True, link_only=True)[0]["linked_project"]
