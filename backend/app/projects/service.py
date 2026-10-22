@@ -195,7 +195,7 @@ def get_assignment_bundle(qbo_customer_id: int):
     for r in crews:
         if r["parent_id"] is not None and int(r["parent_id"]) in by_id:
             by_id[int(r["parent_id"])]["leads"].append(
-                {"id": r["id"], "name": r["name"], "code": r["code"]})
+                {"id": r["id"], "name": r["name"]})
 
     return {
         "qbo": dict(qbo),

@@ -5,7 +5,7 @@ crew_time_off and turns it into "how many of a Crew Boss's crews are out".
 Row meaning (0070): company_id has crew_count crews unavailable on every day
 of start_date..end_date (inclusive). crew_count NULL = ALL the company's
 crews. lead_ids = OPTIONAL list of specific lead work_crews ids that are out
-(informational + lets the Schedule page grey that lead's line).
+(informational only — a lead has no line; greying just uses free lines).
 
 Consumers: /api/crew-time-off CRUD (main.py), /api/schedule (grey lines),
 /assignment/bundle (non-blocking editor warnings), /api/offers/crew-roster
@@ -64,8 +64,8 @@ def load_time_off(conn, where="1=1", params=None):
     if all_lead_ids:
         ph = ",".join(str(int(i)) for i in sorted(all_lead_ids))
         for l in conn.execute(text(
-                f"SELECT id, name, code FROM work_crews WHERE id IN ({ph})")).mappings().all():
-            leads[int(l["id"])] = {"id": int(l["id"]), "name": l["name"], "code": l["code"]}
+                f"SELECT id, name FROM work_crews WHERE id IN ({ph})")).mappings().all():
+            leads[int(l["id"])] = {"id": int(l["id"]), "name": l["name"]}
     out = []
     for r, ids in parsed:
         out.append({

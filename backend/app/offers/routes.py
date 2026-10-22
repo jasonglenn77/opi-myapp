@@ -169,7 +169,7 @@ def _load_crew_world(conn):
 
     leads_by_co = defaultdict(list)
     for l in leads:
-        leads_by_co[int(l["parent_id"])].append({"id": l["id"], "name": l["name"], "code": l["code"]})
+        leads_by_co[int(l["parent_id"])].append({"id": l["id"], "name": l["name"]})
     by_co = defaultdict(list)
     for s_ in scheds:
         if s_["company_id"] is not None:

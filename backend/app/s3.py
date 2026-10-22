@@ -47,3 +47,10 @@ def signed_file_url(key: str, expires_in: int = 3600) -> str:
         },
         ExpiresIn=expires_in,
     )
+
+# Dev points at the PRODUCTION bucket (with a copy of the prod database), so a
+# delete or bulk sync from dev would remove / overwrite real files. Set
+# S3_SHARED_READONLY=1 in .env.local: S3 deletes become no-ops (the DB row is
+# still removed) and the Google Drive documents sync refuses to write unless
+# it's given its own --prefix.
+S3_SHARED_READONLY = os.getenv("S3_SHARED_READONLY", "").strip().lower() in ("1", "true", "yes")

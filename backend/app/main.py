@@ -1283,8 +1283,10 @@ def create_work_crew(req: WorkCrewCreateRequest, admin=Depends(require_admin)):
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
 
-    code = (req.code or "").strip() or None
     parent_id = req.parent_id
+    # Only a crew BOSS (parent row) carries a code — it's the schedule-line
+    # prefix (JR -> JR1, JR2...). Crew leads are names only: never a code.
+    code = None if parent_id is not None else ((req.code or "").strip() or None)
     color = validate_hex_color(req.color)
     boss_name = (req.boss_name or "").strip() or None
     crew_capacity = validate_crew_capacity(req.crew_capacity)
@@ -1395,6 +1397,15 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, admin=Depends(req
             updates.append("parent_id = :parent_id")
             params["parent_id"] = req.parent_id
 
+    # Leads (rows with a parent) never carry a code — the code is the BOSS's
+    # schedule-line prefix only. Force NULL whenever the row is/becomes a lead.
+    becomes_lead = ("parent_id" in req.__fields_set__ and req.parent_id is not None) or         ("parent_id" not in req.__fields_set__ and old["parent_id"] is not None)
+    if becomes_lead:
+        updates = [u for u in updates if u != "code = :code"]
+        params.pop("code", None)
+        if old["code"] is not None:
+            updates.append("code = NULL")
+
     if not updates:
         return {"ok": True, "updated": False}
 
@@ -1416,6 +1427,8 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, admin=Depends(req
     new_vals = dict(params)
     if "parent_id = NULL" in updates:
         new_vals["parent_id"] = None
+    if "code = NULL" in updates:
+        new_vals["code"] = None
     touched = [f for f in ("name", "code", "parent_id", "color", "is_active",
                            "sort_order", "vendor_qbo_id", "boss_name", "crew_capacity")
                if f in new_vals]

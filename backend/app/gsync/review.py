@@ -409,6 +409,26 @@ def schedule_items(conn):
     return out, {"schedule_cells": len(cells)}
 
 
+def crew_boss_items(conn):
+    """Crew bosses still named only by their code (placeholders the schedule
+    import needed, e.g. DS / RC) or with no name — the owner fills in the
+    company name and its leads on Team Management."""
+    out = []
+    for r in conn.execute(text("""
+        SELECT id, name, code FROM work_crews
+        WHERE parent_id IS NULL AND is_active = 1
+          AND (TRIM(COALESCE(name, '')) = '' OR (code IS NOT NULL AND UPPER(TRIM(name)) = UPPER(TRIM(code))))
+        ORDER BY code, id
+    """)).mappings():
+        code = r["code"] or f"#{r['id']}"
+        out.append(_item("schedule", "crew_boss_name_needed", r["id"], "medium",
+                         f"Crew boss {code} needs a name",
+                         f"Crew boss {code} is on the Job Schedule but the app only knows it by its code.",
+                         fix="Add the crew boss's company name (and leads) on the Team Management page",
+                         link="#/teams", app=r["name"] or None, ref={"work_crew_id": int(r["id"])}))
+    return out
+
+
 # ── B151 vs Job Schedule (the two Google sheets against each other) ──────────
 
 def sheets_items(conn):
@@ -524,10 +544,11 @@ def build():
         s_items, s_meta = schedule_items(conn)
         x_items, _ = sheets_items(conn)
         o_items = _optional_items(conn)
+        c_items = crew_boss_items(conn)
         state = {r["item_key"]: dict(r) for r in conn.execute(text(
             "SELECT item_key, status, note, fingerprint, updated_by_email, updated_at FROM data_review_state")).mappings()}
         last_refresh = conn.execute(text("SELECT MAX(finished_at) FROM gsync_runs WHERE ok = 1")).scalar()
-    items = p_items + s_items + x_items + o_items
+    items = p_items + s_items + x_items + o_items + c_items
     for it in items:
         st = state.get(it["key"])
         it["state"] = "open"

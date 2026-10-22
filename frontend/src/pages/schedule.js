@@ -543,7 +543,7 @@ export async function schedulePage(routeFn) {
             <div class="schm-l">Specific crew lead(s) — optional</div>
             ${leads.length ? `<div class="schto-leadlist">${leads.map(l => `
               <label class="schto-lead"><input type="checkbox" data-to-lead="${l.id}" ${draft.lead_ids.map(String).includes(String(l.id)) ? "checked" : ""} />
-                <span>${l.code ? `<b>${escapeHtml(l.code)}</b> · ` : ""}${escapeHtml(l.name)}</span></label>`).join("")}</div>`
+                <span>${escapeHtml(l.name)}</span></label>`).join("")}</div>`
               : `<div class="ah-loading">No active leads for this Crew Boss.</div>`}
           </div>` : ""}
         <div class="schto-foot">
@@ -915,12 +915,9 @@ export async function schedulePage(routeFn) {
 
     const parentsSorted = [...parents].sort(crewSortKey);
     const childCountByParent = new Map();
-    const childByCode = new Map();       // legacy fallback: code -> child crew
-    const parentById = new Map(parentsSorted.map(p => [String(p.id), p]));
     for (const ch of children) {
       const k = String(ch.parent_id);
       childCountByParent.set(k, (childCountByParent.get(k) || 0) + 1);
-      if (ch.code) childByCode.set(ch.code, ch);
     }
 
     // map: "companyId|slot" -> { ymd -> [items...] }; slots seen this month.
@@ -954,14 +951,9 @@ export async function schedulePage(routeFn) {
     // Expand assignments across days they cover (within the month range)
     for (const a of assignments) {
       // one entry per assignment crew row: {slot, company_id, company, lead}
+      // (Crew leads are names only — they never map to a line; the line is
+      // the assignment's slot_code.)
       let entries = Array.isArray(a.crew_slots) ? a.crew_slots.filter(e => e && e.company_id != null) : [];
-      if (!entries.length && Array.isArray(a.work_crew_codes)) {
-        // legacy fallback — derive from the old code list
-        entries = a.work_crew_codes.filter(Boolean).map(code => {
-          const ch = childByCode.get(code);
-          return ch ? { slot: code, company_id: ch.parent_id, company: (parentById.get(String(ch.parent_id)) || {}).name, lead: ch.name } : null;
-        }).filter(Boolean);
-      }
       // CR5 B1: crewless assignment → a pseudo "needs crew" entry expanded
       // into ncMap by the same day loops below (travel/overage included).
       const needsCrew = entries.length === 0;
@@ -1074,12 +1066,11 @@ export async function schedulePage(routeFn) {
       return Number.isFinite(n) ? n : 9998;
     }
     // 0070 CREW TIME-OFF (count model): per company per day, K crews out →
-    // grey K of the company's crew lines. Pick order per day: (1) lines whose
-    // code matches a NAMED lead on the time-off row (lead code JR3 → line
-    // JR3) while that line is free that day, (2) other FREE lines (nothing
-    // drawn that day), highest-numbered first, (3) only when K exceeds the
-    // free lines, BUSY lines, named ones first then highest-first (drawn
-    // as a conflict: hatched behind the bar + "Off" chip). A NULL crew_count
+    // grey K of the company's crew lines. Pick order per day: (1) FREE lines
+    // (nothing drawn that day), highest-numbered first, (2) only when K
+    // exceeds the free lines, BUSY lines highest-first (drawn as a conflict:
+    // hatched behind the bar + "Off" chip). Named leads on a time-off row are
+    // informational only — a lead has no line. A NULL crew_count
     // (whole company) greys every line. offCells: "coId|slot" → ymd → rows.
     const offCells = new Map();
     const fullSlotsByCo = new Map();     // companyId -> sorted line list
@@ -1107,12 +1098,8 @@ export async function schedulePage(routeFn) {
         k = Math.min(k, lines.length);
         if (!k) continue;
         const busy = (s) => ((map.get(`${p.id}|${s}`) || new Map()).get(ds) || []).length > 0;
-        const named = [];
-        for (const t of hits) for (const l of (t.leads || [])) {
-          if (l.code && lines.includes(l.code) && !named.includes(l.code)) named.push(l.code);
-        }
         const desc = [...lines].reverse();
-        const order = [...named.filter(s => !busy(s)), ...desc.filter(s => !busy(s)), ...named, ...desc.filter(s => busy(s))];
+        const order = [...desc.filter(s => !busy(s)), ...desc.filter(s => busy(s))];
         const picked = [...new Set(order)].slice(0, k);
         for (const s of picked) {
           const key = `${p.id}|${s}`;

@@ -283,7 +283,8 @@ def delete_document(doc_id: int, user=Depends(get_current_user)):
         if not r:
             raise HTTPException(status_code=404, detail="Document not found")
         try:
-            if r["s3_key"]:
+            from app.s3 import S3_SHARED_READONLY
+            if r["s3_key"] and not S3_SHARED_READONLY:
                 s3_client.delete_object(Bucket=r["s3_bucket"], Key=r["s3_key"])
         except Exception:
             pass  # row removal proceeds even if S3 delete fails

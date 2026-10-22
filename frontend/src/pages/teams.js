@@ -1217,7 +1217,7 @@ setShell({
       if (!confirm("Re-enable this crew?")) return;
       const payload = {
         name:       c.name,
-        code:       c.code || null,
+        code:       c.parent_id ? null : (c.code || null),
         parent_id:  c.parent_id || null,
         color:      c.color || null,
         sort_order: Number(c.sort_order || 0),

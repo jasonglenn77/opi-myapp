@@ -36,6 +36,7 @@ const TYPES = {
   dates: "Dates differ",
   phases: "Return trips / phases missing",
   crews: "Crews differ",
+  crew_boss_name_needed: "Crew boss name needed",
   pm: "PM differs",
   status: "Status contradicts the dates",
   scheduled_not_on_b151: "On the Job Schedule, no quote on the B151",

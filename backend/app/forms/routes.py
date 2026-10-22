@@ -839,7 +839,9 @@ def delete_form_file(doc_id: int, project_qbo_id: str = Query(...), actor=Depend
             raise HTTPException(status_code=409, detail="This drawing is part of a submitted form and is kept")
         conn.execute(text("DELETE FROM documents WHERE id = :id"), {"id": doc_id})
     try:
-        s3_client.delete_object(Bucket=doc["s3_bucket"], Key=doc["s3_key"])
+        from app.s3 import S3_SHARED_READONLY
+        if not S3_SHARED_READONLY:
+            s3_client.delete_object(Bucket=doc["s3_bucket"], Key=doc["s3_key"])
     except Exception:
         pass
     record_audit(actor_for_audit(actor), "form.file_delete", "document", doc_id,

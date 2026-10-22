@@ -1079,7 +1079,9 @@ def _changes(token, quiet):
 def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, only_file=None, prefix=None,
         workers=None, budget_min=None, who="cli", reuse_walk=False, quiet=False):
     """Plan (and with apply=True, execute) a Drive -> documents sync. Returns a summary dict."""
-    from app.s3 import S3_PREFIX
+    from app.s3 import S3_PREFIX, S3_SHARED_READONLY
+    if apply and S3_SHARED_READONLY and not prefix:
+        return {"skipped": "S3_SHARED_READONLY is set (dev shares the prod bucket) - pass --prefix to test"}
     prefix = (prefix or os.getenv("DRIVE_SYNC_S3_PREFIX") or S3_PREFIX).strip("/")
     workers = workers or int(os.getenv("DRIVE_SYNC_WORKERS", "6"))
     filtered = bool(limit or only_job or only_path or only_file)

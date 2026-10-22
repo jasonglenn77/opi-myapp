@@ -2151,7 +2151,7 @@ def schedule(
         qc.display_name AS project_name,
 
         COALESCE((
-          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(wc2.code) ORDER BY swc2.is_primary DESC, wc2.sort_order, wc2.id), ']') AS JSON)
+          SELECT CAST(CONCAT('[', GROUP_CONCAT(JSON_QUOTE(COALESCE(swc2.slot_code, CASE WHEN wc2.parent_id IS NULL THEN wc2.code END)) ORDER BY swc2.is_primary DESC, wc2.sort_order, wc2.id), ']') AS JSON)
           FROM myapp.project_schedule_item_work_crews swc2
           JOIN myapp.work_crews wc2 ON wc2.id = swc2.work_crew_id
           WHERE swc2.schedule_item_id = psi.id
