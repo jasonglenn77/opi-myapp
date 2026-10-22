@@ -67,14 +67,14 @@ CLI (inside the backend container):
   options: --limit N  --only-job NNNN  --only-path TEXT  --only-file DRIVEID
            --prefix KEYPREFIX  --workers N  --budget-min M  --reuse-walk  --quiet
 Removed in Drive: a copied file that is trashed/deleted/moved out of Customers
-(Changes API removed/trashed, its folder gone, or missing from the weekly full
+(Changes API removed/trashed, its folder gone, or missing from the full
 walk) stays in the app; its row gets drive_removed_at + drive_removed_reason
 (cleared if the file comes back) and Data Review lists it (removed_in_drive).
 A file moved to another folder is re-filed instead.
 
 Reconcile: reconcile() compares Drive with the documents rows per project
 folder (missing / changed / misfiled / extra) after every complete full walk
-(weekly + right after the backfill); gsync_runs source 'drive_reconcile'.
+(every refresh + right after the backfill); gsync_runs source 'drive_reconcile'.
 
 Progress + summary: gsync_runs (source 'drive_docs'); per-file errors:
 drive_file_state (retried by the next run). Only one run at a time
@@ -109,7 +109,9 @@ WALK_FIELDS = "nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,md
 FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,md5Checksum,trashed"
 CHANGE_FIELDS = f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))"
 TEMPLATE_MIN_ROOTS = 20
-FULL_EVERY_DAYS = 7
+# Every refresh (nightly cron and the Data Review button) does a full walk so the
+# Drive-vs-app reconcile runs each time; the walk takes ~6-10 min.
+FULL_EVERY_DAYS = 0.5
 MAX_ATTEMPTS = 8
 UNMAPPED_FOLDER = "7_notes"      # files at a project root or in an unrecognised subfolder
 
@@ -904,7 +906,7 @@ REMOVED_REASONS = {
     "deleted": "deleted from Drive",
     "moved_out": "moved out of the Customers folder",
     "folder_removed": "its Drive folder was trashed, deleted or moved out of Customers",
-    "missing": "no longer found in its Drive folder (weekly re-check)",
+    "missing": "no longer found in its Drive folder",
 }
 
 
@@ -1307,7 +1309,7 @@ def run(mode="full", apply=False, limit=None, only_job=None, only_path=None, onl
                         set_state(conn, "backfill_completed_at", datetime.utcnow().isoformat(timespec="seconds"))
         summary["elapsed_s"] = int(_now() - t0)
         if mode == "full" and not filtered and not left:
-            # post-sync quality check (weekly, and right after the backfill completes)
+            # post-sync quality check — after every complete full sync (each refresh)
             try:
                 rc = reconcile(folders, files, who=f"{who}:after_full_sync", quiet=quiet)
                 summary["reconcile"] = rc.get("totals")
@@ -1343,7 +1345,7 @@ def reconcile(folders=None, files=None, only_job=None, reuse_walk=False, who="cl
       extra     a row whose Drive file is no longer in Drive (extra_unflagged =
                 the sync has not stamped it drive_removed_at yet)
       stale_flag  stamped removed but the file is back in Drive
-    Called after every complete full sync (weekly + right after the backfill)
+    Called after every complete full sync (every refresh + right after the backfill)
     with the walk already in memory; the CLI walks Drive (or --reuse-walk).
     Recorded in gsync_runs (source 'drive_reconcile'); Data Review shows one
     item per mismatched folder (review_docs.py)."""
@@ -1475,15 +1477,15 @@ def reconcile(folders=None, files=None, only_job=None, reuse_walk=False, who="cl
 
 
 def nightly(who="cron"):
-    """Called from run.refresh_all after the sheet refreshes. Cron: auto mode
-    (weekly full walk) with a 3 h budget; the Data Review button: incremental
-    only, 10 min budget. Re-runs continue where a budget-stopped run left off."""
-    if who == "cron":
-        return run(mode="auto", apply=True, who=who, budget_min=180, quiet=True)
+    """Called from run.refresh_all after the sheet refreshes — nightly cron and
+    the Data Review "Refresh from Google" button alike: a full walk (new, changed
+    and removed files) followed by the Drive-vs-app reconcile, every time.
+    Budget 3 h (cron) / 45 min (button); a budget-stopped run continues where it
+    left off next time (the reconcile then runs on the run that completes)."""
     with engine.connect() as conn:
         if not get_state(conn, "backfill_completed_at"):
             return {"skipped": "the initial Drive backfill has not completed yet"}
-    return run(mode="incremental", apply=True, who=who, budget_min=10, quiet=True)
+    return run(mode="auto", apply=True, who=who, budget_min=180 if who == "cron" else 45, quiet=True)
 
 
 def main(argv=None):

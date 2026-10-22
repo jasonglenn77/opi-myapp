@@ -124,7 +124,7 @@ export async function reviewPage(routeFn) {
         </div>
         <div class="rv-sources">
           ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")}
-          <button type="button" class="rv-btn" data-refresh ${st.busy ? "disabled" : ""}>${st.busy ? "Reading Google…" : "Refresh from Google"}</button>
+          <button type="button" class="rv-btn" data-refresh ${st.busy ? "disabled" : ""}>${st.busy ? "Reading Google… (documents take ~10 min — you can leave this page)" : "Refresh from Google"}</button>
         </div>
       </div>
       <div class="rv-blurb">${escapeHtml(cat.blurb)} <span class="rv-legend"><b>Fixed</b> = you corrected it at the source · <b>Ignore</b> = the difference is expected. Neither button changes any data — they just track the review.</span></div>
@@ -198,7 +198,9 @@ export async function reviewPage(routeFn) {
     const before = JSON.stringify(st.data.runs || {});
     try {
       await api("/review/refresh", { method: "POST" });
-      for (let n = 0; n < 60; n++) {          // poll up to ~5 min
+      // Sheets take ~1–2 min; the Drive documents walk + reconcile ~10 min.
+      // Safe to leave the page — the refresh keeps running on the server.
+      for (let n = 0; n < 540; n++) {         // poll up to ~45 min
         await new Promise((r) => setTimeout(r, 5000));
         if (!document.body.contains(root)) return;
         const d = await api("/review");
