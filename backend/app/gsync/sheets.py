@@ -70,9 +70,16 @@ DATE_COLS = {"last_contact", "requested", "revised", "order_date", "start", "end
 
 
 def _serial_date(v):
-    if isinstance(v, (int, float)) and 20000 < v < 80000:
-        return (dt.date(1899, 12, 30) + dt.timedelta(days=int(v))).isoformat()
-    return _val(v)
+    """A date cell → 'YYYY-MM-DD', or None when it doesn't hold a date
+    (e.g. a stray number or 'Date?' typed into a date column)."""
+    if isinstance(v, (int, float)):
+        if 20000 < v < 80000:
+            return (dt.date(1899, 12, 30) + dt.timedelta(days=int(v))).isoformat()
+        return None
+    v = _val(v)
+    if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v[:10]):
+        return v[:10]
+    return None
 
 
 def _rows_from_values(values):
@@ -303,8 +310,13 @@ def store_b151(conn, rows):
 
 
 def load_b151(conn):
-    return [json.loads(d) if isinstance(d, str) else d
+    rows = [json.loads(d) if isinstance(d, str) else d
             for d in conn.execute(text("SELECT data FROM gsync_b151_rows ORDER BY row_num")).scalars()]
+    for r in rows:              # older snapshots may hold non-date values in date columns
+        for k in DATE_COLS:
+            if k in r:
+                r[k] = _serial_date(r[k])
+    return rows
 
 
 # ── Job Schedule ─────────────────────────────────────────────────────────────
