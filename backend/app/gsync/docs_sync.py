@@ -623,15 +623,31 @@ def set_state(conn, k, v):
                          ON DUPLICATE KEY UPDATE v = VALUES(v)"""), {"k": k, "v": v})
 
 
+def _read_all(sql, row_fn, attempts=3):
+    """Read a big table (121k Drive folders) into a dict on a fresh connection,
+    retrying when the connection drops mid-read (MySQL 2013 'Lost connection'
+    once cut a nightly run short while the walk held the server busy)."""
+    import time
+    from sqlalchemy.exc import OperationalError
+    for i in range(attempts):
+        try:
+            with engine.connect() as conn:
+                return dict(row_fn(r) for r in conn.execute(text(sql)).fetchall())
+        except OperationalError:
+            if i == attempts - 1:
+                raise
+            time.sleep(5 * (i + 1))
+
+
 def _load_folders(conn):
     return {r[0]: [r[1], r[2]] for r in conn.execute(text("SELECT drive_id, parent_id, name FROM drive_folders"))}
 
 
 def _write_folders(tree, resolver, quiet):
     """Sync drive_folders with the in-memory tree (diff: insert/update/delete)."""
-    with engine.connect() as conn:
-        cur = {r[0]: tuple(r[1:]) for r in conn.execute(text(
-            "SELECT drive_id, parent_id, name, path, is_root, match_kind, entity_type, entity_id, nums FROM drive_folders"))}
+    cur = _read_all(
+        "SELECT drive_id, parent_id, name, path, is_root, match_kind, entity_type, entity_id, nums FROM drive_folders",
+        lambda r: (r[0], tuple(r[1:])))
     want = {}
     for fid, (par, name) in tree.f.items():
         p = tree.path(fid)
