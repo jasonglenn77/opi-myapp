@@ -36,8 +36,8 @@ const prettyCat = (c) => String(c || "").replace(/_/g, " ").replace(/\b\w/g, m =
 // rateTablesPage below), so they no longer live as tabs here.
 export async function settingsPage(routeFn) {
   setShell({
-    title: "Settings",
-    subtitle: "Roles & permissions — control what each role can see and do across the app.",
+    title: "Roles & Permissions",
+    subtitle: "Control what each role can see and do across the app.",
     bodyHtml: `<div class="w-full pb-3"><div id="setBody"></div></div>`,
     showLogout: true, routeFn,
   });
