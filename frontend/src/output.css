@@ -5710,6 +5710,9 @@ input[type="date"]::-webkit-date-and-time-value { text-align:left; margin:0; }
 .rv-badge-zero { background:#e2e8f0; color:#64748b; }
 .rv-sources { display:flex; flex-wrap:wrap; align-items:center; gap:10px; font-size:11px; color:#64748b; }
 .rv-blurb { font-size:13px; color:rgba(255,255,255,.7); margin:2px 2px 10px; max-width:90ch; }
+.rv-b250 { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; margin-bottom:10px; font-size:12.5px; color:#334155; }
+.rv-b250 label { cursor:pointer; white-space:nowrap; }
+.rv-disabled { opacity:.55; pointer-events:none; }
 .rv-filters { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px; }
 .rv-count { font-size:12px; color:rgba(255,255,255,.6); }
 .rv-group { padding:0; margin-bottom:12px; overflow:hidden; }

@@ -148,6 +148,22 @@ def refresh_payments(who="manual"):
         raise
 
 
+def refresh_b250(who="manual"):
+    """B250 cash-flow workbook from Drive -> gsync_b250_* (gsync_runs source 'b250').
+    Not shared with the service account yet = a successful run that says so."""
+    from . import b250_cash
+    run_id = _start("b250", who)
+    try:
+        summary = b250_cash.refresh_from_drive(who)
+    except b250_cash.NotAccessible as e:
+        summary = {"not_shared": str(e)}
+    except Exception as e:
+        _finish(run_id, False, error=str(e))
+        raise
+    _finish(run_id, True, summary)
+    return summary
+
+
 def refresh_all(who="manual", actor=None):
     """Both sheets (then the Assignments from the Job Schedule, then the Drive
     documents sync, then the crew Payment Schedules); one at a time across the process."""
@@ -178,6 +194,12 @@ def refresh_all(who="manual", actor=None):
             out["payment_import"] = refresh_payments(who)
         except Exception as e:
             out["payment_import"] = {"error": str(e)}
+        # OPI's B250 cash-flow sheet (a copy for Data Review "Cash flow sources";
+        # nothing in the app's forecast reads it). Skips cleanly until it's shared.
+        try:
+            out["b250"] = refresh_b250(who)
+        except Exception as e:
+            out["b250"] = {"error": str(e)}
         return out
     finally:
         _lock.release()

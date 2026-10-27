@@ -3,12 +3,12 @@ import threading
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_ESTIMATE, PAGE_ASSIGNMENT
-from . import review, run
+from . import b250_cash, review, run
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
@@ -33,7 +33,27 @@ def _items(force=False):
 def get_review(fresh: bool = False, user=Depends(get_current_user)):
     _require(user)
     d = _items(force=fresh)
-    return {**d, "runs": run.last_runs(), "built_at": _cache["at"]}
+    return {**d, "runs": run.last_runs(), "built_at": _cache["at"], "b250": b250_cash.latest_meta()}
+
+
+@router.post("/b250-upload")
+async def b250_upload(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Load a copy of OPI's B250 cash-flow workbook (.xlsx) for the "Cash flow
+    sources" checks, until the Drive file is shared with the service account."""
+    _require(user)
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Upload the B250 as an Excel file (.xlsx) — in Google Sheets: File → Download → Microsoft Excel.")
+    content = await file.read()
+    if len(content) > 40 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File is larger than 40 MB")
+    try:
+        out = b250_cash.store(content, "upload", user.get("email") or "user", file_name=file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Couldn't read the workbook: {str(e)[:200]}")
+    _cache["data"] = None
+    return out
 
 
 class StateIn(BaseModel):

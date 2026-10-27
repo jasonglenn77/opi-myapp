@@ -10,6 +10,8 @@ Categories
   pipeline  B151 vs QBO estimates vs the app's Pipeline.
   schedule  Job Schedule (Drive) vs Assignments / Schedule in the app.
   payments  crew Payment Schedule files (Drive) vs the app / QBO (review_payments.py).
+  sources   where each number on OPI's B250 cash-flow sheet comes from, vs QBO and the
+            Payment Schedules (review_sources.py).
 """
 import collections
 import hashlib
@@ -585,7 +587,7 @@ def _optional_items(conn):
     import importlib
     out = []
     for mod, fn in (("app.gsync.review_docs", "docs_items"), ("app.billing.align", "ambiguous_items"),
-                    ("app.gsync.review_payments", "payment_items")):
+                    ("app.gsync.review_payments", "payment_items"), ("app.gsync.review_sources", "source_items")):
         try:
             out += getattr(importlib.import_module(mod), fn)(conn)
         except Exception:
@@ -626,7 +628,7 @@ def build():
     return {"items": items,
             "counts": {c: {"open": counts[(c, "open")], "fixed": counts[(c, "fixed")], "ignored": counts[(c, "ignored")]}
                        for c in ("todo", "pipeline", "schedule", "sheets", "documents", "old_estimates", "billing",
-                                 "payments")},
+                                 "payments", "sources")},
             "meta": {**p_meta, **s_meta}}
 
 

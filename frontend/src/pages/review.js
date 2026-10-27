@@ -20,6 +20,7 @@ const CATS = [
   { key: "old_estimates", label: "Old estimate folders", blurb: "Drive folders whose job # matches only a QuickBooks estimate — mostly 2023–24 jobs that never became a project or Pipeline quote. Their files are copied and kept in the holding area. Grouped by the estimate's year, sorted by customer. Link one if the job did become a project or quote under another number; otherwise Ignore it (the files stay in the holding area).", optional: true },
   { key: "billing", label: "Billing", blurb: "Invoice schedules that couldn't be lined up with the actual QuickBooks invoices automatically.", optional: true },
   { key: "payments", label: "Crew payments", blurb: "The crew \"Payment Schedule\" files in each project's Drive folder. The app's crew payment schedules update from them every night (the sheet wins); these are the files it couldn't match or map, and where a sheet, QuickBooks and the Job Schedule disagree. Most fixes go in the sheet.", optional: true },
+  { key: "sources", label: "Cash flow sources", blurb: "Where each number on OPI's B250 cash-flow sheet comes from. The app's Cash Flow takes bank, invoices and bills from QuickBooks and crew pay from the Payment Schedules; lines with no system of record keep the B250's value and are listed here as \"Unsourced\". Also: B250 rows QuickBooks doesn't back up, and gaps in the QuickBooks books." },
 ];
 const TYPES = {
   create_qbo_project: "Create the QuickBooks project",
@@ -68,6 +69,32 @@ const TYPES = {
   skipped_superseded: "Older Payment Schedule version skipped",
   skipped_duplicate: "Duplicate Payment Schedule skipped",
   no_payment_schedule: "On the Job Schedule, no crew Payment Schedule",
+  b250_missing: "B250 cash-flow sheet not loaded",
+  bank_opening: "Opening cash vs QuickBooks bank accounts",
+  bank_duplicate: "Duplicate bank account in QuickBooks",
+  undeposited: "Payments not deposited in QuickBooks",
+  unsourced_overhead: "Unsourced — Cash Flow lines kept from the B250",
+  unsourced_vendor: "Unsourced — B250 vendor placeholders (weeks 5–13)",
+  unsourced_forecast_inv: "Unsourced — B250 dealer forecasted invoices",
+  unsourced_operating: "Unsourced — B250 operating expenses",
+  ar_paid_or_missing: "On the B250, paid / missing in QuickBooks",
+  ar_amount: "B250 invoice amount differs from QuickBooks",
+  ar_not_on_b250: "Open QuickBooks invoice not on the B250",
+  ar_stale: "Old open invoices left off the B250",
+  ar_duplicate: "Possible duplicate invoices in QuickBooks",
+  crew_vs_schedule: "Crew pay: B250 differs from the Payment Schedules",
+  crew_unmapped: "B250 crew not in the app",
+  crew_total: "Crew pay total: B250 vs Payment Schedules",
+  books_rent_missing: "QuickBooks: rent not booked",
+  books_rent_payee: "QuickBooks: other payments booked as Rent",
+  books_vendor_gap: "QuickBooks: monthly bill missing",
+  books_account_stopped: "QuickBooks: regular cost stopped being booked",
+  books_wip: "QuickBooks: WIP entries stopped",
+  books_owner_account: "QuickBooks: owner pay account switches",
+  b250_monthly_revenue: "B250 monthly \"Revenue\" vs QuickBooks payments",
+  b250_monthly_bookings: "B250 monthly bookings vs QuickBooks",
+  sheet_formula: "B250 formula skips rows",
+  check_failed: "Check failed",
 };
 const TIP_FIXED = "You've corrected it at the source (the B151, the Job Schedule, QuickBooks or the app). Moves it to \"Marked fixed\" — the button itself changes no data. If the next refresh from Google / QuickBooks still finds the difference, it comes back to Open flagged \"still differs\".";
 const TIP_IGNORE = "This difference is expected — leave it as is. Moves it to \"Ignored\" (add a reason). Nothing is changed. It comes back on its own if the difference changes later.";
@@ -119,6 +146,7 @@ export async function reviewPage(routeFn) {
       : src === "b151" ? `${(s.rows || 0).toLocaleString()} rows`
       : src === "schedule_import" ? `${(s.lines_changed || 0) + (s.lines_new || 0)} lines updated from the sheet`
       : src === "payment_import" ? `${s.files_ok || 0} sheets, ${s.projects_changed || 0} projects updated`
+      : src === "b250" ? (s.not_shared ? "not shared with the app yet" : s.skipped ? "unchanged" : `tab ${s.tab || "?"}`)
       : `${(s.cells || 0).toLocaleString()} day cells`;
     return `<span title="${escapeHtml(r.error || "")}">${label}: read ${ago(r.finished_at || r.started_at)} · ${bits}${r.ok ? "" : " ⚠"}</span>`;
   }
@@ -139,10 +167,11 @@ export async function reviewPage(routeFn) {
             ${c.label}<span class="rv-badge ${d.counts[c.key]?.open ? "" : "rv-badge-zero"}">${d.counts[c.key]?.open || 0}</span></button>`).join("")}
         </div>
         <div class="rv-sources">
-          ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")} ${runLine("payment_import", "Crew payments")}
+          ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")} ${runLine("payment_import", "Crew payments")} ${runLine("b250", "B250 cash flow")}
           <button type="button" class="rv-btn" data-refresh ${st.busy ? "disabled" : ""}>${st.busy ? "Reading Google… (documents take ~10 min — you can leave this page)" : "Refresh from Google"}</button>
         </div>
       </div>
+      ${st.cat === "sources" ? b250Bar() : ""}
       <div class="rv-blurb">${escapeHtml(cat.blurb)} <span class="rv-legend"><b>Fixed</b> = you corrected it at the source · <b>Ignore</b> = the difference is expected. Neither button changes any data — they just track the review.</span></div>
       <div class="rv-filters">
         <input type="search" class="input py-1.5" data-q placeholder="Search job #, customer…" value="${escapeHtml(st.q)}" style="max-width:260px">
@@ -156,6 +185,35 @@ export async function reviewPage(routeFn) {
       </div>
       ${items.length ? entries.map(([type, list]) => groupHtml(type, list)).join("")
         : `<div class="card p-6 text-sm text-black/50">${st.state === "open" ? "Nothing to review here — everything matches." : "No items."}</div>`}`;
+  }
+
+  // B250 copy the "Cash flow sources" checks compare against: read from Drive
+  // nightly once it's shared, or uploaded here until then.
+  function b250Bar() {
+    const b = st.data.b250;
+    const what = b
+      ? `Comparing against B250 tab <b>${escapeHtml(b.tab_name || "?")}</b> (week 1 ending ${escapeHtml(b.week1_end || "?")}), ${b.source === "drive" ? "read from Google Drive" : `uploaded${b.loaded_by ? " by " + escapeHtml(b.loaded_by) : ""}`} ${escapeHtml(ago(b.loaded_at))}.`
+      : "No copy of the B250 loaded yet — only the QuickBooks checks are running.";
+    return `<div class="card rv-b250">
+        <span>${what} ${b && b.source === "drive" ? "" : "Once OPI shares the B250 with the app's Google account it's read every night."}</span>
+        <label class="rv-btn rv-btn-go ${st.uploading ? "rv-disabled" : ""}" title="Upload the B250 workbook (.xlsx — in Google Sheets: File → Download → Microsoft Excel)">
+          ${st.uploading ? "Reading…" : "Upload B250 (.xlsx)"}<input type="file" accept=".xlsx,.xlsm" data-b250 hidden ${st.uploading ? "disabled" : ""}>
+        </label>
+      </div>`;
+  }
+
+  async function uploadB250(file) {
+    st.uploading = true; render();
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      await api("/review/b250-upload", { method: "POST", body: fd });
+      st.uploading = false;
+      await load(true);
+    } catch (e) {
+      st.uploading = false; render();
+      alert("Couldn't load the B250: " + (e?.message || e));
+    }
   }
 
   function groupHtml(type, list) {
@@ -274,6 +332,7 @@ export async function reviewPage(routeFn) {
     }
   });
   root.addEventListener("change", (e) => {
+    if (e.target.matches("[data-b250]") && e.target.files?.[0]) { uploadB250(e.target.files[0]); return; }
     if (e.target.matches("[data-state]")) { st.state = e.target.value; render(); }
     if (e.target.matches("[data-sev]")) { st.sev = e.target.value; savePrefs({ cat: st.cat, sev: st.sev }); render(); }
   });

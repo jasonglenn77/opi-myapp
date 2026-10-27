@@ -798,6 +798,12 @@ export async function cashflowPage(routeFn) {
          || (i.cadence || "") !== (i.seed_cadence || "")
          || (i.anchor_date || "").slice(0, 10) !== (i.seed_anchor_date || "").slice(0, 10));
     const sourceCell = (i) => {
+      if (i.source === "b250") {
+        return `<div class="flex items-center gap-2 justify-end whitespace-nowrap">
+          <span class="text-[9px] font-bold uppercase tracking-wide text-rose-700 bg-rose-50 border border-rose-200 rounded px-1 py-px" title="${escapeHtml(i.source_note || "Copied from OPI's B250 cash-flow sheet. No system of record found yet; listed on Data Review → Cash flow sources.")}">B250 · no source</span>
+          <button data-ov-hist="${i.id}" class="text-[11px] font-semibold text-black/40 hover:text-black/70">history</button>
+        </div>`;
+      }
       if (i.from_qbo === 0) {
         return `<div class="flex items-center gap-2 justify-end whitespace-nowrap">
           <span class="text-[9px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-100 border border-indigo-200 rounded px-1 py-px" title="Entered by hand — not from QuickBooks. You maintain this line.">manual</span>

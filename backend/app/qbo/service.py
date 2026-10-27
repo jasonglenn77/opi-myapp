@@ -42,6 +42,20 @@ TRANSACTION_ENTITIES = [
     "BillPayment",
 ]
 
+# Bank-side cash movement, mirrored so the cash-flow forecast and Data Review
+# can source bank/card figures from QBO instead of OPI's typed B250 cells:
+#   Deposit           = money into a bank account (DepositToAccountRef, TotalAmt)
+#   Transfer          = account-to-account move (FromAccountRef/ToAccountRef, Amount)
+#   CreditCardPayment = card bill paid from a bank account (BankAccountRef ->
+#                       CreditCardAccountRef, Amount)
+# Synced on their own watermark ("cash_movements") and best-effort per entity,
+# so a query problem here can never fail or stall the main transactions sync.
+CASH_MOVEMENT_ENTITIES = [
+    "Deposit",
+    "Transfer",
+    "CreditCardPayment",
+]
+
 SALES_TRANSACTION_ENTITIES = {
     "Estimate",
     "Invoice",
@@ -1201,7 +1215,8 @@ def _upsert_one_transaction_and_lines_inner(
     if isinstance(cur, dict):
         currency_code = cur.get("value")
 
-    total_amt = _parse_decimal(t.get("TotalAmt"))
+    # Transfer / CreditCardPayment carry "Amount" instead of "TotalAmt".
+    total_amt = _parse_decimal(t.get("TotalAmt") if t.get("TotalAmt") is not None else t.get("Amount"))
     balance_amt = _parse_decimal(t.get("Balance"))
     sync_token = t.get("SyncToken")
 
@@ -1420,6 +1435,13 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             upserted_lines_total += up_line
             upserted_sales_lines_total += up_sales_line
 
+        # Bank deposits / transfers / card payments (own watermark, best-effort).
+        cash_movements = None
+        try:
+            cash_movements = run_cash_movements_sync(triggered_by=triggered_by)
+        except Exception as e:
+            cash_movements = {"error": str(e)[:300]}
+
         # Reconcile deletions the incremental SELECT can't see: CDC reports rows
         # deleted in QBO since the watermark. Best-effort — never fail the sync
         # over it. (First full sync has no watermark; nothing to reconcile.)
@@ -1468,11 +1490,61 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             "lines_upserted": upserted_lines_total,
             "sales_lines_upserted": upserted_sales_lines_total,
             "transactions_deleted": deleted_total,
+            "cash_movements": cash_movements,
             "run_id": run_id,
         }
     except Exception as e:
         log_sync_finish(run_id, False, error_message=str(e))
         raise
+
+def run_cash_movements_sync(triggered_by: str = "manual") -> dict:
+    """Mirror QBO Deposits, Transfers and CreditCardPayments into qbo_transactions.
+
+    Own watermark (sync_type "cash_movements"): the first run has none, so it
+    pulls the full history; later runs are incremental with the same 24 h
+    overlap as the main sync. Each entity is isolated — one failing query is
+    recorded and the others still sync. The run counts as successful (and the
+    watermark advances) only when every entity succeeded, so a failed entity is
+    retried over the same window next time. Deletions come from CDC like the
+    main sync."""
+    run_id = log_sync_start("cash_movements", triggered_by)
+    try:
+        realm_id, access_token = get_valid_access_token()
+        since = _get_last_successful_sync_time("cash_movements")
+        if since:
+            since = since - timedelta(hours=24)
+        per_entity: dict = {}
+        fetched_total = upserted_total = 0
+        failed = []
+        for entity in CASH_MOVEMENT_ENTITIES:
+            try:
+                rows = fetch_entities_incremental(realm_id, access_token, entity=entity, since=since)
+                up_txn, _, _ = upsert_transactions_and_lines(realm_id, entity, rows)
+                per_entity[entity] = {"fetched": len(rows), "upserted": up_txn}
+                fetched_total += len(rows)
+                upserted_total += up_txn
+            except Exception as e:
+                failed.append(entity)
+                per_entity[entity] = {"error": str(e)[:300]}
+        deleted = 0
+        if since:
+            try:
+                changed_since = max(since, datetime.utcnow() - timedelta(days=25))
+                cdc = _qbo_cdc(realm_id, access_token, CASH_MOVEMENT_ENTITIES, changed_since)
+                for entity, ids in _cdc_deleted_ids(cdc).items():
+                    if entity in CASH_MOVEMENT_ENTITIES:
+                        deleted += _delete_local_transactions(realm_id, entity, ids)
+            except Exception:
+                pass
+        ok = not failed
+        log_sync_finish(run_id, ok, fetched=fetched_total, upserted=upserted_total,
+                        error_message=None if ok else "failed: " + ", ".join(failed))
+        return {"ok": ok, "since": since.isoformat() if since else None,
+                "entities": per_entity, "deleted": deleted, "run_id": run_id}
+    except Exception as e:
+        log_sync_finish(run_id, False, error_message=str(e))
+        raise
+
 
 def run_entities_backfill(entities: list[str], triggered_by: str = "backfill") -> dict:
     """
@@ -1484,7 +1556,7 @@ def run_entities_backfill(entities: list[str], triggered_by: str = "backfill") -
     full history for the named entities. Safe to re-run (ON DUPLICATE KEY UPDATE).
     """
     qbo_init_tables()
-    allowed = set(TRANSACTION_ENTITIES)
+    allowed = set(TRANSACTION_ENTITIES) | set(CASH_MOVEMENT_ENTITIES)
     ents = [e for e in entities if e in allowed]
     if not ents:
         raise ValueError(f"No valid entities. Allowed: {', '.join(sorted(allowed))}")

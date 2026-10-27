@@ -146,7 +146,7 @@ def list_overhead(active_only=False):
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
             SELECT id, name, category, amount, cadence, anchor_date, end_date,
-                   active, sort_order, edited, from_qbo,
+                   active, sort_order, edited, from_qbo, source, source_note,
                    seed_amount, seed_cadence, seed_anchor_date
             FROM cashflow_overhead {where}
             ORDER BY sort_order, id
@@ -408,7 +408,10 @@ def update(oid: int, data: dict, actor: str | None = None):
             {"oid": oid}).mappings().first()
         cols = ", ".join(f"{k} = :{k}" for k in sets)
         params = {**sets, "oid": oid}
-        conn.execute(text(f"UPDATE cashflow_overhead SET {cols}, edited = 1 WHERE id = :oid"), params)
+        # A user changing the figure of a B250-copied line makes it their own value.
+        src = (", source = IF(source = 'b250', 'manual', source)"
+               if any(k in sets for k in ("amount", "cadence", "anchor_date")) else "")
+        conn.execute(text(f"UPDATE cashflow_overhead SET {cols}, edited = 1{src} WHERE id = :oid"), params)
         # Only log a history row when a tracked field actually changed.
         if before and any(k in sets for k in ("amount", "cadence", "anchor_date")):
             old = {"amount": before["amount"], "cadence": before["cadence"], "anchor_date": before["anchor_date"]}
