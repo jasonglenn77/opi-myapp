@@ -157,8 +157,39 @@ def _vendor_bills(conn, pattern, since):
         {"s": since, "p": pattern}).all()
 
 
+def _card_spend(conn, since):
+    return conn.execute(text("""SELECT COALESCE(SUM(CASE WHEN t.raw_json->>'$.Credit' = 'true' THEN -t.total_amt ELSE t.total_amt END), 0)
+        FROM qbo_transactions t JOIN qbo_accounts a ON a.qbo_id = t.raw_json->>'$.AccountRef.value' AND a.account_type = 'Credit Card'
+        WHERE t.entity_type = 'Purchase' AND t.txn_date >= :s"""), {"s": since}).scalar() or 0
+
+
 def _card_evidence(conn, today):
     since = today - timedelta(weeks=13)
+    # How card bills actually get paid in QBO: CreditCardPayment, a Transfer to
+    # the card account, or a journal entry against it. OPI's books (10/2026)
+    # show none of the first two since 2023 — card activity reaches QBO only as
+    # month-end journal entries — so say that rather than report "$0/week".
+    paid = conn.execute(text("""SELECT
+          (SELECT COALESCE(SUM(total_amt), 0) FROM qbo_transactions
+             WHERE entity_type = 'CreditCardPayment' AND txn_date >= :s)
+        + (SELECT COALESCE(SUM(t.total_amt), 0) FROM qbo_transactions t
+             JOIN qbo_accounts a ON a.qbo_id = t.raw_json->>'$.ToAccountRef.value' AND a.account_type = 'Credit Card'
+             WHERE t.entity_type = 'Transfer' AND t.txn_date >= :s)"""), {"s": since}).scalar() or 0
+    if (_has(conn, "CreditCardPayment") or _has(conn, "Transfer")) and float(paid) == 0:
+        je = conn.execute(text("""SELECT MAX(t.txn_date), SUM(l.amount) FROM qbo_transactions t
+            JOIN qbo_transaction_lines l ON l.transaction_id = t.id
+            JOIN qbo_accounts a ON a.qbo_id = l.account_qbo_id AND a.account_type = 'Credit Card'
+            WHERE t.entity_type = 'JournalEntry'
+              AND t.txn_date = (SELECT MAX(t2.txn_date) FROM qbo_transactions t2
+                  JOIN qbo_transaction_lines l2 ON l2.transaction_id = t2.id
+                  JOIN qbo_accounts a2 ON a2.qbo_id = l2.account_qbo_id AND a2.account_type = 'Credit Card'
+                  WHERE t2.entity_type = 'JournalEntry')""")).first()
+        spend = float(_card_spend(conn, since))
+        last_je = f" The last journal entry against the card accounts was on {_md(je[0])} ({_money(je[1])})." if je and je[0] else ""
+        return spend / 13, (f"QuickBooks records no payments to the card accounts in the last 13 weeks (no card payments "
+                            f"or transfers), so the card payoff can't be sourced from QuickBooks.{last_je} "
+                            f"Categorized card spending, last 13 weeks ≈ {_money(spend / 13)}/week. "
+                            f"Needs Chase statement balances and due dates, or card payments recorded in QuickBooks.")
     if _has(conn, "CreditCardPayment"):
         tot = conn.execute(text("""SELECT COALESCE(SUM(total_amt), 0), COUNT(*) FROM qbo_transactions
             WHERE entity_type = 'CreditCardPayment' AND txn_date >= :s"""), {"s": since}).first()
