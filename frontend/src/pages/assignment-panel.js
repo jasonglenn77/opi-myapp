@@ -24,6 +24,8 @@ import {
 import { mountConsistencyChip } from "../utils/crew-consistency.js";
 // 0062: shared "Days off" (non-working days) control.
 import { nonWorkingButtonLabel, openNonWorkingEditor } from "../utils/nonworking.js";
+// 0078: project holds (Put on hold / Edit hold / Resume now).
+import { openHoldDialog, resumeHold, holdTitle } from "../utils/hold.js";
 
 // CR4: schedule-item ids whose history sub-lines are expanded — module-level
 // so the open state survives the panel's frequent remounts after saves.
@@ -34,6 +36,7 @@ const STATUS_OPTIONS = [
   { value: "pending",         label: "Pending" },
   { value: "not_started",     label: "Not started" },
   { value: "in_progress",     label: "In progress" },
+  { value: "on_hold",         label: "On hold" },
   { value: "completed",       label: "Completed" },
   { value: "canceled",        label: "Canceled" },
 ];
@@ -58,7 +61,12 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
 
   const remount = () => mountAssignmentPanel(container, qboCustomerId, onChange);
   const opt = (v, label, sel) => `<option value="${escapeHtml(String(v))}" ${String(sel) === String(v) ? "selected" : ""}>${escapeHtml(label)}</option>`;
-  const statusOptions = (sel) => STATUS_OPTIONS.map((s) => opt(s.value, s.label, sel)).join("");
+  // 'On hold' is driven by the hold bar (it shifts dates) — the select only
+  // offers it while the project is on hold or the line already shows it.
+  const hold = bundle.hold || null;
+  const statusOptions = (sel) => STATUS_OPTIONS
+    .filter((s) => s.value !== "on_hold" || hold || sel === "on_hold")
+    .map((s) => opt(s.value, s.label, sel)).join("");
   const travelOptions = (sel) => TRAVEL_OPTIONS.map(([v, l]) => opt(v, l, sel || 0)).join("");
   const equipOptions = (sel) => EQUIP_OPTIONS.map((v) => opt(v, v || "None", sel || "")).join("");
 
@@ -136,8 +144,22 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
     ? items.map(lineHtml).join("")
     : `<div class="py-4 text-center text-sm text-black/40">No schedule items yet — add one below.</div>`;
 
+  const fmtHd = (v) => { if (!v) return "—"; const [y, m, d] = String(v).slice(0, 10).split("-"); return `${Number(m)}/${Number(d)}/${y.slice(2)}`; };
+  const holdBar = hold
+    ? `<div class="hold-bar-wrap hold-on" data-hold-bar title="${escapeHtml(holdTitle(hold))}">
+        <span class="hold-pill${hold.overdue ? " hold-pill-late" : ""}">On hold until ${fmtHd(hold.expected_resume)}</span>
+        <span class="hold-bar-txt">Since <b>${fmtHd(hold.hold_start)}</b>${hold.shift_days ? ` · remaining work moved <b>${hold.shift_days} days</b>` : ""}${hold.reason ? ` · ${escapeHtml(hold.reason)}` : ""}${hold.note ? ` <span class="text-black/45">— ${escapeHtml(hold.note)}</span>` : ""}${hold.overdue ? ` · <b style="color:#b91c1c">resume date has passed</b>` : ""}${hold.created_by_name ? ` <span class="text-black/40">(${escapeHtml(hold.created_by_name)})</span>` : ""}</span>
+        <button type="button" class="hold-btn" data-hold-edit>Edit hold</button>
+        <button type="button" class="hold-btn hold-btn-go" data-hold-resume>Resume now</button>
+      </div>`
+    : `<div class="hold-bar-wrap" data-hold-bar>
+        <span class="hold-bar-txt text-black/50">Job paused? Put it on hold with an expected resume date — the remaining schedule, invoices, crew payments and expenses move with it so the cash forecast stays right.</span>
+        <button type="button" class="hold-btn" data-hold-put>Put on hold</button>
+      </div>`;
+
   container.innerHTML = `
     <div class="p-4 sm:p-5 text-ink-900">
+      ${holdBar}
       <div class="flex items-start gap-3 flex-wrap mb-3">
         <div class="text-xs text-black/50 flex-1" style="min-width:220px;">Assign the PM(s), crew(s), dates, and schedule detail for each schedule item. A project can have more than one schedule item (extra crews / phases). Changes save automatically.</div>
         <span data-ccx-slot></span>
@@ -411,6 +433,16 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
       catch (err) { alert("Delete failed: " + (err?.message || err)); }
     }
   });
+
+  // 0078: hold actions — after any change the panel remounts (dates moved).
+  const afterHold = () => { if (onChange) onChange({ hold: true }); remount(); };
+  const pname = (bundle.qbo && bundle.qbo.display_name) || "";
+  container.querySelector("[data-hold-put]")?.addEventListener("click", () =>
+    openHoldDialog({ qboCustomerId, projectName: pname, hold: null, onDone: afterHold }));
+  container.querySelector("[data-hold-edit]")?.addEventListener("click", () =>
+    openHoldDialog({ qboCustomerId, projectName: pname, hold, onDone: afterHold }));
+  container.querySelector("[data-hold-resume]")?.addEventListener("click", () =>
+    resumeHold({ qboCustomerId, hold, onDone: afterHold }));
 
   container.querySelector("[data-add]")?.addEventListener("click", async () => {
     try {

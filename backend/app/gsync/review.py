@@ -9,6 +9,7 @@ Categories
   todo      To-do: won quotes that still need a QuickBooks project.
   pipeline  B151 vs QBO estimates vs the app's Pipeline.
   schedule  Job Schedule (Drive) vs Assignments / Schedule in the app.
+  payments  crew Payment Schedule files (Drive) vs the app / QBO (review_payments.py).
 """
 import collections
 import hashlib
@@ -307,6 +308,11 @@ def schedule_items(conn):
         it["eend"] = (it["end_date"] + timedelta(days=int(it["od"]))) if it["end_date"] else None
         items[it["project_id"]].append(it)
 
+    # 0078: projects on hold — the app's dates were shifted past the expected
+    # resume on purpose, so a sheet/app date gap is expected until OPI re-plans.
+    from app.projects.holds import active_holds
+    held = {h["project_id"]: h for h in active_holds(conn).values()}
+
     out = []
     for j, J in sorted(jobs.items()):
         # whole visits that reach the window (a visit that started before it
@@ -346,11 +352,17 @@ def schedule_items(conn):
         worst = max(abs(ds), abs(de))
         if worst:
             sev = "low" if worst <= 2 else "medium" if worst <= 14 else "high"
+            h = held.get(p["pid"])
+            if h:
+                sev = "low"   # expected: the hold moved the app's dates
             out.append(_item("schedule", "dates", j, sev,
-                             f"{name}: dates differ by up to {worst} day{'s' if worst != 1 else ''}",
+                             f"{name}: dates differ by up to {worst} day{'s' if worst != 1 else ''}"
+                             + (f" (on hold until {_md(h['expected_resume'])})" if h else ""),
                              f"Sheet {_md(s_first)} – {_md(s_last)} · App {_md(a_first)} – {_md(a_last)} "
-                             f"(start {'+' if ds > 0 else ''}{ds}d, end {'+' if de > 0 else ''}{de}d).",
-                             fix="Update the Assignment dates (or the sheet, if the app is right).", link=link,
+                             f"(start {'+' if ds > 0 else ''}{ds}d, end {'+' if de > 0 else ''}{de}d)."
+                             + (f" The project is on hold — the app shifted its remaining dates {h['shift_days']} days." if h else ""),
+                             fix=("Move the job on the Job Schedule once OPI re-plans it (or edit the hold)." if h else
+                                  "Update the Assignment dates (or the sheet, if the app is right)."), link=link,
                              sheet=[str(s_first), str(s_last)], app=[str(a_first), str(a_last)], ref=ref))
         if len(segs) > len(relevant or dated):
             out.append(_item("schedule", "phases", j, "medium",
@@ -426,6 +438,48 @@ def crew_boss_items(conn):
                          f"Crew boss {code} is on the Job Schedule but the app only knows it by its code.",
                          fix="Add the crew boss's company name (and leads) on the Team Management page",
                          link="#/teams", app=r["name"] or None, ref={"work_crew_id": int(r["id"])}))
+    return out
+
+
+def unscheduled_won_items(conn):
+    """Won projects (an Accepted/Converted estimate on the QBO project, money
+    still to bill) with NO dates in the app and nothing on the Job Schedule —
+    they can't be forecast (Cash Flow / Revenue Forecast) until the office puts
+    them on the Job Schedule, so they're called out instead of vanishing."""
+    on_sheet = set()
+    for (job,) in conn.execute(text("SELECT DISTINCT job FROM gsync_schedule_days WHERE job IS NOT NULL")):
+        on_sheet.update(re.findall(r"\b(\d{4})\b", job or ""))
+    out = []
+    for r in conn.execute(text("""
+        SELECT qc.qbo_id, qc.display_name,
+               SUM(t.total_amt) AS won_value,
+               (SELECT COALESCE(SUM(i.total_amt), 0) FROM qbo_transactions i
+                 WHERE i.entity_type = 'Invoice' AND i.customer_qbo_id = qc.qbo_id) AS invoiced,
+               MAX(t.txn_date) AS last_estimate
+        FROM qbo_customers qc
+        JOIN qbo_transactions t ON t.customer_qbo_id = qc.qbo_id AND t.entity_type = 'Estimate'
+         AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted')
+        LEFT JOIN projects p ON p.qbo_customer_id = qc.id
+        WHERE qc.is_project = 1 AND qc.active = 1
+          AND NOT EXISTS (SELECT 1 FROM project_schedule_items psi
+                           WHERE psi.project_id = p.id AND psi.start_date IS NOT NULL)
+          AND NOT EXISTS (SELECT 1 FROM project_schedule_items psi
+                           WHERE psi.project_id = p.id AND psi.status IN ('completed', 'canceled'))
+        GROUP BY qc.qbo_id, qc.display_name
+    """)).mappings():
+        m = re.match(r"\s*(\d{4})\b", r["display_name"] or "")
+        if m and m.group(1) in on_sheet:
+            continue
+        left = float(r["won_value"] or 0) - float(r["invoiced"] or 0)
+        if left <= 1:
+            continue
+        out.append(_item("schedule", "won_unscheduled", r["qbo_id"], "high" if left >= 25000 else "medium",
+                         f"{r['display_name']}: won, {_money(left)} to bill, not on the Job Schedule",
+                         f"Accepted estimates {_money(r['won_value'])}, invoiced {_money(r['invoiced'])}. "
+                         "With no dates it can't be placed on the Cash Flow or Revenue Forecast.",
+                         fix="Add the job to the Google Job Schedule (dates, crew boss, PM) — the app picks it up on the next refresh. "
+                             "If it's finished or cancelled, mark it so in its Assignment.",
+                         link=f"#/entity/project/{r['qbo_id']}", app=round(left, 2), ref={"qbo_id": r["qbo_id"]}))
     return out
 
 
@@ -530,7 +584,8 @@ def _optional_items(conn):
     when present, never allowed to break the page."""
     import importlib
     out = []
-    for mod, fn in (("app.gsync.review_docs", "docs_items"), ("app.billing.align", "ambiguous_items")):
+    for mod, fn in (("app.gsync.review_docs", "docs_items"), ("app.billing.align", "ambiguous_items"),
+                    ("app.gsync.review_payments", "payment_items")):
         try:
             out += getattr(importlib.import_module(mod), fn)(conn)
         except Exception:
@@ -544,7 +599,7 @@ def build():
         s_items, s_meta = schedule_items(conn)
         x_items, _ = sheets_items(conn)
         o_items = _optional_items(conn)
-        c_items = crew_boss_items(conn)
+        c_items = crew_boss_items(conn) + unscheduled_won_items(conn)
         state = {r["item_key"]: dict(r) for r in conn.execute(text(
             "SELECT item_key, status, note, fingerprint, updated_by_email, updated_at FROM data_review_state")).mappings()}
         last_refresh = conn.execute(text("SELECT MAX(finished_at) FROM gsync_runs WHERE ok = 1")).scalar()
@@ -570,7 +625,8 @@ def build():
     counts = collections.Counter((i["category"], i["state"]) for i in items)
     return {"items": items,
             "counts": {c: {"open": counts[(c, "open")], "fixed": counts[(c, "fixed")], "ignored": counts[(c, "ignored")]}
-                       for c in ("todo", "pipeline", "schedule", "sheets", "documents", "old_estimates", "billing")},
+                       for c in ("todo", "pipeline", "schedule", "sheets", "documents", "old_estimates", "billing",
+                                 "payments")},
             "meta": {**p_meta, **s_meta}}
 
 

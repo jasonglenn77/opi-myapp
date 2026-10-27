@@ -34,6 +34,9 @@ export async function cashflowPage(routeFn) {
             <span class="text-[11px] text-black/40">wks</span>
           </div>
         </div>
+        <label id="cfCountPlansWrap" class="cfx-chk hidden" title="Planned invoices / crew payments / expenses whose dates already passed without being invoiced, paid or spent. Off: listed for follow-up but not counted. On: counted in week 1.">
+          <input id="cfCountPlans" type="checkbox"> Count overdue plans in week 1
+        </label>
         <button id="cfGenerate" class="btn-primary py-2">Generate</button>
         <button id="cfOverhead" class="hidden px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Overhead</button>
         <button id="cfInfo" type="button" title="How this page works" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/15 text-black/55 hover:bg-black/5">
@@ -73,8 +76,9 @@ export async function cashflowPage(routeFn) {
             <div class="font-bold text-ink-900">Reading the grid</div>
             <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
               <li><span class="font-semibold text-ink-900">Confidence dots</span> next to each line show how firm it is: <span class="font-semibold">committed</span> (in QuickBooks) → <span class="font-semibold">scheduled</span> (planned) → <span class="font-semibold">estimated</span> (run-rate).</li>
-              <li><span class="font-semibold text-ink-900">Past due</span> column — anything dated before this week (overdue invoices to collect, bills/plans to catch up on) sits in its own column, so each week shows only its true Sat–Fri dates.</li>
-              <li><span class="font-semibold text-ink-900">Committed, not yet scheduled</span> — won projects that don't have start dates yet. Their cash is held out of the weekly balance until dates are set; click it to see those projects and what they'd add.</li>
+              <li><span class="font-semibold text-ink-900">Dates</span> — every item sits on its <span class="font-semibold">expected paid date</span>, with no assumed lag: open invoices on the expected-paid date you set (on the invoice, or on its planned milestone), otherwise the QuickBooks due date; bills on their due date; crew on the pay date; project expenses on their expected-paid date (or their week).</li>
+              <li><span class="font-semibold text-ink-900">Overdue — expected date passed</span> — nothing is settled into the opening balance. Open QuickBooks invoices and bills whose date passed are counted in <span class="font-semibold">week 1</span> on a flagged row. Crew payments whose date passed are checked against the crew's QuickBooks payments (bi-weekly runs) and dropped when paid. Planned invoices/expenses/crew payments still unpaid are <span class="font-semibold">flagged, not counted</span> (they need a new date) unless you tick “Count overdue plans in week 1”. All of it is listed under <span class="font-semibold">Overdue — follow up</span>.</li>
+              <li><span class="font-semibold text-ink-900">Won — not scheduled</span> — won projects with no dates on the Job Schedule. Their cash is held out of the weekly balance until dates are set; the banner lists them with their unbilled value and links to each project.</li>
               <li><span class="font-semibold text-ink-900">Drill in</span> — expand any section to see the detail; use the <span class="font-semibold">⇄</span> toggle to switch views (by vendor / project / category / item); and <span class="font-semibold">click a project name</span> to open its Billing &amp; Schedule tab.</li>
               <li><span class="font-semibold text-ink-900">What-if</span> — expand Recurring and type a new amount into a weekly cell to see the balance change live. It's a scenario only — nothing is saved; <span class="font-semibold">Reset to actual</span> restores it.</li>
             </ul>
@@ -93,7 +97,7 @@ export async function cashflowPage(routeFn) {
 
           <div>
             <div class="font-bold text-ink-900">Opening balance</div>
-            <p class="text-black/60">Auto-fills from your QuickBooks bank balance and is editable — override it to model a different starting point.</p>
+            <p class="text-black/60">The sum of the QuickBooks <span class="font-semibold">Bank</span> accounts ticked in the <span class="font-semibold">Opening balance source</span> panel (synced nightly with transactions). Untick an account to leave it out — the choice is saved for everyone. Two accounts with the same bank number get a warning badge. You can still type a different number to model a scenario.</p>
           </div>
 
           <div>
@@ -114,7 +118,7 @@ export async function cashflowPage(routeFn) {
     <div id="cfBacklogModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
       <div class="card p-6 flex flex-col" style="width:100%;max-width:56rem;max-height:85vh;overflow:hidden;">
         <div class="flex items-center justify-between mb-1">
-          <div class="text-lg font-extrabold">Committed, not yet scheduled</div>
+          <div class="text-lg font-extrabold">Won — not scheduled (needs dates on the Job Schedule)</div>
           <button id="cfBacklogClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
         </div>
         <div class="text-xs text-black/50 mb-3">Won projects with a contract but no start dates yet — so their cash isn't on the weekly grid. This is what would flow in and out <span class="font-semibold">if they all got scheduled</span>. Already-paid deposits are in your bank balance; sent invoices (A/R) are already on the forecast by their due date.</div>
@@ -138,7 +142,11 @@ export async function cashflowPage(routeFn) {
       </div>
     </div>
 
+    <div id="cfBank" class="mb-4"></div>
+
     <div id="cfKpis" class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4"></div>
+
+    <div id="cfAlerts" class="cfx-alerts"></div>
 
     <div class="card p-0 overflow-hidden">
       <div id="cfScroll" class="overflow-auto">
@@ -267,7 +275,13 @@ export async function cashflowPage(routeFn) {
       scheduled: { dot: "bg-emerald-500", bg: "#f0f8f2", name: "Scheduled" },
       estimated: { dot: "border-[1.5px] border-black/40", bg: "#f7f7f8", name: "Estimated" },
     };
-    const detailV2 = (rows, group, view = "", editable = false) => rows.map(r => {
+    const flagRow = (r, view = "", group = "") => {
+      const memo = r.flag === "memo";
+      return `<tr class="cfx-flagrow ${memo ? "cfx-memo" : ""}"${view ? ` data-flagview="${view}" data-flaggroup="${group}"` : ""}${view === "b" ? ` style="display:none"` : ""}>
+        <td class="py-1 pr-3 whitespace-nowrap" style="${STICKY}padding-left:2.25rem"><button type="button" data-cf-overdue class="cfx-flaglink" title="${memo ? "Not counted in the totals — open the follow-up list" : "Counted in week 1 — open the follow-up list"}">${escapeHtml(r.label)}</button></td>
+        ${pdCell(0)}${r.weekly.map((v) => `<td class="px-2 py-1 text-right whitespace-nowrap" style="font-variant-numeric:tabular-nums">${v ? (memo ? `<span class="cfx-memo-amt">(${Math.round(v).toLocaleString("en-US")})</span>` : cell(v)) : `<span class="text-black/20">–</span>`}</td>`).join("")}</tr>`;
+    };
+    const detailV2 = (rows, group, view = "", editable = false) => rows.filter(r => !r.flag).map(r => {
       const lbl = (r.link_id && r.is_project)
         ? `<a href="#/entity/project/${escapeHtml(String(r.link_id))}" data-cf-proj class="text-blue-700 hover:underline">${escapeHtml(r.label)}</a>`
         : escapeHtml(r.label);
@@ -289,7 +303,10 @@ export async function cashflowPage(routeFn) {
       const detA = hasRows ? detailV2(s.rows, group, hasAlt ? "a" : "", isRec) : "";
       const detB = hasAlt ? detailV2(s.alt_rows, group, "b", isRec) : "";  // recurring: both views editable
       const totalCells = isRec ? numCellsR(s.weekly_totals, "recTotal") : numCells(s.weekly_totals);
-      return `<tr>${label}${pdCell(s.pastdue || 0)}${totalCells}</tr>` + detA + detB;
+      // flagged overdue rows stay visible (not hidden behind the chevron)
+      const flagsA = (s.rows || []).filter(r => r.flag).map(r => flagRow(r, hasAlt ? "a" : "", group)).join("");
+      const flagsB = hasAlt ? (s.alt_rows || []).filter(r => r.flag).map(r => flagRow(r, "b", group)).join("") : "";
+      return `<tr>${label}${pdCell(s.pastdue || 0)}${totalCells}</tr>` + flagsA + flagsB + detA + detB;
     };
     const inSecs = d.inflow.sections.map((s, i) => secRow(s, `inv2_${i}`)).join("");
     const outSecs = d.outflow.sections.map((s, i) => secRow(s, `outv2_${i}`)).join("");
@@ -308,7 +325,7 @@ export async function cashflowPage(routeFn) {
     const netPos = (bk.net || 0) >= 0;
     const backlogChip = hasBk
       ? `<button data-cf-backlog class="text-left text-[12px] text-black/70 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 hover:bg-amber-100">
-           <b class="text-amber-800">Committed, not yet scheduled</b> · ${bk.count || 0} project${bk.count === 1 ? "" : "s"}
+           <b class="text-amber-800">Won — not scheduled</b> · ${bk.count || 0} project${bk.count === 1 ? "" : "s"}
            <span class="text-black/55"> — need to bill ${fmtMoney(bk.in || 0)} · est. out ${fmtMoney(bk.out || 0)} · </span><b class="${netPos ? "text-emerald-700" : "text-red-600"}">net ${netPos ? "+" : ""}${fmtMoney(bk.net || 0)}</b>
            <span class="text-brand-700 font-semibold ml-1">view →</span>
          </button>`
@@ -350,7 +367,8 @@ export async function cashflowPage(routeFn) {
           ${rowV2("Ending Cash Balance", pd.ending, d.summary.ending, { bold: true, bg: "#eef2ff", rowId: "ending" })}
         </tbody>
       </table>
-      ${hasPD ? `<div class="text-[11px] text-black/45 mt-2 px-1">The <b>Past due</b> column holds cash dated before the current week — overdue invoices to collect and bills/crew/expenses to catch up on — so each week shows only its own dates. It settles off your opening balance; week 1 opens at its result.</div>` : ""}`;
+      ${hasPD ? `<div class="text-[11px] text-black/45 mt-2 px-1">The <b>Past due</b> column holds cash dated before the current week — overdue invoices to collect and bills/crew/expenses to catch up on — so each week shows only its own dates. It settles off your opening balance; week 1 opens at its result.</div>` : ""}
+      ${!isActuals ? `<div class="text-[11px] text-black/45 mt-2 px-1">Week 1 opens at your bank balance — nothing is settled into it. <span class="cfx-legend-od"></span> rows are overdue items (expected date passed) counted in week 1; <span class="cfx-memo-amt">(amounts)</span> are overdue plans shown for follow-up but <b>not counted</b>.</div>` : ""}`;
     // expand/collapse + view-toggle (by vendor/project or project/type). Detail
     // rows carry data-view; only the current view shows when a group is expanded.
     const expanded = new Set(), viewOf = {};
@@ -371,12 +389,17 @@ export async function cashflowPage(routeFn) {
       viewOf[g] = (viewOf[g] === "b") ? "a" : "b";
       btn.textContent = (viewOf[g] === "b" ? btn.dataset.vb : btn.dataset.va) + " ⇄";
       applyDetail(g);
+      grid.querySelectorAll(`[data-flaggroup="${g}"]`).forEach(r => { r.style.display = r.dataset.flagview === (viewOf[g] || "a") ? "table-row" : "none"; });
       if (g === recGroup) recomputeWhatIf();  // what-if follows the visible recurring view
     }));
     const rb = grid.querySelector("[data-cf-refresh]");
     if (rb) rb.addEventListener("click", refreshSchedules);
     const bb = grid.querySelector("[data-cf-backlog]");
     if (bb) bb.addEventListener("click", openBacklog);
+    grid.querySelectorAll("[data-cf-overdue]").forEach(b => b.addEventListener("click", () => {
+      const od = document.getElementById("cfOverdueBox");
+      if (od) { od.open = true; od.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    }));
     // clicking a project row → open its Billing & Schedule tab, and remember to
     // send "← Back to Cash Flow" (scoped to this exact project).
     grid.querySelectorAll("a[data-cf-proj]").forEach(a =>
@@ -489,6 +512,154 @@ export async function cashflowPage(routeFn) {
 
   // (old Forecast/Actuals renderers removed — both views now use renderForecastV2)
 
+  // ── Opening balance source: QBO Bank accounts, include/exclude (persisted) ──
+  const bankEl = document.getElementById("cfBank");
+  const countPlansEl = document.getElementById("cfCountPlans");
+  countPlansEl.addEventListener("change", () => load());
+  const fmtWhen = (iso, utc = false) => {
+    if (!iso) return "—";
+    const d = new Date(utc && !/Z|[+-]\d\d:?\d\d$/.test(iso) ? iso + "Z" : iso);
+    return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], { month: "numeric", day: "numeric", year: "2-digit", hour: "numeric", minute: "2-digit" });
+  };
+  const mdY = (iso) => { if (!iso) return "—"; const [y, m, dd] = String(iso).slice(0, 10).split("-"); return `${+m}/${+dd}/${y.slice(2)}`; };
+  let bankOpen = null;  // remember the panel's open state across re-renders
+  function renderBank(b) {
+    if (!b || !b.available) {
+      bankEl.innerHTML = `<div class="card px-4 py-3 text-[12px] text-black/50">Opening balance: sync the QuickBooks chart of accounts to see your bank accounts.</div>`;
+      return;
+    }
+    const dups = b.duplicate_warnings || [];
+    if (bankOpen === null) bankOpen = dups.length > 0;
+    const dupBadge = dups.map(w => `<span class="cfx-dup" title="${escapeHtml(w.accounts.join(" and "))} share bank number ${escapeHtml(w.key)} — ${w.included.length > 1 ? "BOTH are counted; untick the one that isn't real cash" : "only one is counted"}">⚠ ${w.accounts.length} accounts share ${escapeHtml(w.key)}${w.included.length > 1 ? " · both counted" : ""}</span>`).join(" ");
+    const rows = (b.accounts || []).map(a => `
+      <tr class="${a.included ? "" : "cfx-bank-off"}">
+        <td class="cfx-bank-chk"><input type="checkbox" data-bank="${escapeHtml(a.qbo_id)}" ${a.included ? "checked" : ""} aria-label="Include ${escapeHtml(a.name)}"></td>
+        <td><div class="font-semibold text-ink-900">${escapeHtml(a.name)} ${a.duplicate_of ? `<span class="cfx-dup cfx-dup-sm" title="Same bank number as ${escapeHtml(a.duplicate_of.join(", "))}">⚠ same #</span>` : ""}${a.active ? "" : ` <span class="text-[10px] text-black/40">(inactive in QBO)</span>`}</div>
+            <div class="text-[10.5px] text-black/45">${escapeHtml(a.sub_type || "Bank")}${a.created_in_qbo ? ` · created in QBO ${mdY(a.created_in_qbo)}` : ""}${a.chosen ? "" : " · default"}</div></td>
+        <td class="text-right tabular-nums font-semibold">${fmtMoney(a.balance)}</td>
+        <td class="text-right text-black/55 whitespace-nowrap">${fmtWhen(a.balance_as_of)}</td>
+      </tr>`).join("");
+    bankEl.innerHTML = `
+      <details class="card p-0 overflow-hidden cfx-bank" ${bankOpen ? "open" : ""}>
+        <summary class="cfx-bank-sum">
+          <svg class="cfx-chev" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="text-sm font-bold text-ink-900">Opening balance source</span>
+          <span class="text-[12px] text-black/55">${b.included_count} of ${(b.accounts || []).length} QuickBooks bank accounts · <b class="text-ink-900">${fmtMoney(b.balance)}</b></span>
+          ${dupBadge}
+          <span class="cfx-bank-sync">Last synced ${fmtWhen(b.last_synced, true)}</span>
+        </summary>
+        <div class="cfx-bank-body">
+          <div class="overflow-x-auto"><table class="cfx-bank-tbl">
+            <thead><tr><th></th><th>QuickBooks bank account</th><th class="text-right">Balance</th><th class="text-right">Balance as of</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table></div>
+          <div class="text-[11px] text-black/45 mt-2">Opening cash = the ticked accounts (QuickBooks balances, pulled nightly with transactions). Your choice is saved for everyone. “Balance as of” = when QuickBooks last changed the account.</div>
+        </div>
+      </details>`;
+    bankEl.querySelector("details").addEventListener("toggle", (e) => { bankOpen = e.target.open; });
+    bankEl.querySelectorAll("[data-bank]").forEach(cb => cb.addEventListener("change", async () => {
+      cb.disabled = true;
+      try {
+        const nb = await api("/cashflow/bank-accounts", { method: "PUT", body: JSON.stringify({ included: { [cb.getAttribute("data-bank")]: cb.checked } }) });
+        openingEl.value = Math.round(nb.balance);
+        balSource.textContent = "";
+        renderBank(nb);
+        load();
+      } catch (err) { cb.disabled = false; cb.checked = !cb.checked; alert("Save failed: " + (err?.message || "error")); }
+    }));
+  }
+
+  // ── Alerts above the grid: Won — not scheduled + Overdue follow-up ──
+  const alertsEl = document.getElementById("cfAlerts");
+  let odOpen = false, unOpen = false;
+  function renderAlerts(d) {
+    const bk = d.backlog || {};
+    const projs = bk.projects || [];
+    const od = d.overdue || { items: [] };
+    const projLink = (id, name) => id
+      ? `<a href="#/entity/project/${escapeHtml(String(id))}" data-cf-proj class="text-blue-700 hover:underline font-semibold">${escapeHtml(name || id)}</a>`
+      : escapeHtml(name || "—");
+    let html = "";
+    if (projs.length) {
+      const rows = projs.map(p => `<tr>
+          <td>${projLink(p.entity_id, p.name)}<div class="text-[10px] text-black/40">${escapeHtml(p.status || "")}${p.start_date ? ` · start ${mdY(p.start_date)}, no end` : " · no dates"}</div></td>
+          <td class="text-right tabular-nums font-semibold text-emerald-700">${fmtMoney(p.to_bill)}</td>
+          <td class="text-right tabular-nums text-black/60">${p.ar > 0.5 ? fmtMoney(p.ar) : "–"}</td>
+          <td class="text-right tabular-nums text-red-600">${p.out > 0.5 ? fmtMoney(p.out) : "–"}</td>
+        </tr>`).join("");
+      html += `<details class="cfx-alert cfx-alert-amber" id="cfUnschedBox" ${unOpen ? "open" : ""}>
+        <summary><svg class="cfx-chev" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="cfx-alert-ico">!</span>
+          <span><b>Won — not scheduled</b> (needs dates on the Job Schedule) · ${projs.length} project${projs.length === 1 ? "" : "s"} · <b>${fmtMoney(bk.in || 0)}</b> unbilled <span class="cfx-alert-sub">— not in the weekly balance until dated</span></span>
+        </summary>
+        <div class="cfx-alert-body"><div class="overflow-x-auto"><table class="cfx-tbl">
+          <thead><tr><th>Project</th><th class="text-right">Unbilled (to bill)</th><th class="text-right">Sent A/R</th><th class="text-right">Est. cost out</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+          <div class="text-[11px] text-black/45 mt-2">Add start + end dates on the project's Assignment / Job Schedule and its invoice, crew and expense schedules generate and join the forecast. Sent A/R is already on the grid by its expected-paid date.</div>
+        </div></details>`;
+    }
+    const items = od.items || [];
+    const cm = od.crew_matched_paid || { count: 0, amount: 0, items: [] };
+    if (items.length || cm.count) {
+      const counted = items.filter(i => i.counted), memo = items.filter(i => !i.counted);
+      const sum = (a) => a.reduce((s, i) => s + (i.amount || 0), 0);
+      const row = (i) => `<tr class="${i.counted ? "" : "cfx-memo-row"}">
+          <td><div class="font-semibold">${escapeHtml(i.type)}</div>${i.detail ? `<div class="text-[10.5px] text-black/45">${escapeHtml(i.detail)}</div>` : ""}</td>
+          <td>${i.is_project && i.link_id ? projLink(i.link_id, i.label) : escapeHtml(i.label || "—")}${i.project && i.kind === "ap" ? `<div class="text-[10.5px] text-black/45">${escapeHtml(i.project)}</div>` : ""}</td>
+          <td class="tabular-nums">${escapeHtml(i.doc || "")}</td>
+          <td class="tabular-nums">${mdY(i.sent)}</td>
+          <td class="tabular-nums">${mdY(i.due)}</td>
+          <td class="tabular-nums">${i.kind === "ar" && i.qbo_id
+            ? `<input type="date" class="cfx-date" data-qinv="${escapeHtml(i.qbo_id)}" value="${escapeHtml(i.expected || "")}" title="Expected paid date — saved on the invoice (app only, never written to QuickBooks)">`
+            : mdY(i.expected || (i.kind !== "ar" && i.kind !== "ap" ? i.date : null))}</td>
+          <td class="text-right tabular-nums">${i.days_late != null ? i.days_late : ""}</td>
+          <td class="text-right tabular-nums font-semibold">${fmtMoney(i.amount)}</td>
+          <td class="text-right"><span class="cfx-pill ${i.counted ? "cfx-pill-on" : "cfx-pill-off"}">${i.counted ? "week 1" : "not counted"}</span></td>
+        </tr>`;
+      const crewRows = (cm.items || []).slice(0, 400).map(c => `<tr>
+          <td>${projLink(c.link_id, c.project)}</td><td>${escapeHtml(c.crew || "—")}</td>
+          <td class="tabular-nums">${mdY(c.send_invoice_date)}</td><td class="tabular-nums">${mdY(c.pay_date)}</td>
+          <td class="text-right tabular-nums">${fmtMoney(c.amount)}</td>
+          <td class="tabular-nums text-black/55">${(c.matched || []).map(m => `${mdY(m.date)} ${fmtMoney(m.amount)}`).join(", ")}</td></tr>`).join("");
+      html += `<details class="cfx-alert cfx-alert-red" id="cfOverdueBox" ${odOpen ? "open" : ""}>
+        <summary><svg class="cfx-chev" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+          <span class="cfx-alert-ico">!</span>
+          <span><b>Overdue — expected date passed</b> · follow up ·
+            <b>${fmtMoney(sum(counted))}</b> counted in week 1 (${counted.length})
+            ${memo.length ? ` · <b>${fmtMoney(sum(memo))}</b> plans not counted (${memo.length})` : ""}
+            ${cm.count ? ` <span class="cfx-alert-sub">· ${cm.count} crew payments (${fmtMoney(cm.amount)}) matched to QuickBooks as paid</span>` : ""}</span>
+        </summary>
+        <div class="cfx-alert-body">
+          <div class="text-[11.5px] text-black/55 mb-2">Nothing here is settled into the opening balance. Open invoices and bills (already in QuickBooks) are counted in week 1; set an invoice's <b>expected paid</b> date to move it. Planned items whose dates passed need a new date on the project's Billing &amp; Schedule tab${od.count_plans ? " — currently <b>counted in week 1</b> (toggle at the top)" : " — they're <b>not counted</b> until re-dated (toggle at the top to count them)"}.</div>
+          <div class="overflow-x-auto cfx-scroll"><table class="cfx-tbl">
+            <thead><tr><th>What</th><th>Project / customer</th><th>Ref</th><th>Sent</th><th>Due</th><th>Expected</th><th class="text-right">Days late</th><th class="text-right">Amount</th><th class="text-right">Forecast</th></tr></thead>
+            <tbody>${items.map(row).join("") || `<tr><td colspan="9" class="text-black/40">Nothing overdue.</td></tr>`}</tbody>
+          </table></div>
+          ${cm.count ? `<details class="mt-3"><summary class="cursor-pointer text-[12px] font-semibold text-black/60">Crew installments treated as paid — ${cm.count} matched to the crew's QuickBooks payments (${fmtMoney(cm.amount)})</summary>
+            <div class="text-[11px] text-black/45 my-1">Date passed, not tagged to the project in QuickBooks, but the crew vendor was paid on/after the pay date (bi-weekly run) for at least the amount (within $250 / 5%).</div>
+            <div class="overflow-x-auto cfx-scroll"><table class="cfx-tbl"><thead><tr><th>Project</th><th>Crew</th><th>Send invoice</th><th>Pay date</th><th class="text-right">Amount</th><th>Matched QBO payment(s)</th></tr></thead><tbody>${crewRows}</tbody></table></div></details>` : ""}
+        </div></details>`;
+    }
+    alertsEl.innerHTML = html;
+    const ub = document.getElementById("cfUnschedBox"); if (ub) ub.addEventListener("toggle", () => { unOpen = ub.open; });
+    const ob = document.getElementById("cfOverdueBox"); if (ob) ob.addEventListener("toggle", () => { odOpen = ob.open; });
+    alertsEl.querySelectorAll("a[data-cf-proj]").forEach(a => a.addEventListener("click", () => {
+      try {
+        sessionStorage.setItem("opi_entity_tab", "billing");
+        const pid = (a.getAttribute("href") || "").split("/").pop();
+        if (pid) sessionStorage.setItem("opi_entity_back", JSON.stringify({ entity: "project/" + pid, label: "Cash Flow", hash: "#/cashflow" }));
+      } catch (_) {}
+    }));
+    alertsEl.querySelectorAll("[data-qinv]").forEach(inp => inp.addEventListener("change", async () => {
+      inp.disabled = true;
+      try {
+        await api(`/invoices/qbo-invoice/${encodeURIComponent(inp.getAttribute("data-qinv"))}/expected`, { method: "PATCH", body: JSON.stringify({ expected_paid_date: inp.value || null, via: "cashflow" }) });
+        load(true);
+      } catch (err) { alert("Save failed: " + (err?.message || "error")); }
+      inp.disabled = false;
+    }));
+  }
+
   function renderKpis(d) {
     const minEnding = Math.min(...d.summary.ending);
     const minIdx = d.summary.ending.indexOf(minEnding);
@@ -514,6 +685,7 @@ export async function cashflowPage(routeFn) {
     weeksWrap.classList.toggle("hidden", mode !== "actuals");
     horizonWrap.classList.toggle("hidden", mode !== "forecast_v2");
     document.getElementById("cfOverhead").classList.toggle("hidden", mode !== "forecast_v2");
+    document.getElementById("cfCountPlansWrap").classList.toggle("hidden", mode !== "forecast_v2");
     modeDesc.textContent = mode === "forecast_v2"
       ? "Forward cash from your real bank balance — committed (open invoices/bills) + recurring overhead + the scheduled crew/invoice/expense plans on every project. Extend the horizon as far as you like. Tap ⓘ for how it's built."
       : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out. Tap ⓘ for details.";
@@ -530,11 +702,12 @@ export async function cashflowPage(routeFn) {
     if (startEl.value) params.set("start_date", startEl.value);
     if (mode === "actuals") params.set("weeks", String(parseInt(weeksEl.value, 10) || 13));
     if (mode === "forecast_v2") params.set("weeks", String(Math.max(4, Math.min(520, parseInt(horizonWeeks.value, 10) || 26))));
+    if (mode === "forecast_v2" && countPlansEl.checked) params.set("count_overdue_plans", "true");
     const endpoint = mode === "actuals" ? "actuals" : "forecast-v2";
     try {
       const d = await api(`/cashflow/${endpoint}?${params.toString()}`);
       const sig = JSON.stringify([d.summary, d.inflow.weekly_totals, d.outflow.weekly_totals,
-                                  d.inflow.grand_total, d.outflow.grand_total, d.backlog, d.past_due]);
+                                  d.inflow.grand_total, d.outflow.grand_total, d.backlog, d.past_due, d.overdue, d.bank]);
       if (silent && sig === lastSig) {            // nothing changed — no flash
         if (mode === "forecast_v2") schedulePoll(d.cache);
         return;
@@ -542,8 +715,8 @@ export async function cashflowPage(routeFn) {
       lastSig = sig;
       renderKpis(d);
       render(d);
-      if (mode === "forecast_v2") { schedulePoll(d.cache); loadCreditCards(); }
-      else cardsEl.innerHTML = "";
+      if (mode === "forecast_v2") { schedulePoll(d.cache); loadCreditCards(); renderAlerts(d); if (d.bank) renderBank(d.bank); }
+      else { cardsEl.innerHTML = ""; alertsEl.innerHTML = ""; bankEl.innerHTML = ""; }
     } catch (e) {
       kpis.innerHTML = "";
       if (!silent) grid.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`;
@@ -833,8 +1006,8 @@ export async function cashflowPage(routeFn) {
     const ob = await api("/cashflow/opening-balance");
     if (ob.available) {
       if (!openingEl.value) openingEl.value = Math.round(ob.balance);
-      const names = ob.accounts.map(a => a.name).join(", ");
-      balSource.textContent = `Auto-filled from QuickBooks (${names}). Edit to override.`;
+      balSource.textContent = `Auto-filled from ${ob.included_count} QuickBooks bank account${ob.included_count === 1 ? "" : "s"} (see Opening balance source). Edit to override.`;
+      renderBank(ob);
     } else {
       balSource.textContent = "Sync the chart of accounts to auto-fill from your bank balance.";
     }

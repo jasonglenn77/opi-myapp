@@ -211,6 +211,7 @@ def delete_item(item_id: int, user=Depends(get_current_user)):
 # ── editable weekly expense schedule (per category) ─────────────────────────
 class ExpInstPatch(BaseModel):
     week_of: Optional[str] = None
+    expected_paid_date: Optional[str] = None   # 0079: planned pay date (blank = week_of)
     amount: Optional[float] = None
 
 

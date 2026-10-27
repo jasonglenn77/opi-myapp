@@ -19,6 +19,7 @@ const CATS = [
   { key: "documents", label: "Documents", blurb: "Google Drive Customers folders vs the app: folders that couldn't be matched to a project or quote (their files are copied and waiting to be linked), projects with no Drive folder, files removed in Drive (the app keeps its copies), the weekly Drive-vs-app check, and copy errors.", optional: true },
   { key: "old_estimates", label: "Old estimate folders", blurb: "Drive folders whose job # matches only a QuickBooks estimate — mostly 2023–24 jobs that never became a project or Pipeline quote. Their files are copied and kept in the holding area. Grouped by the estimate's year, sorted by customer. Link one if the job did become a project or quote under another number; otherwise Ignore it (the files stay in the holding area).", optional: true },
   { key: "billing", label: "Billing", blurb: "Invoice schedules that couldn't be lined up with the actual QuickBooks invoices automatically.", optional: true },
+  { key: "payments", label: "Crew payments", blurb: "The crew \"Payment Schedule\" files in each project's Drive folder. The app's crew payment schedules update from them every night (the sheet wins); these are the files it couldn't match or map, and where a sheet, QuickBooks and the Job Schedule disagree. Most fixes go in the sheet.", optional: true },
 ];
 const TYPES = {
   create_qbo_project: "Create the QuickBooks project",
@@ -43,6 +44,7 @@ const TYPES = {
   scheduled_not_won: "Scheduled, but not Won on the B151",
   b151_no_dates: "Scheduled, but no dates on the B151",
   won_not_scheduled: "Won and starting soon, not on the Job Schedule",
+  won_unscheduled: "Won — not on the Job Schedule (can't be forecast)",
   unbilled_balance: "Partly billed — balance to bill",
   retainage_held: "Retainage held",
   unmatched_folder: "Drive folder not filed on a project or quote",
@@ -54,6 +56,18 @@ const TYPES = {
   copy_error: "Drive file did not copy",
   sync_failed: "Drive documents sync failed",
   estimate_folder: "Old estimate folder",
+  unmatched_file: "Payment Schedule not matched to a project",
+  ambiguous_project: "Payment Schedule # points at another project",
+  unknown_crew: "Crew company unknown",
+  total_mismatch: "Payments don't add up to the Contract Value",
+  paid_over_sheet: "Crews paid more in QuickBooks than the sheet",
+  off_calendar: "Pay dates off the payroll calendar",
+  bad_date: "Date problems on the sheet",
+  sheet_paid_no_qbo: "Marked paid on the sheet, no QuickBooks payment",
+  qbo_paid_not_marked: "Paid in QuickBooks, not marked on the sheet",
+  skipped_superseded: "Older Payment Schedule version skipped",
+  skipped_duplicate: "Duplicate Payment Schedule skipped",
+  no_payment_schedule: "On the Job Schedule, no crew Payment Schedule",
 };
 const TIP_FIXED = "You've corrected it at the source (the B151, the Job Schedule, QuickBooks or the app). Moves it to \"Marked fixed\" — the button itself changes no data. If the next refresh from Google / QuickBooks still finds the difference, it comes back to Open flagged \"still differs\".";
 const TIP_IGNORE = "This difference is expected — leave it as is. Moves it to \"Ignored\" (add a reason). Nothing is changed. It comes back on its own if the difference changes later.";
@@ -104,6 +118,7 @@ export async function reviewPage(routeFn) {
     const bits = !r.ok ? "failed"
       : src === "b151" ? `${(s.rows || 0).toLocaleString()} rows`
       : src === "schedule_import" ? `${(s.lines_changed || 0) + (s.lines_new || 0)} lines updated from the sheet`
+      : src === "payment_import" ? `${s.files_ok || 0} sheets, ${s.projects_changed || 0} projects updated`
       : `${(s.cells || 0).toLocaleString()} day cells`;
     return `<span title="${escapeHtml(r.error || "")}">${label}: read ${ago(r.finished_at || r.started_at)} · ${bits}${r.ok ? "" : " ⚠"}</span>`;
   }
@@ -124,7 +139,7 @@ export async function reviewPage(routeFn) {
             ${c.label}<span class="rv-badge ${d.counts[c.key]?.open ? "" : "rv-badge-zero"}">${d.counts[c.key]?.open || 0}</span></button>`).join("")}
         </div>
         <div class="rv-sources">
-          ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")}
+          ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")} ${runLine("payment_import", "Crew payments")}
           <button type="button" class="rv-btn" data-refresh ${st.busy ? "disabled" : ""}>${st.busy ? "Reading Google… (documents take ~10 min — you can leave this page)" : "Refresh from Google"}</button>
         </div>
       </div>
@@ -170,6 +185,7 @@ export async function reviewPage(routeFn) {
         </div>
         <div class="rv-actions">
           ${i.ref && i.ref.drive_unmatched_id ? `<button type="button" class="rv-btn rv-btn-go" data-drivelink title="Pick the project or quote this Google Drive folder belongs to — its files (already copied) move there">Link folder…</button>` : ""}
+          ${i.ref && i.ref.sheet_url ? `<a class="rv-btn" href="${escapeHtml(i.ref.sheet_url)}" target="_blank" rel="noopener" title="Open the Payment Schedule in Google Drive">Sheet</a>` : ""}
           ${i.link ? `<a class="rv-btn" href="${escapeHtml(i.link)}" title="Go to the record in the app to fix it">Open</a>` : ""}
           ${done ? `<button type="button" class="rv-btn" data-act="open" title="Put this item back on the open list">Reopen</button>`
                  : `<button type="button" class="rv-btn rv-btn-go" data-act="fixed" title="${escapeHtml(TIP_FIXED)}">Fixed</button><button type="button" class="rv-btn" data-act="ignored" title="${escapeHtml(TIP_IGNORE)}">Ignore</button>`}

@@ -11,6 +11,10 @@
 import { api, hasCapability, getToken } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+// 0078: project holds — "On hold until …" pill next to the status.
+import { loadHolds, holdPillHtml } from "../utils/hold.js";
+let _holds = new Map();   // qbo_id -> active hold
+const holdPill = (qboId) => holdPillHtml(_holds.get(String(qboId)));
 import { driveSourceHtml } from "../utils/drive-link.js";
 import { createFormRenderer } from "../utils/form-render.js";
 import { openMarkupViewer, fillDrawingThumbs } from "../utils/drawing-markup.js";
@@ -45,6 +49,7 @@ const STATUS = {
   pending:         { label: "Pending",         cls: "bg-amber-100 text-amber-800" },
   not_started:     { label: "Not started",     cls: "bg-violet-100 text-violet-700" },
   in_progress:     { label: "In progress",     cls: "bg-blue-100 text-blue-700" },
+  on_hold:         { label: "On hold",         cls: "bg-slate-200 text-slate-700" },
   completed:       { label: "Complete",        cls: "bg-emerald-100 text-emerald-800" },
   canceled:        { label: "Canceled",        cls: "bg-black/10 text-black/50" },
 };
@@ -59,7 +64,8 @@ const windowText = (p) => {
 
 async function loadList(showAll) {
   const scope = showAll ? "all" : "mine";
-  const d = await api(`/pm/projects${showAll ? "?all=1" : ""}`);
+  const [d, hs] = await Promise.all([api(`/pm/projects${showAll ? "?all=1" : ""}`), loadHolds()]);
+  _holds = hs.byEntity;
   _listCache[scope] = d;
   return d;
 }
@@ -113,7 +119,7 @@ async function pmHome(routeFn) {
           <div class="flex items-center gap-1 shrink-0">${formChips}</div>
         </div>
         <div class="mt-1.5 flex items-center gap-2 flex-wrap">
-          ${statusBadge(p.status)}
+          ${statusBadge(p.status)}${holdPill(p.qbo_id)}
           <span class="text-[11px] text-black/45 tabular-nums">${escapeHtml(windowText(p))}</span>
           ${p.leads_due ? `<span class="pm-chip pm-chip-flag" title="${p.leads_due} crew line${p.leads_due === 1 ? "" : "s"} in progress or starting within 7 days with no crew lead">Pick crew lead${p.leads_due > 1 ? ` · ${p.leads_due}` : ""}</span>` : ""}
         </div>
@@ -250,7 +256,7 @@ async function pmProjectDetail(routeFn, qboId) {
           <div class="text-base font-extrabold text-ink-900">${escapeHtml(proj?.name || "Project")}</div>
           <div class="text-xs text-black/50 mt-0.5">${escapeHtml(proj?.customer || "")}</div>
           <div class="mt-1.5 mb-2 flex items-center gap-2 flex-wrap">
-            ${proj ? statusBadge(proj.status) : ""}
+            ${proj ? statusBadge(proj.status) + holdPill(proj.qbo_id) : ""}
             ${proj ? `<span class="text-[11px] text-black/45 tabular-nums">${escapeHtml(windowText(proj))}</span>` : ""}
           </div>
           <div id="pmTabBar" class="flex gap-1 -mb-px overflow-x-auto"></div>

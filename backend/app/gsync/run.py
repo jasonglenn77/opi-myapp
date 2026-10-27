@@ -133,9 +133,24 @@ def refresh_assignments(who="manual"):
         raise
 
 
+def refresh_payments(who="manual"):
+    """Drive crew "Payment Schedule" files -> the app's crew payment schedules
+    (payment_import, apply mode; the sheets win). gsync_runs source 'payment_import'."""
+    from . import payment_import
+    run_id = _start("payment_import", who)
+    try:
+        summary = payment_import.run(do_apply=True, log=lambda *a: None)
+        _finish(run_id, not summary.get("errors"), summary,
+                error="; ".join(f"{e['project']}: {e['error']}" for e in summary.get("errors", []))[:4000] or None)
+        return summary
+    except Exception as e:
+        _finish(run_id, False, error=str(e))
+        raise
+
+
 def refresh_all(who="manual", actor=None):
     """Both sheets (then the Assignments from the Job Schedule, then the Drive
-    documents sync); one at a time across the process."""
+    documents sync, then the crew Payment Schedules); one at a time across the process."""
     if not _lock.acquire(blocking=False):
         return {"busy": True}
     try:
@@ -157,6 +172,12 @@ def refresh_all(who="manual", actor=None):
             out["drive_docs"] = docs_sync.nightly(who="cron" if who == "cron" else who)
         except Exception as e:
             out["drive_docs"] = {"error": str(e)}
+        # crew Payment Schedule files -> crew payment schedules (sheet wins);
+        # its own Drive listing, so it runs even when the documents step skips
+        try:
+            out["payment_import"] = refresh_payments(who)
+        except Exception as e:
+            out["payment_import"] = {"error": str(e)}
         return out
     finally:
         _lock.release()

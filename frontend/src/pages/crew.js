@@ -28,7 +28,7 @@ export async function crewPortalPage(routeFn, params = null) {
   const chip = (cls, txt) => `<span class="inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-bold ${cls}">${txt}</span>`;
   const statusBadge = (s) => {
     if (!s) return "";
-    const map = { in_progress: "bg-blue-100 text-blue-700", not_started: "bg-violet-100 text-violet-700", needs_attention: "bg-amber-100 text-amber-700", completed: "bg-emerald-50 text-emerald-700" };
+    const map = { in_progress: "bg-blue-100 text-blue-700", not_started: "bg-violet-100 text-violet-700", needs_attention: "bg-amber-100 text-amber-700", completed: "bg-emerald-50 text-emerald-700", on_hold: "bg-slate-200 text-slate-700" };
     return chip(map[s] || "bg-black/5 text-black/50", escapeHtml(s));
   };
   const metricChips = (m) => `

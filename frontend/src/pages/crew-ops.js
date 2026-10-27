@@ -67,6 +67,7 @@ export async function crewOpsPage(routeFn) {
     pending: ["Pending", "bg-amber-50 text-amber-700 border-amber-200"],
     not_started: ["Not started", "bg-black/5 text-black/60 border-black/15"],
     in_progress: ["In progress", "bg-emerald-50 text-emerald-700 border-emerald-200"],
+    on_hold: ["On hold", "bg-slate-100 text-slate-700 border-slate-300"],
   };
   const statusPill = (s) => { const m = STATUS[s] || [s, "bg-black/5 text-black/60 border-black/15"]; return `<span class="inline-flex rounded-full border px-2 py-0.5 text-[11px] font-bold whitespace-nowrap ${m[1]}">${m[0]}</span>`; };
   const OFFER = { sent: ["Offer sent", "text-blue-700"], accepted: ["Accepted", "text-emerald-700"], declined: ["Declined", "text-red-700"], withdrawn: ["Withdrawn", "text-black/50"] };

@@ -171,6 +171,11 @@ def list_deleted():
     return [dict(r) for r in rows]
 
 
+# A NEW auto item is not added for an account whose trailing spend is mostly on
+# credit cards: the card itself is paid by the recurring "Chase credit card"
+# line (migration 0080), so adding the account too would count it twice.
+CARD_PAID_SHARE = 0.85
+
 _PERIODS_PER_YEAR = {"weekly": 52, "biweekly": 26, "monthly": 12, "quarterly": 4, "annual": 1}
 
 
@@ -208,7 +213,8 @@ def _compute_runrate(today: date | None = None) -> dict:
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')) AS acct,
-                   qt.txn_date AS d, l.amount AS amt
+                   qt.txn_date AS d, l.amount AS amt,
+                   JSON_UNQUOTE(JSON_EXTRACT(qt.raw_json, '$.PaymentType')) AS pay_type
             FROM qbo_transactions qt
             JOIN qbo_transaction_lines l ON l.transaction_id = qt.id
             WHERE qt.entity_type = 'Purchase' AND qt.txn_date >= :start AND qt.txn_date < :today
@@ -216,11 +222,14 @@ def _compute_runrate(today: date | None = None) -> dict:
         """), {"start": start, "today": today}).mappings().all()
 
     by_acct = defaultdict(list)
+    card_by_acct = defaultdict(float)
     for r in rows:
         acct = r["acct"]
         if not acct or acct.split(":")[0] not in _CATEGORY_TO_ROW:
             continue  # only overhead/payroll accounts
         by_acct[acct].append((r["d"], float(r["amt"] or 0)))
+        if (r.get("pay_type") or "") == "CreditCard":
+            card_by_acct[acct] += float(r["amt"] or 0)
 
     out = {}
     for acct, txns in by_acct.items():
@@ -233,6 +242,9 @@ def _compute_runrate(today: date | None = None) -> dict:
             "cadence": cadence,
             "anchor": max(d for d, _ in txns),                       # real day-of-cycle
             "category": _CATEGORY_TO_ROW.get(acct.split(":")[0], acct.split(":")[0]),
+            # share of the account's spend charged to a credit card — card spend
+            # is forecast by the "Chase credit card" payment line instead
+            "card_share": round(card_by_acct.get(acct, 0.0) / total, 3) if total else 0.0,
         }
     return out
 
@@ -278,7 +290,7 @@ def refresh_auto_from_runrate(today: date | None = None) -> dict:
         live = {r["name"]: r for r in existing if r["deleted_at"] is None}
         deleted = {r["name"] for r in existing if r["deleted_at"] is not None}
         next_so = (conn.execute(text("SELECT COALESCE(MAX(sort_order),0) FROM cashflow_overhead")).scalar() or 0)
-        updated = inserted = skipped = 0
+        updated = inserted = skipped = skipped_card = 0
         for acct, v in sorted(runrate.items()):
             if acct in deleted:
                 skipped += 1
@@ -300,6 +312,8 @@ def refresh_auto_from_runrate(today: date | None = None) -> dict:
                          WHERE id=:id
                     """), {"a": v["amount"], "cad": v["cadence"], "d": v["anchor"], "id": row["id"]})
                 updated += 1
+            elif v.get("card_share", 0) >= CARD_PAID_SHARE:
+                skipped_card += 1   # paid by card -> covered by the card-payment line
             else:
                 next_so += 1
                 conn.execute(text("""
@@ -310,7 +324,8 @@ def refresh_auto_from_runrate(today: date | None = None) -> dict:
                 """), {"n": acct, "c": v["category"], "a": v["amount"],
                        "cad": v["cadence"], "d": v["anchor"], "so": next_so})
                 inserted += 1
-    return {"updated": updated, "inserted": inserted, "skipped_deleted": skipped}
+    return {"updated": updated, "inserted": inserted, "skipped_deleted": skipped,
+            "skipped_card_paid": skipped_card}
 
 
 def expand(week_ends):

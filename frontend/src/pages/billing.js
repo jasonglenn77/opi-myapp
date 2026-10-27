@@ -99,6 +99,7 @@ const shortDate = (s) => {
 const STATUS_PILL = {
   completed:       ["Complete", "text-emerald-700 bg-emerald-50 border-emerald-200"],
   in_progress:     ["In progress", "text-emerald-700 bg-emerald-50 border-emerald-200"],
+  on_hold:         ["On hold", "text-slate-700 bg-slate-100 border-slate-400"],
   not_started:     ["Not started", "text-slate-700 bg-slate-100 border-slate-300"],
   pending:         ["Pending", "text-amber-800 bg-amber-50 border-amber-300"],
   needs_attention: ["Needs attention", "text-rose-700 bg-rose-50 border-rose-200"],
@@ -115,6 +116,9 @@ export function prefetchBilling(entityId) {
   if (!entityId || _prefetch.has(entityId)) return;
   _prefetch.set(entityId, api(`/billing/project/${encodeURIComponent(entityId)}`).catch(() => null));
 }
+
+/** 0078: forget a warmed bundle (e.g. after a hold shifted the dates). */
+export function dropBillingPrefetch(entityId) { _prefetch.delete(entityId); }
 
 export async function mountBillingPanel(container, entityId) {
   container.innerHTML = `<div class="p-6 text-sm text-black/50">Loading billing & schedule…</div>`;
@@ -141,7 +145,10 @@ function render(container, entityId, d) {
   const inv = d.invoices, crew = d.crew, exp = d.expenses;
   const crews = d.crews || [];
   const terms = d.terms || { percents: [35, 35, 30], net_days: 30, label: "35 / 35 / 30 · net-30", custom: false };
-  const [stLabel, stCls] = STATUS_PILL[p.operational_status] || [p.operational_status || "—", "text-slate-700 bg-slate-100 border-slate-300"];
+  let [stLabel, stCls] = STATUS_PILL[p.operational_status] || [p.operational_status || "—", "text-slate-700 bg-slate-100 border-slate-300"];
+  // 0078: an active hold — "On hold until 12/7/26" (remaining items below are
+  // already shifted to after the resume date).
+  if (p.hold) stLabel = `On hold until ${shortDate(p.hold.expected_resume)}${p.hold.shift_days ? ` · shifted ${p.hold.shift_days}d` : ""}`;
   // Crew Model v2 (CR3): assignable choices are COMPANIES ("MTY · Jesse
   // Rosales Jr."); leads stay in the list only so legacy child assignments
   // resolve to a readable "MTY · Gustavo Ramirez" label.
@@ -262,9 +269,9 @@ function render(container, entityId, d) {
     const acts = a.invoice_actuals || [];
     const actTotal = acts.reduce((s, x) => s + (x.amount || 0), 0);
     const actuals = acts.length ? actualsBlock("Actual invoices in QuickBooks", acts.length,
-      `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Date</th><th class="font-bold">Due</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
-       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : x.status === "Retainage" ? `Retainage held · ${money(x.balance)}` : x.status === "Partial" ? `Partial · ${money(x.balance)} A/R` : "Sent · A/R")}</td></tr>`).join("")}</tbody>
-       <tfoot><tr class="border-t-2 border-black/15 font-bold"><td class="py-1.5" colspan="3">Total invoiced <span class="font-normal text-black/45">vs ${money(a.value)} est</span></td><td class="py-1.5 text-right tabular-nums">${money(actTotal)}</td><td></td></tr></tfoot></table>`) : "";
+      `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Sent</th><th class="font-bold">Due</th><th class="font-bold" title="When the cash is expected — the Cash Flow forecast uses this (blank = due date). Saved in the app only.">Expected paid</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
+       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1 tabular-nums">${x.balance > 0.01 && x.status !== "Retainage" ? `${eInput("qboinv", x.qbo_id, "expected_paid_date", x.expected_override || "", "date")}${!x.expected_override && x.expected_paid_date ? `<div class="text-[10px] text-black/40" title="From the planned milestone's expected paid date">milestone: ${shortDate(x.expected_paid_date)}</div>` : ""}` : `<span class="text-black/30">—</span>`}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : x.status === "Retainage" ? `Retainage held · ${money(x.balance)}` : x.status === "Partial" ? `Partial · ${money(x.balance)} A/R` : "Sent · A/R")}</td></tr>`).join("")}</tbody>
+       <tfoot><tr class="border-t-2 border-black/15 font-bold"><td class="py-1.5" colspan="4">Total invoiced <span class="font-normal text-black/45">vs ${money(a.value)} est</span></td><td class="py-1.5 text-right tabular-nums">${money(actTotal)}</td><td></td></tr></tfoot></table>`) : "";
     return `<details open class="group card overflow-hidden mb-3 ${nr ? "border-amber-300" : ""}">
       <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
         <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
@@ -435,6 +442,7 @@ function render(container, entityId, d) {
     const weekly = (c.weekly || []).map((w) => `
       <tr class="border-b border-black/5">
         <td class="py-1 pl-6 pr-2"><span class="flex items-center gap-2">${DOT[w.tier]}${expenseComplete ? `<span class="tabular-nums text-black/60">${shortDate(w.week_of)}</span>` : eInput("expinst", w.id, "week_of", w.week_of, "date")}</span></td>
+        <td class="py-1 px-2">${expenseComplete ? `<span class="tabular-nums text-black/60">${w.expected_paid_date ? shortDate(w.expected_paid_date) : "—"}</span>` : eInput("expinst", w.id, "expected_paid_date", w.expected_paid_date, "date")}</td>
         <td class="py-1 px-2 text-right">${expenseComplete ? `<span class="tabular-nums font-semibold">${money(w.amount)}</span>` : eInput("expinst", w.id, "amount", Math.round(w.amount), "number", "ml-auto")}</td>
         <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${editedChip(w.edited)}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
       </tr>`).join("");
@@ -452,7 +460,7 @@ function render(container, entityId, d) {
         </span>
       </summary>
       <div class="bg-black/[0.012]">
-        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left">Weekly cash-out</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="3" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left">Weekly cash-out</th><th class="py-1.5 px-2 text-left" title="When this expense is expected to actually be paid — the Cash Flow forecast uses it (blank = the week)">Expected paid</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="4" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
         ${expenseComplete ? "" : addBtn("expinst", c.category, "Add expense payment")}
         ${actuals}
       </div>
@@ -632,7 +640,7 @@ function render(container, entityId, d) {
     const kind = el.getAttribute("data-edit"), id = el.getAttribute("data-id"), field = el.getAttribute("data-field");
     let val = el.value;
     if (el.type === "number") val = val === "" ? null : Number(val);
-    const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}` }[kind];
+    const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}`, qboinv: `/invoices/qbo-invoice/${encodeURIComponent(id)}/expected` }[kind];
     if (!url) return;
     let payload = { [field]: val };
     // milestone % / $ save BOTH fields (kept in sync live by the input handler)

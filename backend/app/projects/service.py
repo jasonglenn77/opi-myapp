@@ -10,7 +10,10 @@ from app.projects.history import (
     crew_label, used_slot_codes, suggest_slot_code,
 )
 
-ALLOWED_STATUS = {"needs_attention", "pending", "not_started", "in_progress", "completed", "canceled"}
+ALLOWED_STATUS = {"needs_attention", "pending", "not_started", "in_progress", "on_hold", "completed", "canceled"}
+# 'on_hold' (0078) = the project is paused with an expected resume date; set /
+# cleared by app/projects/holds.py (Put on hold / Resume) and kept by the Job
+# Schedule importer guard below while the hold is active.
 # 'pending' = the office has started on the project (e.g. a PM is assigned) but
 # it isn't fully set up yet (crew and/or dates still unknown). It sits between
 # 'needs_attention' (untouched) and a fully-scheduled state.
@@ -181,6 +184,10 @@ def get_assignment_bundle(qbo_customer_id: int):
         from app.crew.timeoff import load_time_off, serialize as _ser_time_off
         time_off_rows = load_time_off(conn)
 
+        # 0078: the project's active hold (or None) for the panel's hold bar.
+        from app.projects.holds import get_active_hold
+        active_hold = get_active_hold(conn, project_id) if project_id else None
+
     # CR3: company-first picker feed — one entry per company with its active
     # leads nested ("MTY · Jesse Rosales Jr." rendering is the frontend's job).
     companies = []
@@ -208,6 +215,7 @@ def get_assignment_bundle(qbo_customer_id: int):
         "work_crews": [dict(r) for r in crews if r["parent_id"] is not None] + [dict(r) for r in crews if r["parent_id"] is None],
         "companies": companies,
         "time_off": [_ser_time_off(r) for r in time_off_rows],
+        "hold": active_hold,
     }
 
 def _json(conn, v):
@@ -424,6 +432,16 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
 
         schedule_item_id = getattr(req, "schedule_item_id", None)
         is_create = not bool(schedule_item_id)
+
+        # 0078 project holds: while a hold is active the nightly Job Schedule
+        # import still writes (sheet wins), but a stale sheet date / a date
+        # inside the hold window is kept shifted and the derived status stays
+        # 'on_hold' (no double shift). Hand edits are never adjusted.
+        from app.projects import holds as _holds
+        if _holds.is_import_actor(conn, actor_user_id):
+            status, start_date, end_date = _holds.guard_import(
+                conn, project_id, schedule_item_id, status, start_date, end_date,
+                getattr(req, "overage_days", 0) or 0)
 
         prior_item = None
         prior_pm_ids = []

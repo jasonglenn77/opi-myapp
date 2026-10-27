@@ -30,8 +30,21 @@ def update_categories(req: CategorySettingsRequest, _user=Depends(require_capabi
 
 @router.get("/opening-balance")
 def opening_balance(_user=Depends(require_capability("page.cashflow"))):
-    """Suggested opening cash balance = sum of QBO bank-account balances."""
+    """Opening cash = the QBO Bank accounts chosen on Cash Flow (default: all
+    active), with each account's balance, as-of + last-synced time and a
+    duplicate-account-number warning."""
     return service.get_bank_balance()
+
+
+class BankInclusionRequest(BaseModel):
+    included: dict[str, bool] = {}   # {qbo_account_id: include?}
+
+
+@router.put("/bank-accounts")
+def set_bank_accounts(req: BankInclusionRequest, user=Depends(require_capability("page.cashflow"))):
+    """Persist which QBO bank accounts count toward the opening balance."""
+    actor = user.get("email") if isinstance(user, dict) else getattr(user, "email", None)
+    return service.set_bank_inclusion(req.included, actor)
 
 
 @router.get("/credit-cards")
@@ -91,6 +104,7 @@ def forecast_v2(
     start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to the coming Friday)"),
     weeks: int = Query(26, ge=1, le=520, description="Horizon in weeks (unbounded — user extends as far as they want)"),
     opening_balance: Optional[float] = Query(None, description="Override the opening balance (defaults to the live QBO bank balance)"),
+    count_overdue_plans: bool = Query(False, description="Count overdue schedule items (dates passed, never invoiced/paid/spent) in week 1"),
     _user=Depends(require_capability("page.cashflow")),
 ):
     """Phase-3b forecast: real bank anchor + committed QBO layers + recurring +
@@ -103,7 +117,8 @@ def forecast_v2(
             sd = datetime.strptime(start_date, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="start_date must be YYYY-MM-DD")
-    result = service.generate_forecast_v2(start_date=sd, weeks=weeks, opening_balance=opening_balance)
+    result = service.generate_forecast_v2(start_date=sd, weeks=weeks, opening_balance=opening_balance,
+                                          count_overdue_plans=count_overdue_plans)
     c = result.get("cache") or {}
     if c.get("stale") and not c.get("computing"):
         background.add_task(_safe_recompute)

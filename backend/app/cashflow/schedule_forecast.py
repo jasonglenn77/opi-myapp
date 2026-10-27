@@ -25,6 +25,13 @@ from app.db import engine
 EPS = 0.5
 WEEK_END_WEEKDAY = 4  # Friday
 
+# Bump when _project_events' OUTPUT changes: the per-project cache keys on
+# schedule-row timestamps, so a logic change alone wouldn't invalidate it. A
+# mismatch wipes project_cash_cache + marks the singleton cache stale (no
+# manual clear needed on deploy).
+LOGIC_VERSION = "2026-10-26.overdue-v1"
+_PAID_STATUSES = ("paid", "realized", "complete", "completed")
+
 
 def _iso(d):
     """Normalize a date/datetime/str to a YYYY-MM-DD string (or None)."""
@@ -106,7 +113,11 @@ def _project_events(conn, entity_id):
                 continue
             d = _iso(m.get("expected_paid_date") or m.get("due_date") or m.get("invoice_date"))
             if d and has_dates:  # only on the grid if the project is fully dated
-                events.append({"date": d, "dir": "in", "amt": remaining, "src": "invoice"})
+                events.append({"date": d, "dir": "in", "amt": remaining, "src": "invoice",
+                               "mid": m.get("id"), "label": m.get("label"),
+                               "est": e.get("doc"),
+                               "sent": _iso(m.get("invoice_date")), "due": _iso(m.get("due_date")),
+                               "exp": _iso(m.get("expected_paid_date"))})
             else:                # undated (incl. partial start-only) -> all to backlog
                 backlog_in += remaining
 
@@ -116,6 +127,29 @@ def _project_events(conn, entity_id):
     # (e.g. a $10k lump with $3k already paid adds $7k), matching the project
     # workspace rather than the whole lump.
     crew_paid = float(crew.get("paid_qbo") or 0)
+    # installment -> (crew vendor, crew name, send-invoice date, status) so an
+    # overdue installment can be matched to the crew's QBO payments at forecast
+    # time (service._match_overdue_crew) and listed with its dates.
+    inst_meta = {}
+    for r in conn.execute(text("""
+        SELECT i.id, i.send_invoice_date, i.status, s.crew_id
+        FROM project_payment_installments i JOIN project_payment_schedules s ON s.id = i.schedule_id
+        WHERE s.entity_id = :e"""), {"e": entity_id}).mappings().all():
+        inst_meta[r["id"]] = r
+    crew_name_by_inst = {}
+    for sc in crew.get("schedules") or []:
+        for x in sc.get("installments") or []:
+            crew_name_by_inst[x.get("id")] = sc.get("crew_name")
+    vendor_cache = {}
+
+    def _vendor(crew_id):
+        if crew_id not in vendor_cache:
+            try:
+                vendor_cache[crew_id] = B._crew_vendor(conn, crew_id)
+            except Exception:
+                vendor_cache[crew_id] = None
+        return vendor_cache[crew_id]
+
     ccum = 0.0
     for i in sorted(crew["installments"],
                     key=lambda x: (str(x.get("pay_date")) if x.get("pay_date") else "9999", x.get("id") or 0)):
@@ -123,11 +157,17 @@ def _project_events(conn, entity_id):
         covered = min(amt, max(0.0, crew_paid - ccum))
         ccum += amt
         owed = round(amt - covered, 2)
+        meta = inst_meta.get(i.get("id")) or {}
+        if str(meta.get("status") or "").lower() in _PAID_STATUSES:
+            continue  # marked paid (e.g. by the Payment Schedule importer)
         if owed <= EPS:
             continue
         d = _iso(i.get("pay_date"))
         if d and has_dates:
-            events.append({"date": d, "dir": "out", "amt": owed, "src": "crew"})
+            events.append({"date": d, "dir": "out", "amt": owed, "src": "crew",
+                           "iid": i.get("id"), "vendor": _vendor(meta.get("crew_id")),
+                           "crew": crew_name_by_inst.get(i.get("id")),
+                           "send": _iso(meta.get("send_invoice_date")), "full": round(amt, 2)})
         else:
             backlog_out += owed
 
@@ -145,9 +185,12 @@ def _project_events(conn, entity_id):
                 continue
             if amt <= EPS:
                 continue
-            d = _iso(w.get("week_of"))
+            # 0079: the planned PAY date wins over the spend week
+            d = _iso(w.get("expected_paid_date") or w.get("week_of"))
             if d and has_dates:
-                events.append({"date": d, "dir": "out", "amt": amt, "src": "expense"})
+                events.append({"date": d, "dir": "out", "amt": amt, "src": "expense",
+                               "cat": cat.get("category"), "week_of": _iso(w.get("week_of")),
+                               "exp": _iso(w.get("expected_paid_date"))})
             else:
                 backlog_out += amt
 
@@ -172,6 +215,7 @@ def _project_events(conn, entity_id):
         # A/R is already on the grid by its due date, paid is already in the bank.
         backlog_detail = {
             "entity_id": entity_id, "name": ctx["name"], "status": op_status,
+            "start_date": _iso(ctx.get("start_date")), "end_date": _iso(ctx.get("end_date")),
             "paid": paid, "ar": ar, "to_bill": to_bill,
             "crew_out": crew_out, "exp_out": exp_out, "out": est_out,
             "net": round(to_bill - est_out, 2),
@@ -245,11 +289,27 @@ def ensure_project_cache_table():
         """))
 
 
+def _check_logic_version():
+    """Wipe the per-project cache when the event logic changed (LOGIC_VERSION)."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cashflow_cache_meta (
+              k VARCHAR(64) NOT NULL PRIMARY KEY, v VARCHAR(255) NULL,
+              updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB"""))
+        cur = conn.execute(text("SELECT v FROM cashflow_cache_meta WHERE k = 'logic_version'")).scalar()
+        if cur != LOGIC_VERSION:
+            conn.execute(text("DELETE FROM project_cash_cache"))
+            conn.execute(text("""INSERT INTO cashflow_cache_meta (k, v) VALUES ('logic_version', :v)
+                                 ON DUPLICATE KEY UPDATE v = VALUES(v)"""), {"v": LOGIC_VERSION})
+
+
 def refresh_stale():
     """Recompute + upsert only the projects whose schedules changed since we last
     stored them. Each project runs in its own transaction, so progress persists
     and we never hold one long lock. Returns how many were refreshed."""
     ensure_project_cache_table()
+    _check_logic_version()
     with engine.connect() as conn:
         cands = _candidate_project_ids(conn)
         cur = {str(r["entity_id"]): r["v"] for r in conn.execute(_VERSIONS_SQL).mappings().all()}
@@ -304,6 +364,7 @@ def compute_all_events() -> dict:
     backlog_projects.sort(key=lambda x: -(x["to_bill"] + x["ar"] + x["out"]))
     return {
         "computed_at": _iso_now(),
+        "logic_version": LOGIC_VERSION,
         "events": all_events,
         "backlog": {
             "in": round(sum(p["to_bill"] for p in backlog_projects), 2),
@@ -349,6 +410,7 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
     name_by = {p["entity_id"]: p.get("name") for p in payload.get("projects", [])}
     proj_in, proj_out = {}, {}   # entity_id -> {weekly, pastdue, beyond, src{}}
     type_out = {}                # src ('crew'/'expense') -> {weekly, pastdue, beyond}
+    overdue = []                 # events dated before the first week (unpaid)
 
     def _pg(bucket, key):
         return bucket.setdefault(key, {"weekly": [0.0] * weeks, "pastdue": 0.0, "beyond": 0.0, "src": {}})
@@ -361,12 +423,10 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         pg["src"][e.get("src")] = round(pg["src"].get(e.get("src"), 0.0) + e["amt"], 2)
         tg = None if is_in else _pg(type_out, e.get("src") or "other")
         if c == "past":
-            if is_in:
-                pastdue_in += e["amt"]
-            else:
-                pastdue_out += e["amt"]
-            pg["pastdue"] += e["amt"]
-            if tg: tg["pastdue"] += e["amt"]
+            # Expected date already passed and still unpaid: NOT cash now and NOT
+            # settled into the opening -- handed back for the caller to match
+            # (crew -> QBO payments) and flag for follow-up (owner rule 2026-10-26).
+            overdue.append({**e, "project": name_by.get(eid) or str(eid)})
         elif c == "beyond":
             if is_in:
                 beyond_in += e["amt"]
@@ -424,6 +484,7 @@ def bucket_events(payload: dict, start_date: date | None = None, weeks: int = 26
         "sched_in_rows": _proj_rows(proj_in),
         "sched_out_rows": _proj_rows(proj_out),
         "sched_out_by_type": _type_rows(type_out),
+        "overdue": overdue,
         "backlog": payload.get("backlog", {"in": 0.0, "out": 0.0}),
         "projects": payload.get("projects", []),
         "project_count": payload.get("project_count", 0),
@@ -549,7 +610,8 @@ def get_events(max_age_seconds: int = 1800):
     if computed_at:
         age = (_dt.utcnow() - computed_at).total_seconds()
     edited_since = (cur_max is not None and (source_max is None or cur_max > source_max))
-    stale = dirty or edited_since or age is None or age > max_age_seconds
+    old_logic = bool(payload) and payload.get("logic_version") != LOGIC_VERSION
+    stale = dirty or edited_since or old_logic or age is None or age > max_age_seconds
     meta = {"computed_at": computed_at.isoformat() if computed_at else None,
             "age_seconds": int(age) if age is not None else None,
             "computing": computing, "stale": stale, "has_data": payload is not None,

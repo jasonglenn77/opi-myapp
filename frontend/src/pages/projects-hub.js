@@ -7,6 +7,8 @@
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+// 0078: "On hold until …" pill next to the status.
+import { loadHolds, holdPillHtml } from "../utils/hold.js";
 
 const dash = (s) => (s == null || s === "" ? "—" : s);
 const money = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)).toLocaleString());
@@ -35,6 +37,7 @@ const OP_STATUS = {
   pending:         { label: "Pending",         cls: "bg-amber-100 text-amber-800" },
   not_started:     { label: "Not started",     cls: "bg-slate-200 text-slate-700" },
   in_progress:     { label: "In progress",     cls: "bg-indigo-100 text-indigo-800" },
+  on_hold:         { label: "On hold",         cls: "bg-slate-200 text-slate-700" },
   completed:       { label: "Complete",        cls: "bg-emerald-100 text-emerald-800" },
   canceled:        { label: "Canceled",        cls: "bg-black/10 text-black/50" },
 };
@@ -177,6 +180,7 @@ export async function projectsHubPage(routeFn) {
   const cardCache = new Map(); // project_qbo_id -> card detail (lazy)
   const openSet = new Set();   // project_qbo_id currently expanded
   let statusFilter = "all", search = "", sortKey = "project_name", sortDir = "asc";
+  let holdsByEntity = new Map();   // 0078: active holds by project qbo_id
   // Per-column filters (schedule/pm/crew/value/profit/outstanding/flags). Status
   // stays on the pill row; project/pm/crew text stays on the global search.
   let colFilters = { schedule: "", pm: "", crew: "", valueMin: "", profit: "", outstanding: "", flags: "" };
@@ -443,7 +447,10 @@ export async function projectsHubPage(routeFn) {
   };
   // Status is read-only here — it's the final assignment row's status, set on the
   // Assignment page (Projects hub reflects it, doesn't edit it).
-  const statusCell = (p) => statusBadge(p.operational_status);
+  const statusCell = (p) => {
+    const h = holdsByEntity.get(String(p.project_qbo_id));
+    return h ? `<span class="inline-flex flex-col items-start gap-0.5">${statusBadge(p.operational_status)}${holdPillHtml(h)}</span>` : statusBadge(p.operational_status);
+  };
 
   const rowHtml = (p) => {
     const att = attById.get(String(p.project_qbo_id));
@@ -826,6 +833,9 @@ export async function projectsHubPage(routeFn) {
   applyScroll();
   listEl.addEventListener("wheel", () => { pendingScroll = 0; }, { once: true, passive: true });
 
+  loadHolds(true)
+    .then((h) => { holdsByEntity = h.byEntity; if (h.list.length) { renderList(); applyScroll(); } })
+    .catch(() => {});
   api("/projects/financials")
     .then((d) => { finById = new Map((d.financials || []).map((f) => [f.qbo_customer_id, f])); renderList(); applyScroll(); })
     .catch(() => {});

@@ -12,7 +12,9 @@ import { mountChangeOrdersPanel } from "./change-orders.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
 // 0062: non-working day math for the Overview days-remaining calculator.
 import { countNonWorkingBetween } from "../utils/nonworking.js";
-import { mountBillingPanel, prefetchBilling } from "./billing.js";
+import { mountBillingPanel, prefetchBilling, dropBillingPrefetch } from "./billing.js";
+// 0078: "On hold until …" pill on the project header.
+import { loadHolds, holdPillHtml } from "../utils/hold.js";
 
 const TYPE_STYLE = {
   estimate: "bg-blue-100 text-blue-700",
@@ -42,6 +44,7 @@ const OP_STATUS = {
   assigned:         { label: "Assigned",         cls: "bg-slate-200 text-slate-700" },
   scheduled:        { label: "Scheduled",        cls: "bg-sky-100 text-sky-800" },
   in_progress:      { label: "In progress",      cls: "bg-indigo-100 text-indigo-800" },
+  on_hold:          { label: "On hold",          cls: "bg-slate-200 text-slate-700" },
   complete:         { label: "Complete",         cls: "bg-emerald-100 text-emerald-800" },
   canceled:         { label: "Canceled",         cls: "bg-black/10 text-black/50" },
 };
@@ -163,6 +166,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
           <div class="flex items-center gap-2 flex-wrap">
             ${typeBadge}
             <div class="text-base font-extrabold text-ink-900">${escapeHtml(entity.name || "Entity")}</div>
+            ${isProject ? `<span id="edHoldPill"></span>` : ""}
           </div>
           <div class="text-xs text-black/50 mt-0.5 ${isProject ? "mb-2" : "pb-3"}">${escapeHtml(entity.customer_name || "")}</div>
           ${isProject ? `<div id="tabBar" class="flex gap-1 -mb-px"></div>` : ""}
@@ -170,6 +174,15 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         <div id="tabBody" class="flex-1 overflow-auto"></div>
       </div>
     </div>`, routeFn);
+
+  // 0078: hold pill — refreshed after hold changes in the Assignment tab.
+  async function refreshHoldPill(force) {
+    const el = document.getElementById("edHoldPill");
+    if (!el) return;
+    const { byEntity } = await loadHolds(force);
+    el.innerHTML = holdPillHtml(byEntity.get(String(entityId)));
+  }
+  if (isProject) refreshHoldPill(false);
 
   // "Go to Projects" surfaces this project on the hub (All filter, searched to it).
   if (isProject) {
@@ -382,7 +395,12 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
       body.innerHTML = "";
       // On any assignment change, invalidate the overview cache so its
       // operational status / PM / crew refresh when revisited.
-      mountAssignmentPanel(body, proj.qbo_customer_id, () => { _ovProj = null; _ovBundle = null; });
+      mountAssignmentPanel(body, proj.qbo_customer_id, (ev) => {
+        _ovProj = null; _ovBundle = null;
+        // 0078: a hold moved dates — refresh the pill and drop the warmed
+        // Billing bundle so the Billing tab re-reads the shifted schedule.
+        if (ev && ev.hold) { refreshHoldPill(true); dropBillingPrefetch(entityId); }
+      });
     } catch (e) {
       body.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load assignment: ${escapeHtml(e?.message || String(e))}</div>`;
     }

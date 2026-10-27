@@ -36,6 +36,7 @@ def _is_protected_email(email) -> bool:
     return (email or "").strip().lower() in PROTECTED_ADMIN_EMAILS
 from app.qbo.routes import router as qbo_router
 from app.projects.routes import router as projects_router
+from app.projects.holds import router as project_holds_router
 from app.quoting.routes import router as quoting_router
 from app.estimates.routes import router as estimates_router
 from app.cashflow.routes import router as cashflow_router
@@ -64,6 +65,7 @@ from app.gsync.docs_routes import router as drive_docs_router
 
 app = FastAPI()
 app.include_router(qbo_router)
+app.include_router(project_holds_router)
 app.include_router(projects_router)
 app.include_router(quoting_router)
 app.include_router(estimates_router)
@@ -499,7 +501,7 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
     upcoming.sort(key=lambda x: x["pay_date"] or "9999")
     overdue.sort(key=lambda x: x["pay_date"] or "9999")
 
-    ACTIVE = {"needs_attention", "pending", "not_started", "in_progress"}
+    ACTIVE = {"needs_attention", "pending", "not_started", "in_progress", "on_hold"}
     needs_crew = []
     for p in projects:
         qid = str(p["qbo_id"])

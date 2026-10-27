@@ -14,6 +14,9 @@ import { api, getToken } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
+// 0078: project holds — "On hold until …" pill + on_hold status.
+import { loadHolds, holdPillHtml } from "../utils/hold.js";
+let holdsByEntity = new Map();
 
 const money = (v) => (v == null ? "—" : "$" + Math.round(Number(v)).toLocaleString("en-US"));
 const money2 = (v) => (v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
@@ -21,6 +24,7 @@ const fmtMD = (iso) => { if (!iso) return "—"; const [y, m, d] = iso.split("-"
 const fmtMDY = (iso) => { if (!iso) return "—"; const [y, m, d] = iso.split("-"); return `${Number(m)}/${Number(d)}/${y.slice(2)}`; };
 const STATUS = {
   in_progress: ["In progress", "at-st-prog"], not_started: ["Not started", "at-st-ns"], pending: ["Pending", "at-st-pend"],
+  on_hold: ["On hold", "at-st-hold"],
   needs_attention: ["Needs attention", "at-st-attn"], completed: ["Completed", "at-st-done"], canceled: ["Canceled", "at-st-cxl"],
 };
 const statusPill = (s) => { const [l, c] = STATUS[s] || [s || "—", "at-st-ns"]; return `<span class="at-pill ${c}">${escapeHtml(l)}</span>`; };
@@ -59,8 +63,9 @@ export async function trackerPage(routeFn) {
   const root = document.getElementById("atRoot");
 
   try {
-    const d = await api("/tracker/invoicing");
+    const [d, hs] = await Promise.all([api("/tracker/invoicing"), loadHolds(true)]);
     st.rows = d.rows || []; st.today = d.today; st.soonDays = d.soon_days || 14;
+    holdsByEntity = hs.byEntity;
   } catch (e) {
     root.innerHTML = `<div class="card p-6 text-sm text-red-700">Couldn't load the tracker: ${escapeHtml(e?.message || String(e))}</div>`;
     return;
@@ -202,7 +207,7 @@ export async function trackerPage(routeFn) {
           <div class="at-pname"><span class="at-caret">${open ? "▾" : "▸"}</span>${escapeHtml(r.name)}</div>
           <div class="at-sub">${escapeHtml(r.customer || "")}${r.flags.includes("pending_estimate") ? ` · <span class="at-flag-pend">pending estimate</span>` : ""}${r.retainage_held > 0.5 ? ` · <span class="at-flag-ret" title="Invoices paid except the retainage the customer is holding back — expected at release, not overdue">${money(r.retainage_held)} retainage held</span>` : ""}${r.unbilled ? ` · <span class="at-flag-unb" title="Partly billed — the rest is ${escapeHtml(UNB_WHY[r.unbilled.why] || "")}">${money(r.unbilled.amount)} balance to bill</span>` : ""}</div>
         </td>
-        <td><button type="button" class="at-stbtn" data-assign="${escapeHtml(r.entity_id)}" title="Change status, dates, PM or crew">${statusPill(r.status)}</button></td>
+        <td><button type="button" class="at-stbtn" data-assign="${escapeHtml(r.entity_id)}" title="Change status, dates, PM or crew">${statusPill(r.status)}</button>${holdsByEntity.has(String(r.entity_id)) ? `<div class="mt-1">${holdPillHtml(holdsByEntity.get(String(r.entity_id)))}</div>` : ""}</td>
         <td class="at-nowrap">${pmCell(r)}</td>
         <td class="at-nowrap">${r.start ? `${fmtMDY(r.start)} – ${fmtMDY(r.end)}<div class="at-sub">${r.days != null ? `${r.days} days` : ""}</div>` : `<span class="at-muted">No dates</span>`}</td>
         <td class="at-num">${money(r.contract)}</td>
@@ -266,11 +271,14 @@ export async function trackerPage(routeFn) {
       <div class="at-actuals">
         <div class="at-actuals-h">Actual QuickBooks invoices</div>
         <div class="at-tablewrap"><table class="at-ms">
-          <thead><tr><th>Invoice #</th><th>Date</th><th>Due</th><th class="at-num">Amount</th><th class="at-num">Balance</th><th>Status</th></tr></thead>
+          <thead><tr><th>Invoice #</th><th>Sent</th><th>Due</th><th title="When the cash is expected — Cash Flow uses this (blank = due date). Saved in the app only.">Expected paid</th><th class="at-num">Amount</th><th class="at-num">Balance</th><th>Status</th></tr></thead>
           <tbody>${inv.map((x) => `
             <tr>
               <td><b>${escapeHtml(x.doc || "—")}</b>${!x.estimate_doc ? ` <span class="at-muted">(no estimate link in QuickBooks)</span>` : ""}</td>
               <td>${fmtMDY(x.date)}</td><td>${fmtMDY(x.due)}</td>
+              <td>${x.qbo_id && Number(x.balance) > 0.01 && !x.retainage
+                ? `<input type="date" class="at-in" data-qinv="${escapeHtml(x.qbo_id)}" value="${escapeHtml(x.expected_override || "")}"${!x.expected_override && x.expected ? ` title="Milestone expected paid ${escapeHtml(x.expected)}"` : ""}>`
+                : `<span class="at-muted">—</span>`}</td>
               <td class="at-num">${money2(x.amount)}</td><td class="at-num">${money2(x.balance)}</td>
               <td><span class="at-chip ${x.status === "Paid" ? "at-c-paid" : x.retainage ? "at-c-ret" : x.late ? "at-c-late" : "at-c-sent"}">${x.status === "Paid" ? "Paid" : x.retainage ? "Retainage held" : x.late ? `${escapeHtml(x.status)} · past due` : escapeHtml(x.status)}</span></td>
             </tr>`).join("")}</tbody>
@@ -598,7 +606,7 @@ export async function trackerPage(routeFn) {
         </div>
         <div class="at-legend at-pad">
           <span class="at-bar-key at-b-in_progress">In progress</span><span class="at-bar-key at-b-not_started">Not started</span>
-          <span class="at-bar-key at-b-pending">Pending</span><span class="at-bar-key at-b-completed">Completed</span>
+          <span class="at-bar-key at-b-pending">Pending</span><span class="at-bar-key at-b-on_hold">On hold</span><span class="at-bar-key at-b-completed">Completed</span>
           <span class="at-tl-band-key">Overlap (2+ projects at once)</span>
           <span class="at-muted">· gaps are open days · click a bar to see the project's invoicing</span>
         </div>
@@ -669,6 +677,7 @@ export async function trackerPage(routeFn) {
     const close = async () => {
       overlay.remove(); document.body.style.overflow = prevOverflow;
       st.pmData = null;   // PM schedule reloads with any date/PM changes
+      holdsByEntity = (await loadHolds(true)).byEntity;   // 0078
       await refreshRow(id);
     };
     overlay.addEventListener("click", (e) => { if (e.target === overlay || e.target.closest("[data-close]")) close(); });
@@ -795,6 +804,12 @@ export async function trackerPage(routeFn) {
     if (t.matches("[data-pmsel]")) { st.pm = t.value; persist(); renderPm(); return; }
     if (t.matches("[data-tlmonths]")) { st.tlMonths = Number(t.value); renderPm(); return; }
     if (t.matches("[data-ms]")) saveMilestone(t);
+    if (t.matches("[data-qinv]")) {
+      t.disabled = true;
+      api(`/invoices/qbo-invoice/${encodeURIComponent(t.getAttribute("data-qinv"))}/expected`, { method: "PATCH", body: JSON.stringify({ expected_paid_date: t.value || null, via: "tracker" }) })
+        .catch((err) => alert("Save failed: " + (err?.message || "error")))
+        .finally(() => { t.disabled = false; });
+    }
   });
 
   render();

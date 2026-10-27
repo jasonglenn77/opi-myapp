@@ -4,6 +4,8 @@
 // incl. crew_assignments v2) and the shared history renderer.
 import { api, fetchMe, hasCapability } from "../api.js";
 import { setShell } from "../shell.js";
+// 0078: project holds — held lines render as a slate hatched bar.
+import { loadHolds, holdTitle } from "../utils/hold.js";
 import { escapeHtml } from "../utils/html.js";
 import {
   historyBadgeHtml, historyPanelHtml, loadHistory, invalidateHistory, cachedHistory,
@@ -118,7 +120,7 @@ export async function schedulePage(routeFn) {
   const MODAL_STATUS_OPTIONS = [
     ["needs_attention", "Needs Attention"], ["pending", "Pending"],
     ["not_started", "Not Started"], ["in_progress", "In Progress"],
-    ["completed", "Completed"], ["canceled", "Canceled"],
+    ["on_hold", "On Hold"], ["completed", "Completed"], ["canceled", "Canceled"],
   ];
   const MODAL_TRAVEL_OPTIONS = [[0, "None"], [2, "2 days"], [3, "3 days"], [4, "4 days"]];
   const MODAL_EQUIP_OPTIONS = ["", "Equip", "No Equip", "Electric"];
@@ -253,7 +255,7 @@ export async function schedulePage(routeFn) {
           <div class="schm-grid">
             <div><span class="schm-l">Status</span>
               <select class="input text-xs py-1.5" data-m-f="status" data-i="${i}" ${dis}>
-                ${MODAL_STATUS_OPTIONS.map(([v, l]) => `<option value="${v}" ${ln.status === v ? "selected" : ""}>${l}</option>`).join("")}
+                ${MODAL_STATUS_OPTIONS.filter(([v]) => v !== "on_hold" || ln.status === "on_hold").map(([v, l]) => `<option value="${v}" ${ln.status === v ? "selected" : ""}>${l}</option>`).join("")}
               </select></div>
             <div><span class="schm-l">Start</span>
               <input type="date" class="input text-xs py-1.5" data-m-f="start_date" data-i="${i}" value="${escapeHtml(ln.start_date)}" ${dis}/></div>
@@ -850,9 +852,10 @@ export async function schedulePage(routeFn) {
 
     const { start, end } = monthRange(state.year, state.month);
 
-    const [data, pms] = await Promise.all([
+    const [data, pms, holds] = await Promise.all([
       api(`/schedule?week_start=${encodeURIComponent(ymd(start))}&week_end=${encodeURIComponent(ymd(end))}`),
       api("/project-managers"),
+      loadHolds(true),
     ]);
 
     const crews = data.crews || [];
@@ -996,6 +999,7 @@ export async function schedulePage(routeFn) {
         project_name_raw: a.project_name || "",
         project: `${a.project_name || ""}${equipmentSuffix}`,
         status: a.project_status || "",
+        hold: a.project_status === "on_hold" ? (holds.byCustomer.get(String(a.qbo_customer_id)) || {}) : null,
         start_date: a.start_date,
         end_date: a.end_date,
         crews: crewsDisplay,
@@ -1178,6 +1182,10 @@ export async function schedulePage(routeFn) {
         } else if (isDayoff) {
           // 0062: grey hatched — distinct from overage (orange) and travel.
           wrapClass = "nwd-cell";
+        } else if (it.hold) {
+          // 0078: project on hold — slate hatched bar (dates already shifted
+          // to after the expected resume).
+          wrapClass = "hold-cell";
         } else if (it.needsCrew) {
           // CR5 B1: amber "needs crew" bar (start day slightly darker).
           wrapClass = isStartDate ? "nc-bar nc-startday" : "nc-bar";
@@ -1218,10 +1226,14 @@ export async function schedulePage(routeFn) {
         const ncChip = (it.needsCrew && !isTravel && isStartDate)
           ? ` <span class="nc-chip" title="No crew assigned — click to assign">Needs crew</span>`
           : "";
+        const holdChip = (it.hold && !isTravel && isStartDate)
+          ? ` <span class="hold-chip" title="${escapeHtml(holdTitle(it.hold) || "On hold")}">ON HOLD</span>`
+          : "";
 
         const tip = encodeURIComponent(JSON.stringify({
           project: it.project,
           status: it.status,
+          hold_until: it.hold ? it.hold.expected_resume || null : null,
           start_date: it.start_date,
           end_date: it.end_date,
           crews: it.crews || [],
@@ -1240,7 +1252,7 @@ export async function schedulePage(routeFn) {
             ${pmBadges ? `<div class="flex flex-wrap gap-px">${pmBadges}</div>` : ""}
             <div class="text-[10px] leading-tight font-semibold ${isTravel ? "text-center" : "cursor-pointer hover:underline"} ${isDayoff ? "nwd-cell-label" : ""} break-words"
               ${isTravel ? "" : `data-proj-tip="${tip}" data-proj-open="${escapeHtml(String(it.qbo_customer_id ?? ""))}" data-proj-pname="${escapeHtml(it.project_name_raw)}"`}>
-              ${escapeHtml(it.project)}${tbdChip}${ncChip}
+              ${escapeHtml(it.project)}${tbdChip}${ncChip}${holdChip}
             </div>
           </div>
         `;
@@ -1339,7 +1351,7 @@ export async function schedulePage(routeFn) {
               <div class="text-base font-extrabold">Schedule</div>
               <div class="text-xs text-black/60">Month view (Mon–Sun) by company crew slot (JR1…) ·
                 <span style="display:inline-block;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:3px;padding:0 2px;font-size:8px;font-weight:800;vertical-align:middle;">TBD</span>
-                = lead not assigned yet · <span class="nwd-legend"></span> = day off · <span class="schto-legend"></span> = crew unavailable (time off) · click a project to view/edit its assignment</div>
+                = lead not assigned yet · <span class="nwd-legend"></span> = day off · <span class="hold-legend"></span> = on hold · <span class="schto-legend"></span> = crew unavailable (time off) · click a project to view/edit its assignment</div>
             </div>
             <div class="flex items-center gap-2 flex-wrap justify-end">
               <div class="text-xs font-semibold text-black/60 whitespace-nowrap">${escapeHtml(monthLabel)}</div>
@@ -1447,6 +1459,7 @@ export async function schedulePage(routeFn) {
         const statusLabel = (s) =>
           s === "not_started"     ? "Not Started"     :
           s === "in_progress"     ? "In Progress"     :
+          s === "on_hold"         ? "On Hold" + (data.hold_until ? ` (expected resume ${data.hold_until})` : "") :
           s === "completed"       ? "Completed"       :
           s === "canceled"        ? "Canceled"        :
           s === "needs_attention" ? "Needs Attention" : (s || "—");

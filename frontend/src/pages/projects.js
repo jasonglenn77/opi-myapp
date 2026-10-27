@@ -88,6 +88,7 @@ export async function projectsPage(routeFn) {
   function statusLabel(s) {
     return s === "not_started"     ? "Not Started"    :
            s === "in_progress"     ? "In Progress"    :
+           s === "on_hold"         ? "On Hold"        :
            s === "completed"       ? "Completed"      :
            s === "canceled"        ? "Canceled"       :
            s === "needs_attention" ? "Needs Attn"     : s;

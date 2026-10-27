@@ -829,6 +829,7 @@ def _actual_invoices(conn, entity_id):
         SELECT qbo_id, doc_number, txn_date, due_date, total_amt, balance_amt, raw_json
         FROM latest WHERE rn = 1 ORDER BY txn_date, doc_number
     """), {"e": entity_id}).mappings().all()
+    exp_override, exp_ms = invoice_expected_dates(conn, [str(r["qbo_id"]) for r in rows])
     out = []
     for r in rows:
         total = float(r["total_amt"] or 0)
@@ -844,8 +845,38 @@ def _actual_invoices(conn, entity_id):
             "status": "Paid" if bal <= 0.01 else ("Retainage" if ret else "Partial" if bal < total else "Open"),
             # paid except a held-back 5-15% (billing/retainage.py): held, not overdue A/R
             "retainage": round(bal, 2) if ret else 0.0,
+            # 0079: when the cash is expected (override > linked milestone > due)
+            "expected_paid_date": exp_override.get(str(r["qbo_id"])) or exp_ms.get(str(r["qbo_id"])),
+            "expected_override": exp_override.get(str(r["qbo_id"])),
         })
     return out
+
+
+def invoice_expected_dates(conn, invoice_qbo_ids):
+    """(overrides, milestone_dates) for actual QBO invoices — each a dict of
+    invoice qbo_id -> 'YYYY-MM-DD'. overrides = the office's expected-paid date
+    set on the invoice itself (qbo_invoice_expected_paid, 0079); milestone_dates
+    = the expected_paid_date of the planned milestone aligned to that invoice.
+    The forecast uses override > milestone > QBO due date."""
+    ids = [str(i) for i in invoice_qbo_ids if i]
+    if not ids:
+        return {}, {}
+    from sqlalchemy import bindparam
+    ov, ms = {}, {}
+    try:
+        for r in conn.execute(text(
+                "SELECT invoice_qbo_id, expected_paid_date FROM qbo_invoice_expected_paid "
+                "WHERE invoice_qbo_id IN :ids AND expected_paid_date IS NOT NULL"
+        ).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).all():
+            ov[str(r[0])] = str(r[1])
+    except Exception:
+        pass  # table not migrated yet
+    for r in conn.execute(text(
+            "SELECT qbo_invoice_id, MAX(expected_paid_date) FROM project_invoice_milestones "
+            "WHERE qbo_invoice_id IN :ids AND expected_paid_date IS NOT NULL GROUP BY qbo_invoice_id"
+    ).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).all():
+        ms[str(r[0])] = str(r[1])
+    return ov, ms
 
 
 def _actual_expenses(conn, entity_id):
@@ -1340,7 +1371,7 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
     # only the still-scheduled rows count toward the cash-flow forecast.
     inst_by_cat = {}
     for r in conn.execute(text("""
-        SELECT id, category, seq, week_of, amount, edited
+        SELECT id, category, seq, week_of, expected_paid_date, amount, edited
         FROM project_expense_installments WHERE entity_id=:e ORDER BY category, seq, id
     """), {"e": entity_id}).mappings().all():
         inst_by_cat.setdefault(r["category"], []).append(r)
@@ -1364,6 +1395,8 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
                 tier, label = "scheduled", "Scheduled"
             out.append({"id": r["id"], "seq": r["seq"],
                         "week_of": str(r["week_of"]) if r["week_of"] else None,
+                        # 0079: when the cash actually goes out (blank = week_of)
+                        "expected_paid_date": str(r["expected_paid_date"]) if r["expected_paid_date"] else None,
                         "amount": amt, "tier": tier, "edited": bool(r["edited"]),
                         "paid": round(covered, 2), "status_label": label})
         return out
@@ -1810,6 +1843,9 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         # item #3: per-estimate crew-split allocations. Key present ONLY when a
         # split exists, so single-crew bundles are byte-identical to before.
         crew_splits = _crew_splits(conn, entity_id)
+        # 0078: active project hold (dates below are already shifted by it)
+        from app.projects.holds import active_holds
+        hold = active_holds(conn).get(str(entity_id))
 
     record_alignment(align_audits)
     kpis = {
@@ -1838,6 +1874,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
             "operational_status": op_status,
             "appears_complete": appears_complete,
             "drift": drift,
+            "hold": hold,
         },
         "invoices": inv,
         "crew": crew,

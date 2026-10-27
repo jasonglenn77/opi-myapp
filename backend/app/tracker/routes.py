@@ -135,6 +135,13 @@ def _signatures(conn, only=None):
         SELECT entity_id, MAX(updated_at), COUNT(*) FROM project_estimate_billing
         {"WHERE entity_id = :only" if only else ""} GROUP BY entity_id
     """), p).all())
+    try:   # 0079 expected-paid overrides on actual invoices
+        add(conn.execute(text(f"""
+            SELECT entity_id, MAX(updated_at), COUNT(*), COUNT(expected_paid_date) FROM qbo_invoice_expected_paid
+            {"WHERE entity_id = :only" if only else ""} GROUP BY entity_id
+        """), p).all())
+    except Exception:
+        pass
     return {k: tuple(sorted(v)) for k, v in sig.items()}
 
 
@@ -235,6 +242,10 @@ def _row(eid, proj, sched, pms, est_dates, comp, today):
                              and str(x.get("due_date")) < today.isoformat()),
                 "retainage": x.get("retainage") or 0.0,
                 "estimate_doc": x.get("estimate_doc"),
+                # 0079: expected-paid date on the actual invoice (Cash Flow uses it)
+                "qbo_id": x.get("qbo_id"),
+                "expected": x.get("expected_paid_date"),
+                "expected_override": x.get("expected_override"),
             } for x in acts],
         })
 

@@ -63,6 +63,7 @@ const STATUS_LABELS = {
   pending: "Pending",
   not_started: "Not Started",
   in_progress: "In Progress",
+  on_hold: "On Hold",
   completed: "Completed",
   canceled: "Canceled",
 };

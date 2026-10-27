@@ -1394,3 +1394,91 @@ input[type="date"]::-webkit-date-and-time-value { text-align:left; margin:0; }
 .at-flag-ret { color:#6d28d9; font-weight:700; }
 .at-flag-unb { color:#b45309; font-weight:700; }
 .bl-ret-dot { background:#8b5cf6; }
+
+/* ── Project holds (0078): pill, Assignment hold bar, Schedules bar, dialog (hold-*) ── */
+.hold-pill { display:inline-flex; align-items:center; gap:0.25rem; white-space:nowrap; font-size:11px; font-weight:700; line-height:1.2; color:#334155; background:#f1f5f9; border:1px solid #94a3b8; border-radius:999px; padding:0.1rem 0.5rem; }
+.hold-pill::before { content:""; width:7px; height:8px; flex:none; border-left:2px solid currentColor; border-right:2px solid currentColor; box-sizing:border-box; }
+.hold-pill-late { color:#b91c1c; background:#fef2f2; border-color:#fca5a5; }
+.hold-bar-wrap { display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem 0.75rem; margin-bottom:0.75rem; padding:0.55rem 0.75rem; border-radius:0.75rem; border:1px dashed #94a3b8; background:#f8fafc; font-size:12px; color:#334155; }
+.hold-bar-wrap.hold-on { border-style:solid; border-color:#94a3b8; background:#f1f5f9; background-image:repeating-linear-gradient(135deg, rgba(148,163,184,.10) 0 6px, transparent 6px 12px); }
+.hold-bar-txt { flex:1; min-width:200px; line-height:1.35; }
+.hold-bar-txt b { color:#0f172a; }
+.hold-btn { font-size:11.5px; font-weight:700; border-radius:0.5rem; padding:0.3rem 0.7rem; border:1px solid #cbd5e1; background:#fff; color:#334155; white-space:nowrap; }
+.hold-btn:hover { background:#f1f5f9; }
+.hold-btn-go { background:#047857; border-color:#047857; color:#fff; }
+.hold-btn-go:hover { background:#065f46; }
+.hold-cell { background:#e2e8f0; background-image:repeating-linear-gradient(135deg, #e2e8f0 0 4px, #cbd5e1 4px 8px); border:1px dashed #64748b; border-radius:4px; color:#334155; padding:0 2px; }
+.hold-legend { display:inline-block; width:12px; height:9px; border-radius:2px; border:1px dashed #64748b; vertical-align:middle; background:#e2e8f0; background-image:repeating-linear-gradient(135deg, #e2e8f0 0 3px, #cbd5e1 3px 6px); }
+.hold-chip { display:inline-block; background:#334155; color:#fff; border-radius:3px; padding:0 3px; font-size:8px; font-weight:800; line-height:1.4; vertical-align:middle; }
+.hold-ov { position:fixed; inset:0; z-index:300; background:rgba(15,23,42,.45); display:flex; align-items:flex-start; justify-content:center; padding:10vh 16px 16px; }
+.hold-card { width:440px; max-width:100%; background:#fff; color:#0f172a; border-radius:0.9rem; box-shadow:0 20px 50px rgba(0,0,0,.25); padding:1rem 1.1rem; display:flex; flex-direction:column; gap:0.6rem; }
+.hold-h { font-size:15px; font-weight:800; }
+.hold-sub { font-size:12px; color:rgba(0,0,0,.5); margin-top:-0.4rem; }
+.hold-grid { display:grid; grid-template-columns:1fr 1fr; gap:0.6rem; }
+.hold-f { display:flex; flex-direction:column; gap:0.2rem; font-size:11px; font-weight:700; color:rgba(0,0,0,.55); }
+.hold-f .input { width:100%; }
+.hold-info { font-size:12px; line-height:1.4; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; border-radius:0.5rem; padding:0.5rem 0.6rem; }
+.hold-err { font-size:12px; color:#b91c1c; min-height:0; }
+.hold-err:empty { display:none; }
+.hold-btns { display:flex; justify-content:flex-end; gap:0.5rem; }
+.hold-dot { background:#64748b; }
+@media (max-width:480px) { .hold-grid { grid-template-columns:1fr; } }
+/* Tracker: on-hold status pill + PM-timeline bar (0078) */
+.at-st-hold { background:#e2e8f0; color:#334155; }
+.pms-st.at-st-hold { background:#e2e8f0; color:#334155; }
+.at-b-on_hold { background:#64748b; background-image:repeating-linear-gradient(135deg, rgba(255,255,255,.18) 0 5px, transparent 5px 10px); border:1px dashed #334155; }
+
+/* ── Cash Flow owner decisions 2026-10-26 (cfx-*): bank source, overdue rows, alerts ── */
+.cfx-chk { display:inline-flex; align-items:center; gap:0.4rem; font-size:12px; font-weight:600; color:rgba(0,0,0,.65); padding:0.45rem 0.6rem; border:1px solid rgba(0,0,0,.15); border-radius:0.75rem; cursor:pointer; white-space:nowrap; }
+.cfx-chk.hidden { display:none; }
+.cfx-chev { width:12px; height:12px; flex:none; color:rgba(0,0,0,.3); transition:transform .15s; }
+details[open] > summary > .cfx-chev { transform:rotate(90deg); }
+.cfx-bank-sum { display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem 0.6rem; padding:0.7rem 1rem; cursor:pointer; list-style:none; user-select:none; }
+.cfx-bank-sum::-webkit-details-marker { display:none; }
+.cfx-bank-sync { margin-left:auto; font-size:11px; color:rgba(0,0,0,.45); white-space:nowrap; }
+.cfx-bank-body { padding:0 1rem 0.9rem; border-top:1px solid rgba(0,0,0,.06); }
+.cfx-bank-tbl { width:100%; font-size:12.5px; border-collapse:collapse; margin-top:0.4rem; }
+.cfx-bank-tbl th { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:rgba(0,0,0,.4); text-align:left; padding:0.35rem 0.5rem; border-bottom:1px solid rgba(0,0,0,.1); }
+.cfx-bank-tbl td { padding:0.45rem 0.5rem; border-bottom:1px solid rgba(0,0,0,.05); vertical-align:top; }
+.cfx-bank-tbl .text-right, .cfx-tbl .text-right { text-align:right; }
+.cfx-bank-chk { width:28px; }
+.cfx-bank-chk input { width:16px; height:16px; margin-top:2px; cursor:pointer; }
+.cfx-bank-off td { color:rgba(0,0,0,.4); }
+.cfx-bank-off td .text-ink-900 { color:rgba(0,0,0,.45); text-decoration:line-through; }
+.cfx-dup { display:inline-flex; align-items:center; gap:0.2rem; font-size:11px; font-weight:700; color:#9a3412; background:#fff7ed; border:1px solid #fdba74; border-radius:999px; padding:0.1rem 0.5rem; white-space:nowrap; }
+.cfx-dup-sm { font-size:10px; padding:0 0.4rem; vertical-align:middle; }
+.cfx-flagrow td { background:#fff7ed; }
+.cfx-flagrow td:first-child { background:#fff7ed !important; }
+.cfx-memo td, .cfx-memo td:first-child { background:#fffbeb !important; font-style:italic; }
+.cfx-flaglink { font-size:12.5px; font-weight:700; color:#9a3412; text-align:left; background:none; border:0; padding:0; cursor:pointer; }
+.cfx-flaglink:hover { text-decoration:underline; }
+.cfx-memo .cfx-flaglink { color:#92400e; font-weight:600; }
+.cfx-memo-amt { color:#b45309; font-style:italic; }
+.cfx-legend-od { display:inline-block; width:12px; height:9px; border-radius:2px; background:#fed7aa; border:1px solid #fdba74; vertical-align:middle; }
+.cfx-alerts { display:flex; flex-direction:column; gap:0.6rem; margin-bottom:1rem; }
+.cfx-alerts:empty { display:none; }
+.cfx-alert { border-radius:0.9rem; border:1px solid; overflow:hidden; }
+.cfx-alert > summary { display:flex; align-items:flex-start; gap:0.5rem; padding:0.65rem 0.9rem; cursor:pointer; list-style:none; font-size:13px; line-height:1.4; user-select:none; }
+.cfx-alert > summary::-webkit-details-marker { display:none; }
+.cfx-alert > summary .cfx-chev { margin-top:4px; }
+.cfx-alert-amber { border-color:#fcd34d; background:#fffbeb; color:#78350f; }
+.cfx-alert-red { border-color:#fdba74; background:#fff7ed; color:#7c2d12; }
+.cfx-alert-ico { width:20px; height:20px; flex:none; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; font-weight:800; font-size:12px; color:#fff; background:#d97706; }
+.cfx-alert-red .cfx-alert-ico { background:#ea580c; }
+.cfx-alert-sub { color:rgba(0,0,0,.5); font-weight:400; }
+.cfx-alert-body { background:#fff; padding:0.75rem 0.9rem 0.9rem; border-top:1px solid rgba(0,0,0,.08); color:#0f172a; }
+.cfx-scroll { max-height:420px; overflow-y:auto; }
+.cfx-tbl { width:100%; font-size:12px; border-collapse:collapse; }
+.cfx-tbl th { position:sticky; top:0; background:#fff; z-index:1; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:rgba(0,0,0,.4); text-align:left; padding:0.35rem 0.45rem; border-bottom:1px solid rgba(0,0,0,.1); white-space:nowrap; }
+.cfx-tbl td { padding:0.35rem 0.45rem; border-bottom:1px solid rgba(0,0,0,.05); vertical-align:top; }
+.cfx-memo-row td { color:rgba(0,0,0,.6); }
+.cfx-pill { display:inline-block; font-size:10px; font-weight:700; border-radius:999px; padding:0.05rem 0.45rem; white-space:nowrap; border:1px solid; }
+.cfx-pill-on { color:#9a3412; background:#ffedd5; border-color:#fdba74; }
+.cfx-pill-off { color:rgba(0,0,0,.5); background:#f8fafc; border-color:#e2e8f0; }
+.cfx-date { font-size:12px; border:1px solid rgba(0,0,0,.15); border-radius:6px; padding:0.1rem 0.25rem; background:#fff; width:8.4rem; }
+.cfx-date:focus { outline:none; border-color:#3b82f6; }
+.cfx-exp-src { font-size:9.5px; font-weight:700; color:#1d4ed8; }
+@media (max-width:640px) {
+  .cfx-bank-sync { margin-left:0; width:100%; }
+  .cfx-alert > summary { font-size:12.5px; }
+}

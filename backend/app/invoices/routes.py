@@ -282,3 +282,46 @@ def delete_milestone(mid: int, user=Depends(get_current_user)):
                          k: (str(old[k]) if old[k] is not None else None)
                          for k in ("label", "pct", "amount", "invoice_date", "due_date", "expected_paid_date")}})
     return {"ok": True}
+
+
+# ── Expected-paid date on an ACTUAL open QuickBooks invoice (0079) ───────────
+# The cash-flow forecast places each open invoice on its expected-paid date:
+# this override > the aligned milestone's expected_paid_date > the QBO due date.
+# Never writes to QuickBooks — stored in the app only.
+class QboInvoiceExpected(BaseModel):
+    expected_paid_date: Optional[str] = None   # blank clears (back to due date)
+    note: Optional[str] = None
+    via: Optional[str] = None
+
+
+@router.patch("/qbo-invoice/{qbo_id}/expected")
+def patch_qbo_invoice_expected(qbo_id: str, req: QboInvoiceExpected, user=Depends(get_current_user)):
+    _require(user)
+    fields = req.model_dump(exclude_unset=True)
+    d = fields.get("expected_paid_date")
+    d = (str(d)[:10] if d else None)
+    if d:
+        try:
+            date.fromisoformat(d)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="expected_paid_date must be YYYY-MM-DD")
+    actor = (user or {}).get("email") if isinstance(user, dict) else getattr(user, "email", None)
+    with engine.begin() as conn:
+        inv = conn.execute(text(
+            "SELECT qbo_id, doc_number, customer_qbo_id, due_date FROM qbo_transactions "
+            "WHERE entity_type = 'Invoice' AND qbo_id = :q"), {"q": qbo_id}).mappings().first()
+        if not inv:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        old = conn.execute(text(
+            "SELECT expected_paid_date FROM qbo_invoice_expected_paid WHERE invoice_qbo_id = :q"),
+            {"q": qbo_id}).scalar()
+        conn.execute(text("""
+            INSERT INTO qbo_invoice_expected_paid (invoice_qbo_id, entity_id, expected_paid_date, note, updated_by)
+            VALUES (:q, :e, :d, :n, :u)
+            ON DUPLICATE KEY UPDATE entity_id = VALUES(entity_id), expected_paid_date = VALUES(expected_paid_date),
+                                    note = COALESCE(VALUES(note), note), updated_by = VALUES(updated_by)
+        """), {"q": qbo_id, "e": inv["customer_qbo_id"], "d": d, "n": fields.get("note"), "u": actor})
+    record_audit(user, "billing.invoice_expected_paid", "qbo_invoice", qbo_id, f"Invoice #{inv['doc_number'] or qbo_id}",
+                 {"entity_id": inv["customer_qbo_id"], "via": fields.get("via"),
+                  "changes": {"expected_paid_date": [str(old) if old else None, d]}})
+    return {"ok": True, "expected_paid_date": d, "due_date": str(inv["due_date"]) if inv["due_date"] else None}

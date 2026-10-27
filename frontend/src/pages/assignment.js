@@ -25,8 +25,8 @@ import {
 // status from the dropdown. Truly unknown / empty statuses still fall
 // back to 'not_started' defensively.
 const USER_STATUSES = new Set([
-  "needs_attention", "pending", "not_started", "in_progress", "completed", "canceled",
-]);
+  "needs_attention", "pending", "not_started", "in_progress", "on_hold", "completed", "canceled",
+]);   // 'on_hold' (0078) is set by Put on hold in the project's Assignment tab
 
 export async function assignmentPage(routeFn) {
   const res = await api("/assignment/table");
@@ -67,6 +67,7 @@ export async function assignmentPage(routeFn) {
     { value: "pending",         label: "Pending" },
     { value: "not_started",     label: "Not Started" },
     { value: "in_progress",     label: "In Progress" },
+    { value: "on_hold",         label: "On Hold" },
     { value: "completed",       label: "Completed" },
     { value: "canceled",        label: "Canceled" },
   ];
@@ -187,6 +188,7 @@ export async function assignmentPage(routeFn) {
     if (v === "pending") return "Pending";
     if (v === "not_started") return "Not Started";
     if (v === "in_progress") return "In Progress";
+    if (v === "on_hold") return "On Hold";
     if (v === "completed") return "Completed";
     if (v === "canceled") return "Canceled";
     return String(v);
@@ -822,7 +824,7 @@ export async function assignmentPage(routeFn) {
 
         <div class="absolute left-0 top-9 z-50 min-w-[170px] w-max max-w-[220px] rounded-xl border border-black/10 bg-white p-2 shadow-xl">
           <div class="flex flex-col gap-1">
-            ${STATUS_OPTIONS.map((opt) => `
+            ${STATUS_OPTIONS.filter((opt) => opt.value !== "on_hold" || row.project_status === "on_hold").map((opt) => `
               <button
                 type="button"
                 class="inline-flex w-full rounded-lg px-2 py-2 text-left hover:bg-black/[0.04]"
