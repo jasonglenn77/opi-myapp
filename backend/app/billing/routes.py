@@ -270,8 +270,13 @@ def _ensure_expense_items(conn, entity_id, ctx):
 
 def _ensure_expense_installments(conn, entity_id, ctx):
     """One editable WEEKLY cash-out schedule per expense category (create-if-
-    missing): the category's estimated total spread evenly across the project
-    weeks. The office can then edit amounts/dates, add or delete rows."""
+    missing). 0084: the category's estimate is spread by its timing profile
+    measured from QBO history (Assumptions page) — e.g. materials land early,
+    lift and lodging bills trail the end date — with the cash-out date set by
+    the measured bill-to-payment lag. Categories without a profile fall back to
+    an even spread across the project weeks. The office can then edit
+    amounts/dates, add or delete rows."""
+    from app.assumptions.calibrate import expense_timing, profile_split
     start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
     if not start or not end or end < start:
         return
@@ -282,11 +287,16 @@ def _ensure_expense_installments(conn, entity_id, ctx):
             "SELECT COUNT(*) FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
             {"e": entity_id, "c": cat}).scalar():
             continue
-        for r in _weekly_split(float(est), start, end):
+        rows, basis = profile_split(float(est), start, end, expense_timing(conn, cat)), "auto_profile"
+        if not rows:
+            rows, basis = _weekly_split(float(est), start, end), "auto_even"
+        for r in rows:
             conn.execute(text("""
-                INSERT INTO project_expense_installments (entity_id, category, seq, week_of, amount)
-                VALUES (:e, :c, :s, :w, :a)
-            """), {"e": entity_id, "c": cat, "s": r["seq"], "w": r["week_of"], "a": r["amount"]})
+                INSERT INTO project_expense_installments
+                  (entity_id, category, seq, week_of, expected_paid_date, amount, basis)
+                VALUES (:e, :c, :s, :w, :p, :a, :b)
+            """), {"e": entity_id, "c": cat, "s": r["seq"], "w": r["week_of"],
+                   "p": r.get("expected_paid_date"), "a": r["amount"], "b": basis})
 
 
 # ---------------------------------------------------------------------------
@@ -1371,7 +1381,7 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
     # only the still-scheduled rows count toward the cash-flow forecast.
     inst_by_cat = {}
     for r in conn.execute(text("""
-        SELECT id, category, seq, week_of, expected_paid_date, amount, edited
+        SELECT id, category, seq, week_of, expected_paid_date, amount, edited, basis
         FROM project_expense_installments WHERE entity_id=:e ORDER BY category, seq, id
     """), {"e": entity_id}).mappings().all():
         inst_by_cat.setdefault(r["category"], []).append(r)
@@ -1398,6 +1408,7 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
                         # 0079: when the cash actually goes out (blank = week_of)
                         "expected_paid_date": str(r["expected_paid_date"]) if r["expected_paid_date"] else None,
                         "amount": amt, "tier": tier, "edited": bool(r["edited"]),
+                        "basis": r["basis"],
                         "paid": round(covered, 2), "status_label": label})
         return out
     by_category = [

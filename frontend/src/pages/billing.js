@@ -43,6 +43,11 @@ function pill(label) {
 // amount and status follow that invoice; the status pill names it on hover
 // (zero extra width: the milestone table is already at full card width).
 const qboTitle = (m) => m.qbo_invoice_doc ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc)} — dates, amount and status follow the invoice"` : "";
+// 0084: how an expense row was produced — links to the Assumptions page, where
+// the timing profile and payment lag behind it are shown with their evidence.
+const basisChip = (w) => (w.edited || !w.basis || w.basis === "manual") ? "" : w.basis === "auto_profile"
+  ? `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Placed by this category's timing profile measured from QuickBooks history; paid date = bill week + the measured bill-to-payment lag. Click to see the numbers.">auto · history</a>`
+  : `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-slate-600 bg-slate-50 rounded px-1 py-0.5" style="border:1px solid #e2e8f0" title="Estimate spread evenly across the project weeks (no timing profile for this category). Click to see the rules.">auto · even</a>`;
 const editedChip = (e) => e ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
 
 // Assignment-workflow glue (#4): corner toast after the offer-accept confirm —
@@ -444,7 +449,7 @@ function render(container, entityId, d) {
         <td class="py-1 pl-6 pr-2"><span class="flex items-center gap-2">${DOT[w.tier]}${expenseComplete ? `<span class="tabular-nums text-black/60">${shortDate(w.week_of)}</span>` : eInput("expinst", w.id, "week_of", w.week_of, "date")}</span></td>
         <td class="py-1 px-2">${expenseComplete ? `<span class="tabular-nums text-black/60">${w.expected_paid_date ? shortDate(w.expected_paid_date) : "—"}</span>` : eInput("expinst", w.id, "expected_paid_date", w.expected_paid_date, "date")}</td>
         <td class="py-1 px-2 text-right">${expenseComplete ? `<span class="tabular-nums font-semibold">${money(w.amount)}</span>` : eInput("expinst", w.id, "amount", Math.round(w.amount), "number", "ml-auto")}</td>
-        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${editedChip(w.edited)}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
+        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${editedChip(w.edited)}${basisChip(w)}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
       </tr>`).join("");
     const acts = c.actuals || [];
     const actuals = acts.length ? actualsBlock("Actual expenses in QuickBooks", acts.length,

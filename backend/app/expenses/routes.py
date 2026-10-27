@@ -238,8 +238,8 @@ def add_expense_installment(entity_id: str, category: str, user=Depends(get_curr
             "SELECT COALESCE(MAX(seq),0)+1 FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
             {"e": entity_id, "c": category}).scalar()
         conn.execute(text("""
-            INSERT INTO project_expense_installments (entity_id, category, seq, week_of, amount, edited)
-            VALUES (:e, :c, :s, NULL, 0, 1)
+            INSERT INTO project_expense_installments (entity_id, category, seq, week_of, amount, edited, basis)
+            VALUES (:e, :c, :s, NULL, 0, 1, 'manual')
         """), {"e": entity_id, "c": category, "s": seq})
     return {"ok": True}
 

@@ -27,5 +27,9 @@ rc=$?
 # Then Google Drive: re-read the B151 + Job Schedule, mirror the B151 into the
 # Pipeline and link quotes to the freshly synced QBO projects (Data Review page).
 docker exec myapp-backend python -m app.gsync.run --cron || echo "[$(ts)] gsync failed (see gsync_runs)"
+# Re-measure the forecast assumptions (expense timing per category, bill-to-
+# payment lag) from the freshly synced bills; shown on the Assumptions page.
+# New expense schedules use them; existing rows are re-spread only on request.
+docker exec myapp-backend python -m app.assumptions.calibrate || echo "[$(ts)] assumptions recalibrate failed"
 echo "[$(ts)] qbo-cron-sync: done (exit ${rc})"
 exit ${rc}
