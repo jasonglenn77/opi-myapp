@@ -249,7 +249,8 @@ def b250_opening():
         return None
     return {"balance": round(float(r["amount"]), 2), "tab": r["tab_name"],
             "week1_end": r["week1_end"].isoformat() if r["week1_end"] else None,
-            "as_of": (r["file_modified"] or r["loaded_at"]).isoformat() if (r["file_modified"] or r["loaded_at"]) else None,
+            # file_modified is text on some databases, a datetime on others
+            "as_of": str(r["file_modified"] or r["loaded_at"] or "").replace(" ", "T")[:19] or None,
             "source": r["source"]}
 
 
