@@ -172,6 +172,58 @@ def measure_estimate_accuracy(conn):
     return out
 
 
+LODGING_VENDOR = "Hotel Engine"
+
+
+def measure_lodging_billing(conn):
+    """How Hotel Engine bills lodging, from its recent bills. Since mid-2026 it
+    sends one monthly statement, dated around the 11th, for the previous month's
+    stays (the document number carries the stay month: 503231-2608-1 = August).
+    Measured over the run of consecutive stay-months that each have exactly one
+    bill (the monthly era): bill day of month, months after the stay month, and
+    bill-to-payment days. None when the recent bills aren't monthly."""
+    import re
+    from statistics import median
+    rows = conn.execute(text("""
+        SELECT t.qbo_id, t.doc_number, t.txn_date, t.due_date, t.total_amt,
+          (SELECT MIN(p.txn_date) FROM qbo_transactions p,
+             JSON_TABLE(p.raw_json, '$.Line[*].LinkedTxn[*]' COLUMNS (id VARCHAR(40) COLLATE utf8mb4_unicode_ci PATH '$.TxnId', ty VARCHAR(20) PATH '$.TxnType')) j
+           WHERE p.entity_type = 'BillPayment' AND j.ty = 'Bill' AND j.id = t.qbo_id) AS paid
+        FROM qbo_transactions t
+        WHERE t.entity_type = 'Bill' AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.VendorRef.name')) LIKE :v
+          AND t.txn_date >= CURDATE() - INTERVAL 18 MONTH AND t.total_amt > 100
+        ORDER BY t.txn_date
+    """), {"v": f"%{LODGING_VENDOR}%"}).mappings().all()
+    by_month = {}
+    for r in rows:
+        m = re.match(r"^\d+-(\d{2})(\d{2})-\d+$", r["doc_number"] or "")
+        if not m:
+            continue
+        by_month.setdefault((2000 + int(m.group(1)), int(m.group(2))), []).append(r)
+    run = []
+    for ym in sorted(by_month, reverse=True):     # newest first: the current monthly run
+        if len(by_month[ym]) != 1:
+            break
+        run.append((ym, by_month[ym][0]))
+    if len(run) < 2:
+        return None
+    run.reverse()
+    offs = [(r["txn_date"].year - y) * 12 + (r["txn_date"].month - mo) for (y, mo), r in run]
+    lags = [(r["paid"] - r["txn_date"]).days for _, r in run if r["paid"]]
+    dues = [(r["due_date"] - r["txn_date"]).days for _, r in run if r["due_date"]]
+    return {
+        "calibrated": {"cadence": "monthly", "bill_day": int(median(r["txn_date"].day for _, r in run)),
+                       "month_offset": int(median(offs)),
+                       "paid_lag_days": round(median(lags), 1) if lags else None,
+                       "due_days": round(median(dues), 1) if dues else None},
+        "basis": {"vendor": LODGING_VENDOR, "since": f"{run[0][0][0]}-{run[0][0][1]:02d}",
+                  "bills": [{"doc": r["doc_number"], "stay_month": f"{y}-{mo:02d}", "date": str(r["txn_date"]),
+                             "due": str(r["due_date"]) if r["due_date"] else None,
+                             "paid": str(r["paid"]) if r["paid"] else None, "amount": float(r["total_amt"] or 0)}
+                            for (y, mo), r in run]},
+    }
+
+
 def _upsert(conn, akey, grp, label, calibrated, basis):
     conn.execute(text("""
         INSERT INTO forecast_assumptions (akey, grp, label, calibrated, basis, computed_at)
@@ -187,6 +239,9 @@ def recalibrate():
         timing = measure_expense_timing(conn)
         for cat, v in timing.items():
             _upsert(conn, f"expense_timing.{cat}", "expense_timing", f"{cat} timing", v["calibrated"], v["basis"])
+        lb = measure_lodging_billing(conn)
+        if lb:
+            _upsert(conn, "lodging_billing", "lodging_billing", "Lodging billing (Hotel Engine)", lb["calibrated"], lb["basis"])
         acc = measure_estimate_accuracy(conn)
         for cat, v in acc.items():
             _upsert(conn, f"estimate_accuracy.{cat}", "estimate_accuracy",
@@ -205,6 +260,53 @@ def _load(v):
     if v is None or isinstance(v, (dict, list)):
         return v
     return json.loads(v)
+
+
+def lodging_billing(conn):
+    """Effective Hotel Engine billing calendar (override > measured), or None."""
+    if "__lodging__" not in _cache:
+        try:
+            r = conn.execute(text(
+                "SELECT calibrated, override_val FROM forecast_assumptions WHERE akey = 'lodging_billing'")).first()
+        except Exception:
+            r = None
+        if not r:
+            _cache["__lodging__"] = None
+        else:
+            eff = dict(_load(r[0]) or {})
+            eff.update({k: v for k, v in (_load(r[1]) or {}).items() if v is not None})
+            _cache["__lodging__"] = eff
+    return _cache["__lodging__"]
+
+
+def lodging_split(total, start, end, lb):
+    """A job's lodging estimate on Hotel Engine's billing calendar: the nights
+    are spread evenly over the job's scheduled days; each calendar month's
+    nights are billed on the statement dated `bill_day` of the month
+    `month_offset` later; the cash leaves `paid_lag_days` after that.
+    Rows: week_of (= expected bill date), expected_paid_date, amount, stay_month."""
+    from calendar import monthrange
+    if not lb or total <= 0 or not start or not end or end < start:
+        return []
+    days = (end - start).days + 1
+    per_month = {}
+    d = start
+    while d <= end:
+        last = date(d.year, d.month, monthrange(d.year, d.month)[1])
+        per_month[(d.year, d.month)] = per_month.get((d.year, d.month), 0) + (min(last, end) - d).days + 1
+        d = last + timedelta(days=1)
+    off, day = int(lb.get("month_offset") or 1), int(lb.get("bill_day") or 11)
+    lag = int(round(lb.get("paid_lag_days") or 0))
+    out, running, keys = [], 0.0, sorted(per_month)
+    for i, (y, mo) in enumerate(keys):
+        amt = round(total * per_month[(y, mo)] / days, 2) if i < len(keys) - 1 else round(total - running, 2)
+        running += amt
+        by, bm = y + (mo - 1 + off) // 12, (mo - 1 + off) % 12 + 1
+        bill = date(by, bm, min(day, monthrange(by, bm)[1]))
+        out.append({"seq": i + 1, "week_of": str(bill), "amount": amt,
+                    "expected_paid_date": str(bill + timedelta(days=lag)) if lag else None,
+                    "stay_month": f"{y}-{mo:02d}"})
+    return out
 
 
 def expense_timing(conn, category):

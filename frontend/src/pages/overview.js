@@ -218,7 +218,7 @@ export async function overviewPage(routeFn) {
           <span>Click a category to see its jobs.</span>
         </div>
         <div class="mt-2">${costTable()}</div>
-        ${s && st.scope === "finished" ? `<p class="text-xs text-black/50 mt-3" style="max-width:48rem">Lodging, propane and travel usually show less than estimated and many jobs show no cost at all. That mostly means the spend wasn't tagged to the job in QuickBooks (Hotel Engine not split, card purchases untagged), not that it cost less.</p>` : ""}
+        ${s && st.scope === "finished" ? `<p class="text-xs text-black/50 mt-3" style="max-width:48rem">Lodging usually comes in under its estimate: Hotel Engine's monthly bill is split to jobs almost completely, so that mostly means estimates run high or crews didn't use hotels. Propane and travel often show no cost on a job because card purchases aren't always tagged to the job in QuickBooks.</p>` : ""}
       </section>`;
   }
 

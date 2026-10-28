@@ -84,6 +84,12 @@ and upload receipts tagged to the job, so cost is visible before the bill.
 - Recurring overhead in the app comes from a trailing 13-week QuickBooks run-rate.
   Lines with no system of record keep the B250 value and are badged "B250 · no
   source": W-2 wages, bonus/commission, Hotel Engine, Chase card.
-- The B250 "Hotel Engine" overhead line ($150k/month) likely overlaps lodging
-  already scheduled per project. Retire it once project lodging schedules are
-  trusted.
+- Lodging (2026-10-28): Hotel Engine is OPI's lodging vendor. Since mid-2026 it sends one
+  statement a month, dated the 11th, for the previous month's stays (weekly bills before),
+  and the bookkeeper splits it across the jobs (98-100% tagged). The B250 plans lodging as
+  a round $150k company-wide line; the app copied it (0080) on top of the lodging planned on
+  each job, which counted the same nights twice. Owner decision: lodging comes only from
+  the jobs, dated on Hotel Engine's measured calendar (migration 0086 retired the overhead
+  line). On jobs finished since March, lodging came to 79% of estimate, so the
+  job-based plan errs high. IDL (6016) has $458k of estimated lodging but almost no
+  Hotel Engine charges: open question.

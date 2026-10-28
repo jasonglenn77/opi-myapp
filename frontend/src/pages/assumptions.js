@@ -100,6 +100,26 @@ export async function assumptionsPage(routeFn) {
     </tr>`;
   }
 
+  // Lodging follows Hotel Engine's billing calendar instead of a timing profile.
+  function lodgingCard(d) {
+    const it = d.items.find((i) => i.group === "lodging_billing");
+    if (!it) return "";
+    const v = eff(it), b = it.basis || {};
+    const lodging = d.items.find((i) => i.key === "expense_timing.Lodging");
+    const u = lodging?.usage || {};
+    const fmtD = (s) => s ? new Date(`${s}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric", year: "2-digit" }) : "—";
+    const days = (a, z) => (a && z) ? Math.round((new Date(`${z}T00:00:00`) - new Date(`${a}T00:00:00`)) / 864e5) : null;
+    return `<section class="card p-5">
+      <h2 class="text-base font-bold">Lodging dates (Hotel Engine)</h2>
+      <p class="text-sm text-black/60 mt-1" style="max-width:48rem">Lodging is planned on each job from its estimate (the B250-style company-wide Hotel Engine line was retired on 10/28 because it paid for the same hotel nights). The dates follow how Hotel Engine actually bills: the job's nights are spread over its scheduled days, each month's nights go on one statement dated about the <b>${v.bill_day}th of the following month</b>, and OPI pays it about <b>${Math.round(v.paid_lag_days || 0)} days</b> later (due ${v.due_days != null ? Math.round(v.due_days) + " days" : "—"} after the statement). These are estimates; the real statement replaces them when it posts.${u.auto_lodging ? ` Used by ${u.auto_lodging} lodging rows.` : ""}</p>
+      <div class="overflow-x-auto mt-3"><table class="w-full text-sm">
+        <thead><tr class="text-[11px] uppercase tracking-wide text-black/45"><th class="py-2 pr-3 text-left">Statement</th><th class="py-2 pr-3 text-left">Stays in</th><th class="py-2 pr-3 text-left">Dated</th><th class="py-2 pr-3 text-left">Due</th><th class="py-2 pr-3 text-left">Paid</th><th class="py-2 pr-3 text-right">Days to pay</th><th class="py-2 text-right">Amount</th></tr></thead>
+        <tbody>${(b.bills || []).map((x) => `<tr class="border-t border-black/[0.06]"><td class="py-1.5 pr-3 tabular-nums">${escapeHtml(x.doc || "")}</td><td class="py-1.5 pr-3">${escapeHtml(x.stay_month || "")}</td><td class="py-1.5 pr-3 tabular-nums">${fmtD(x.date)}</td><td class="py-1.5 pr-3 tabular-nums">${fmtD(x.due)}</td><td class="py-1.5 pr-3 tabular-nums">${fmtD(x.paid)}</td><td class="py-1.5 pr-3 text-right tabular-nums">${days(x.date, x.paid) ?? "—"}</td><td class="py-1.5 text-right tabular-nums">${fmtMoney(x.amount)}</td></tr>`).join("")}</tbody>
+      </table></div>
+      <div class="text-xs text-black/45 mt-2">Measured from Hotel Engine's monthly statements since ${escapeHtml(b.since || "")} (it billed weekly before mid-2026). Re-measured nightly.</div>
+    </section>`;
+  }
+
   function render() {
     const d = st.data;
     const timing = d.items.filter((i) => i.group === "expense_timing").sort((a, b) => (b.basis?.amount || 0) - (a.basis?.amount || 0));
@@ -129,6 +149,8 @@ export async function assumptionsPage(routeFn) {
             <tbody>${timing.map((it) => timingRow(it, d)).join("") || `<tr><td colspan="7" class="py-4 text-black/45">Not measured yet.</td></tr>`}</tbody>
           </table></div>
         </section>
+
+        ${lodgingCard(d)}
 
         <section class="card p-5">
           <h2 class="text-base font-bold">Actual cost vs estimate</h2>

@@ -149,7 +149,7 @@ def _build():
     a["vendors"] = list(secs_out["ap"]["weekly_totals"])
     # project schedule: crew vs expenses (lodging split out), from the cached events
     payload, _ = SF.get_events()
-    lodging_jobs = 0.0
+    lodging_jobs, lodging_ids = 0.0, set()
     first_start = weeks[0] - timedelta(days=6)
     for e in (payload or {}).get("events", []):
         if e.get("dir") != "out" or e.get("src") not in ("crew", "expense"):
@@ -165,6 +165,7 @@ def _build():
         elif (e.get("cat") or "") == "Lodging":
             a["lodging"][i] += e["amt"]
             lodging_jobs += e["amt"]
+            lodging_ids.add(e.get("entity_id"))
         else:
             a["vendors"][i] += e["amt"]
     for item in secs_out["recurring"].get("alt_rows") or []:
@@ -184,9 +185,27 @@ def _build():
         undep = conn.execute(text(
             "SELECT COALESCE(SUM(current_balance), 0) FROM qbo_accounts WHERE account_sub_type = 'UndepositedFunds'")).scalar() or 0
     top = lambda d: ", ".join(k for k, _ in sorted(d.items(), key=lambda x: -x[1])[:3]) + ("…" if len(d) > 3 else "")
-    ar_od = float(f["overdue"].get("ar_counted") or 0)
-    ar_beyond = round(sum(r.get("beyond") or 0 for r in secs_in["ar"]["rows"]), 2)
     money = lambda v: f"${v:,.0f}"
+    ar_od = float(f["overdue"].get("ar_counted") or 0)
+    # lodging facts for the explanation: Hotel Engine's calendar + recent statements
+    from app.assumptions.calibrate import lodging_billing, LODGING_VENDOR
+    from app.jobcost import service as JC
+    with engine.connect() as conn:
+        lb = lodging_billing(conn) or {}
+        he = conn.execute(text("""
+            SELECT DATE_FORMAT(txn_date, '%b') AS m, ROUND(SUM(total_amt)) AS amt FROM qbo_transactions
+            WHERE entity_type = 'Bill' AND JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.VendorRef.name')) LIKE :v
+              AND txn_date >= CURDATE() - INTERVAL 4 MONTH
+            GROUP BY DATE_FORMAT(txn_date, '%Y-%m'), m ORDER BY DATE_FORMAT(txn_date, '%Y-%m')
+        """), {"v": f"%{LODGING_VENDOR}%"}).all()
+    lb_day, lb_lag = lb.get("bill_day", 11), round(lb.get("paid_lag_days") or 0)
+    he_recent = ", ".join(f"{m} {money(float(v))}" for m, v in he) or "none in the last 4 months"
+    fin = [j for j in JC.dataset()["jobs"] if j["state"] == "finished" and j["end"] >= str(date.today().replace(month=3, day=1))
+           and j["est"].get("Lodging", 0) > 0]
+    e_sum = sum(j["est"]["Lodging"] for j in fin)
+    lodge_ratio = f"{sum(j['act'].get('Lodging', 0) for j in fin) / e_sum:.0%}" if e_sum else "n/a"
+    lodging_n = len(lodging_ids)
+    ar_beyond = round(sum(r.get("beyond") or 0 for r in secs_in["ar"]["rows"]), 2)
     a_opening = f["opening_balance"]
     a_ending = f["summary"]["ending"]
 
@@ -206,8 +225,16 @@ def _build():
          "B250: open bills plus round placeholders ($62,900 a week from week 5). App: open QuickBooks bills plus each active job's planned expenses, timed by how those bills actually land (Assumptions page).",
          "Agree to plan rentals and materials per scheduled job instead of placeholders (P7)."),
         ("lodging", "out", "Lodging (Hotel Engine)",
-         f"B250: one Hotel Engine overhead line ($150,000 a month). App: that same line ({money(sum(a['lodging']) - lodging_jobs)}) plus {money(lodging_jobs)} of lodging planned on active jobs, so the app likely counts lodging twice until the overhead line is retired.",
-         "Confirm how the $150,000 is estimated (P6). Once job lodging is trusted, drop the overhead line."),
+         (f"B250: one company-wide Hotel Engine line, a round $150,000 on 11/20 and 12/25. "
+          f"App: the lodging on each scheduled job's estimate ({money(lodging_jobs)} across {lodging_n} jobs), placed on Hotel Engine's real billing calendar: "
+          f"one statement for the previous month's stays, dated about the {lb_day}th, paid about {lb_lag} days later. "
+          f"Hotel Engine's recent statements: {he_recent}, each split across the jobs the crews stayed on. "
+          + (f"The app's line still includes the B250's own $150,000 overhead line ({money(sum(a['lodging']) - lodging_jobs)}); retire it to stop counting lodging twice. "
+             if sum(a['lodging']) - lodging_jobs > 0.5 else
+             "Since 10/28 the app counts lodging only from the jobs; the B250-style overhead line was retired because it paid for the same hotel nights. ")
+          + "The app's number falls off in later months because jobs not yet on the Job Schedule aren't included, and it uses the full estimate "
+          f"(on jobs finished since March, lodging cost came to {lodge_ratio} of estimate)."),
+         "Confirm how IDL is housed: its estimate carries $458,000 of lodging but almost no Hotel Engine charges (X7). Get won jobs onto the Job Schedule so their lodging is planned. Compare each month's Hotel Engine statement to the plan (P6)."),
         ("cards", "out", "Credit card payments",
          "Both use the B250's $20,000 a week: QuickBooks records no card payoffs to check it against.",
          "Record card payoffs in QuickBooks or share statements (B4)."),

@@ -46,3 +46,19 @@ First measurement (2026-10-27, dev copy of prod data):
 
 **Not applied:** actual-vs-estimate ratios. They are shown for review only,
 because low actuals mostly reflect untagged spend, not savings.
+
+## Lodging dates (added 2026-10-28, migration 0086)
+
+Lodging follows Hotel Engine's billing calendar instead of a timing profile. A job's
+lodging estimate is spread evenly over its scheduled nights. Each calendar month's
+nights are billed on the statement dated around the 11th of the following month,
+and paid after the measured lag (median 4 days; due 10 days). These are measured
+nightly from Hotel Engine's monthly statements (`calibrate.measure_lodging_billing`),
+shown on the Assumptions page, and can be overridden.
+
+On the Billing & Schedule tab, each lodging row shows "est. · Hotel Engine · <month>
+stays", and the Lodging section explains the estimate. Each row carries two dates:
+- **Expected bill date:** drives job cost and burn-down.
+- **Expected paid:** when cash leaves; the forecast uses it.
+
+When the real statement posts, it burns the plan down and its due date takes over.

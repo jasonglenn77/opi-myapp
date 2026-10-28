@@ -270,13 +270,15 @@ def _ensure_expense_items(conn, entity_id, ctx):
 
 def _ensure_expense_installments(conn, entity_id, ctx):
     """One editable WEEKLY cash-out schedule per expense category (create-if-
-    missing). 0084: the category's estimate is spread by its timing profile
+    missing). 0086: Lodging follows Hotel Engine's monthly statement (nights
+    spread over the job's days, each month billed ~the 11th of the next month,
+    paid after the measured lag). 0084: other categories are spread by a timing profile
     measured from QBO history (Assumptions page) — e.g. materials land early,
     lift and lodging bills trail the end date — with the cash-out date set by
     the measured bill-to-payment lag. Categories without a profile fall back to
     an even spread across the project weeks. The office can then edit
     amounts/dates, add or delete rows."""
-    from app.assumptions.calibrate import expense_timing, profile_split
+    from app.assumptions.calibrate import expense_timing, profile_split, lodging_billing, lodging_split
     start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
     if not start or not end or end < start:
         return
@@ -287,7 +289,11 @@ def _ensure_expense_installments(conn, entity_id, ctx):
             "SELECT COUNT(*) FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
             {"e": entity_id, "c": cat}).scalar():
             continue
-        rows, basis = profile_split(float(est), start, end, expense_timing(conn, cat)), "auto_profile"
+        rows, basis = [], None
+        if cat == "Lodging":   # 0086: on Hotel Engine's monthly billing calendar
+            rows, basis = lodging_split(float(est), start, end, lodging_billing(conn)), "auto_lodging"
+        if not rows:
+            rows, basis = profile_split(float(est), start, end, expense_timing(conn, cat)), "auto_profile"
         if not rows:
             rows, basis = _weekly_split(float(est), start, end), "auto_even"
         for r in rows:
@@ -1411,8 +1417,19 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
                         "basis": r["basis"],
                         "paid": round(covered, 2), "status_label": label})
         return out
+    # 0086: say how the lodging dates were estimated (Hotel Engine's measured calendar)
+    from app.assumptions.calibrate import lodging_billing
+    lb = lodging_billing(conn) if "Lodging" in inst_by_cat else None
+    lodging_note = (
+        f"Estimated dates. This job's lodging estimate is spread over its scheduled nights. "
+        f"Hotel Engine bills each month's stays on one statement dated about the {lb.get('bill_day', 11)}th "
+        f"of the following month, and OPI pays it about {round(lb.get('paid_lag_days') or 0)} days later "
+        f"(measured from Hotel Engine's recent bills; see the Assumptions page). "
+        f"When the real statement posts in QuickBooks, it replaces these estimates."
+    ) if lb else None
     by_category = [
         {"category": c, "estimated": round(cat_est.get(c, 0.0), 2),
+         "timing_note": lodging_note if c == "Lodging" else None,
          "actual": round(cat_act.get(c, 0.0), 2),
          "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2),
          "remaining": round(max(0.0, cat_est.get(c, 0.0) - cat_act.get(c, 0.0)), 2),

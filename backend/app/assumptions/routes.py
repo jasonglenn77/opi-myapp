@@ -52,11 +52,11 @@ def get_assumptions(user=Depends(get_current_user)):
                    override_by, override_at, computed_at
             FROM forecast_assumptions ORDER BY grp, akey
         """)).mappings().all()
-        usage = {r[0]: {"auto_profile": int(r[1] or 0), "auto_even": int(r[2] or 0),
-                        "edited": int(r[3] or 0), "projects": int(r[4] or 0)}
+        usage = {r[0]: {"auto_profile": int(r[1] or 0) + int(r[5] or 0), "auto_even": int(r[2] or 0),
+                        "edited": int(r[3] or 0), "projects": int(r[4] or 0), "auto_lodging": int(r[5] or 0)}
                  for r in conn.execute(text("""
             SELECT category, SUM(basis = 'auto_profile' AND edited = 0), SUM(basis = 'auto_even' AND edited = 0),
-                   SUM(edited = 1), COUNT(DISTINCT entity_id)
+                   SUM(edited = 1), COUNT(DISTINCT entity_id), SUM(basis = 'auto_lodging' AND edited = 0)
             FROM project_expense_installments GROUP BY category
         """)).all()}
         rules = catalog.rules(conn)

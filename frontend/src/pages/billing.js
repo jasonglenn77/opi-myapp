@@ -45,7 +45,11 @@ function pill(label) {
 const qboTitle = (m) => m.qbo_invoice_doc ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc)} — dates, amount and status follow the invoice"` : "";
 // 0084: how an expense row was produced — links to the Assumptions page, where
 // the timing profile and payment lag behind it are shown with their evidence.
-const basisChip = (w) => (w.edited || !w.basis || w.basis === "manual") ? "" : w.basis === "auto_profile"
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const stayMonth = (billDate) => { const d = new Date(`${billDate}T00:00:00`); d.setMonth(d.getMonth() - 1); return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`; };
+const basisChip = (w) => (w.edited || !w.basis || w.basis === "manual") ? "" : w.basis === "auto_lodging" && w.week_of
+  ? `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Estimated: ${stayMonth(w.week_of)} stays, billed on Hotel Engine's monthly statement and paid a few days later. Dates come from Hotel Engine's billing history (click for the numbers). The real statement replaces this when it posts.">est. · Hotel Engine · ${stayMonth(w.week_of).split(" ")[0].slice(0, 3)} stays</a>`
+  : w.basis === "auto_profile"
   ? `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Placed by this category's timing profile measured from QuickBooks history; paid date = bill week + the measured bill-to-payment lag. Click to see the numbers.">auto · history</a>`
   : `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-slate-600 bg-slate-50 rounded px-1 py-0.5" style="border:1px solid #e2e8f0" title="Estimate spread evenly across the project weeks (no timing profile for this category). Click to see the rules.">auto · even</a>`;
 const editedChip = (e) => e ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
@@ -465,7 +469,8 @@ function render(container, entityId, d) {
         </span>
       </summary>
       <div class="bg-black/[0.012]">
-        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left">Weekly cash-out</th><th class="py-1.5 px-2 text-left" title="When this expense is expected to actually be paid — the Cash Flow forecast uses it (blank = the week)">Expected paid</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="4" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
+        ${c.timing_note ? `<div class="px-6 pt-2 pb-1 text-[11.5px] text-sky-900">${escapeHtml(c.timing_note)}</div>` : ""}
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left" title="When the vendor's bill is expected (an estimate unless a person edited it)">Expected bill date</th><th class="py-1.5 px-2 text-left" title="When the cash is expected to leave the bank. The Cash Flow forecast uses this date (blank = the bill date)">Expected paid</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="4" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
         ${expenseComplete ? "" : addBtn("expinst", c.category, "Add expense payment")}
         ${actuals}
       </div>

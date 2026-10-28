@@ -73,6 +73,12 @@ def rules(conn):
          "drives": "The weekly expense rows on each project and the expense lines of the forecast. "
                    "Hand-edited rows are never re-spread.",
          "where": "assumptions/calibrate.py profile_split, billing/routes.py _ensure_expense_installments"},
+        {"area": "Expenses", "name": "Lodging dates",
+         "value": "The job's lodging estimate spread over its scheduled nights; each month's nights billed on Hotel Engine's "
+                  "monthly statement (measured day of month, the following month) and paid after the measured lag",
+         "drives": "Lodging rows on each project and in the forecast. Lodging is counted only from jobs: the company-wide "
+                   "Hotel Engine overhead line was retired 10/28 (it double-counted).",
+         "where": "assumptions/calibrate.py lodging_split, migration 0086"},
         {"area": "Expenses", "name": "How actual bills burn down the plan",
          "value": "QuickBooks bills fill the earliest planned weeks first; what is left stays on the schedule",
          "drives": "Paid / Partial / Scheduled status on each expense row; only the unspent part is forecast.",
