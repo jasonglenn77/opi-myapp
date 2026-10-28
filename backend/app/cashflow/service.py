@@ -197,14 +197,60 @@ def get_bank_balance() -> dict:
                              "included": [a["name"] for a in accs if a["included"]]})
     inc = [a for a in accounts if a["included"]]
     total = round(sum(a["balance"] for a in inc), 2)
+    # 0085: the opening can start from the bank balance typed on the B250
+    # (the bank's own balance) instead of the QuickBooks books.
+    source = get_setting("opening_source", "b250")
+    b250 = b250_opening()
+    use_b250 = source == "b250" and b250 is not None
     return {
-        "available": len(accounts) > 0,
-        "balance": total,
+        "available": len(accounts) > 0 or use_b250,
+        "balance": b250["balance"] if use_b250 else total,
+        "source": "b250" if use_b250 else "qbo",
+        "source_setting": source,
+        "books_balance": total,
+        "b250": b250,
         "accounts": accounts,
         "included_count": len(inc),
         "last_synced": synced.isoformat() if synced else None,   # UTC
         "duplicate_warnings": warnings,
     }
+
+
+def get_setting(key, default=None):
+    try:
+        with engine.connect() as conn:
+            v = conn.execute(text("SELECT svalue FROM cashflow_settings WHERE skey = :k"), {"k": key}).scalar()
+        return v if v is not None else default
+    except Exception:
+        return default   # table not migrated yet
+
+
+def set_setting(key, value, actor=None):
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO cashflow_settings (skey, svalue, updated_by) VALUES (:k, :v, :by)
+            ON DUPLICATE KEY UPDATE svalue = VALUES(svalue), updated_by = VALUES(updated_by)
+        """), {"k": key, "v": value, "by": actor})
+
+
+def b250_opening():
+    """The opening cash typed on the latest B250 copy: the bank's own balance
+    (Julie copies it from the QuickBooks bank screen). None if no copy."""
+    try:
+        with engine.connect() as conn:
+            r = conn.execute(text("""
+                SELECT s.tab_name, s.week1_end, s.loaded_at, s.file_modified, s.source, l.amount
+                FROM gsync_b250_snapshot s
+                JOIN gsync_b250_lines l ON l.snapshot_id = s.id AND l.section = 'opening'
+                ORDER BY s.id DESC LIMIT 1""")).mappings().first()
+    except Exception:
+        return None
+    if not r or r["amount"] is None:
+        return None
+    return {"balance": round(float(r["amount"]), 2), "tab": r["tab_name"],
+            "week1_end": r["week1_end"].isoformat() if r["week1_end"] else None,
+            "as_of": (r["file_modified"] or r["loaded_at"]).isoformat() if (r["file_modified"] or r["loaded_at"]) else None,
+            "source": r["source"]}
 
 
 def set_bank_inclusion(choices: dict, actor: str | None = None) -> dict:

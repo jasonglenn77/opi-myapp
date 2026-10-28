@@ -99,8 +99,9 @@ def rules(conn):
          "value": f"{CF.WEEKS} weeks, each ending Friday",
          "drives": "The Cash Flow grid.", "where": "cashflow/service.py WEEKS, WEEK_END_WEEKDAY"},
         {"area": "Cash flow", "name": "Overhead run-rate window",
-         "value": f"Trailing {CF.RUNRATE_TRAILING_WEEKS} weeks of QuickBooks spend",
-         "drives": "Auto overhead lines on the Cash Flow page.", "where": "cashflow/service.py RUNRATE_TRAILING_WEEKS"},
+         "value": "Trailing 12 months of QuickBooks spend per account, at the cadence it posts (weekly, monthly...)",
+         "drives": "Auto overhead lines on the Cash Flow page (refreshed on every QuickBooks sync).",
+         "where": "cashflow/overhead.py refresh_auto_from_runrate"},
         {"area": "Cash flow", "name": "Card-paid overhead accounts",
          "value": f"An account with {OV.CARD_PAID_SHARE:.0%}+ of its spend on credit cards gets no overhead line "
                   "(the card payment line covers it)",

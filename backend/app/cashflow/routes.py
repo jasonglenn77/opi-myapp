@@ -47,6 +47,23 @@ def set_bank_accounts(req: BankInclusionRequest, user=Depends(require_capability
     return service.set_bank_inclusion(req.included, actor)
 
 
+class OpeningSourceRequest(BaseModel):
+    source: str   # "b250" | "qbo"
+
+
+@router.put("/opening-source")
+def set_opening_source(req: OpeningSourceRequest, user=Depends(require_capability("page.cashflow"))):
+    """Where week 1's opening cash comes from: the B250's bank balance or the
+    QuickBooks books. Saved for everyone; a typed opening still overrides."""
+    if req.source not in ("b250", "qbo"):
+        raise HTTPException(status_code=400, detail="source must be b250 or qbo")
+    actor = user.get("email") if isinstance(user, dict) else getattr(user, "email", None)
+    service.set_setting("opening_source", req.source, actor)
+    from app.audit import record_audit
+    record_audit(user, "cashflow.opening_source", "cashflow_setting", "opening_source", "Opening cash source", {"source": req.source})
+    return service.get_bank_balance()
+
+
 @router.get("/credit-cards")
 def credit_cards(_user=Depends(require_capability("page.cashflow"))):
     """QBO Credit Card accounts + balances. Informational/parked — not folded
@@ -123,6 +140,14 @@ def forecast_v2(
     if c.get("stale") and not c.get("computing"):
         background.add_task(_safe_recompute)
     return result
+
+
+@router.get("/reconcile")
+def reconcile(fresh: bool = False, _user=Depends(require_capability("page.cashflow"))):
+    """OPI's B250 13-week cash flow vs this forecast, group by group, with why
+    each differs and what fixes it (the "Why our numbers differ" panel)."""
+    from . import reconcile as RC
+    return RC.build(force=fresh)
 
 
 @router.post("/forecast-v2/refresh")

@@ -39,6 +39,9 @@ export async function cashflowPage(routeFn) {
         </label>
         <button id="cfGenerate" class="btn-primary py-2">Generate</button>
         <button id="cfOverhead" class="hidden px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Overhead</button>
+        <button id="cfRecon" type="button" title="Why this forecast differs from OPI's B250 cash-flow sheet, and what needs fixing" class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-black/15 px-3 text-sm font-semibold text-black/70 hover:bg-black/5">
+          <svg viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 4v16M17 4v16M3 8h8M13 16h8" stroke-linecap="round"/></svg>Compare with B250
+        </button>
         <button id="cfInfo" type="button" title="How this page works" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/15 text-black/55 hover:bg-black/5">
           <svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -56,62 +59,80 @@ export async function cashflowPage(routeFn) {
           <button id="cfInfoClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
         </div>
         <div class="text-sm text-black/70 space-y-4 overflow-y-auto pr-1" style="min-height:0;">
-          <p>This page shows your cash two ways, switched at the top left: <span class="font-semibold text-ink-900">Forecast</span> (what's coming) and <span class="font-semibold text-ink-900">Actuals</span> (what already happened).</p>
+          <p>This page shows cash two ways, switched at the top left: <span class="font-semibold text-ink-900">Forecast</span> (what's coming) and <span class="font-semibold text-ink-900">Actuals</span> (what already happened). <span class="font-semibold text-ink-900">Compare with B250</span> lines the forecast up against OPI's own 13-week cash sheet and explains every difference.</p>
 
           <div>
             <div class="font-bold text-ink-900">How the Forecast builds each week</div>
-            <p class="text-black/60">It starts at your <span class="font-semibold">real QuickBooks bank balance</span>, then each week: <span class="font-semibold">opening → + cash in − cash out → ending</span>, and the next week opens where the last one ended. You can extend the horizon as far out as you want (13 / 26 / 52 or any number of weeks).</p>
+            <p class="text-black/60">It starts from the opening cash balance, then each week: <span class="font-semibold">opening + cash in − cash out = ending</span>, and the next week opens where the last one ended. Pick 13, 26 or 52 weeks, or type any number.</p>
           </div>
 
           <div>
-            <div class="font-bold text-ink-900">What the lines mean — and where each number comes from</div>
+            <div class="font-bold text-ink-900">Opening balance</div>
+            <p class="text-black/60">Chosen under <span class="font-semibold">Opening balance source</span> (saved for everyone): the <span class="font-semibold">bank balance typed on OPI's B250</span> (the default for now), or the <span class="font-semibold">QuickBooks books</span> for the ticked bank accounts. QuickBooks shows the bank's own balance on its screen but doesn't share it with outside apps, and its books are currently higher than the bank, mainly because customer payments were never matched to deposits. Once the books are reconciled, switch to the books. Typing an opening number at the top overrides either, for a scenario.</p>
+          </div>
+
+          <div>
+            <div class="font-bold text-ink-900">What the lines mean, and where each number comes from</div>
             <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
-              <li><span class="font-semibold text-ink-900">Committed</span> — the firmest money, because it's already in QuickBooks. <em>In</em> = customer invoices you've already sent, placed on their due date. <em>Out</em> = bills you've already entered, on their due date.</li>
-              <li><span class="font-semibold text-ink-900">Scheduled</span> — the plans from each project's <span class="font-semibold">Billing &amp; Schedule</span> tab that aren't in QuickBooks yet: invoices you're set to send, crew payments, and project expenses, each on its planned date. The forecast is the sum of every project's tab, so if you fix a project's schedule it updates here.</li>
-              <li><span class="font-semibold text-ink-900">Recurring</span> — your steady overhead: rent, insurance, payroll, loan payments. Most lines are auto-generated from your trailing-12-month spending and refresh with every QuickBooks sync; a few (payroll wages, bonus, payroll taxes) are kept by hand because they aren't in QuickBooks. Open the <span class="font-semibold">Overhead</span> button to view, add, or adjust any line — see <span class="font-semibold">The Overhead editor</span> below.</li>
+              <li><span class="font-semibold text-ink-900">Committed</span> (in QuickBooks): <em>in</em> = open customer invoices, on the expected-paid date if someone set one, otherwise the QuickBooks due date; <em>out</em> = open bills, on their due date.</li>
+              <li><span class="font-semibold text-ink-900">Scheduled</span> (planned on each project's <span class="font-semibold">Billing &amp; Schedule</span> tab, not yet in QuickBooks):
+                <ul class="ml-5 mt-1 space-y-1" style="list-style:circle">
+                  <li>Invoices to send: each estimate's billing terms placed on the Job Schedule dates.</li>
+                  <li>Crew pay: the job's Payment Schedule sheet from Google Drive (updated nightly), or an even split of the estimate's labor when there's no sheet. Paid on the every-other-Friday payroll calendar.</li>
+                  <li>Project expenses: each estimate cost category (rentals, lodging, materials…) spread the way those bills have actually landed on past jobs, and paid after the usual bill-to-payment time. The numbers behind this are on the <a href="#/assumptions" class="text-brand-700 font-semibold hover:underline">Assumptions</a> page.</li>
+                </ul>
+                Each project's plan burns down as QuickBooks invoices, bills and payments arrive, so only what's left shows here. Fix a project's schedule and the forecast follows.</li>
+              <li><span class="font-semibold text-ink-900">Recurring</span> (estimated): overhead and payroll. Most lines are each account's trailing 12-month QuickBooks spend at the cadence it posts, refreshed on every sync. A few lines have no QuickBooks source and keep the value typed on OPI's B250 (W-2 wages, bonus/commission, Hotel Engine, Chase card); they're tagged <span class="text-[9px] font-bold uppercase tracking-wide text-rose-700 bg-rose-50 border border-rose-200 rounded px-1 py-px">B250 · no source</span> and listed on Data Review.</li>
             </ul>
           </div>
 
           <div>
             <div class="font-bold text-ink-900">Reading the grid</div>
             <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
-              <li><span class="font-semibold text-ink-900">Confidence dots</span> next to each line show how firm it is: <span class="font-semibold">committed</span> (in QuickBooks) → <span class="font-semibold">scheduled</span> (planned) → <span class="font-semibold">estimated</span> (run-rate).</li>
-              <li><span class="font-semibold text-ink-900">Dates</span> — every item sits on its <span class="font-semibold">expected paid date</span>, with no assumed lag: open invoices on the expected-paid date you set (on the invoice, or on its planned milestone), otherwise the QuickBooks due date; bills on their due date; crew on the pay date; project expenses on their expected-paid date (or their week).</li>
-              <li><span class="font-semibold text-ink-900">Overdue — expected date passed</span> — nothing is settled into the opening balance. Open QuickBooks invoices and bills whose date passed are counted in <span class="font-semibold">week 1</span> on a flagged row. Crew payments whose date passed are checked against the crew's QuickBooks payments (bi-weekly runs) and dropped when paid. Planned invoices/expenses/crew payments still unpaid are <span class="font-semibold">flagged, not counted</span> (they need a new date) unless you tick “Count overdue plans in week 1”. All of it is listed under <span class="font-semibold">Overdue — follow up</span>.</li>
-              <li><span class="font-semibold text-ink-900">Won — not scheduled</span> — won projects with no dates on the Job Schedule. Their cash is held out of the weekly balance until dates are set; the banner lists them with their unbilled value and links to each project.</li>
-              <li><span class="font-semibold text-ink-900">Drill in</span> — expand any section to see the detail; use the <span class="font-semibold">⇄</span> toggle to switch views (by vendor / project / category / item); and <span class="font-semibold">click a project name</span> to open its Billing &amp; Schedule tab.</li>
-              <li><span class="font-semibold text-ink-900">What-if</span> — expand Recurring and type a new amount into a weekly cell to see the balance change live. It's a scenario only — nothing is saved; <span class="font-semibold">Reset to actual</span> restores it.</li>
+              <li><span class="font-semibold text-ink-900">Confidence dots</span>: committed (in QuickBooks), scheduled (planned), estimated (run-rate).</li>
+              <li><span class="font-semibold text-ink-900">Overdue — expected date passed</span>: open invoices and bills whose date passed are counted in <span class="font-semibold">week 1</span> on a flagged row. Crew payments whose date passed are checked against the crew's QuickBooks payments and dropped when paid. Planned invoices, crew payments and expenses whose date passed are listed but <span class="font-semibold">not counted</span> until they get a new date (tick "Count overdue plans in week 1" to count them). The list above the grid says where each date comes from.</li>
+              <li><span class="font-semibold text-ink-900">Won — not scheduled</span>: won projects with no Job Schedule dates. Their cash stays out of the weekly balance until they're dated.</li>
+              <li><span class="font-semibold text-ink-900">Drill in</span>: expand any section; use <span class="font-semibold">⇄</span> to switch views (by vendor / project / type / item); click a project to open its Billing &amp; Schedule tab. Sections you open stay open when the page refreshes in the background.</li>
+              <li><span class="font-semibold text-ink-900">What-if</span>: expand Recurring and type into a weekly cell to see the balance change. Nothing is saved; <span class="font-semibold">Reset to actual</span> undoes it.</li>
+              <li>For crew pay and project expenses across every project by week, see <a href="#/money" class="text-brand-700 font-semibold hover:underline">Project Money</a>.</li>
             </ul>
           </div>
 
           <div>
-            <div class="font-bold text-ink-900">Actuals — what already happened</div>
-            <p class="text-black/60">Same layout, for a date range you choose: real customer payments received <em>in</em>, and bill payments + card/check spend <em>out</em>, by the week the cash actually moved. Expand, toggle, and click through to projects the same way.</p>
-            <p class="text-black/60 mt-1.5">Your <span class="font-semibold">recurring overhead shows here too</span> — as the real posted spend, under <span class="font-semibold">Direct expenses</span> (by category — occupancy, owner draws, insurance…) and <span class="font-semibold">Bill payments</span> (by vendor). The only things you won't see are the hand-entered lines (wages, bonus, payroll taxes, miscellaneous): they never post to QuickBooks, so there's no actual to show.</p>
+            <div class="font-bold text-ink-900">The Overhead editor</div>
+            <p class="text-black/60">The <span class="font-semibold">Overhead</span> button lists every recurring line by category with a per-week figure and totals. Add, edit or delete lines; changes show in the forecast right away. Each line is tagged by where its number comes from:</p>
+            <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
+              <li><span class="text-[10px] font-bold uppercase tracking-wide text-black/40 border border-black/15 rounded px-1 py-px">auto</span>: from QuickBooks (trailing 12 months), refreshed on every sync.</li>
+              <li><span class="text-[10px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px">edited</span>: a QuickBooks line someone adjusted; <span class="font-semibold">↺</span> goes back to the QuickBooks figure.</li>
+              <li><span class="text-[9px] font-bold uppercase tracking-wide text-rose-700 bg-rose-50 border border-rose-200 rounded px-1 py-px">B250 · no source</span>: copied from OPI's B250 because no system of record has it yet.</li>
+              <li><span class="text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-100 border border-indigo-200 rounded px-1 py-px">manual</span>: entered in the app by hand.</li>
+            </ul>
+            <p class="text-black/60 mt-1.5">Deleted lines stay deleted until restored, and <span class="font-semibold">history</span> shows every change.</p>
+          </div>
+
+          <div>
+            <div class="font-bold text-ink-900">Actuals</div>
+            <p class="text-black/60">Same layout for a past date range: customer payments received <em>in</em>; bill payments and card/check spend <em>out</em>, by the week the cash moved. Lines with no QuickBooks source (W-2 wages, bonus) have no actuals to show.</p>
           </div>
 
           <div>
             <div class="font-bold text-ink-900">Where the numbers come from</div>
-            <p class="text-black/60">Everything reads from your QuickBooks data that we've already synced into the app — invoices, bills, payments, purchases, and bank balances. <span class="font-semibold text-ink-900">Opening this page never calls QuickBooks</span>, so it never uses your Intuit API limits. To pull the latest, run <span class="font-semibold">"Sync transactions now"</span> on the QuickBooks page.</p>
-          </div>
-
-          <div>
-            <div class="font-bold text-ink-900">Opening balance</div>
-            <p class="text-black/60">The sum of the QuickBooks <span class="font-semibold">Bank</span> accounts ticked in the <span class="font-semibold">Opening balance source</span> panel (synced nightly with transactions). Untick an account to leave it out — the choice is saved for everyone. Two accounts with the same bank number get a warning badge. You can still type a different number to model a scenario.</p>
-          </div>
-
-          <div>
-            <div class="font-bold text-ink-900">The Overhead editor — your recurring schedule</div>
-            <p class="text-black/60">The <span class="font-semibold">Overhead</span> button opens every recurring cash-out line, <span class="font-semibold">grouped by category</span> (Occupancy, Payroll, Travel…) with a weekly subtotal per group and a <span class="font-semibold">grand total</span> ($/wk and $/yr) at the top. A <span class="font-semibold">Per week</span> column normalizes each line, so a monthly rent and a weekly payroll are comparable at a glance. The column header stays pinned as you scroll, and you can <span class="font-semibold">collapse any category</span> by clicking its header. Add a line with the <span class="font-semibold">+ add</span> on a category header (files it there) or <span class="font-semibold">+ Add item</span> at the bottom, pick its <span class="font-semibold">Category</span> from the dropdown, and edit amount / cadence / dates inline. You can also edit Recurring cells right in the Cash Outflow grid for a live what-if.</p>
-            <p class="text-black/60 mt-2">Each line is tagged by <span class="font-semibold">where its number comes from</span>:</p>
-            <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
-              <li><span class="text-[10px] font-bold uppercase tracking-wide text-black/40 border border-black/15 rounded px-1 py-px">auto</span> — derived from your trailing-12-month QuickBooks spending, at the cadence detected from how often it posts. <span class="font-semibold">Refreshes on every sync.</span></li>
-              <li><span class="text-[10px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px">edited</span> — a QuickBooks line you've hand-adjusted (e.g. rent cleaned of one-off charges). It holds your value and shows <span class="font-semibold">↺ revert</span> back to the live auto figure.</li>
-              <li><span class="text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-100 border border-indigo-200 rounded px-1 py-px">manual</span> — <span class="font-semibold">not in QuickBooks</span>, so you maintain it by hand. These rows are <span class="text-indigo-700">shaded</span> so they stand out — W-2 wages, bonus / commission, employer payroll taxes, and miscellaneous, since payroll runs through an outside provider.</li>
-            </ul>
-            <p class="text-black/60 mt-1.5">Deleted lines stay deleted (they won't come back on a sync) until you restore them, and <span class="font-semibold">history</span> shows every change to a line.</p>
+            <p class="text-black/60">QuickBooks data synced into the app every night (invoices, bills, payments, deposits, bank and card accounts), plus OPI's Google Drive sheets read the same night (Job Schedule, crew Payment Schedules, B250). Opening this page never calls QuickBooks. To pull the latest, run <span class="font-semibold">Sync transactions now</span> on the QuickBooks page.</p>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div id="cfReconModal" class="fixed inset-0 hidden items-center justify-center bg-black/40 p-4" style="z-index:70;">
+      <div class="card p-6 flex flex-col" style="width:100%;max-width:64rem;max-height:90vh;overflow:hidden;">
+        <div class="flex items-start justify-between gap-3 mb-2">
+          <div>
+            <div class="text-lg font-extrabold">Why the app's cash flow differs from OPI's B250</div>
+            <div id="cfReconSub" class="text-xs text-black/50"></div>
+          </div>
+          <button id="cfReconClose" class="rounded-xl border border-black/15 px-3 py-1.5 text-sm font-semibold text-ink-800 hover:bg-black/5">Close</button>
+        </div>
+        <div id="cfReconBody" class="overflow-y-auto pr-1 text-sm" style="min-height:0;">Loading…</div>
       </div>
     </div>
 
@@ -148,13 +169,13 @@ export async function cashflowPage(routeFn) {
 
     <div id="cfAlerts" class="cfx-alerts"></div>
 
-    <div class="card p-0 overflow-hidden">
-      <div id="cfScroll" class="overflow-auto">
+    <div class="card p-0" style="overflow:clip">
+      <div id="cfHead" class="hidden" style="position:sticky;top:0;z-index:6;overflow:hidden;background:#fff;border-bottom:1px solid rgba(0,0,0,.1);box-shadow:0 2px 4px -2px rgba(0,0,0,.08)"></div>
+      <div id="cfScroll" class="overflow-x-auto" style="overflow-y:visible">
         <div id="cfGrid" class="p-4 text-sm text-black/50">Loading…</div>
       </div>
     </div>
 
-    <div id="cfCards" class="mt-4"></div>
   `;
 
   setShell({ title: "", subtitle: "", bodyHtml, showLogout: true, routeFn });
@@ -170,16 +191,35 @@ export async function cashflowPage(routeFn) {
   const weeksEl = document.getElementById("cfWeeks");
   const weeksWrap = document.getElementById("cfWeeksWrap");
   const grid = document.getElementById("cfGrid");
-  // Bound the forecast table to the remaining viewport so it scrolls INTERNALLY —
-  // that's what keeps the sticky "Week ending" header row visible while you scroll
-  // through expanded inflow/outflow sections.
-  function sizeCfScroll() {
-    const el = document.getElementById("cfScroll");
-    if (!el) return;
-    const top = el.getBoundingClientRect().top;
-    el.style.maxHeight = Math.max(320, window.innerHeight - top - 16) + "px";
+  // The grid shows at full height (the page scrolls, not the card); it only
+  // scrolls sideways for long horizons. A sideways-scrolling box can't pin its
+  // own header to the page, so the week-date row is copied into #cfHead, which
+  // sticks to the top of the window while the page scrolls and follows the
+  // grid's sideways scroll. Its column widths are measured from the grid.
+  const headEl = document.getElementById("cfHead");
+  const scrollEl = document.getElementById("cfScroll");
+  scrollEl.addEventListener("scroll", () => { headEl.scrollLeft = scrollEl.scrollLeft; }, { passive: true });
+  function syncHead() {
+    const table = grid.querySelector("table");
+    const head = table && table.tHead && table.tHead.rows[0];
+    if (!head) { headEl.classList.add("hidden"); headEl.innerHTML = ""; return; }
+    const widths = [...head.cells].map((c) => c.getBoundingClientRect().width);
+    const clone = head.cloneNode(true);
+    [...clone.cells].forEach((c, i) => {
+      c.style.width = c.style.minWidth = c.style.maxWidth = `${widths[i]}px`;
+      c.style.position = i === 0 ? "sticky" : "static";
+      c.style.top = "";
+    });
+    // same left offset as the grid's table (the grid has padding around it)
+    const offset = table.getBoundingClientRect().left - scrollEl.getBoundingClientRect().left + scrollEl.scrollLeft;
+    headEl.innerHTML = `<table class="text-sm" style="border-collapse:separate;border-spacing:0;table-layout:fixed;margin-left:${offset}px;width:${table.getBoundingClientRect().width}px"><thead></thead></table>`;
+    headEl.querySelector("thead").appendChild(clone);
+    head.style.visibility = "collapse";          // the pinned copy replaces it
+    headEl.classList.remove("hidden");
+    headEl.style.top = `${document.getElementById("topBar")?.getBoundingClientRect().height || 0}px`;  // pin below the app's top bar
+    headEl.scrollLeft = scrollEl.scrollLeft;
   }
-  window.addEventListener("resize", sizeCfScroll);
+  window.addEventListener("resize", () => { const h = grid.querySelector("table")?.tHead?.rows[0]; if (h) h.style.visibility = ""; syncHead(); });
   const kpis = document.getElementById("cfKpis");
   const modeDesc = document.getElementById("cfModeDesc");
   const btnV2 = document.getElementById("cfModeV2");
@@ -188,6 +228,9 @@ export async function cashflowPage(routeFn) {
   const horizonWeeks = document.getElementById("cfHorizonWeeks");
 
   let lastBacklog = null; // most recent Forecast backlog, for the drill-down modal
+  // Which grid sections are expanded / which view (⇄) each shows — kept across
+  // re-renders so a background refresh doesn't collapse what you opened.
+  const expanded = new Set(), viewOf = {};
 
   // ---- formatting helpers ----
   const cell = (n) => {
@@ -371,7 +414,8 @@ export async function cashflowPage(routeFn) {
       ${!isActuals ? `<div class="text-[11px] text-black/45 mt-2 px-1">Week 1 opens at your bank balance — nothing is settled into it. <span class="cfx-legend-od"></span> rows are overdue items (expected date passed) counted in week 1; <span class="cfx-memo-amt">(amounts)</span> are overdue plans shown for follow-up but <b>not counted</b>.</div>` : ""}`;
     // expand/collapse + view-toggle (by vendor/project or project/type). Detail
     // rows carry data-view; only the current view shows when a group is expanded.
-    const expanded = new Set(), viewOf = {};
+    // expanding can widen the label column: re-measure the pinned header
+    const resyncHead = () => { const h = grid.querySelector("table")?.tHead?.rows[0]; if (h) h.style.visibility = ""; requestAnimationFrame(syncHead); };
     const applyDetail = (g) => {
       const open = expanded.has(g), view = viewOf[g] || "a";
       grid.querySelectorAll(`.cf-detail[data-group="${g}"]`).forEach(r => {
@@ -383,12 +427,14 @@ export async function cashflowPage(routeFn) {
       if (expanded.has(g)) expanded.delete(g); else expanded.add(g);
       btn.textContent = expanded.has(g) ? "▾" : "▸";
       applyDetail(g);
+      resyncHead();
     }));
     grid.querySelectorAll("[data-view-toggle]").forEach(btn => btn.addEventListener("click", () => {
       const g = btn.getAttribute("data-view-toggle");
       viewOf[g] = (viewOf[g] === "b") ? "a" : "b";
       btn.textContent = (viewOf[g] === "b" ? btn.dataset.vb : btn.dataset.va) + " ⇄";
       applyDetail(g);
+      resyncHead();
       grid.querySelectorAll(`[data-flaggroup="${g}"]`).forEach(r => { r.style.display = r.dataset.flagview === (viewOf[g] || "a") ? "table-row" : "none"; });
       if (g === recGroup) recomputeWhatIf();  // what-if follows the visible recurring view
     }));
@@ -448,7 +494,19 @@ export async function cashflowPage(routeFn) {
     grid.querySelectorAll("td.cf-recedit").forEach(td => td.addEventListener("input", recomputeWhatIf));
     const wreset = grid.querySelector("[data-cf-whatif-reset]");
     if (wreset) wreset.addEventListener("click", () => renderForecastV2(d));
-    requestAnimationFrame(sizeCfScroll);  // bound the scroll area so the header stays sticky
+    // re-open what was expanded before this render (background refreshes re-render)
+    [...expanded].forEach((g) => {
+      const btn = grid.querySelector(`[data-toggle="${g}"]`);
+      if (!btn) { expanded.delete(g); return; }
+      btn.textContent = "▾";
+      if (viewOf[g] === "b") {
+        const vt = grid.querySelector(`[data-view-toggle="${g}"]`);
+        if (vt) vt.textContent = vt.dataset.vb + " ⇄";
+        grid.querySelectorAll(`[data-flaggroup="${g}"]`).forEach(r => { r.style.display = r.dataset.flagview === "b" ? "table-row" : "none"; });
+      }
+      applyDetail(g);
+    });
+    requestAnimationFrame(syncHead);
   }
 
   // ── Backlog drill-down (undated projects: what flows if they all get dates) ──
@@ -544,11 +602,25 @@ export async function cashflowPage(routeFn) {
         <summary class="cfx-bank-sum">
           <svg class="cfx-chev" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Opening balance source</span>
-          <span class="text-[12px] text-black/55">${b.included_count} of ${(b.accounts || []).length} QuickBooks bank accounts · <b class="text-ink-900">${fmtMoney(b.balance)}</b></span>
+          <span class="text-[12px] text-black/55">${b.source === "b250"
+            ? `Bank balance from the B250 · <b class="text-ink-900">${fmtMoney(b.balance)}</b> <span class="text-black/40">(QuickBooks books ${fmtMoney(b.books_balance)})</span>`
+            : `${b.included_count} of ${(b.accounts || []).length} QuickBooks bank accounts (books) · <b class="text-ink-900">${fmtMoney(b.balance)}</b>`}</span>
           ${dupBadge}
           <span class="cfx-bank-sync">Last synced ${fmtWhen(b.last_synced, true)}</span>
         </summary>
         <div class="cfx-bank-body">
+          <div class="flex flex-wrap items-center gap-2 mb-3 text-[12.5px]">
+            <span class="font-semibold text-black/70">Start week 1 from:</span>
+            <label class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${b.source === "b250" ? "border-ink-900 bg-black/[0.04]" : "border-black/15"} ${b.b250 ? "cursor-pointer" : "opacity-50"}">
+              <input type="radio" name="cfOpenSrc" value="b250" ${b.source === "b250" ? "checked" : ""} ${b.b250 ? "" : "disabled"}>
+              Bank balance from the B250 <b>${b.b250 ? fmtMoney(b.b250.balance) : "—"}</b>${b.b250 ? ` <span class="text-black/40">tab "${escapeHtml(b.b250.tab || "")}", ${fmtWhen(b.b250.as_of)}</span>` : ""}
+            </label>
+            <label class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${b.source === "qbo" ? "border-ink-900 bg-black/[0.04]" : "border-black/15"} cursor-pointer">
+              <input type="radio" name="cfOpenSrc" value="qbo" ${b.source === "qbo" ? "checked" : ""}>
+              QuickBooks books <b>${fmtMoney(b.books_balance)}</b> <span class="text-black/40">(accounts ticked below)</span>
+            </label>
+          </div>
+          ${b.b250 && Math.abs(b.books_balance - b.b250.balance) > 1 ? `<div class="text-[11.5px] text-black/55 mb-3">The books are <b>${fmtMoney(b.books_balance - b.b250.balance)}</b> ${b.books_balance > b.b250.balance ? "above" : "below"} the bank. QuickBooks doesn't share the bank's own balance with outside apps, so the B250's typed bank balance is used until the books are reconciled (Compare with B250 explains the gap). Typing an opening balance above still overrides either.</div>` : ""}
           <div class="overflow-x-auto"><table class="cfx-bank-tbl">
             <thead><tr><th></th><th>QuickBooks bank account</th><th class="text-right">Balance</th><th class="text-right">Balance as of</th></tr></thead>
             <tbody>${rows}</tbody>
@@ -557,6 +629,15 @@ export async function cashflowPage(routeFn) {
         </div>
       </details>`;
     bankEl.querySelector("details").addEventListener("toggle", (e) => { bankOpen = e.target.open; });
+    bankEl.querySelectorAll('input[name="cfOpenSrc"]').forEach((r) => r.addEventListener("change", async () => {
+      try {
+        const nb = await api("/cashflow/opening-source", { method: "PUT", body: JSON.stringify({ source: r.value }) });
+        openingEl.value = Math.round(nb.balance);
+        balSource.textContent = "";
+        renderBank(nb);
+        load();
+      } catch (err) { alert("Save failed: " + (err?.message || "error")); }
+    }));
     bankEl.querySelectorAll("[data-bank]").forEach(cb => cb.addEventListener("change", async () => {
       cb.disabled = true;
       try {
@@ -614,7 +695,7 @@ export async function cashflowPage(routeFn) {
             : mdY(i.expected || (i.kind !== "ar" && i.kind !== "ap" ? i.date : null))}</td>
           <td class="text-right tabular-nums">${i.days_late != null ? i.days_late : ""}</td>
           <td class="text-right tabular-nums font-semibold">${fmtMoney(i.amount)}</td>
-          <td class="text-right"><span class="cfx-pill ${i.counted ? "cfx-pill-on" : "cfx-pill-off"}">${i.counted ? "week 1" : "not counted"}</span></td>
+          <td class="text-right"><span class="cfx-pill ${i.counted ? "cfx-pill-on" : "cfx-pill-off"}" title="${i.counted ? "Counted as cash in/out in week 1 of the forecast" : "Shown for follow-up only; not in the totals until it gets a new date"}">${i.counted ? "counted in week 1" : "not counted"}</span></td>
         </tr>`;
       const crewRows = (cm.items || []).slice(0, 400).map(c => `<tr>
           <td>${projLink(c.link_id, c.project)}</td><td>${escapeHtml(c.crew || "—")}</td>
@@ -630,9 +711,15 @@ export async function cashflowPage(routeFn) {
             ${cm.count ? ` <span class="cfx-alert-sub">· ${cm.count} crew payments (${fmtMoney(cm.amount)}) matched to QuickBooks as paid</span>` : ""}</span>
         </summary>
         <div class="cfx-alert-body">
+          <ul class="text-[11.5px] text-black/55 mb-2 space-y-0.5 list-disc ml-4">
+            <li><b>Invoice sent — not paid</b>: a real QuickBooks invoice. Sent and Due are the invoice's own dates in QuickBooks; Expected is a date someone set (blank = the due date). Counted as cash in, in week 1.</li>
+            <li><b>Bill past due — pay now</b>: a real QuickBooks bill. Bill date and Due are from QuickBooks. Counted as cash out, in week 1.</li>
+            <li><b>Planned invoice — date passed, not invoiced</b> (grey): a milestone on the project's billing schedule (Billing &amp; Schedule tab, built from the estimate's terms and the Job Schedule dates) with no matching QuickBooks invoice yet. Either it was billed under an invoice the app couldn't match, the job's dates or terms changed, or it really hasn't been sent. Fix the milestone date or link the invoice on the project.</li>
+            <li><b>Crew payment / planned expense — date passed</b> (grey): planned on the project but no matching QuickBooks payment or bill yet.</li>
+          </ul>
           <div class="text-[11.5px] text-black/55 mb-2">Nothing here is settled into the opening balance. Open invoices and bills (already in QuickBooks) are counted in week 1; set an invoice's <b>expected paid</b> date to move it. Planned items whose dates passed need a new date on the project's Billing &amp; Schedule tab${od.count_plans ? " — currently <b>counted in week 1</b> (toggle at the top)" : " — they're <b>not counted</b> until re-dated (toggle at the top to count them)"}.</div>
           <div class="overflow-x-auto cfx-scroll"><table class="cfx-tbl">
-            <thead><tr><th>What</th><th>Project / customer</th><th>Ref</th><th>Sent</th><th>Due</th><th>Expected</th><th class="text-right">Days late</th><th class="text-right">Amount</th><th class="text-right">Forecast</th></tr></thead>
+            <thead><tr><th>What</th><th>Project / customer</th><th>Ref</th><th title="Invoices and bills: the QuickBooks document date. Planned items: the date the project's schedule planned">Sent / bill date</th><th title="Invoices and bills: the QuickBooks due date. Planned invoices: planned send date + payment terms">Due</th><th title="When the cash is expected: a date someone set (on the invoice or its milestone), else the due date">Expected</th><th class="text-right">Days late</th><th class="text-right">Amount</th><th class="text-right">In forecast</th></tr></thead>
             <tbody>${items.map(row).join("") || `<tr><td colspan="9" class="text-black/40">Nothing overdue.</td></tr>`}</tbody>
           </table></div>
           ${cm.count ? `<details class="mt-3"><summary class="cursor-pointer text-[12px] font-semibold text-black/60">Crew installments treated as paid — ${cm.count} matched to the crew's QuickBooks payments (${fmtMoney(cm.amount)})</summary>
@@ -687,7 +774,7 @@ export async function cashflowPage(routeFn) {
     document.getElementById("cfOverhead").classList.toggle("hidden", mode !== "forecast_v2");
     document.getElementById("cfCountPlansWrap").classList.toggle("hidden", mode !== "forecast_v2");
     modeDesc.textContent = mode === "forecast_v2"
-      ? "Forward cash from your real bank balance — committed (open invoices/bills) + recurring overhead + the scheduled crew/invoice/expense plans on every project. Extend the horizon as far as you like. Tap ⓘ for how it's built."
+      ? "Forward cash from the opening balance: committed (open invoices and bills) + recurring overhead + the scheduled crew, invoice and expense plans on every project. Compare with B250 explains how it differs from OPI's sheet; ⓘ explains how it's built."
       : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out. Tap ⓘ for details.";
   }
 
@@ -696,6 +783,7 @@ export async function cashflowPage(routeFn) {
     // `silent` = a background poll while the cache recomputes: don't blank the
     // grid, and only re-render if the numbers actually changed (no flash).
     if (!silent) grid.innerHTML = `<div class="p-4 text-sm text-black/50">Loading…</div>`;
+    if (!silent) syncHead();
     const params = new URLSearchParams();
     const ob = parseFloat(openingEl.value);
     if (!Number.isNaN(ob)) params.set("opening_balance", String(ob));
@@ -713,45 +801,16 @@ export async function cashflowPage(routeFn) {
         return;
       }
       lastSig = sig;
+      const keepY = window.scrollY;
       renderKpis(d);
       render(d);
-      if (mode === "forecast_v2") { schedulePoll(d.cache); loadCreditCards(); renderAlerts(d); if (d.bank) renderBank(d.bank); }
-      else { cardsEl.innerHTML = ""; alertsEl.innerHTML = ""; bankEl.innerHTML = ""; }
+      if (mode === "forecast_v2") { schedulePoll(d.cache); renderAlerts(d); if (d.bank) renderBank(d.bank); }
+      else { alertsEl.innerHTML = ""; bankEl.innerHTML = ""; }
+      if (silent) window.scrollTo(0, keepY);
     } catch (e) {
       kpis.innerHTML = "";
       if (!silent) grid.innerHTML = `<div class="p-4 text-sm text-red-700">Failed to load: ${escapeHtml(e.message || e)}</div>`;
     }
-  }
-
-  // ── Credit cards: parked/informational panel (Forecast+ only). The balances are
-  //    tracked but NOT in the forecast math yet — pending how payoffs are scheduled.
-  const cardsEl = document.getElementById("cfCards");
-  let ccData = null;
-  async function loadCreditCards() {
-    if (!ccData) {
-      try { ccData = await api("/cashflow/credit-cards"); }
-      catch (e) { ccData = { available: false }; }
-    }
-    if (mode !== "forecast_v2" || !ccData.available) { cardsEl.innerHTML = ""; return; }
-    const accts = (ccData.accounts || []).filter(a => Math.abs(a.balance) > 0.5);
-    const rows = accts.map(a => `
-      <tr class="border-b border-black/[0.04]">
-        <td class="py-1 pr-3 text-black/70">${escapeHtml(a.name)}</td>
-        <td class="py-1 pl-2 text-right tabular-nums ${a.credit_balance ? "text-emerald-700" : "text-black/70"}">${a.credit_balance ? "credit " + fmtMoney(-a.owed) : fmtMoney(a.owed)}</td>
-      </tr>`).join("");
-    cardsEl.innerHTML = `
-      <details class="group/cc card p-0 overflow-hidden">
-        <summary class="flex items-center gap-2 px-4 py-3 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015]">
-          <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open/cc:rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
-          <span class="text-sm font-bold text-ink-900">Credit cards</span>
-          <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Tracked · not in forecast yet</span>
-          <span class="ml-auto text-[13px] tabular-nums"><span class="text-black/45">owed</span> <b class="text-ink-900">${fmtMoney(ccData.total_owed || 0)}</b></span>
-        </summary>
-        <div class="px-4 pb-4 border-t border-black/[0.06]">
-          <div class="text-[12px] text-black/50 py-2">Card balances from QuickBooks. Not folded into the forecast until we set how the cards are paid off — card charges aren't cash out of the bank until the card is paid.</div>
-          <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pr-3 text-left">Card</th><th class="py-1.5 pl-2 text-right">Owed</th></tr></thead><tbody>${rows || `<tr><td colspan="2" class="py-3 text-black/40">No card balances.</td></tr>`}</tbody></table></div>
-        </div>
-      </details>`;
   }
 
   // While the scheduled-cash cache is still computing (background recompute),
@@ -983,6 +1042,7 @@ export async function cashflowPage(routeFn) {
   function setMode(m) {
     if (mode === m) return;
     mode = m;
+    expanded.clear(); Object.keys(viewOf).forEach((k) => delete viewOf[k]);
     startEl.value = ""; // reset to mode-appropriate default
     applyModeUi();
     load();
@@ -1003,6 +1063,112 @@ export async function cashflowPage(routeFn) {
   document.getElementById("cfInfoClose").addEventListener("click", closeInfo);
   infoModal.addEventListener("click", (e) => { if (e.target === infoModal) closeInfo(); });
 
+  // ---- Compare with B250: OPI's 13-week cash sheet vs this forecast ----
+  // Same weeks on both sides, split into the same groups. The bridge explains
+  // the ending-balance gap group by group; each line carries why and the fix.
+  const reconModal = document.getElementById("cfReconModal");
+  const reconBody = document.getElementById("cfReconBody");
+  const reconSub = document.getElementById("cfReconSub");
+  const closeRecon = () => { reconModal.classList.add("hidden"); reconModal.classList.remove("flex"); };
+  document.getElementById("cfReconClose").addEventListener("click", closeRecon);
+  reconModal.addEventListener("click", (e) => { if (e.target === reconModal) closeRecon(); });
+  // whole dollars in this panel: it's read in meetings, cents only add noise
+  const usd = (v) => `$${Math.round(Math.abs(v || 0)).toLocaleString("en-US")}`;
+  const signed = (v) => `${v > 0.5 ? "+" : v < -0.5 ? "−" : ""}${usd(v)}`;
+
+  function balanceChart(r) {
+    const W = 860, H = 220, L = 70, R = 16, T = 14, B = 30;
+    const a = r.ending.app, b = r.ending.b250.map((v) => v ?? null);
+    const vals = [...a, ...b.filter((v) => v != null)];
+    let lo = Math.min(0, ...vals), hi = Math.max(...vals);
+    const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+    const x = (i) => L + (i * (W - L - R)) / Math.max(1, a.length - 1);
+    const y = (v) => T + ((hi - v) * (H - T - B)) / (hi - lo);
+    const path = (arr) => arr.map((v, i) => v == null ? "" : `${i === 0 || arr[i - 1] == null ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+    const ticks = 4, grid = [];
+    for (let t = 0; t <= ticks; t++) {
+      const v = lo + ((hi - lo) * t) / ticks;
+      grid.push(`<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="rgba(0,0,0,.07)"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="rgba(0,0,0,.45)">${(v / 1e6).toFixed(1)}M</text>`);
+    }
+    const labels = r.week_ends.map((w, i) => i % 2 === 0 ? `<text x="${x(i)}" y="${H - 10}" text-anchor="middle" font-size="11" fill="rgba(0,0,0,.45)">${+w.slice(5, 7)}/${+w.slice(8)}</text>` : "").join("");
+    const end = (arr, color, name) => { const i = arr.length - 1; return arr[i] == null ? "" : `<circle cx="${x(i)}" cy="${y(arr[i])}" r="4" fill="${color}"/><text x="${x(i) - 8}" y="${y(arr[i]) - 9}" text-anchor="end" font-size="12" font-weight="700" fill="${color}">${name} ${usd(arr[i])}</text>`; };
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img" aria-label="Ending cash by week, app vs B250">
+      ${grid.join("")}${lo < 0 ? `<line x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}" stroke="rgba(0,0,0,.35)"/>` : ""}${labels}
+      <path d="${path(b)}" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="6 4"/>
+      <path d="${path(a)}" fill="none" stroke="#1d4ed8" stroke-width="2.5"/>
+      ${end(a, "#1d4ed8", "App")}${end(b, "#b45309", "B250")}
+    </svg>`;
+  }
+
+  function renderRecon(r) {
+    if (!r.available) {
+      reconBody.innerHTML = `<div class="text-black/55">No copy of the B250 yet. It's read from Google Drive every night, or upload a copy on Data Review → Cash flow sources.</div>`;
+      return;
+    }
+    const wk = r.week_ends;
+    reconSub.textContent = `Weeks ending ${mdY(wk[0])} to ${mdY(wk[wk.length - 1])} (${wk.length} weeks) · B250 tab "${r.b250.tab}", ${r.b250.source === "upload" ? "uploaded copy" : "read from Drive"} ${fmtWhen(r.b250.loaded_at)}${r.b250.weeks_skipped ? ` · the B250's first ${r.b250.weeks_skipped === 1 ? "week has" : r.b250.weeks_skipped + " weeks have"} already passed, so the comparison starts at the app's week 1` : ""}`;
+    const t = r.totals;
+    const head = (label, bv, av, sub = "") => `<div class="rounded-xl border border-black/10 p-3">
+      <div class="text-[11px] font-semibold uppercase tracking-wide text-black/45">${label}</div>
+      <div class="grid grid-cols-2 gap-2 mt-1 tabular-nums"><div><div class="text-[10px] text-black/40">B250</div><div class="font-bold">${bv == null ? "—" : usd(bv)}</div></div>
+        <div><div class="text-[10px] text-black/40">App</div><div class="font-bold">${usd(av)}</div></div></div>
+      <div class="text-[11px] mt-1 ${Math.abs(av - (bv || 0)) > 0.5 ? "text-black/60" : "text-emerald-700"}">Difference ${signed(av - (bv || 0))}${sub}</div></div>`;
+    const bridge = [
+      { label: "Opening cash", b250: r.opening.b250, app: r.opening.app, effect: r.opening.difference, why: r.opening.why, fix: r.opening.fix, key: "opening" },
+      ...r.groups.map((g) => ({ ...g, effect: g.cash_effect })),
+    ].sort((p, q) => Math.abs(q.effect) - Math.abs(p.effect));
+    const row = (g, i) => `<tr class="border-t border-black/[0.06] align-top">
+        <td class="py-2 pr-3"><details><summary class="cursor-pointer font-semibold text-ink-900">${escapeHtml(g.label)}${g.direction ? ` <span class="text-[10px] font-normal text-black/40">${g.direction === "in" ? "cash in" : "cash out"}</span>` : ""}</summary>
+          <div class="mt-1.5 text-[12.5px] text-black/65"><b class="text-black/75">Why:</b> ${escapeHtml(g.why)}</div>
+          <div class="mt-1 text-[12.5px] text-black/65"><b class="text-black/75">Fix:</b> ${escapeHtml(g.fix)}</div></details></td>
+        <td class="py-2 px-2 text-right tabular-nums whitespace-nowrap">${g.b250 == null ? "—" : usd(g.b250)}</td>
+        <td class="py-2 px-2 text-right tabular-nums whitespace-nowrap">${usd(g.app)}</td>
+        <td class="py-2 pl-2 text-right tabular-nums whitespace-nowrap font-bold ${g.effect > 0.5 ? "text-emerald-700" : g.effect < -0.5 ? "text-red-600" : "text-black/40"}">${signed(g.effect)}</td></tr>`;
+    const fixes = bridge.filter((g) => Math.abs(g.effect) > 1000 || g.key === "cards");
+    reconBody.innerHTML = `
+      <p class="text-black/70" style="max-width:52rem">By week ${wk.length} the app ends <b>${signed(r.gap)}</b> ${r.gap >= 0 ? "above" : "below"} the B250. The opening balance accounts for <b>${signed(r.opening.difference)}</b> of that; the rest comes from the lines below. ${Math.abs(r.b250_formula_gap) > 0.5 ? `The last <b>${usd(Math.abs(r.b250_formula_gap))}</b> is a formula error inside the B250: its totals don't add up to its own lines.` : ""}</p>
+      <div class="grid gap-2 mt-3" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+        ${head("Opening cash", r.opening.b250, r.opening.app)}
+        ${head(`Cash in, ${wk.length} weeks`, t.b250_in, t.app_in)}
+        ${head(`Cash out, ${wk.length} weeks`, t.b250_out, t.app_out)}
+        ${head(`Ending cash, week ${wk.length}`, t.b250_end, t.app_end)}
+      </div>
+      <div class="mt-4">
+        <div class="flex flex-wrap items-center gap-4 text-[11px] text-black/55"><b class="text-black/70 text-xs">Ending cash by week</b>
+          <span class="inline-flex items-center gap-1.5"><span class="inline-block" style="width:18px;height:3px;background:#1d4ed8"></span>App</span>
+          <span class="inline-flex items-center gap-1.5"><span class="inline-block" style="width:18px;height:0;border-top:3px dashed #b45309"></span>B250</span></div>
+        ${balanceChart(r)}
+      </div>
+      <h3 class="text-sm font-bold mt-4">What makes up the ${usd(Math.abs(r.gap))} difference</h3>
+      <div class="text-[11.5px] text-black/50">Largest first. "Effect" is how each line moves the app's ending cash compared with the B250: more cash in or less cash out shows as +. Click a line for why it differs and what fixes it.</div>
+      <div class="overflow-x-auto mt-1"><table class="w-full text-sm">
+        <thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
+          <th class="py-2 pr-3 text-left">Line</th><th class="py-2 px-2 text-right">B250</th><th class="py-2 px-2 text-right">App</th><th class="py-2 pl-2 text-right">Effect on ending cash</th></tr></thead>
+        <tbody>${bridge.map(row).join("")}
+          ${Math.abs(r.b250_formula_gap) > 0.5 ? `<tr class="border-t border-black/[0.06]"><td class="py-2 pr-3"><details><summary class="cursor-pointer font-semibold text-ink-900">B250 formula error</summary><div class="mt-1.5 text-[12.5px] text-black/65">The B250's weekly "Cash Inflow" total (row 10) starts at row 13 and skips the AARS row 12, so its ending balance is lower than its own lines add up to. Fix: start the SUM at row 12 (S1).</div></details></td>
+            <td></td><td></td><td class="py-2 pl-2 text-right tabular-nums font-bold ${r.b250_formula_gap > 0 ? "text-emerald-700" : "text-red-600"}">${signed(r.b250_formula_gap)}</td></tr>` : ""}
+          <tr class="border-t-2 border-black/15 font-bold"><td class="py-2 pr-3">Total difference in week-${wk.length} ending cash</td><td></td><td></td>
+            <td class="py-2 pl-2 text-right tabular-nums">${signed(r.gap)}</td></tr>
+        </tbody></table></div>
+      <h3 class="text-sm font-bold mt-5">What needs to be addressed</h3>
+      <ol class="ml-5 mt-1 space-y-1.5 text-[13px] text-black/70" style="list-style:decimal">
+        ${fixes.map((g) => `<li><b class="text-ink-900">${escapeHtml(g.label)}</b> (${signed(g.effect)}): ${escapeHtml(g.fix)}</li>`).join("")}
+        <li><b class="text-ink-900">B250 formula</b>: start the inflow SUM on row 10 at row 12 (S1).</li>
+      </ol>
+      <div class="text-[12px] text-black/55 mt-2">${r.data_review_open != null ? `<b>${r.data_review_open}</b> open items on <a href="#/review" class="text-brand-700 font-semibold hover:underline">Data Review → Cash flow sources</a> list each difference line by line (invoice, crew, payday). ` : ""}The codes in brackets (B1, I4, C2…) match the "OPI Records Review" questions doc.</div>
+      <h3 class="text-sm font-bold mt-5">About the B151</h3>
+      <p class="text-[13px] text-black/70 mt-1" style="max-width:52rem">${escapeHtml(r.b151.summary)}</p>
+      <ul class="ml-5 mt-1 space-y-1 text-[13px] text-black/65" style="list-style:disc">${r.b151.differences.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}</ul>`;
+  }
+
+  document.getElementById("cfRecon").addEventListener("click", async () => {
+    reconModal.classList.remove("hidden"); reconModal.classList.add("flex");
+    reconSub.textContent = "";
+    reconBody.innerHTML = `<div class="text-black/50">Comparing the B250 with the forecast…</div>`;
+    try { renderRecon(await api("/cashflow/reconcile")); }
+    catch (e) { reconBody.innerHTML = `<div class="text-red-700">Couldn't build the comparison: ${escapeHtml(e?.message || String(e))}</div>`; }
+  });
+
   // (The old "Categories" exclusion modal was removed — the Overhead editor and
   //  the editable Recurring cash-outflow rows cover that need now.)
 
@@ -1012,7 +1178,9 @@ export async function cashflowPage(routeFn) {
     const ob = await api("/cashflow/opening-balance");
     if (ob.available) {
       if (!openingEl.value) openingEl.value = Math.round(ob.balance);
-      balSource.textContent = `Auto-filled from ${ob.included_count} QuickBooks bank account${ob.included_count === 1 ? "" : "s"} (see Opening balance source). Edit to override.`;
+      balSource.textContent = ob.source === "b250"
+        ? "Auto-filled from the bank balance on the B250 (see Opening balance source). Edit to override."
+        : `Auto-filled from ${ob.included_count} QuickBooks bank account${ob.included_count === 1 ? "" : "s"} (see Opening balance source). Edit to override.`;
       renderBank(ob);
     } else {
       balSource.textContent = "Sync the chart of accounts to auto-fill from your bank balance.";
