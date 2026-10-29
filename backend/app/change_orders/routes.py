@@ -151,6 +151,17 @@ def _build(conn, project_qbo_id):
     return items, rollup
 
 
+def pending_change_orders(conn, project_qbo_id):
+    """Change orders not approved yet (drafts in the app + estimates sent / pending
+    in QuickBooks), as the Change Orders tab shows them. Used by the Billing tab
+    and the Overview drill-down so pending work is visible where money is planned."""
+    items, _ = _build(conn, project_qbo_id)
+    return [{"co_number": i["co_number"], "title": i["title"], "reason": i["reason"], "status": i["status"],
+             "amount": i["amount"], "doc_number": i["doc_number"], "txn_date": i["txn_date"],
+             "source": i["source"], "kind": i["kind"]}
+            for i in items if i["status"] in ("draft", "sent")]
+
+
 def _auto_link_full_quotes(conn, project_qbo_id):
     """Phase-2 extension of the option-3 auto-link. Option 3's "links up
     automatically after the next sync" has always been a TAB-LOAD materialization

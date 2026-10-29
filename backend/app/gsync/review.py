@@ -587,7 +587,8 @@ def _optional_items(conn):
     import importlib
     out = []
     for mod, fn in (("app.gsync.review_docs", "docs_items"), ("app.billing.align", "ambiguous_items"),
-                    ("app.gsync.review_payments", "payment_items"), ("app.gsync.review_sources", "source_items")):
+                    ("app.gsync.review_payments", "payment_items"), ("app.gsync.review_sources", "source_items"),
+                    ("app.gsync.overrides", "items")):
         try:
             out += getattr(importlib.import_module(mod), fn)(conn)
         except Exception:
@@ -628,7 +629,7 @@ def build():
     return {"items": items,
             "counts": {c: {"open": counts[(c, "open")], "fixed": counts[(c, "fixed")], "ignored": counts[(c, "ignored")]}
                        for c in ("todo", "pipeline", "schedule", "sheets", "documents", "old_estimates", "billing",
-                                 "payments", "sources")},
+                                 "payments", "sources", "app_edits")},
             "meta": {**p_meta, **s_meta}}
 
 

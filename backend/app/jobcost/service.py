@@ -249,6 +249,25 @@ def job_detail(entity_id, cat):
             WHERE l.line_customer_qbo_id = :e AND t.entity_type IN ('Bill', 'Purchase')
             ORDER BY t.txn_date, t.id
         """), {"e": entity_id}).mappings().all()]
+        # pending change orders (Change Orders tab) + this category's cost on the QBO ones
+        try:
+            from app.change_orders.routes import pending_change_orders
+            pcos = pending_change_orders(conn, entity_id)
+        except Exception:
+            pcos = []
+        pend_cost = {}
+        for r in conn.execute(text("""
+            SELECT t.doc_number AS doc, l.item_name AS item,
+                   CASE WHEN l.item_name LIKE 'Contract Labor%' THEN COALESCE(l.cost_amount, l.amount)
+                        ELSE COALESCE(l.cost_amount, 0) END AS amount
+            FROM qbo_transactions t JOIN qbo_sales_transaction_lines l ON l.transaction_id = t.id AND l.line_level = 'child'
+            WHERE t.entity_type = 'Estimate' AND t.customer_qbo_id = :e
+              AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) = 'Pending'
+        """), {"e": entity_id}).mappings():
+            if category_of(r["item"]) == cat:
+                pend_cost[r["doc"]] = pend_cost.get(r["doc"], 0.0) + float(r["amount"] or 0)
+    pending = [{**c, "category_cost": round(pend_cost[c["doc_number"]], 2) if c.get("doc_number") in pend_cost else None}
+               for c in pcos]
     est_out = [{"doc": r["doc"], "item": r["item"], "description": r["description"],
                 "qty": float(r["qty"]) if r["qty"] is not None else None, "amount": float(r["amount"] or 0)}
                for r in est_lines if category_of(r["item"]) == cat and float(r["amount"] or 0) != 0]
@@ -256,4 +275,4 @@ def job_detail(entity_id, cat):
                 "vendor": r["vendor"] or "Unknown", "item": r["item"], "description": r["description"],
                 "amount": float(r["amount"] or 0)}
                for r in bills if category_of(r["item"]) == cat]
-    return {"estimate_lines": est_out, "actual_lines": act_out}
+    return {"estimate_lines": est_out, "actual_lines": act_out, "pending_change_orders": pending}

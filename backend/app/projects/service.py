@@ -1,5 +1,7 @@
 # projects/service.py
 # This file defines service functions for managing projects and assignments, including listing assignable projects, fetching project assignment bundles, saving project assignments, and listing project events. It uses SQLAlchemy for database interactions and includes validation and logging of changes.
+import json
+import re
 from sqlalchemy import text
 from app.db import engine
 from datetime import datetime, date
@@ -402,6 +404,33 @@ def _normalize_crew_entries(req, crews_map):
     return entries
 
 
+OVERRIDE_FIELDS = ("start_date", "end_date", "status", "overage_days", "travel_days", "wire_guidance",
+                   "equipment_type", "non_working", "crews", "project_managers")
+
+
+def _record_job_schedule_overrides(conn, qbo_customer_row_id, sid, actor_user_id, changes):
+    """0088: a person's edit to a line the nightly Job Schedule import manages is
+    kept (the import skips those fields) and listed on Data Review."""
+    from app.gsync import overrides as OV
+    from app.gsync.schedule_import import SYSTEM_EMAIL
+    actor = conn.execute(text("SELECT email FROM users WHERE id = :i"), {"i": actor_user_id}).scalar()
+    if not actor or actor == SYSTEM_EMAIL:
+        return
+    p = conn.execute(text("SELECT qbo_id, display_name FROM qbo_customers WHERE id = :i"),
+                     {"i": qbo_customer_row_id}).mappings().first()
+    job = (re.match(r"\s*(\d+)", (p or {}).get("display_name") or "") or [None, None])[1]
+    if not job or not conn.execute(text("SELECT 1 FROM gsync_schedule_days WHERE job = :j LIMIT 1"), {"j": job}).first():
+        return   # not on the Job Schedule: nothing would overwrite it
+    for f in OVERRIDE_FIELDS:
+        if f in changes:
+            old, new = changes[f]
+            field = "pms" if f == "project_managers" else f
+            OV.record(conn, OV.JOB, "project_schedule_items", sid, field,
+                      new if not isinstance(new, dict) else json.dumps(new, sort_keys=True),
+                      old if not isinstance(old, dict) else json.dumps(old, sort_keys=True),
+                      entity_id=p["qbo_id"], sheet_ref=f"job #{job}", user_email=actor)
+
+
 def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
     status = (req.status or "").strip()
     if status not in ALLOWED_STATUS:
@@ -698,6 +727,7 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
             record_item_history(conn, sid, "created", actor_user_id, changes or None)
         elif changes:  # a no-op save records nothing
             record_item_history(conn, sid, "updated", actor_user_id, changes)
+            _record_job_schedule_overrides(conn, int(req.qbo_customer_id), sid, actor_user_id, changes)
 
     # 0087: planned invoices (Mobilization at start, Final at end) follow the new dates
     if is_create or item_changed:

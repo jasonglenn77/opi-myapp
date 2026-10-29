@@ -201,7 +201,7 @@ export async function moneyPage(routeFn) {
     const planned = d.planned.filter(keep), actual = d.actual.filter(keep);
     const pms = [...new Set(Object.values(d.projects).map((p) => p.pm).filter(Boolean))].sort();
     const seg = (key, opts) => `<div class="inline-flex rounded-lg border border-black/10 overflow-hidden text-xs">${opts.map(([v, l]) =>
-      `<button data-${key}="${v}" class="px-3 py-1.5 font-semibold ${st[key] === v ? "bg-ink-900 text-white" : "bg-white text-black/60 hover:bg-black/[0.04]"}">${l}</button>`).join("")}</div>`;
+      `<button data-${key}="${v}" class="px-3 py-1.5 font-semibold ${st[key] === v ? "bg-ink-900 text-white" : "bg-white text-black/60 hover:bg-slate-200 hover:text-ink-900"}">${l}</button>`).join("")}</div>`;
     root.innerHTML = `<div class="grid gap-4" style="grid-template-columns:minmax(0,1fr)">
       <div class="flex flex-wrap items-center gap-2">
         ${seg("kind", [["both", "Crew + expenses"], ["crew", "Crew pay"], ["expense", "Expenses"]])}

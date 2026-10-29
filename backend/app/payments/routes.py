@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.db import engine
+from app.gsync import overrides as OV
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS
 
@@ -358,10 +359,34 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
         return {"ok": True}
     sets.append("edited=1")
     with engine.begin() as conn:
+        old = _sheet_row(conn, inst_id)
         n = conn.execute(text(f"UPDATE project_payment_installments SET {', '.join(sets)} WHERE id=:id"), params).rowcount
+        if old:   # 0088: a change to a value read from the Drive Payment Schedule is kept + listed on Data Review
+            new = {"pay_date": params.get("pd"), "send_invoice_date": params.get("inv"), "amount": params.get("amt")}
+            for f, v in new.items():
+                if f in ("pay_date", "send_invoice_date", "amount") and (
+                        (f == "pay_date" and body.pay_date is not None) or (f == "send_invoice_date" and body.send_invoice_date is not None)
+                        or (f == "amount" and body.amount is not None)):
+                    OV.record(conn, OV.PAYMENT, "project_payment_installments", inst_id, f, v, old[f],
+                              user_email=user.get("email"), **_ov_ctx(old))
     if not n:
         raise HTTPException(status_code=404, detail="Installment not found")
     return {"ok": True}
+
+
+def _sheet_row(conn, inst_id):
+    """The installment + its schedule's Drive file, when the row came from a Payment Schedule sheet."""
+    r = conn.execute(text("""SELECT i.id, i.seq, i.pay_date, i.amount, i.send_invoice_date, i.source,
+                                    s.id AS schedule_id, s.entity_id, s.source AS s_source, s.source_file_id, s.source_file_name
+                             FROM project_payment_installments i JOIN project_payment_schedules s ON s.id = i.schedule_id
+                             WHERE i.id = :id"""), {"id": inst_id}).mappings().first()
+    return dict(r) if r and r["source"] == "sheet" and r["s_source"] == "sheet" else None
+
+
+def _ov_ctx(r, seq=None):
+    seq = r.get("seq") if seq is None else seq
+    return {"entity_id": r["entity_id"], "file_id": r["source_file_id"], "file_name": r["source_file_name"],
+            "sheet_ref": f"payment #{seq}" if seq else None}
 
 
 @router.post("/schedule/{sid}/installment")
@@ -372,11 +397,18 @@ def add_installment(sid: int, body: InstallmentBody, user=Depends(get_current_us
             raise HTTPException(status_code=404, detail="Schedule not found")
         nxt = conn.execute(text("SELECT COALESCE(MAX(seq),0)+1 FROM project_payment_installments WHERE schedule_id=:sid"),
                            {"sid": sid}).scalar()
-        conn.execute(text("""INSERT INTO project_payment_installments
+        new_id = conn.execute(text("""INSERT INTO project_payment_installments
                              (schedule_id, seq, pay_date, amount, send_invoice_date, status, note)
                              VALUES (:sid,:seq,:pd,:amt,:inv,'pending',:nt)"""),
                      {"sid": sid, "seq": nxt, "pd": _parse_d(body.pay_date),
-                      "amt": body.amount or 0, "inv": _parse_d(body.send_invoice_date), "nt": body.note})
+                      "amt": body.amount or 0, "inv": _parse_d(body.send_invoice_date), "nt": body.note}).lastrowid
+        s = conn.execute(text("SELECT entity_id, source, source_file_id, source_file_name FROM project_payment_schedules WHERE id=:sid"),
+                         {"sid": sid}).mappings().first()
+        if s and s["source"] == "sheet":   # 0088: a row added to a Drive-backed schedule
+            OV.record(conn, OV.PAYMENT, "project_payment_installments", new_id, "added",
+                      "new payment (date and amount to be set)" if not body.pay_date else f"{body.pay_date} ${float(body.amount or 0):,.0f}",
+                      None, user_email=user.get("email"), entity_id=s["entity_id"], file_id=s["source_file_id"],
+                      file_name=s["source_file_name"], sheet_ref=None)
     return {"ok": True}
 
 
@@ -384,5 +416,12 @@ def add_installment(sid: int, body: InstallmentBody, user=Depends(get_current_us
 def delete_installment(inst_id: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
+        old = _sheet_row(conn, inst_id)
         conn.execute(text("DELETE FROM project_payment_installments WHERE id=:id"), {"id": inst_id})
+        if old:   # 0088: the import would put a Drive row back; remember it was removed in the app
+            OV.record(conn, OV.PAYMENT, "project_payment_schedules", old["schedule_id"], f"deleted:{old['seq']}", None,
+                      f"{old['pay_date']} ${float(old['amount'] or 0):,.0f}", user_email=user.get("email"), **_ov_ctx(old))
+        conn.execute(text("""UPDATE app_overrides SET resolved_at = NOW(), resolved_how = 'row_deleted'
+                             WHERE target_table = 'project_payment_installments' AND target_id = :id AND resolved_at IS NULL"""),
+                     {"id": inst_id})
     return {"ok": True}

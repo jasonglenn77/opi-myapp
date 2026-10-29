@@ -15,15 +15,18 @@ import { openDocViewer } from "../utils/doc-viewer.js";
 const CATS = [
   { key: "todo", label: "To-do", blurb: "100% Won quotes that still need a project in QuickBooks." },
   { key: "pipeline", label: "Pipeline", blurb: "The B151 vs QuickBooks estimates. The Pipeline page follows the B151, so most fixes go in the B151 or QuickBooks." },
-  { key: "schedule", label: "Schedule", blurb: "The Job Schedule sheet vs each project's Assignment (dates, crews, PM, status). Assignments update from the sheet every night, so most fixes go in the Job Schedule." },
+  { key: "schedule", label: "Schedule", blurb: "The Job Schedule sheet vs each project's Assignment (dates, crews, PM, status). Assignments update from the sheet every night (except values someone changed in the app: see App changes not in Drive), so most fixes go in the Job Schedule." },
   { key: "sheets", label: "B151 vs Job Schedule", blurb: "The two Google sheets against each other: jobs scheduled but not Won on the B151, Won jobs starting soon that aren't scheduled, and B151 dates that don't match the Job Schedule." },
   { key: "documents", label: "Documents", blurb: "Google Drive Customers folders vs the app: folders that couldn't be matched to a project or quote (their files are copied and waiting to be linked), projects with no Drive folder, files removed in Drive (the app keeps its copies), the weekly Drive-vs-app check, and copy errors.", optional: true },
   { key: "old_estimates", label: "Old estimate folders", blurb: "Drive folders whose job # matches only a QuickBooks estimate — mostly 2023–24 jobs that never became a project or Pipeline quote. Their files are copied and kept in the holding area. Grouped by the estimate's year, sorted by customer. Link one if the job did become a project or quote under another number; otherwise Ignore it (the files stay in the holding area).", optional: true },
   { key: "billing", label: "Billing", blurb: "Invoice schedules that couldn't be lined up with the actual QuickBooks invoices automatically.", optional: true },
-  { key: "payments", label: "Crew payments", blurb: "The crew \"Payment Schedule\" files in each project's Drive folder. The app's crew payment schedules update from them every night (the sheet wins); these are the files it couldn't match or map, and where a sheet, QuickBooks and the Job Schedule disagree. Most fixes go in the sheet.", optional: true },
+  { key: "payments", label: "Crew payments", blurb: "The crew \"Payment Schedule\" files in each project's Drive folder. The app's crew payment schedules update from them every night (the sheet wins, except values someone changed in the app: see App changes not in Drive); these are the files it couldn't match or map, and where a sheet, QuickBooks and the Job Schedule disagree. Most fixes go in the sheet.", optional: true },
+  { key: "app_edits", label: "App changes not in Drive", blurb: "Values someone changed in the app that came from a Google Drive file (crew Payment Schedules, the Job Schedule). The app keeps the change: the nightly import no longer writes over it. Each item says which file, which row and what to change there; it clears itself once the file matches. Or click \"Use Drive's value\" to undo the app change.", optional: true },
   { key: "sources", label: "Cash flow sources", blurb: "Where each number on OPI's B250 cash-flow sheet comes from. The app's Cash Flow takes bank, invoices and bills from QuickBooks and crew pay from the Payment Schedules; lines with no system of record keep the B250's value and are listed here as \"Unsourced\". Also: B250 rows QuickBooks doesn't back up, and gaps in the QuickBooks books." },
 ];
 const TYPES = {
+  payment_schedule_edit: "Crew payment changed in the app, not in the Payment Schedule",
+  job_schedule_edit: "Assignment changed in the app, not on the Job Schedule",
   create_qbo_project: "Create the QuickBooks project",
   accepted_not_won: "Accepted in QuickBooks, not Won on the B151",
   recurring_estimate: "Recurring estimate in QuickBooks",
@@ -246,6 +249,7 @@ export async function reviewPage(routeFn) {
           ${i.ref && i.ref.drive_unmatched_id ? `<button type="button" class="rv-btn rv-btn-go" data-drivelink title="Pick the project or quote this Google Drive folder belongs to — its files (already copied) move there">Link folder…</button>` : ""}
           ${i.ref && i.ref.file_id ? `<button type="button" class="rv-btn" data-viewsheet title="View the Payment Schedule here (read live from Google Drive)">Sheet</button>`
             : i.ref && i.ref.sheet_url ? `<a class="rv-btn" href="${escapeHtml(i.ref.sheet_url)}" target="_blank" rel="noopener" title="Open the Payment Schedule in Google Drive">Sheet</a>` : ""}
+          ${i.ref && i.ref.override_id && !done ? `<button type="button" class="rv-btn" data-release="${i.ref.override_id}" title="Undo the app change and use the value in the Google Drive file">Use Drive's value</button>` : ""}
           ${i.link ? `<a class="rv-btn" href="${escapeHtml(i.link)}" title="Go to the record in the app to fix it">Open</a>` : ""}
           ${done ? `<button type="button" class="rv-btn" data-act="open" title="Put this item back on the open list">Reopen</button>`
                  : `<button type="button" class="rv-btn rv-btn-go" data-act="fixed" title="${escapeHtml(TIP_FIXED)}">Fixed</button><button type="button" class="rv-btn" data-act="ignored" title="${escapeHtml(TIP_IGNORE)}">Ignore</button>`}
@@ -296,6 +300,15 @@ export async function reviewPage(routeFn) {
     if (t.closest("[data-refresh]")) { refreshFromGoogle(); return; }
     const more = t.closest("[data-more]");
     if (more) { st.showAll.add(more.dataset.more); render(); return; }
+    const rl = t.closest("[data-release]");
+    if (rl) {
+      if (!confirm("Undo the change made in the app and use the value in the Google Drive file?")) return;
+      rl.disabled = true;
+      api(`/review/overrides/${rl.dataset.release}/release`, { method: "POST" })
+        .then((r) => { alert(r.applied_now ? "Done: the app now uses the Drive file's value." : "Done: the next Job Schedule import (nightly, or Refresh from Google) applies the file's value."); load(true); })
+        .catch((e) => { rl.disabled = false; alert(`Failed: ${e?.message || e}`); });
+      return;
+    }
     const vs = t.closest("[data-viewsheet]");
     if (vs) {
       const it = st.data.items.find((x) => x.key === vs.closest("[data-key]").dataset.key);

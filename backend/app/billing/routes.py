@@ -566,6 +566,14 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
                    "iv": pd[0] if pd else None, "du": pd[1] if pd else None, "x": pd[2] if pd else None})
 
 
+def _pending_cos(conn, entity_id):
+    try:
+        from app.change_orders.routes import pending_change_orders
+        return pending_change_orders(conn, entity_id)
+    except Exception:
+        return []
+
+
 def _align_invoice_schedules(conn, entity_id):
     """Best-effort: align this project's schedules to its actual QBO invoices
     (billing/align.py) inside a savepoint, so a failure never breaks the tab.
@@ -740,6 +748,7 @@ def _compose_estimates(conn, entity_id):
     rel = retainage_release(conn, [entity_id]).get(str(entity_id)) if ret_invs else None
     return {
         "accepted": accepted, "pending": pending, "needs_review": needs_review,
+        "pending_cos": _pending_cos(conn, entity_id),
         "retainage": {"held": round(sum(x["held"] for x in ret_invs), 2), "invoices": ret_invs,
                       "release_expected": rel.isoformat() if rel else None},
         "invoiced_qbo": round(invoiced, 2), "collected": collected, "open_ar": round(open_ar, 2),

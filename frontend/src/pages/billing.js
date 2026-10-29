@@ -500,12 +500,26 @@ function render(container, entityId, d) {
     </details>`;
   };
 
-  // ── pending tray (bottom) ──
-  const pendingTray = est.pending.length ? `
-    <div class="card p-4 border-dashed">
-      <div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 mb-2">Pending estimates — not yet billing</div>
-      ${est.pending.map((e) => `<div class="flex items-center gap-2 py-1 text-[12.5px] border-b border-black/[0.05] last:border-0"><span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">Pending</span> Estimate <b class="text-blue-700">#${escapeHtml(e.doc || "—")}</b><span class="ml-auto tabular-nums">${money(e.value)}</span></div>`).join("")}
-      <div class="text-[11px] text-black/40 mt-1.5">Becomes its own billing section automatically when accepted/converted in QuickBooks.</div>
+  // ── pending change orders (bottom of the invoice section) ──
+  // From the Change Orders tab (app drafts + estimates sent/pending in QBO);
+  // falls back to the QBO pending estimates when the CO list isn't available.
+  const pcos = est.pending_cos || est.pending.map((e) => ({ doc_number: e.doc, amount: e.value, status: "sent", source: "qbo", kind: "change_order" }));
+  const pcoTotal = pcos.reduce((s, c) => s + (c.amount || 0), 0);
+  const pendingTray = pcos.length ? `
+    <div class="rounded-xl border border-dashed border-amber-300 mt-1" style="background:rgba(255,251,235,.55)">
+      <div class="flex items-center gap-2 px-4 py-2.5 flex-wrap">
+        <span class="text-[10.5px] font-bold uppercase tracking-wide text-amber-800">Pending change orders: not billing yet</span>
+        <a href="#" data-goto-cos class="text-[11px] font-semibold text-blue-600 hover:underline">Change Orders tab →</a>
+        <span class="ml-auto tabular-nums text-[12.5px] font-bold text-ink-900">${money(pcoTotal)}</span>
+      </div>
+      ${pcos.map((c) => `<div class="flex items-center gap-2 px-4 py-1.5 text-[12.5px] flex-wrap" style="border-top:1px solid rgba(253,230,138,.7)">
+        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${c.status === "draft" ? "bg-slate-100 text-slate-600 border border-slate-300" : "bg-amber-50 text-amber-700 border border-amber-200"}">${c.status === "draft" ? "Draft (app)" : "Sent · awaiting approval"}</span>
+        <span class="font-semibold text-ink-900">${c.kind === "change_order" && c.co_number ? `CO ${c.co_number}` : "Estimate"}${c.doc_number ? ` <span class="text-blue-700">#${escapeHtml(c.doc_number)}</span>` : ""}</span>
+        ${c.title ? `<span class="text-black/60">${escapeHtml(c.title)}</span>` : ""}
+        ${c.txn_date ? `<span class="text-black/40 text-[11px]">${shortDate(c.txn_date)}</span>` : ""}
+        <span class="ml-auto tabular-nums font-semibold">${money(c.amount)}</span>
+      </div>`).join("")}
+      <div class="px-4 py-2 text-[11px] text-black/45" style="border-top:1px solid rgba(253,230,138,.7)">Not in the invoice schedule or the cash-flow forecast. Once it's accepted in QuickBooks it gets its own invoice schedule here automatically.</div>
     </div>` : "";
 
   const contribHtml = buildContribution(inv, crew, exp);
@@ -567,6 +581,7 @@ function render(container, entityId, d) {
         <div class="p-3">
           ${retainageBlock}
           ${est.accepted.map(invEstimateCard).join("") || `<div class="p-4 text-sm text-black/45">No accepted estimates yet.</div>`}
+          ${pendingTray}
         </div>
       </details>
 
@@ -597,7 +612,6 @@ function render(container, entityId, d) {
         ${(exp.by_category && exp.by_category.length) ? exp.by_category.map(expenseCat).join("") : `<div class="px-4 py-4 text-[12.5px] text-black/45">No estimate cost lines to plan from.</div>`}
       </details>
 
-      ${pendingTray}
       ${contribHtml}
     </div>`;
 
@@ -696,6 +710,11 @@ function render(container, entityId, d) {
       ab.disabled = true; ab.textContent = "Balancing…";
       try { await api(`/invoices/schedule/${ab.getAttribute("data-autobal")}/auto-balance`, { method: "POST" }); await reload(); }
       catch (err) { ab.disabled = false; ab.textContent = "Balance automatically"; alert("Failed: " + (err?.message || "error")); }
+      return;
+    }
+    if (e.target.closest("[data-goto-cos]")) {
+      e.preventDefault();
+      document.querySelector('#tabBar [data-tab="changeorders"]')?.click();
       return;
     }
     const ad = e.target.closest("[data-autodates]");

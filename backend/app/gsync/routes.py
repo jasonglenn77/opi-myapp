@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.audit import record_audit
 from app.auth import get_current_user
 from app.permissions import has_capability, PAGE_CUSTOMERS, PAGE_ESTIMATE, PAGE_ASSIGNMENT
 from . import b250_cash, review, run
@@ -81,6 +82,17 @@ def set_state(body: StateIn, user=Depends(get_current_user)):
             if it["key"] == body.key:
                 it["state"], it["note"], it["state_by"] = body.status, body.note, user.get("email")
     return {"ok": True}
+
+
+@router.post("/overrides/{override_id}/release")
+def release_override(override_id: int, user=Depends(get_current_user)):
+    """'Use Drive's value' on an App changes not in Drive item (0088)."""
+    _require(user)
+    from . import overrides
+    res = overrides.release(override_id, user.get("email"))
+    record_audit(user, "data_review.use_drive_value", "app_override", override_id, None, res)
+    _cache["data"] = None
+    return res
 
 
 @router.post("/refresh")

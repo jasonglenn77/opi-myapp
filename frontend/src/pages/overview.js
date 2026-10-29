@@ -188,12 +188,29 @@ export async function overviewPage(routeFn) {
       ${list("Recorded in QuickBooks", d.actual_lines, (r) => `<tr class="border-t border-black/[0.05]">
         <td class="py-1 pr-2 text-black/50 tabular-nums whitespace-nowrap">${day(r.date)}</td><td class="py-1 pr-2">${escapeHtml(r.vendor)} <span class="text-black/40">${r.type}${r.doc ? ` #${escapeHtml(r.doc)}` : ""}</span></td>
         <td class="py-1 text-right tabular-nums">${fmtMoney(r.amount)}</td></tr>`)}
+      ${pendingCos(d.pending_change_orders || [], jcat, jid)}
     </div>`;
+  }
+
+  // Change orders not approved yet (Change Orders tab): not in the estimate above
+  // until accepted, so the job's budget may grow by this much.
+  function pendingCos(rows, jcat, jid) {
+    if (!rows.length) return "";
+    const total = rows.reduce((a, r) => a + (r.amount || 0), 0);
+    const catTotal = rows.reduce((a, r) => a + (r.category_cost || 0), 0);
+    return `<div class="min-w-0 rounded-lg p-2" style="grid-column:1/-1;background:#fffbeb;border:1px dashed #fcd34d">
+      <div class="text-[11px] uppercase tracking-wide text-amber-800 mb-1">Pending change orders · ${fmtMoney(total)} contract${catTotal ? ` · ${fmtMoney(catTotal)} ${escapeHtml(jcat.toLowerCase())} cost` : ""} · not in the estimate yet
+        <a href="#/entity/project/${encodeURIComponent(jid)}?tab=changeorders" class="ml-2 normal-case tracking-normal font-semibold text-blue-600 hover:underline">Change Orders →</a></div>
+      <table class="w-full text-xs"><tbody>${rows.map((r) => `<tr class="border-t border-black/[0.05]">
+        <td class="py-1 pr-2 whitespace-nowrap"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${r.status === "draft" ? "bg-slate-100 text-slate-600" : "bg-amber-50 text-amber-700"}">${r.status === "draft" ? "Draft (app)" : "Sent"}</span></td>
+        <td class="py-1 pr-2">${r.kind === "change_order" && r.co_number ? `CO ${r.co_number}` : "Estimate"}${r.doc_number ? ` <span class="text-black/50">#${escapeHtml(r.doc_number)}</span>` : ""}${r.title ? ` <span class="text-black/60">${escapeHtml(r.title)}</span>` : ""}</td>
+        <td class="py-1 pr-2 text-right tabular-nums text-black/55">${r.category_cost != null ? `${fmtMoney(r.category_cost)} ${escapeHtml(jcat.toLowerCase())}` : ""}</td>
+        <td class="py-1 text-right tabular-nums font-semibold">${fmtMoney(r.amount)}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   function render() {
     const seg = (items) => `<div class="inline-flex rounded-lg border border-black/10 overflow-hidden text-xs">${items.map(([attr, v, l, on]) =>
-      `<button ${attr}="${v}" class="px-3 py-1.5 font-semibold ${on ? "bg-ink-900 text-white" : "bg-white text-black/60 hover:bg-black/[0.04]"}">${l}</button>`).join("")}</div>`;
+      `<button ${attr}="${v}" class="px-3 py-1.5 font-semibold ${on ? "bg-ink-900 text-white" : "bg-white text-black/60 hover:bg-slate-200 hover:text-ink-900"}">${l}</button>`).join("")}</div>`;
     const s = st.sum;
     root.innerHTML = `
       ${tiles()}

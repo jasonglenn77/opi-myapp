@@ -935,10 +935,35 @@ def _sync_rows(conn, sid, d, hold, holds_map, eid, do_apply, covered=False):
         SELECT id, seq, pay_date, amount, send_invoice_date, status, note, edited, source, sheet_paid,
                paid_source, qbo_txn_id FROM project_payment_installments WHERE schedule_id = :s ORDER BY seq, id"""),
         {"s": sid}).mappings()]
+    # 0088: changes made in the app win over the sheet (gsync/overrides.py):
+    # rows added in the app are kept as they are, sheet rows removed in the app
+    # stay removed, and edited fields keep the app's value - each listed on
+    # Data Review until the sheet says the same.
+    from . import overrides as OV
+    ov_rows = OV.open_for(conn, "project_payment_installments", [r["id"] for r in existing])
+    added = [r for r in existing if "added" in ov_rows.get(r["id"], {})]
+    existing = [r for r in existing if r not in added]
+    deleted = {f.split(":", 1)[1]: ov for f, ov in (OV.open_for(conn, "project_payment_schedules", [sid]).get(sid) or {}).items()
+               if f.startswith("deleted:")} if sid else {}
+    rows = []
+    for r in d["rows"]:
+        ov = deleted.pop(str(r["seq"]), None)
+        if ov:   # the sheet still has the row someone removed in the app: keep it removed
+            OV.keep_app(conn, ov, f"{r['pay_date']} ${float(r['amount'] or 0):,.0f}", do_apply, sheet_ref=f"payment #{r['seq']}")
+            continue
+        rows.append(r)
+    for ov in deleted.values():   # the sheet no longer has that row: resolved
+        OV.keep_app(conn, ov, None, do_apply)
+    for a in added:               # the sheet now has the row the app added: drop the app's copy
+        twin = next((r for r in rows if r["pay_date"] and a["pay_date"] and abs((_d(r["pay_date"]) - _d(a["pay_date"])).days) <= 3
+                     and abs(float(r["amount"]) - float(a["amount"] or 0)) < 1), None)
+        if twin and do_apply:
+            conn.execute(text("DELETE FROM project_payment_installments WHERE id = :id"), {"id": a["id"]})
+            OV.keep_app(conn, ov_rows[a["id"]]["added"], ov_rows[a["id"]]["added"]["app_value"], do_apply)
     # app-marked paid rows (by hand, not by this import) stay paid
     app_paid = [r for r in existing if (r["status"] or "") == "paid" and (r["paid_source"] in (None, "app"))]
     changes = []
-    for i, r in enumerate(d["rows"]):
+    for i, r in enumerate(rows):
         ex = existing[i] if i < len(existing) else None
         pay = _d(r["pay_date"])
         hand = next((a for a in app_paid if a["pay_date"] and pay and abs((a["pay_date"] - pay).days) <= 3
@@ -960,6 +985,9 @@ def _sync_rows(conn, sid, d, hold, holds_map, eid, do_apply, covered=False):
                 "note": r["note"], "edited": 1, "source": "sheet", "sheet_paid": r["sheet_paid"],
                 "paid_source": psrc, "qbo_txn_id": r["qbo_txn_id"]}
         if ex:
+            for f, ov in (ov_rows.get(ex["id"]) or {}).items():
+                if f in want and OV.keep_app(conn, ov, want[f], do_apply, sheet_ref=f"payment #{r['seq']}"):
+                    want[f] = ex[f]   # keep the app's value
             diff = {k: v for k, v in want.items()
                     if not (_num_eq(ex[k], v) if k == "amount" else (ex[k] if k not in ("pay_date", "send_invoice_date")
                                                                       else _d(ex[k])) == v)}
@@ -979,7 +1007,7 @@ def _sync_rows(conn, sid, d, hold, holds_map, eid, do_apply, covered=False):
                      paid_source, qbo_txn_id)
                     VALUES (:sid, :seq, :pay_date, :amount, :send_invoice_date, :status, :note, 1, 'sheet', :sheet_paid,
                      :paid_source, :qbo_txn_id)"""), {"sid": sid, **want})
-    for ex in existing[len(d["rows"]):]:
+    for ex in existing[len(rows):]:
         changes.append({"row": ex["seq"], "id": ex["id"], "deleted": {"pay_date": _iso(ex["pay_date"]),
                                                                        "amount": float(ex["amount"]), "status": ex["status"]}})
         if do_apply:

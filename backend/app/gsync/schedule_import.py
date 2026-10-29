@@ -366,6 +366,49 @@ def _diff(it, tgt, slot_label):
     return ch
 
 
+def _jv(v):
+    """Comparable text for a line value (dicts as sorted JSON)."""
+    from .overrides import norm
+    return json.dumps(v, sort_keys=True) if isinstance(v, dict) else norm(v)
+
+
+def _apply_overrides(ovs, it, tgt, slot_label, pm_name, today, job, checks):
+    """0088: fields a person changed in the app keep the app's value; each check
+    (what the sheet says now, or resolved) is written by apply()."""
+    cur = _current(it)
+    ref = f"job #{job}, Job Schedule {tgt['start_date']} to {tgt['end_date']}"
+    for f, ov in ovs.items():
+        if f == "crews":
+            if tgt["crew_entries"] is None:
+                continue
+            app_v = _jv(sorted(slot_label(c) for c in it["crews"]))
+            sheet_v = _jv(sorted(slot_label(c) for c in tgt["crew_entries"]))
+            keep = app_v != sheet_v
+            if keep:
+                tgt["crew_entries"] = None          # leave the line's crews alone
+        elif f == "pms":
+            app_ids = [p["project_manager_id"] for p in it["pms"]]
+            app_pri = next((p["project_manager_id"] for p in it["pms"] if p["is_primary"]), None)
+            app_v = _jv(sorted(pm_name.get(i, str(i)) for i in app_ids))
+            sheet_v = _jv(sorted(pm_name.get(i, str(i)) for i in tgt["pm_ids"]))
+            keep = app_v != sheet_v or app_pri != tgt["primary_pm"]
+            if keep:
+                tgt["pm_ids"], tgt["primary_pm"] = app_ids, app_pri
+        elif f in cur:
+            app_v, sheet_v = _jv(cur[f]), _jv(tgt[f])
+            keep = sheet_v != app_v
+            if keep:
+                tgt[f] = cur[f]
+        else:
+            continue
+        checks.append({"ov": ov, "sheet": sheet_v, "app": app_v, "keep": keep, "ref": ref})
+    # dates kept from the app: the status follows those dates, not the sheet's
+    if any(f in ovs for f in ("start_date", "end_date", "overage_days")) and "status" not in ovs and tgt["start_date"]:
+        st = date.fromisoformat(tgt["start_date"])
+        en = date.fromisoformat(tgt["end_date"] or tgt["start_date"]) + timedelta(days=int(tgt["overage_days"] or 0))
+        tgt["status"] = _status(it, st, en, today)
+
+
 # ── plan / apply ─────────────────────────────────────────────────────────────
 
 def plan(conn, today=None):
@@ -389,6 +432,9 @@ def plan(conn, today=None):
     pm_ids = {r["first_name"]: int(r["id"]) for r in conn.execute(text(
         "SELECT id, first_name FROM project_managers WHERE is_active = 1")).mappings()}
     notes = {"unknown_crews": collections.Counter()}
+    from .overrides import open_for
+    pm_name = {v: k for k, v in pm_ids.items()}
+    checks = []
 
     def slot_label(c):
         return c.get("slot_code") or (crews_map.get(c["company_id"]) or {}).get("code") or "?"
@@ -419,6 +465,7 @@ def plan(conn, today=None):
         items = _items(conn, proj["project_id"]) if proj["project_id"] else []
         pairs = _match(visits, items, win)
         by_id = {it["id"]: it for it in items}
+        ovs = open_for(conn, "project_schedule_items", list(by_id))
         matched = set(pairs.values())
         siblings_done = set()
         for vi, v in enumerate(visits):
@@ -433,6 +480,8 @@ def plan(conn, today=None):
                     and x["start_date"] <= v["last"] and (x["eend"] or x["start_date"]) >= v["first"]]
             claimed = {(c["company_id"], (_slot(c["slot_code"] or "") or ("", ""))[1]) for x in sibs for c in x["crews"]}
             tgt = _target(v, it, crews_map, company_by_code, pm_ids, today, notes, claimed)
+            if it and ovs.get(it["id"]):
+                _apply_overrides(ovs[it["id"]], it, tgt, slot_label, pm_name, today, job, checks)
             ch = _diff(it, tgt, slot_label)
             if ch:
                 changes.append({"job": job, "project": proj["display_name"], "qbo_customer_id": proj["qbo_customer_id"],
@@ -450,7 +499,7 @@ def plan(conn, today=None):
                     changes.append({"job": job, "project": proj["display_name"], "qbo_customer_id": proj["qbo_customer_id"],
                                     "schedule_item_id": x["id"], "visit": [str(v["first"]), str(v["last"])], "sibling": True,
                                     "changes": {"status": [x["status"], st]}, "target": t, "item": x})
-    return {"jobs": jobs_seen, "changes": changes, "skipped": skipped,
+    return {"jobs": jobs_seen, "changes": changes, "skipped": skipped, "override_checks": checks,
             "unknown_crews": dict(notes["unknown_crews"]), "sheet": [str(data_first), str(data_last)]}
 
 
@@ -483,8 +532,22 @@ def _request(c):
         notes=(it or {}).get("notes"), non_working=t["non_working"])
 
 
+def _write_checks(checks):
+    """Record what the sheet says for each app change, or resolve it (0088)."""
+    if not checks:
+        return
+    with engine.begin() as conn:
+        for c in checks:
+            conn.execute(text("""UPDATE app_overrides SET sheet_value = :s, app_value = :a, checked_at = NOW(),
+                                 sheet_ref = :ref, resolved_at = IF(:keep, NULL, NOW()),
+                                 resolved_how = IF(:keep, NULL, 'file_updated') WHERE id = :id"""),
+                         {"s": c["sheet"], "a": c["app"], "ref": c["ref"][:255], "keep": 1 if c["keep"] else 0,
+                          "id": c["ov"]["id"]})
+
+
 def apply(p):
     from app.projects.service import save_schedule_item
+    _write_checks(p.get("override_checks"))
     with engine.begin() as conn:
         actor = system_user_id(conn)
     done, errors = collections.Counter(), []
@@ -513,6 +576,9 @@ def run(do_apply=False):
     s = summarize(p)
     if do_apply and p["changes"]:
         s.update(apply(p))
+    elif do_apply:
+        _write_checks(p.get("override_checks"))
+    s["app_changes_kept"] = sum(1 for c in p.get("override_checks") or [] if c["keep"])
     return s, p
 
 
