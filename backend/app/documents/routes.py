@@ -262,7 +262,7 @@ async def upload_document(entity_type: str, entity_id: str, folder: str = Query(
 
 
 @router.get("/file/{doc_id}/url")
-def document_url(doc_id: int, user=Depends(get_current_user)):
+def document_url(doc_id: int, download: bool = False, user=Depends(get_current_user)):
     _require(user)
     with engine.connect() as conn:
         r = conn.execute(text("SELECT s3_key, original_filename, drive_link FROM documents WHERE id=:id"),
@@ -271,7 +271,119 @@ def document_url(doc_id: int, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Document not found")
     if not r["s3_key"] and r["drive_link"]:      # link-only Drive row (export too big, shortcut, form)
         return {"url": r["drive_link"], "filename": r["original_filename"], "drive_link_only": True}
-    return {"url": signed_file_url(r["s3_key"]), "filename": r["original_filename"]}
+    return {"url": signed_file_url(r["s3_key"], disposition=_attach(r["original_filename"]) if download else None),
+            "filename": r["original_filename"]}
+
+
+# ── In-app viewer (preview.py) ──────────────────────────────────────────────
+PREVIEW_HTML_MAX = 20 * 1024 * 1024
+CONTENT_MAX = 60 * 1024 * 1024
+
+
+def _doc_row(doc_id):
+    with engine.connect() as conn:
+        r = conn.execute(text("""SELECT id, s3_key, original_filename, content_type, size_bytes, drive_link, source_drive_id
+                                 FROM documents WHERE id = :id"""), {"id": doc_id}).mappings().first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return r
+
+
+def _attach(name):
+    from urllib.parse import quote
+    return f"attachment; filename*=UTF-8''{quote(name or 'file')}"
+
+
+@router.get("/file/{doc_id}/preview")
+def document_preview(doc_id: int, user=Depends(get_current_user)):
+    """How the viewer should show a file: {kind: pdf|image|video|html|drive|none, ...}."""
+    _require(user)
+    from . import preview as PV
+    r = _doc_row(doc_id)
+    name = r["original_filename"] or "file"
+    base = {"id": r["id"], "filename": name, "drive_link": r["drive_link"], "size_bytes": int(r["size_bytes"] or 0)}
+    if not r["s3_key"]:                     # link-only Drive row: Google's own viewer
+        if r["source_drive_id"]:
+            return {**base, "kind": "drive", "embed_url": f"https://drive.google.com/file/d/{r['source_drive_id']}/preview",
+                    "open_url": r["drive_link"]}
+        return {**base, "kind": "none"}
+    kind = PV.kind_of(name, r["content_type"])
+    base["download_url"] = signed_file_url(r["s3_key"], disposition=_attach(name))
+    if kind in ("pdf", "image"):
+        if (r["size_bytes"] or 0) > CONTENT_MAX:
+            return {**base, "kind": kind, "url": signed_file_url(r["s3_key"], disposition="inline",
+                                                                 content_type=PV.MIME.get(PV.ext_of(name)))}
+        return {**base, "kind": kind, "content_path": f"/documents/file/{r['id']}/content"}
+    if kind == "video":
+        return {**base, "kind": "video", "url": signed_file_url(r["s3_key"], disposition="inline",
+                                                                content_type=PV.MIME.get(PV.ext_of(name)))}
+    if kind == "html" and (r["size_bytes"] or 0) <= PREVIEW_HTML_MAX:
+        try:
+            data = s3_client.get_object(Bucket=AWS_BUCKET, Key=r["s3_key"])["Body"].read()
+            return {**base, "kind": "html", "html": PV.render_html(name, data)}
+        except Exception as e:
+            return {**base, "kind": "none", "reason": f"This file couldn't be previewed ({type(e).__name__})."}
+    reason = ("Outlook .msg emails can't be previewed yet." if PV.ext_of(name) == "msg"
+              else "This file type can't be previewed in the app.")
+    return {**base, "kind": "none", "reason": reason}
+
+
+@router.get("/file/{doc_id}/content")
+def document_content(doc_id: int, user=Depends(get_current_user)):
+    """The file's bytes, inline (same-origin, so the viewer can print it). HEIC
+    photos come back as JPEG."""
+    _require(user)
+    from fastapi.responses import Response
+    from . import preview as PV
+    r = _doc_row(doc_id)
+    if not r["s3_key"]:
+        raise HTTPException(status_code=404, detail="No stored copy of this file")
+    if (r["size_bytes"] or 0) > CONTENT_MAX:
+        raise HTTPException(status_code=413, detail="File too large to preview")
+    name = r["original_filename"] or "file"
+    data = s3_client.get_object(Bucket=AWS_BUCKET, Key=r["s3_key"])["Body"].read()
+    e = PV.ext_of(name)
+    ctype = PV.MIME.get(e) or r["content_type"] or "application/octet-stream"
+    if e in PV.HEIC_EXT:
+        data, ctype = PV.heic_to_jpeg(data), "image/jpeg"
+    return Response(content=data, media_type=ctype,
+                    headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=600"})
+
+
+_drive_cache = {}
+
+
+@router.get("/drive/{file_id}/preview")
+def drive_preview(file_id: str, sheet: Optional[str] = None, user=Depends(get_current_user)):
+    """A Google Drive sheet the app reads data from (the B250, a crew Payment
+    Schedule), shown as HTML. Only files the app has recorded as a data source."""
+    from app.permissions import PAGE_CASHFLOW
+    if not (has_capability(user, PAGE_CUSTOMERS) or has_capability(user, PAGE_CASHFLOW)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    import time
+    from app import gdrive
+    from . import preview as PV
+    with engine.connect() as conn:
+        known = conn.execute(text("""
+            SELECT file_name FROM gsync_b250_snapshot WHERE file_id = :f
+            UNION ALL SELECT name FROM gsync_payment_files WHERE file_id = :f LIMIT 1"""), {"f": file_id}).scalar()
+    if known is None:
+        raise HTTPException(status_code=404, detail="Not a data source the app reads")
+    key = (file_id, sheet)
+    hit = _drive_cache.get(key)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    meta = gdrive.get(file_id)
+    if (meta.get("mimeType") or "").startswith("application/vnd.google-apps"):
+        data = gdrive.export(file_id, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        data = gdrive.download(file_id)
+    name = meta.get("name") or known or "Sheet"
+    out = {"kind": "html", "filename": name + ("" if name.lower().endswith(".xlsx") else ""),
+           "html": PV.xlsx_html(data, name, sheet), "open_url": f"https://drive.google.com/open?id={file_id}",
+           "sheet": sheet, "modified": meta.get("modifiedTime")}
+    _drive_cache[key] = (time.time(), out)
+    return out
 
 
 @router.delete("/file/{doc_id}")

@@ -38,15 +38,15 @@ def build_document_key(entity_type: str, entity_id: str, folder: str, filename: 
 def public_file_url(key: str) -> str:
     return f"https://{AWS_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}"
 
-def signed_file_url(key: str, expires_in: int = 3600) -> str:
-    return s3_client.generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": AWS_BUCKET,
-            "Key": key,
-        },
-        ExpiresIn=expires_in,
-    )
+def signed_file_url(key: str, expires_in: int = 3600, disposition: str = None, content_type: str = None) -> str:
+    """Presigned GET. `disposition` ('inline' / 'attachment; filename=...') and
+    `content_type` override what S3 sends, so the browser shows or saves it."""
+    params = {"Bucket": AWS_BUCKET, "Key": key}
+    if disposition:
+        params["ResponseContentDisposition"] = disposition
+    if content_type:
+        params["ResponseContentType"] = content_type
+    return s3_client.generate_presigned_url("get_object", Params=params, ExpiresIn=expires_in)
 
 # Dev points at the PRODUCTION bucket (with a copy of the prod database), so a
 # delete or bulk sync from dev would remove / overwrite real files. Set

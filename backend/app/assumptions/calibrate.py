@@ -224,6 +224,127 @@ def measure_lodging_billing(conn):
     }
 
 
+# Invoice milestones by kind. The anchor is the job date the invoice follows;
+# Mobilization goes out on the start date and the Final / single invoice on the
+# end date (owner rule 2026-10-28), so their offset is 0 and the measured offset
+# is shown for review. The deposit has no job-date rule, so it uses history.
+INVOICE_KINDS = {
+    "deposit":      {"anchor": "start", "rule_offset": None, "label": "Deposit (at PO)"},
+    "mobilization": {"anchor": "start", "rule_offset": 0, "label": "Mobilization (at start)"},
+    "final":        {"anchor": "end", "rule_offset": 0, "label": "Final (at completion)"},
+    "full":         {"anchor": "end", "rule_offset": 0, "label": "Payment in full (at completion)"},
+}
+# Used until history is measured (and when a kind has too few invoices).
+INVOICE_DEFAULTS = {"deposit": (-42, 34), "mobilization": (0, 31), "final": (0, 29), "full": (0, 34)}
+INVOICE_MIN_N = 15
+SIZE_BUCKETS = [(10000, "Under $10k"), (25000, "$10k-25k"), (50000, "$25k-50k"), (None, "$50k and up")]
+
+
+def invoice_kind(label):
+    """Which invoice a milestone label is, or None for a custom row."""
+    s = (label or "").lower()
+    if "deposit" in s:
+        return "deposit"
+    if "mobiliz" in s or "progress" in s:
+        return "mobilization"
+    if "in full" in s or s.startswith("full invoice"):
+        return "full"
+    if "final" in s or "completion" in s or "balance to bill" in s:
+        return "final"
+    return None
+
+
+def measure_invoice_timing(conn):
+    """When OPI invoices each milestone relative to the job dates, its terms,
+    and how long customers take to pay, from milestones matched to actual
+    QuickBooks invoices (billing/align.py) in the last WINDOW_MONTHS. Plus how
+    many invoices an estimate is billed in, by size, and for change orders, which
+    sets when a job is billed in one invoice instead of 35/35/30."""
+    from statistics import median
+    wins = _project_windows(conn)
+    rows = conn.execute(text("""
+        SELECT m.label, m.invoice_date, m.due_date, m.expected_paid_date, m.status, m.amount,
+               s.entity_id, qc.display_name
+        FROM project_invoice_milestones m JOIN project_invoice_schedules s ON s.id = m.schedule_id
+        LEFT JOIN qbo_customers qc ON qc.qbo_id = s.entity_id
+        WHERE m.qbo_invoice_id IS NOT NULL AND m.invoice_date >= CURDATE() - INTERVAL :mo MONTH
+        ORDER BY m.invoice_date DESC
+    """), {"mo": WINDOW_MONTHS}).mappings().all()
+    by_kind, samples = defaultdict(list), []
+    for r in rows:
+        k = invoice_kind(r["label"])
+        w = wins.get(str(r["entity_id"]))
+        if not k or not w:
+            continue
+        st, en = w
+        anchor = st if INVOICE_KINDS[k]["anchor"] == "start" else en
+        paid = r["expected_paid_date"] if r["status"] == "paid" else None
+        by_kind[k].append({"off": (r["invoice_date"] - anchor).days,
+                           "terms": (r["due_date"] - r["invoice_date"]).days if r["due_date"] else None,
+                           "lag": (paid - r["invoice_date"]).days if paid else None})
+        if len(samples) < 40:
+            samples.append({"project": r["display_name"], "kind": k, "label": r["label"],
+                            "invoice": str(r["invoice_date"]), "start": str(st), "end": str(en),
+                            "due": str(r["due_date"]) if r["due_date"] else None,
+                            "paid": str(paid) if paid else None, "amount": float(r["amount"] or 0)})
+    med = lambda xs: round(median(xs), 1) if xs else None
+    kinds = {}
+    for k, spec in INVOICE_KINDS.items():
+        xs = by_kind.get(k, [])
+        offs = [x["off"] for x in xs]
+        lags = [x["lag"] for x in xs if x["lag"] is not None]
+        terms = [x["terms"] for x in xs if x["terms"] is not None]
+        d_off, d_lag = INVOICE_DEFAULTS[k]
+        enough = len(xs) >= INVOICE_MIN_N
+        kinds[k] = {"anchor": spec["anchor"],
+                    "offset_days": spec["rule_offset"] if spec["rule_offset"] is not None else (med(offs) if enough else d_off),
+                    "measured_offset_days": med(offs),
+                    "paid_lag_days": med(lags) if len(lags) >= INVOICE_MIN_N else d_lag,
+                    "terms_days": med(terms), "n": len(xs), "n_paid": len(lags)}
+
+    # invoices per accepted estimate, by size and for change orders (any accepted
+    # estimate after the project's first)
+    ests = conn.execute(text("""
+        SELECT e.qbo_id, e.customer_qbo_id, e.txn_date, e.total_amt,
+               (SELECT COUNT(*) FROM qbo_transactions i
+                 WHERE i.entity_type = 'Invoice' AND i.customer_qbo_id = e.customer_qbo_id AND i.total_amt > 0
+                   AND JSON_SEARCH(i.raw_json, 'one', e.qbo_id, NULL, '$.LinkedTxn[*].TxnId') IS NOT NULL) AS n_inv
+        FROM qbo_transactions e
+        WHERE e.entity_type = 'Estimate' AND e.txn_date >= CURDATE() - INTERVAL :mo MONTH
+          AND JSON_UNQUOTE(JSON_EXTRACT(e.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')
+        ORDER BY e.customer_qbo_id, e.txn_date, e.qbo_id
+    """), {"mo": WINDOW_MONTHS}).mappings().all()
+    seen, buckets, co = set(), [{"label": lab, "under": hi, "n": 0, "single": 0, "two": 0, "three_plus": 0}
+                                for hi, lab in SIZE_BUCKETS], {"n": 0, "single": 0}
+    for e in ests:
+        n = int(e["n_inv"] or 0)
+        if not n:
+            continue
+        is_co = e["customer_qbo_id"] in seen
+        seen.add(e["customer_qbo_id"])
+        if is_co:
+            co["n"] += 1
+            co["single"] += n == 1
+            continue
+        v = float(e["total_amt"] or 0)
+        b = next(b for b in buckets if b["under"] is None or v < b["under"])
+        b["n"] += 1
+        b["single" if n == 1 else "two" if n == 2 else "three_plus"] += 1
+    # one invoice below the largest bucket edge where most estimates are billed once
+    single_below = 0
+    for b in buckets:
+        if b["under"] and b["n"] and b["single"] / b["n"] >= 0.5:
+            single_below = b["under"]
+        else:
+            break
+    return {
+        "calibrated": {"kinds": kinds, "single_below": single_below or 10000,
+                       "change_orders_single": bool(co["n"] and co["single"] / co["n"] >= 0.5)},
+        "basis": {"window_months": WINDOW_MONTHS, "min_n": INVOICE_MIN_N, "size_buckets": buckets,
+                  "change_orders": co, "samples": samples},
+    }
+
+
 def _upsert(conn, akey, grp, label, calibrated, basis):
     conn.execute(text("""
         INSERT INTO forecast_assumptions (akey, grp, label, calibrated, basis, computed_at)
@@ -242,12 +363,14 @@ def recalibrate():
         lb = measure_lodging_billing(conn)
         if lb:
             _upsert(conn, "lodging_billing", "lodging_billing", "Lodging billing (Hotel Engine)", lb["calibrated"], lb["basis"])
+        it = measure_invoice_timing(conn)
+        _upsert(conn, "invoice_timing", "invoice_timing", "Invoice dates", it["calibrated"], it["basis"])
         acc = measure_estimate_accuracy(conn)
         for cat, v in acc.items():
             _upsert(conn, f"estimate_accuracy.{cat}", "estimate_accuracy",
                     f"{cat} actual vs estimate", v["calibrated"], v["basis"])
     _cache.clear()
-    return {"expense_timing": len(timing), "estimate_accuracy": len(acc)}
+    return {"expense_timing": len(timing), "estimate_accuracy": len(acc), "invoice_timing": True}
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +400,30 @@ def lodging_billing(conn):
             eff.update({k: v for k, v in (_load(r[1]) or {}).items() if v is not None})
             _cache["__lodging__"] = eff
     return _cache["__lodging__"]
+
+
+def invoice_timing(conn):
+    """Effective invoice timing (override > measured; built-in defaults until
+    measured). Per-kind override fields merge into the measured kind."""
+    if "__invoice__" not in _cache:
+        try:
+            r = conn.execute(text(
+                "SELECT calibrated, override_val FROM forecast_assumptions WHERE akey = 'invoice_timing'")).first()
+        except Exception:
+            r = None
+        eff = {"kinds": {k: {"anchor": s["anchor"], "offset_days": INVOICE_DEFAULTS[k][0],
+                             "paid_lag_days": INVOICE_DEFAULTS[k][1]} for k, s in INVOICE_KINDS.items()},
+               "single_below": 10000, "change_orders_single": True}
+        if r:
+            cal, ov = _load(r[0]) or {}, _load(r[1]) or {}
+            for src in (cal, ov):
+                for k, v in (src.get("kinds") or {}).items():
+                    eff["kinds"].setdefault(k, {}).update({f: x for f, x in v.items() if x is not None})
+                for f in ("single_below", "change_orders_single"):
+                    if src.get(f) is not None:
+                        eff[f] = src[f]
+        _cache["__invoice__"] = eff
+    return _cache["__invoice__"]
 
 
 def lodging_split(total, start, end, lb):
@@ -375,3 +522,6 @@ def profile_split(total, start, end, timing):
 
 if __name__ == "__main__":
     print(recalibrate())
+    # nightly: planned invoice dates follow the (possibly moved) job dates
+    from app.billing.invoice_dates import redate_all
+    print(redate_all())

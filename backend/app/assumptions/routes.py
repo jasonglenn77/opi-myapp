@@ -97,6 +97,16 @@ def set_override(akey: str, body: OverrideBody, user=Depends(get_current_user)):
             ov["profile"] = {k: round(float(prof.get(k, 0)) / s, 4) for k in CAL.BUCKET_KEYS}
         if ov.get("paid_lag_days") is not None and not (0 <= float(ov["paid_lag_days"]) <= 180):
             raise HTTPException(status_code=400, detail="Payment lag must be 0-180 days")
+    if ov is not None and akey == "invoice_timing":
+        for k, v in (ov.get("kinds") or {}).items():
+            if k not in CAL.INVOICE_KINDS:
+                raise HTTPException(status_code=400, detail=f"Unknown invoice kind {k}")
+            if v.get("paid_lag_days") is not None and not (0 <= float(v["paid_lag_days"]) <= 180):
+                raise HTTPException(status_code=400, detail="Days to pay must be 0-180")
+            if v.get("offset_days") is not None and not (-180 <= float(v["offset_days"]) <= 180):
+                raise HTTPException(status_code=400, detail="Offset must be -180 to 180 days")
+        if ov.get("single_below") is not None and float(ov["single_below"]) < 0:
+            raise HTTPException(status_code=400, detail="Amount can't be negative")
     with engine.begin() as conn:
         n = conn.execute(text("""
             UPDATE forecast_assumptions
@@ -110,6 +120,9 @@ def set_override(akey: str, body: OverrideBody, user=Depends(get_current_user)):
     CAL._cache.clear()
     record_audit(user, "assumption.override" if ov is not None else "assumption.reset",
                  "assumption", akey, akey, {"override": ov, "note": body.note})
+    if akey == "invoice_timing":   # app-dated planned invoices pick up the change now
+        from app.billing.invoice_dates import redate_all
+        redate_all()
     return get_assumptions(user)
 
 
@@ -148,12 +161,14 @@ def apply_to_schedules():
                              {"e": e, "c": c})
             B._ensure_expense_installments(conn, e, ctx)
             rebuilt += 1
+    from app.billing.invoice_dates import redate_all   # 0087: planned invoice dates too
+    inv = redate_all()
     try:
         from app.cashflow.schedule_forecast import touch_dirty
         touch_dirty()
     except Exception:
         pass
-    return {"projects_rebuilt": rebuilt}
+    return {"projects_rebuilt": rebuilt, "invoices": inv}
 
 
 @router.post("/apply")

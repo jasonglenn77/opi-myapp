@@ -62,3 +62,46 @@ stays", and the Lodging section explains the estimate. Each row carries two date
 - **Expected paid:** when cash leaves; the forecast uses it.
 
 When the real statement posts, it burns the plan down and its due date takes over.
+
+## Invoice dates (added 2026-10-28, migration 0087)
+
+**Owner rules (from OPI).** Larger jobs bill 35% at PO, 35% at start (Mobilization), and 30% at
+completion (Final). Change orders and small jobs are billed once, in full. The Mobilization invoice
+goes out on the project's start date, and when the start date changes it moves too.
+
+**What we found.** Invoice dates were copied from the job dates once, when the schedule was first
+built, and never updated. Jobs scheduled after their estimate was accepted (Mygrant Urbandale, BGI)
+had no Mobilization or Final dates at all, so that money sat in the "not yet dated" backlog, off
+the weekly grid. Jobs that moved (PPG Mojave) kept old dates and showed as overdue.
+
+**How it works now** (`billing/invoice_dates.py`):
+- Mobilization = start date; Final and a single full invoice = end date; the deposit sits at its
+  measured timing (median 45 days before start), never before the estimate date.
+- Due date = invoice date + the schedule's net terms.
+- Expected paid = invoice date + the measured days customers took to pay that kind of invoice
+  (deposit 34, Mobilization 31, Final 29, full 34; 24 months of matched QuickBooks invoices).
+- These rows are marked `auto_history` ("auto · history" on the Billing tab) and are re-dated
+  whenever the job dates change (Assignment save, nightly Job Schedule import, Billing tab open,
+  nightly calibration). Typing a date makes it `manual`, which is never moved ("↺ auto" hands it
+  back). A row that is a QuickBooks invoice (`invoice`) follows the invoice.
+- Completed projects are not re-dated: their leftover balance is a Data Review item.
+
+**One invoice or 35/35/30** is measured too: estimates under $10k were billed in one invoice 83% of
+the time (vs 26% at $10-25k, where two invoices is most common), and change orders 86%. New
+schedules for change orders (as classified on the Change Orders tab) and estimates under the
+threshold get one "Payment in full (at completion)" row. Untouched 35/35/30 plans that match are
+converted. Custom project terms always win. Both rules are on the Assumptions page with the
+evidence, and can be overridden.
+
+## Crew pay vs the B250 (2026-10-28)
+
+The app reads each job's crew Payment Schedule from Drive every night, so the difference from the
+B250 (12 weeks: B250 $1.91M, app $1.60M) is not missing data. It comes from:
+1. **Stale Payment Schedules.** About $291k of unpaid installments are dated before this week,
+   mostly jobs that moved after the sheet was made (Sysco Walnut CA: sheet dated Jan-Apr 2026,
+   job now starts 10/19; Sysco Denver: dated May-June). The app shows them as overdue, not in the
+   weekly totals. The B250 puts that crew pay in the coming weeks.
+2. **Jobs with no Payment Schedule.** About $393k on 15 jobs comes from the estimate's labor split
+   evenly (Amazon Dallas $231k), not from a sheet.
+3. **Crew naming.** The B250 names some crews differently (ABM = A&B Installations, Gomez = JG
+   Pallet Rack); Data Review maps them by payment amounts and compares per crew.

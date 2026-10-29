@@ -16,6 +16,7 @@ import { loadHolds, holdPillHtml } from "../utils/hold.js";
 let _holds = new Map();   // qbo_id -> active hold
 const holdPill = (qboId) => holdPillHtml(_holds.get(String(qboId)));
 import { driveSourceHtml } from "../utils/drive-link.js";
+import { openDocViewer } from "../utils/doc-viewer.js";
 import { createFormRenderer } from "../utils/form-render.js";
 import { openMarkupViewer, fillDrawingThumbs } from "../utils/drawing-markup.js";
 import { mountKickoffPanel } from "./kickoff.js";
@@ -866,10 +867,10 @@ async function mountPmDocuments(container, qboId) {
     <div class="flex items-center gap-2 py-1.5 pr-2">
       ${FILE_ICON}
       <div class="min-w-0 flex-1">
-        <div class="truncate text-xs font-medium text-ink-900" title="${escapeHtml(f.filename || "")}">${escapeHtml(f.filename || "(unnamed)")}</div>
+        <button type="button" data-view="${f.id}" data-vname="${escapeHtml(f.filename || "")}" class="block max-w-full truncate text-left text-xs font-medium text-ink-900 hover:text-blue-600 hover:underline" title="View ${escapeHtml(f.filename || "")}">${escapeHtml(f.filename || "(unnamed)")}</button>
         <div class="text-[10px] text-black/45">${f.link_only ? "Google file" : fmtBytes(f.size_bytes)}${f.created_at ? " · " + fmtDate(f.created_at) : ""}${f.uploaded_by ? " · " + escapeHtml(f.uploaded_by) : ""}${f.from_drive ? " · " + driveSourceHtml(f) : ""}</div>
       </div>
-      <button type="button" data-dl="${f.id}" title="Open" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/45 hover:bg-black/5 hover:text-blue-600">${DOWNLOAD_ICON}</button>
+      <button type="button" data-dl="${f.id}" title="Download" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/45 hover:bg-black/5 hover:text-blue-600">${DOWNLOAD_ICON}</button>
     </div>`;
 
   const renderNode = (node, depth) => {
@@ -940,10 +941,15 @@ async function mountPmDocuments(container, qboId) {
       input.click();
       return;
     }
+    const vw = e.target.closest("[data-view]");
+    if (vw) {
+      openDocViewer({ id: Number(vw.getAttribute("data-view")), filename: vw.getAttribute("data-vname") || "" });
+      return;
+    }
     const dl = e.target.closest("[data-dl]");
     if (dl) {
       try {
-        const res = await api(`/documents/file/${dl.getAttribute("data-dl")}/url`);
+        const res = await api(`/documents/file/${dl.getAttribute("data-dl")}/url?download=1`);
         if (res.url) window.open(res.url, "_blank");
       } catch (err) { alert(`Could not open file: ${err.message}`); }
       return;

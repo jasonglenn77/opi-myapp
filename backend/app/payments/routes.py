@@ -155,6 +155,10 @@ def _load_schedules(conn, entity_id):
     """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
     scheds = conn.execute(text("""
         SELECT s.id, s.estimate_qbo_id, s.estimate_doc_number, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
+               s.source, s.source_file_name, s.source_modified,
+               -- the app's copy of the Drive file the schedule was read from (documents viewer)
+               (SELECT d.id FROM documents d WHERE d.source_drive_id = s.source_file_id
+                 ORDER BY d.entity_id = s.entity_id DESC, d.id DESC LIMIT 1) AS source_doc_id,
                -- Crew Model v2 (CR3): "Company · Lead" (company-pointing rows
                -- show "Company · lead TBD")
                TRIM(CASE WHEN wc.id IS NULL THEN ''
@@ -177,6 +181,10 @@ def _load_schedules(conn, entity_id):
             "start_date": str(sched["start_date"]) if sched["start_date"] else None,
             "end_date": str(sched["end_date"]) if sched["end_date"] else None,
             "invoice_lead_days": sched["invoice_lead_days"],
+            # where the installments came from: 'sheet' = the Payment Schedule in Drive
+            "source": sched["source"], "source_file_name": sched["source_file_name"],
+            "source_modified": str(sched["source_modified"])[:10] if sched["source_modified"] else None,
+            "source_doc_id": sched["source_doc_id"],
         }
         installments = [{
             "id": r["id"], "seq": r["seq"],

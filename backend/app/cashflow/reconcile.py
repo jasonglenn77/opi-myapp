@@ -24,7 +24,7 @@ PAYROLL_WORDS = ("payroll", "wages", "owner", "bonus", "commission")
 
 def _b250(conn):
     snap = conn.execute(text(
-        "SELECT id, source, file_name, tab_name, week1_end, loaded_at FROM gsync_b250_snapshot ORDER BY id DESC LIMIT 1"
+        "SELECT id, source, file_id, file_name, tab_name, week1_end, loaded_at FROM gsync_b250_snapshot ORDER BY id DESC LIMIT 1"
     )).mappings().first()
     if not snap:
         return None
@@ -59,6 +59,42 @@ def _opening_text(bank, b_open, a_open, skipped, week1, undep, money):
     return {"why": why, "fix": fix, "source": bank.get("source"), "books": books}
 
 
+def _crew_why(crew_od, crew_iids, src_items, first_start, money):
+    """Why the crew rows differ, from the data: stale Payment Schedules (unpaid
+    installments dated before week 1 aren't in the weekly totals), jobs with no
+    Payment Schedule (estimate labor split evenly), and B250 crews the app
+    doesn't know (Data Review crew_unmapped)."""
+    with engine.connect() as conn:
+        names = dict(conn.execute(text("SELECT qbo_id, display_name FROM qbo_customers WHERE is_project = 1")).all())
+        src = {}
+        if crew_iids:
+            ids = ",".join(str(int(i)) for i in crew_iids)
+            src = dict(conn.execute(text(f"""SELECT i.id, s.source FROM project_payment_installments i
+                JOIN project_payment_schedules s ON s.id = i.schedule_id WHERE i.id IN ({ids})""")).all())
+    short = lambda e: (names.get(str(e)) or str(e)).split(" - ", 1)[-1]
+    parts = ["B250: one typed row per crew company. App: each job's crew Payment Schedule from Google Drive "
+             "(or the estimate's labor split evenly where there is no sheet), minus what QuickBooks shows paid."]
+    od = sum(crew_od.values())
+    if od > 0.5:
+        top = sorted(crew_od.items(), key=lambda kv: -kv[1])[:3]
+        parts.append(f"{money(od)} of unpaid installments are on Payment Schedules dated before {first_start:%m/%d}, mostly jobs "
+                     f"that moved after the sheet was made ({', '.join(f'{short(e)} {money(a)}' for e, a in top)}). The app lists "
+                     "these as overdue instead of in the weeks; the B250 puts that crew pay in the coming weeks.")
+    fb = defaultdict(float)
+    for iid, (e, a) in crew_iids.items():
+        if src.get(iid) == "app":
+            fb[e] += a
+    if fb:
+        top = sorted(fb.items(), key=lambda kv: -kv[1])[:2]
+        parts.append(f"{money(sum(fb.values()))} on {len(fb)} job{'s' if len(fb) > 1 else ''} with no Payment Schedule in Drive comes from "
+                     f"the estimate's labor ({', '.join(f'{short(e)} {money(a)}' for e, a in top)}).")
+    unm = [i for i in src_items if i.get("type") == "crew_unmapped" and i.get("sheet")]
+    if unm:
+        parts.append("B250 crews with no crew company in the app: "
+                     + ", ".join(f"{i['key'].split(':', 2)[-1]} {money(i['sheet'])}" for i in unm[:4]) + ".")
+    return " ".join(parts)
+
+
 _cache = {"at": 0.0, "data": None}
 
 
@@ -82,9 +118,10 @@ def _build():
             from app.gsync.review_sources import source_items
             closed = {r[0] for r in conn.execute(text(
                 "SELECT item_key FROM data_review_state WHERE status IN ('fixed', 'ignored')")).all()}
-            dr_open = sum(1 for i in source_items(conn) if i["key"] not in closed)
+            src_items = source_items(conn)
+            dr_open = sum(1 for i in src_items if i["key"] not in closed)
         except Exception:
-            dr_open = None
+            dr_open, src_items = None, []
 
     # The B250's week 1 is often already past (its tab is copied forward each
     # Monday). Compare from the app's week 1 (the coming Friday) so both sides
@@ -151,12 +188,17 @@ def _build():
     payload, _ = SF.get_events()
     lodging_jobs, lodging_ids = 0.0, set()
     first_start = weeks[0] - timedelta(days=6)
+    crew_od, crew_iids = defaultdict(float), {}
     for e in (payload or {}).get("events", []):
         if e.get("dir") != "out" or e.get("src") not in ("crew", "expense"):
             continue
         d = date.fromisoformat(e["date"])
         if d < first_start:
+            if e["src"] == "crew":   # unpaid installments dated before week 1 (stale sheets)
+                crew_od[e.get("entity_id")] += e["amt"]
             continue  # overdue plans: listed on the page, not in the totals
+        if e["src"] == "crew" and e.get("iid") and d <= weeks[-1]:
+            crew_iids[e["iid"]] = (e.get("entity_id"), e["amt"])
         i = _wk(weeks, d)
         if i is None:
             continue
@@ -198,6 +240,7 @@ def _build():
               AND txn_date >= CURDATE() - INTERVAL 4 MONTH
             GROUP BY DATE_FORMAT(txn_date, '%Y-%m'), m ORDER BY DATE_FORMAT(txn_date, '%Y-%m')
         """), {"v": f"%{LODGING_VENDOR}%"}).all()
+    crew_why = _crew_why(crew_od, crew_iids, src_items, first_start, money)
     lb_day, lb_lag = lb.get("bill_day", 11), round(lb.get("paid_lag_days") or 0)
     he_recent = ", ".join(f"{m} {money(float(v))}" for m, v in he) or "none in the last 4 months"
     fin = [j for j in JC.dataset()["jobs"] if j["state"] == "finished" and j["end"] >= str(date.today().replace(month=3, day=1))
@@ -238,9 +281,8 @@ def _build():
         ("cards", "out", "Credit card payments",
          "Both use the B250's $20,000 a week: QuickBooks records no card payoffs to check it against.",
          "Record card payoffs in QuickBooks or share statements (B4)."),
-        ("crew", "out", "Crew pay",
-         "B250: typed per crew. App: each job's Payment Schedule sheet (or the estimate's labor where there is no sheet), minus installments QuickBooks already shows paid. MTY alone is $335,700 higher on the B250 for 10/30 to 1/15.",
-         "Update whichever is out of date, the Payment Schedules or the B250 (C1-C4)."),
+        ("crew", "out", "Crew pay", crew_why,
+         "Re-date the Payment Schedules of jobs that moved (in the job's Drive folder), add Payment Schedules for the jobs using the estimate, and name the B250 crews the app doesn't know. Per-crew detail: Data Review → Cash flow sources (C1-C4)."),
         ("payroll", "out", "Payroll (owner, W-2, bonus)",
          "Owner pay: both $300,000 a month. W-2 and bonus: the app uses the B250's figures because payroll paychecks aren't visible in QuickBooks.",
          "Export the payroll summary after each run (P1). Book owner pay to one account (P2)."),
@@ -273,7 +315,7 @@ def _build():
         "available": True,
         "b250": {"tab": snap["tab_name"], "week1_end": str(snap["week1_end"]), "compared_from": str(week1),
                  "weeks_skipped": skipped, "source": snap["source"],
-                 "file_name": snap["file_name"], "loaded_at": str(snap["loaded_at"])},
+                 "file_name": snap["file_name"], "file_id": snap.get("file_id"), "loaded_at": str(snap["loaded_at"])},
         "week_ends": [str(w) for w in weeks],
         "opening": {"b250": b_opening, "app": a_opening, "difference": open_diff, **_opening_text(
             f.get("bank") or {}, b_opening, a_opening, skipped, week1, float(undep), money)},

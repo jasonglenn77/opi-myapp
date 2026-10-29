@@ -6,6 +6,7 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { driveSourceHtml } from "../utils/drive-link.js";
+import { openDocViewer } from "../utils/doc-viewer.js";
 import { mountKickoffPanel } from "./kickoff.js";
 import { mountDailyPanel } from "./daily.js";
 import { mountChangeOrdersPanel } from "./change-orders.js";
@@ -26,7 +27,8 @@ const FOLDER_ICON = `<svg class="size-4 text-amber-500" viewBox="0 0 24 24" fill
 const FILE_ICON = `<svg class="size-4 text-black/40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>`;
 const UPLOAD_ICON = `<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
 const TRASH_ICON = `<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
-const DOWNLOAD_ICON = `<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
+const EYE_ICON = `<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+const DOWNLOAD_ICON =`<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
 
 function fmtBytes(bytes) {
   const n = Number(bytes || 0);
@@ -105,9 +107,10 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     <div class="flex items-center gap-2 py-1.5 pr-2 group">
       ${FILE_ICON}
       <div class="min-w-0 flex-1">
-        <div class="truncate text-xs font-medium text-ink-900" title="${escapeHtml(f.filename || "")}">${escapeHtml(f.filename || "(unnamed)")}</div>
+        <button type="button" data-view="${f.id}" data-vname="${escapeHtml(f.filename || "")}" class="block max-w-full truncate text-left text-xs font-medium text-ink-900 hover:text-blue-600 hover:underline" title="View ${escapeHtml(f.filename || "")}">${escapeHtml(f.filename || "(unnamed)")}</button>
         <div class="text-[10px] text-black/45">${f.link_only ? "Google file" : fmtBytes(f.size_bytes)}${f.created_at ? " · " + fmtDate(f.created_at) : ""}${f.uploaded_by ? " · " + escapeHtml(f.uploaded_by) : ""}${f.from_drive ? " · " + driveSourceHtml(f) : ""}</div>
       </div>
+      <button type="button" data-view="${f.id}" data-vname="${escapeHtml(f.filename || "")}" title="View" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/45 hover:bg-black/5 hover:text-blue-600">${EYE_ICON}</button>
       <button type="button" data-dl="${f.id}" title="Download" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/45 hover:bg-black/5 hover:text-blue-600">${DOWNLOAD_ICON}</button>
       <button type="button" data-del="${f.id}" data-dname="${escapeHtml(f.filename || "")}" title="Delete" class="inline-flex h-7 w-7 items-center justify-center rounded-lg text-black/40 hover:bg-red-50 hover:text-red-600">${TRASH_ICON}</button>
     </div>`;
@@ -287,10 +290,15 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
         input.click();
         return;
       }
+      const vw = e.target.closest("[data-view]");
+      if (vw) {
+        openDocViewer({ id: Number(vw.getAttribute("data-view")), filename: vw.getAttribute("data-vname") || "" });
+        return;
+      }
       const dl = e.target.closest("[data-dl]");
       if (dl) {
         try {
-          const res = await api(`/documents/file/${dl.getAttribute("data-dl")}/url`);
+          const res = await api(`/documents/file/${dl.getAttribute("data-dl")}/url?download=1`);
           if (res.url) window.open(res.url, "_blank");
         } catch (err) { alert(`Could not open file: ${err.message}`); }
         return;

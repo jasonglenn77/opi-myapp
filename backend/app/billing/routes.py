@@ -158,8 +158,8 @@ def _terms_lines(percents):
     n = len(percents)
     out = []
     for i, p in enumerate(percents):
-        if n == 1:
-            out.append((1, "Payment in full (at PO)", p, "po"))
+        if n == 1:   # small jobs / change orders: billed once, at completion (0087)
+            out.append((1, "Payment in full (at completion)", p, "end"))
         elif i == 0:
             out.append((1, "Deposit (at PO)", p, "po"))
         elif i == n - 1:
@@ -336,6 +336,7 @@ def _estimates_for_billing(conn, entity_id):
         h = hdrs.get(str(r["qbo_id"]))
         out.append({
             "qbo_id": str(r["qbo_id"]), "doc_number": r["doc_number"],
+            "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
             "value": float(r["value"] or 0), "labor": float(r["labor"] or 0),
             "status": _EST_STATUS.get(r["txn_status"], (r["txn_status"] or "").lower()),
             "crew_id": (h["crew_id"] if h else None),
@@ -522,12 +523,15 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
     from the project's saved default terms (built-in 35/35/30 net-30 when none
     were chosen) — so estimates that convert AFTER the office picked custom
     terms arrive on the right split automatically."""
+    # 0087: dates come from the job dates + measured billing history
+    # (billing/invoice_dates.py); small jobs and change orders bill once.
+    from app.billing.invoice_dates import plan_dates, single_invoice, change_order_ids
+    from app.assumptions.calibrate import invoice_timing, invoice_kind
+    it = invoice_timing(conn)
     start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
-    date_for = {"po": start, "start": start, "end": end}
     t = _project_terms(conn, entity_id)
     net_days = t["net_days"]
-    lines = _terms_lines(t["percents"])
-    terms = f"{' / '.join(_fmt_pct(p) + '%' for p in t['percents'])}, net-{net_days}"
+    cos = None
     for e in _estimates_for_billing(conn, entity_id):
         if e["status"] != "accepted" or e["value"] <= 0:
             continue
@@ -536,6 +540,11 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
             {"e": entity_id, "eq": e["qbo_id"]}).scalar()
         if exists:
             continue
+        cos = change_order_ids(conn, entity_id) if cos is None else cos
+        is_co = str(e["qbo_id"]) in cos
+        percents = t["percents"] if t["custom"] or not single_invoice(e["value"], is_co, it) else [100.0]
+        lines = _terms_lines(percents)
+        terms = f"{' / '.join(_fmt_pct(p) + '%' for p in percents)}, net-{net_days}"
         contract = e["value"]
         sid = conn.execute(text("""
             INSERT INTO project_invoice_schedules
@@ -548,13 +557,13 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
             amt = round(contract * pct / 100.0, 2) if idx < n - 1 else round(contract - acc, 2)
             if idx < n - 1:
                 acc += amt
-            inv_d = date_for.get(key)
-            due_d = (inv_d + timedelta(days=net_days)) if inv_d else None
+            pd = plan_dates(invoice_kind(label), start, end, net_days, it, e.get("txn_date"))
             conn.execute(text("""
                 INSERT INTO project_invoice_milestones
-                  (schedule_id, seq, label, pct, invoice_date, due_date, amount, status, note)
-                VALUES (:s,:seq,:l,:p,:iv,:du,:a,'pending',NULL)
-            """), {"s": sid, "seq": seq, "l": label, "p": pct, "iv": inv_d, "du": due_d, "a": amt})
+                  (schedule_id, seq, label, pct, invoice_date, due_date, expected_paid_date, date_basis, amount, status, note)
+                VALUES (:s,:seq,:l,:p,:iv,:du,:x,'auto_history',:a,'pending',NULL)
+            """), {"s": sid, "seq": seq, "l": label, "p": pct, "a": amt,
+                   "iv": pd[0] if pd else None, "du": pd[1] if pd else None, "x": pd[2] if pd else None})
 
 
 def _align_invoice_schedules(conn, entity_id):
@@ -593,7 +602,7 @@ def _compose_estimates(conn, entity_id):
         {"e": entity_id}).mappings().all():
         ms = conn.execute(text("""
             SELECT id, seq, label, pct, invoice_date, due_date, expected_paid_date,
-                   amount, status, note, edited, amount_edited, qbo_invoice_id
+                   amount, status, note, edited, amount_edited, qbo_invoice_id, date_basis
             FROM project_invoice_milestones WHERE schedule_id=:sid ORDER BY seq, id
         """), {"sid": s["id"]}).mappings().all()
         scheds[str(s["estimate_qbo_id"])] = (s["id"], ms)
@@ -664,6 +673,7 @@ def _compose_estimates(conn, entity_id):
             "qbo_invoice_id": m.get("qbo_invoice_id"), "qbo_invoice_doc": t.get("doc"),
             "retainage_held": t.get("retainage") or 0.0,
             "amount_edited": bool(m.get("amount_edited")),
+            "date_basis": m.get("date_basis"),
         }
 
     unlinked = actuals_by_est.get("", [])
@@ -719,6 +729,8 @@ def _compose_estimates(conn, entity_id):
             "retainage_held": h_ret, "schedule_off": off, "schedule_sum_state": sum_state,
             "crew_schedule_id": (cs["id"] if cs else None),
             "crew_installments": cinsts,
+            "crew_source": ({k: cs.get(k) for k in ("source", "source_file_name", "source_modified", "source_doc_id")}
+                            if cs else None),
         })
     # Retainage held on this project's invoices (paid except a held-back 5-15%)
     # — with how long each has been held and when release is expected.
@@ -1830,6 +1842,12 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         _apply_assignment_default_crew(conn, entity_id)   # #4: single assigned company fills blanks
         _ensure_invoice_schedules(conn, entity_id, ctx)   # per estimate (35/35/30)
         align_audits = _align_invoice_schedules(conn, entity_id)  # follow actual QBO invoices
+        try:  # 0087: app-dated planned invoices follow the current job dates
+            with conn.begin_nested():
+                from app.billing.invoice_dates import redate_project
+                redate_project(conn, entity_id)
+        except Exception:
+            pass
         _ensure_crew_schedules(conn, entity_id, ctx, meta)
         _ensure_expense_items(conn, entity_id, ctx)
         _ensure_expense_installments(conn, entity_id, ctx)

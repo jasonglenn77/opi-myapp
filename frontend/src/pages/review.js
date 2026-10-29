@@ -10,6 +10,7 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
 import { openDriveLinkModal } from "../utils/drive-link.js";
+import { openDocViewer } from "../utils/doc-viewer.js";
 
 const CATS = [
   { key: "todo", label: "To-do", blurb: "100% Won quotes that still need a project in QuickBooks." },
@@ -243,7 +244,8 @@ export async function reviewPage(routeFn) {
         </div>
         <div class="rv-actions">
           ${i.ref && i.ref.drive_unmatched_id ? `<button type="button" class="rv-btn rv-btn-go" data-drivelink title="Pick the project or quote this Google Drive folder belongs to — its files (already copied) move there">Link folder…</button>` : ""}
-          ${i.ref && i.ref.sheet_url ? `<a class="rv-btn" href="${escapeHtml(i.ref.sheet_url)}" target="_blank" rel="noopener" title="Open the Payment Schedule in Google Drive">Sheet</a>` : ""}
+          ${i.ref && i.ref.file_id ? `<button type="button" class="rv-btn" data-viewsheet title="View the Payment Schedule here (read live from Google Drive)">Sheet</button>`
+            : i.ref && i.ref.sheet_url ? `<a class="rv-btn" href="${escapeHtml(i.ref.sheet_url)}" target="_blank" rel="noopener" title="Open the Payment Schedule in Google Drive">Sheet</a>` : ""}
           ${i.link ? `<a class="rv-btn" href="${escapeHtml(i.link)}" title="Go to the record in the app to fix it">Open</a>` : ""}
           ${done ? `<button type="button" class="rv-btn" data-act="open" title="Put this item back on the open list">Reopen</button>`
                  : `<button type="button" class="rv-btn rv-btn-go" data-act="fixed" title="${escapeHtml(TIP_FIXED)}">Fixed</button><button type="button" class="rv-btn" data-act="ignored" title="${escapeHtml(TIP_IGNORE)}">Ignore</button>`}
@@ -294,6 +296,12 @@ export async function reviewPage(routeFn) {
     if (t.closest("[data-refresh]")) { refreshFromGoogle(); return; }
     const more = t.closest("[data-more]");
     if (more) { st.showAll.add(more.dataset.more); render(); return; }
+    const vs = t.closest("[data-viewsheet]");
+    if (vs) {
+      const it = st.data.items.find((x) => x.key === vs.closest("[data-key]").dataset.key);
+      openDocViewer({ drive: it.ref.file_id, filename: "Payment Schedule" });
+      return;
+    }
     const dl = t.closest("[data-drivelink]");
     if (dl) {
       const key = dl.closest("[data-key]").dataset.key;

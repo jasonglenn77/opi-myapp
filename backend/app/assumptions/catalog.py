@@ -30,17 +30,24 @@ def rules(conn):
     out = [
         # --- invoices -------------------------------------------------------
         {"area": "Invoices", "name": "Default invoice schedule",
-         "value": _pct_terms(DEFAULT_TERMS),
-         "drives": "The invoice milestones created for each accepted estimate (editable per project).",
-         "where": "invoices/routes.py DEFAULT_TERMS, billing/routes.py DEFAULT_PERCENTS"},
+         "value": f"{_pct_terms(DEFAULT_TERMS)}; one invoice in full at completion for change orders and estimates under "
+                  f"${float(CAL.invoice_timing(conn).get('single_below') or 0):,.0f} (measured)",
+         "drives": "The invoice milestones created for each accepted estimate (editable per project; custom project terms win).",
+         "where": "billing/routes.py _ensure_invoice_schedules, billing/invoice_dates.py"},
+        {"area": "Invoices", "name": "Planned invoice dates",
+         "value": "Mobilization on the job's start date, Final (or the single invoice) on its end date, deposit at its "
+                  "measured timing; re-placed whenever the job dates change",
+         "drives": "Invoice dates on rows marked \"auto · history\". A date a person types is kept (\"manual\").",
+         "where": "billing/invoice_dates.py redate_project (runs on date changes, Billing tab open, nightly)"},
         {"area": "Invoices", "name": "Default payment terms",
          "value": f"Net {B.DEFAULT_NET_DAYS} days",
          "drives": "Each milestone's due date = invoice date + net days.",
          "where": "billing/routes.py DEFAULT_NET_DAYS"},
         {"area": "Invoices", "name": "When a payment is expected",
-         "value": "Hand-entered expected date, else the milestone's expected date, else the QuickBooks due date",
-         "drives": "The week an open invoice lands in the cash-flow forecast.",
-         "where": "billing/routes.py invoice_expected_dates"},
+         "value": "Hand-entered expected date, else the milestone's expected paid date (invoice date + measured days to pay), "
+                  "else the QuickBooks due date",
+         "drives": "The week an invoice lands in the cash-flow forecast.",
+         "where": "billing/routes.py invoice_expected_dates, assumptions invoice_timing"},
         # --- crew -----------------------------------------------------------
         {"area": "Crew pay", "name": "Crew payment schedule",
          "value": "Estimate Contract Labor split evenly, paid bi-weekly in arrears across the job; "

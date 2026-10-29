@@ -699,6 +699,10 @@ def save_schedule_item(req, actor_user_id: int) -> Dict[str, Any]:
         elif changes:  # a no-op save records nothing
             record_item_history(conn, sid, "updated", actor_user_id, changes)
 
+    # 0087: planned invoices (Mobilization at start, Final at end) follow the new dates
+    if is_create or item_changed:
+        from app.billing.invoice_dates import redate_for_customer_row
+        redate_for_customer_row(int(req.qbo_customer_id))
     return {"ok": True, "project_id": project_id, "schedule_item_id": sid}
 
 
@@ -846,7 +850,12 @@ def delete_schedule_item(schedule_item_id: int, actor_user_id: int):
 
         record_item_history(conn, int(schedule_item_id), "deleted",
                             actor_user_id, changes or None)
+        qcid = conn.execute(text("SELECT qbo_customer_id FROM projects WHERE id = :p"),
+                            {"p": row["project_id"]}).scalar()
 
+    if qcid:  # 0087: the job's start/end may have changed
+        from app.billing.invoice_dates import redate_for_customer_row
+        redate_for_customer_row(int(qcid))
     return {"ok": True}
 
 def list_project_events(qbo_customer_id: int):

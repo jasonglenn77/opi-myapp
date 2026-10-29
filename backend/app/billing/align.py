@@ -525,6 +525,13 @@ def _apply(conn, res, run_id):
         sets = ", ".join(f"{f} = :{f}" for f in res["sched_changes"])
         conn.execute(text(f"UPDATE project_invoice_schedules SET {sets} WHERE id = :id"),
                      {**{f: v[1] for f, v in res["sched_changes"].items()}, "id": sid})
+    # 0087: a row that IS an invoice follows it; one whose invoice went away is
+    # app-dated again (billing/invoice_dates.py re-places it from the job dates)
+    conn.execute(text("""UPDATE project_invoice_milestones SET date_basis = 'invoice'
+                         WHERE schedule_id = :s AND qbo_invoice_id IS NOT NULL"""), {"s": sid})
+    conn.execute(text("""UPDATE project_invoice_milestones SET date_basis = 'auto_history'
+                         WHERE schedule_id = :s AND qbo_invoice_id IS NULL
+                           AND (date_basis IS NULL OR date_basis = 'invoice')"""), {"s": sid})
     # bump updated_at so cash-flow / tracker caches see delete-only changes too
     conn.execute(text("UPDATE project_invoice_milestones SET updated_at = CURRENT_TIMESTAMP WHERE schedule_id = :s"),
                  {"s": sid})

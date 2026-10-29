@@ -30,3 +30,6 @@ boto3
 python-multipart
 xhtml2pdf==0.2.17
 openpyxl==3.1.5
+pillow==13.0.0
+pillow-heif==1.8.1
+mammoth==1.13.0

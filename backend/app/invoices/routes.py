@@ -196,6 +196,8 @@ class MilestonePatch(BaseModel):
     status: Optional[str] = None
     note: Optional[str] = None
     via: Optional[str] = None   # which screen made the edit (audit only)
+    # 0087: true = hand the dates back to the app (job dates + billing history)
+    auto_dates: Optional[bool] = None
 
 
 @router.patch("/milestone/{mid}")
@@ -203,9 +205,30 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
     _require(user)
     fields = req.model_dump(exclude_unset=True)
     fields.pop("via", None)
+    if fields.pop("auto_dates", None):
+        with engine.begin() as conn:
+            old = conn.execute(text("SELECT * FROM project_invoice_milestones WHERE id = :id"), {"id": mid}).mappings().first()
+            if not old:
+                raise HTTPException(status_code=404, detail="Milestone not found")
+            if old["qbo_invoice_id"]:
+                raise HTTPException(status_code=400, detail="This row is a QuickBooks invoice; its dates follow the invoice")
+            conn.execute(text("UPDATE project_invoice_milestones SET date_basis = 'auto_history' WHERE id = :id"), {"id": mid})
+            ent, pname = _ms_entity(conn, mid=mid)
+            from app.billing.invoice_dates import redate_project
+            redate_project(conn, ent, audit=False)
+            new = conn.execute(text("SELECT invoice_date, due_date, expected_paid_date FROM project_invoice_milestones WHERE id = :id"),
+                               {"id": mid}).mappings().first()
+        record_audit(user, "billing.milestone_auto_dates", "invoice_milestone", mid, old["label"],
+                     {"entity_id": ent, "project": pname, "via": req_via(req),
+                      "changes": {f: [str(old[f]) if old[f] else None, str(new[f]) if new[f] else None]
+                                  for f in ("invoice_date", "due_date", "expected_paid_date")}})
+        if not fields:
+            return {"ok": True}
     if not fields:
         return {"ok": True}
     sets, params = ["edited = 1"], {"id": mid}
+    if any(f in fields for f in ("invoice_date", "due_date", "expected_paid_date")):
+        sets.append("date_basis = 'manual'")   # 0087: a person's date is never moved automatically
     # A hand-set amount / % is an override the schedule's automatic true-up
     # (billing/align.py) must respect; a date/label edit isn't (the row's amount
     # keeps following the estimate so the schedule still adds up).

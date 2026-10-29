@@ -120,6 +120,65 @@ export async function assumptionsPage(routeFn) {
     </section>`;
   }
 
+  // 0087: when planned invoices are dated, and which estimates bill in one invoice.
+  const KIND_ROWS = [
+    ["deposit", "Deposit (35% at PO)", "Before the start, at its measured timing"],
+    ["mobilization", "Mobilization (35% at start)", "The job's start date"],
+    ["final", "Final (30% at completion)", "The job's end date"],
+    ["full", "Payment in full (one invoice)", "The job's end date"],
+  ];
+  function invoiceCard(d) {
+    const it = d.items.find((i) => i.key === "invoice_timing");
+    if (!it) return "";
+    const cal = it.calibrated || {}, ov = it.override || {}, b = it.basis || {};
+    const k = (name) => ({ ...((cal.kinds || {})[name] || {}), ...Object.fromEntries(Object.entries((ov.kinds || {})[name] || {}).filter(([, v]) => v != null)) });
+    const below = ov.single_below ?? cal.single_below;
+    const off = (n) => n == null ? "—" : n === 0 ? "same day" : `${Math.abs(Math.round(n))} days ${n < 0 ? "before" : "after"}`;
+    const overridden = ov && Object.keys(ov).length;
+    const co = b.change_orders || {};
+    const sh = (x, n) => n ? `${Math.round((x / n) * 100)}%` : "—";
+    const editing = st.editing === "invoice_timing";
+    const fmtD = (s) => s ? new Date(`${s}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric", year: "2-digit" }) : "—";
+    return `<section class="card p-5">
+      <h2 class="text-base font-bold">Invoice dates ${overridden ? `<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 align-middle" title="${escapeHtml(`Overridden by ${it.override_by || "?"} ${when(it.override_at)}${it.override_note ? ": " + it.override_note : ""}`)}">Overridden</span>` : ""}</h2>
+      <p class="text-sm text-black/60 mt-1" style="max-width:52rem">Planned (not yet sent) invoices are dated from the job dates. Mobilization goes out on the start date and the Final on the end date, and both move when the job dates change. The due date adds the project's net terms. <b>Expected paid</b> adds how long customers have actually taken to pay that kind of invoice, measured from QuickBooks; the Cash Flow forecast uses it. These rows show <b>auto · history</b> on the Billing tab. A date someone types is kept and marked <b>manual dates</b>. Once the real invoice is in QuickBooks, its dates take over.</p>
+      <div class="overflow-x-auto mt-3"><table class="w-full text-sm">
+        <thead><tr class="text-[11px] uppercase tracking-wide text-black/45"><th class="py-2 pr-3 text-left">Invoice</th><th class="py-2 pr-3 text-left">Invoiced on</th><th class="py-2 pr-3 text-left" title="Median days between the job date and the actual invoice date">OPI actually invoiced</th><th class="py-2 pr-3 text-left">Terms</th><th class="py-2 pr-3 text-left">Days to pay (used)</th><th class="py-2 text-right">Invoices measured</th></tr></thead>
+        <tbody>${KIND_ROWS.map(([name, label, rule]) => { const x = k(name); return `<tr class="border-t border-black/[0.06]">
+          <td class="py-2 pr-3 font-semibold">${escapeHtml(label)}</td>
+          <td class="py-2 pr-3">${name === "deposit" ? `${off(x.offset_days)} the start` : escapeHtml(rule)}</td>
+          <td class="py-2 pr-3 tabular-nums text-black/60">${off(x.measured_offset_days)} the ${x.anchor === "end" ? "end" : "start"}</td>
+          <td class="py-2 pr-3 tabular-nums">${x.terms_days != null ? `net ${Math.round(x.terms_days)}` : "—"}</td>
+          <td class="py-2 pr-3 tabular-nums font-semibold">${days(x.paid_lag_days)}${(ov.kinds || {})[name]?.paid_lag_days != null ? `<div class="text-[10px] font-normal text-black/40">measured ${days((cal.kinds || {})[name]?.paid_lag_days)}</div>` : ""}</td>
+          <td class="py-2 text-right tabular-nums text-black/60">${x.n || 0}${x.n_paid ? ` <span class="text-black/40">(${x.n_paid} paid)</span>` : ""}</td></tr>`; }).join("")}</tbody>
+      </table></div>
+      <h3 class="text-xs font-bold uppercase tracking-wide text-black/45 mt-5">One invoice or 35/35/30</h3>
+      <p class="text-sm text-black/60 mt-1" style="max-width:52rem">New invoice schedules bill <b>change orders${cal.change_orders_single === false ? " (not currently)" : ""}</b> and <b>estimates under ${fmtMoney(below || 0)}</b> in one invoice at completion; larger estimates bill 35/35/30. Custom terms set on a project always win. How OPI's estimates were actually billed in the last ${b.window_months || 24} months:</p>
+      <div class="overflow-x-auto mt-2"><table class="w-full text-sm" style="max-width:46rem">
+        <thead><tr class="text-[11px] uppercase tracking-wide text-black/45"><th class="py-2 pr-3 text-left">Estimate size</th><th class="py-2 pr-3 text-right">Estimates</th><th class="py-2 pr-3 text-right">1 invoice</th><th class="py-2 pr-3 text-right">2 invoices</th><th class="py-2 text-right">3 or more</th></tr></thead>
+        <tbody>${(b.size_buckets || []).map((x) => `<tr class="border-t border-black/[0.06]"><td class="py-1.5 pr-3">${escapeHtml(x.label)}</td><td class="py-1.5 pr-3 text-right tabular-nums">${x.n}</td><td class="py-1.5 pr-3 text-right tabular-nums ${x.n && x.single / x.n >= 0.5 ? "font-bold" : ""}">${sh(x.single, x.n)}</td><td class="py-1.5 pr-3 text-right tabular-nums">${sh(x.two, x.n)}</td><td class="py-1.5 text-right tabular-nums ${x.n && x.three_plus / x.n >= 0.5 ? "font-bold" : ""}">${sh(x.three_plus, x.n)}</td></tr>`).join("")}
+          <tr class="border-t border-black/[0.06]"><td class="py-1.5 pr-3">Change orders</td><td class="py-1.5 pr-3 text-right tabular-nums">${co.n || 0}</td><td class="py-1.5 pr-3 text-right tabular-nums font-bold">${sh(co.single || 0, co.n)}</td><td class="py-1.5 pr-3 text-right text-black/35" colspan="2">more than one</td></tr></tbody>
+      </table></div>
+      ${d.can_edit ? `<div class="mt-3">${editing ? `<form id="asInvEdit" class="grid gap-3 bg-sky-50 rounded-lg p-3">
+          <div class="text-xs text-black/60">Leave a box blank to keep the measured value. Saving re-dates every auto · history invoice right away.</div>
+          <div class="flex flex-wrap gap-3">
+            <label class="text-xs grid gap-1"><span class="text-black/55">Deposit: days before start</span><input name="dep_off" type="number" min="0" max="180" step="1" value="${(ov.kinds || {}).deposit?.offset_days != null ? -ov.kinds.deposit.offset_days : ""}" placeholder="${Math.round(-((cal.kinds || {}).deposit?.offset_days || 0))}" class="input w-28 tabular-nums"></label>
+            ${KIND_ROWS.map(([name, label]) => `<label class="text-xs grid gap-1"><span class="text-black/55">${escapeHtml(label.split(" (")[0])}: days to pay</span><input name="lag_${name}" type="number" min="0" max="180" step="1" value="${(ov.kinds || {})[name]?.paid_lag_days ?? ""}" placeholder="${Math.round((cal.kinds || {})[name]?.paid_lag_days || 0)}" class="input w-28 tabular-nums"></label>`).join("")}
+            <label class="text-xs grid gap-1"><span class="text-black/55">One invoice under ($)</span><input name="below" type="number" min="0" step="500" value="${ov.single_below ?? ""}" placeholder="${cal.single_below || 0}" class="input w-32 tabular-nums"></label>
+          </div>
+          <label class="text-xs grid gap-1"><span class="text-black/55">Why (shown on the page)</span><input name="note" maxlength="255" value="${escapeHtml(it.override_note || "")}" class="input"></label>
+          <div class="flex gap-2"><button class="btn-primary text-xs" type="submit">Save override</button>
+            ${overridden ? `<button class="btn-ghost text-xs" type="button" data-reset="invoice_timing">Use measured values</button>` : ""}
+            <button class="btn-ghost text-xs" type="button" data-cancel>Cancel</button></div>
+        </form>` : `<button class="btn-ghost text-xs" data-edit="invoice_timing">Override</button>`}</div>` : ""}
+      <details class="mt-3"><summary class="text-xs font-semibold text-black/55 cursor-pointer">Recent invoices measured (${(b.samples || []).length})</summary>
+        <div class="overflow-x-auto mt-2"><table class="w-full text-xs">
+          <thead><tr class="text-[10px] uppercase tracking-wide text-black/45"><th class="py-1 pr-3 text-left">Project</th><th class="py-1 pr-3 text-left">Invoice</th><th class="py-1 pr-3 text-left">Job</th><th class="py-1 pr-3 text-left">Invoiced</th><th class="py-1 pr-3 text-left">Due</th><th class="py-1 pr-3 text-left">Paid</th><th class="py-1 text-right">Amount</th></tr></thead>
+          <tbody>${(b.samples || []).map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1 pr-3">${escapeHtml(x.project || "")}</td><td class="py-1 pr-3">${escapeHtml(x.label || "")}</td><td class="py-1 pr-3 tabular-nums whitespace-nowrap">${fmtD(x.start)} – ${fmtD(x.end)}</td><td class="py-1 pr-3 tabular-nums">${fmtD(x.invoice)}</td><td class="py-1 pr-3 tabular-nums">${fmtD(x.due)}</td><td class="py-1 pr-3 tabular-nums">${fmtD(x.paid)}</td><td class="py-1 text-right tabular-nums">${fmtMoney(x.amount)}</td></tr>`).join("")}</tbody>
+        </table></div></details>
+    </section>`;
+  }
+
   function render() {
     const d = st.data;
     const timing = d.items.filter((i) => i.group === "expense_timing").sort((a, b) => (b.basis?.amount || 0) - (a.basis?.amount || 0));
@@ -149,6 +208,8 @@ export async function assumptionsPage(routeFn) {
             <tbody>${timing.map((it) => timingRow(it, d)).join("") || `<tr><td colspan="7" class="py-4 text-black/45">Not measured yet.</td></tr>`}</tbody>
           </table></div>
         </section>
+
+        ${invoiceCard(d)}
 
         ${lodgingCard(d)}
 
@@ -195,7 +256,7 @@ export async function assumptionsPage(routeFn) {
           st.msg = "Re-measured from QuickBooks.";
         } else {
           const r = await api("/assumptions/apply", { method: "POST" });
-          st.msg = `Re-spread auto expense rows on ${r.projects_rebuilt} projects. Hand-edited rows were left as they were.`;
+          st.msg = `Re-spread auto expense rows on ${r.projects_rebuilt} projects${r.invoices ? ` and re-dated ${r.invoices.rows_redated} planned invoices` : ""}. Hand-edited rows were left as they were.`;
           st.data = await api("/assumptions");
         }
       } catch (e) { st.msg = `Failed: ${e?.message || e}`; }
@@ -206,6 +267,20 @@ export async function assumptionsPage(routeFn) {
   root.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
+    if (ev.target.id === "asInvEdit") {
+      const num = (n) => { const v = f.get(n); return v === "" || v == null ? null : Number(v); };
+      const kinds = {};
+      for (const [name] of KIND_ROWS) { const lag = num(`lag_${name}`); if (lag != null) kinds[name] = { paid_lag_days: lag }; }
+      const dep = num("dep_off");
+      if (dep != null) kinds.deposit = { ...(kinds.deposit || {}), offset_days: -dep };
+      const override = { kinds, ...(num("below") != null ? { single_below: num("below") } : {}) };
+      try {
+        st.data = await api("/assumptions/invoice_timing", { method: "PATCH", body: JSON.stringify({ override, note: f.get("note") || null }) });
+        st.editing = null; st.msg = "Override saved. Planned invoices marked auto · history were re-dated.";
+      } catch (e) { st.msg = `Couldn't save: ${e?.message || e}`; }
+      render();
+      return;
+    }
     const profile = Object.fromEntries(st.data.buckets.map(([k]) => [k, Number(f.get(`b_${k}`) || 0) / 100]));
     const lag = f.get("lag");
     const override = { profile, ...(lag !== "" && lag != null ? { paid_lag_days: Number(lag) } : {}) };

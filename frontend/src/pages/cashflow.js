@@ -1,3 +1,4 @@
+import { openDocViewer, DOC_ICON } from "../utils/doc-viewer.js";
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { fmtMoney } from "../utils/format.js";
@@ -77,7 +78,7 @@ export async function cashflowPage(routeFn) {
               <li><span class="font-semibold text-ink-900">Committed</span> (in QuickBooks): <em>in</em> = open customer invoices, on the expected-paid date if someone set one, otherwise the QuickBooks due date; <em>out</em> = open bills, on their due date.</li>
               <li><span class="font-semibold text-ink-900">Scheduled</span> (planned on each project's <span class="font-semibold">Billing &amp; Schedule</span> tab, not yet in QuickBooks):
                 <ul class="ml-5 mt-1 space-y-1" style="list-style:circle">
-                  <li>Invoices to send: each estimate's billing terms placed on the Job Schedule dates.</li>
+                  <li>Invoices to send: 35/35/30 for larger estimates, one invoice at completion for change orders and small jobs. Mobilization is dated on the job's start date and the Final on its end date, and both move when the dates change. Cash is expected after the measured days customers take to pay (about 30). See the Assumptions page.</li>
                   <li>Crew pay: the job's Payment Schedule sheet from Google Drive (updated nightly), or an even split of the estimate's labor when there's no sheet. Paid on the every-other-Friday payroll calendar.</li>
                   <li>Project expenses: each estimate cost category (rentals, lodging, materials…) spread the way those bills have actually landed on past jobs, and paid after the usual bill-to-payment time. The numbers behind this are on the <a href="#/assumptions" class="text-brand-700 font-semibold hover:underline">Assumptions</a> page.</li>
                 </ul>
@@ -1107,6 +1108,11 @@ export async function cashflowPage(routeFn) {
     }
     const wk = r.week_ends;
     reconSub.textContent = `Weeks ending ${mdY(wk[0])} to ${mdY(wk[wk.length - 1])} (${wk.length} weeks) · B250 tab "${r.b250.tab}", ${r.b250.source === "upload" ? "uploaded copy" : "read from Drive"} ${fmtWhen(r.b250.loaded_at)}${r.b250.weeks_skipped ? ` · the B250's first ${r.b250.weeks_skipped === 1 ? "week has" : r.b250.weeks_skipped + " weeks have"} already passed, so the comparison starts at the app's week 1` : ""}`;
+    if (r.b250.file_id) {   // the B250 tab these numbers were read from, in the viewer
+      reconSub.insertAdjacentHTML("beforeend", ` <button type="button" class="src-doc-btn" data-b250view title="View the B250 tab the comparison was read from">${DOC_ICON} View the B250</button>`);
+      reconSub.querySelector("[data-b250view]").addEventListener("click", () =>
+        openDocViewer({ drive: r.b250.file_id, sheet: r.b250.tab, filename: r.b250.file_name || "B250" }));
+    }
     const t = r.totals;
     const head = (label, bv, av, sub = "") => `<div class="rounded-xl border border-black/10 p-3">
       <div class="text-[11px] font-semibold uppercase tracking-wide text-black/45">${label}</div>

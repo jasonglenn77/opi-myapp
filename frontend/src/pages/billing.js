@@ -8,6 +8,7 @@ import { api } from "../api.js";
 import { escapeHtml } from "../utils/html.js";
 import { mountConsistencyChip } from "../utils/crew-consistency.js";
 import { timeOffRangeLabel } from "../utils/crew-editor.js";
+import { openDocViewer, DOC_ICON } from "../utils/doc-viewer.js";
 
 const money = (n) => (n == null || n === "" ? "—" : "$" + Math.round(Number(n)).toLocaleString("en-US"));
 const money2 = (n) => (n == null || n === "" ? "—" : "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 }));
@@ -52,7 +53,21 @@ const basisChip = (w) => (w.edited || !w.basis || w.basis === "manual") ? "" : w
   : w.basis === "auto_profile"
   ? `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Placed by this category's timing profile measured from QuickBooks history; paid date = bill week + the measured bill-to-payment lag. Click to see the numbers.">auto · history</a>`
   : `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-slate-600 bg-slate-50 rounded px-1 py-0.5" style="border:1px solid #e2e8f0" title="Estimate spread evenly across the project weeks (no timing profile for this category). Click to see the rules.">auto · even</a>`;
-const editedChip = (e) => e ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
+// 0087: where an invoice row's dates come from. auto = job dates + OPI's billing
+// history (re-placed when the job dates move); manual = typed by a person.
+const INV_RULE = { deposit: "the deposit's measured timing before the start date", mobilization: "the job's start date",
+  final: "the job's end date", full: "the job's end date" };
+const invKind = (label) => { const s = (label || "").toLowerCase();
+  return s.includes("deposit") ? "deposit" : (s.includes("mobiliz") || s.includes("progress")) ? "mobilization"
+    : (s.includes("in full") || s.startsWith("full invoice")) ? "full" : (s.includes("final") || s.includes("completion") || s.includes("balance to bill")) ? "final" : null; };
+const dateBasisChip = (m) => {
+  if (m.qbo_invoice_id || m.date_basis === "invoice") return "";
+  if (m.date_basis === "manual") return `<span style="width:fit-content" class="mt-0.5 flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="A person set these dates, so the app won't move them when the job dates change">manual dates<button type="button" data-autodates="${m.id}" class="font-bold text-blue-600 hover:underline" title="Hand the dates back to the app: invoice on ${escapeHtml(INV_RULE[invKind(m.label)] || "the job dates")}, due and expected paid from history">↺ auto</button></span>`;
+  const k = invKind(m.label);
+  if (!k) return "";
+  return `<a href="#/assumptions" style="width:fit-content" class="mt-0.5 flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Estimated: invoiced on ${escapeHtml(INV_RULE[k])}; due = the net terms; expected paid = how long customers have taken to pay this kind of invoice (measured from QuickBooks). Moves with the job dates until the invoice is sent or a person edits a date. Click to see the numbers.">auto · history</a>`;
+};
+const editedChip = (e) => e ?`<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Hand-edited — preserved when the schedule refreshes">✎ edited</span>` : "";
 
 // Assignment-workflow glue (#4): corner toast after the offer-accept confirm —
 // did the crew land on the project schedule? (shared .doc-toast style)
@@ -245,11 +260,11 @@ function render(container, entityId, d) {
     <tr class="border-b border-black/5" data-ms-row data-estval="${estVal || 0}">
       <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[m.tier]}${eInput("milestone", m.id, "label", m.label || "Milestone", "text", "font-semibold min-w-[8rem]")}</span></td>
       <td class="py-1 px-2"><span class="flex items-center gap-0.5"><input data-edit="milestone" data-id="${m.id}" data-field="pct" type="number" step="0.1" min="0" value="${m.pct ? Math.round(m.pct * 10) / 10 : ""}" class="${EDIT_BASE} ms-pct-w text-right tabular-nums"><span class="text-black/40 text-[11px]">%</span></span></td>
-      <td class="py-1 px-2">${eInput("milestone", m.id, "invoice_date", m.invoice_date, "date")}</td>
+      <td class="py-1 px-2">${eInput("milestone", m.id, "invoice_date", m.invoice_date, "date")}${dateBasisChip(m)}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "due_date", m.due_date, "date")}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "expected_paid_date", m.expected_paid_date, "date")}</td>
       <td class="py-1 px-2 text-right"><input data-edit="milestone" data-id="${m.id}" data-field="amount" type="number" step="0.01" value="${m.amount != null ? Math.round(m.amount * 100) / 100 : ""}" class="${EDIT_BASE} w-[6.5rem] text-right tabular-nums font-semibold ml-auto"></td>
-      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap"><span${m.tier === "retainage" ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc || "")} is paid except ${money(m.retainage_held)} the customer is holding back (retainage) — expected at release, not overdue"` : qboTitle(m)}>${pill(m.tier === "retainage" ? `Retainage · ${money(m.retainage_held)}` : m.status_label)}</span>${editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
+      <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap"><span${m.tier === "retainage" ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc || "")} is paid except ${money(m.retainage_held)} the customer is holding back (retainage) — expected at release, not overdue"` : qboTitle(m)}>${pill(m.tier === "retainage" ? `Retainage · ${money(m.retainage_held)}` : m.status_label)}</span>${m.date_basis === "manual" ? "" : editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`;
   const invEstimateCard = (a) => {
     const nr = !a.confirmed;
@@ -418,14 +433,22 @@ function render(container, entityId, d) {
             <select data-assign-crew data-eq="${a.qbo_id}" class="${EDIT_BASE} border-black/15">${crewOpts(a.crew_id)}</select>
             <button data-crew-browse data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-blue-600 hover:underline">browse crews →</button>
             <button data-crew-split data-eq="${a.qbo_id}" class="text-[11px] font-semibold text-indigo-700 hover:underline" title="Split this estimate's crew payments across 2+ crew companies — one schedule, each payment divided by percentage">Split across crews…</button></div>`;
+    // where the installments came from — the Payment Schedule file opens in the viewer
+    const cs = a.crew_source || {};
+    const srcLine = cs.source && String(cs.source).startsWith("sheet")
+      ? `<div class="px-4 py-1 text-[11.5px] text-black/55 flex items-center gap-1.5 flex-wrap">From the crew Payment Schedule in Google Drive${cs.source_modified ? ` (updated ${escapeHtml(shortDate(cs.source_modified))})` : ""}, read nightly; the sheet wins.
+          ${cs.source_doc_id ? `<button type="button" data-srcdoc="${cs.source_doc_id}" data-srcname="${escapeHtml(cs.source_file_name || "Payment Schedule")}" class="src-doc-btn" title="Open the file this schedule was read from">${DOC_ICON} ${escapeHtml(cs.source_file_name || "Payment Schedule")}</button>` : ""}</div>`
+      : cs.source ? `<div class="px-4 py-1 text-[11.5px] text-black/45">No Payment Schedule in Drive for this estimate: the estimate's labor split evenly across bi-weekly paydays.</div>` : "";
     return `<details class="group/ce border-b border-black/[0.06]">
       <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015] flex-wrap">
         <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-[12.5px] font-semibold text-ink-900">Estimate #${escapeHtml(a.doc || "—")}</span>
         <span class="tabular-nums text-[12px] text-black/55">${money(a.labor)} labor</span>
+        ${cs.source_doc_id ? `<button type="button" data-srcdoc="${cs.source_doc_id}" data-srcname="${escapeHtml(cs.source_file_name || "Payment Schedule")}" class="src-doc-btn" title="These payments were read from this Payment Schedule. Click to view it here.">${DOC_ICON} Payment Schedule</button>` : ""}
         <span class="ml-auto text-[11px] ${split ? "font-bold text-indigo-700" : "text-black/40"}">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "Unassigned"))}</span>
       </summary>
       ${assignRow}
+      ${srcLine}
       <div class="overflow-x-auto px-2 pb-2"><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-4">Pay date (auto bi-weekly)</th><th class="py-1 text-right">Amount</th><th></th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
       ${splitTotals}
       ${!complete && a.crew_schedule_id ? addBtn("installment", a.crew_schedule_id, "Add payment") : ""}
@@ -673,6 +696,19 @@ function render(container, entityId, d) {
       ab.disabled = true; ab.textContent = "Balancing…";
       try { await api(`/invoices/schedule/${ab.getAttribute("data-autobal")}/auto-balance`, { method: "POST" }); await reload(); }
       catch (err) { ab.disabled = false; ab.textContent = "Balance automatically"; alert("Failed: " + (err?.message || "error")); }
+      return;
+    }
+    const ad = e.target.closest("[data-autodates]");
+    if (ad) {
+      ad.disabled = true; ad.textContent = "…";
+      try { await api(`/invoices/milestone/${ad.getAttribute("data-autodates")}`, { method: "PATCH", body: JSON.stringify({ auto_dates: true, via: "billing" }) }); await reload(); }
+      catch (err) { ad.disabled = false; ad.textContent = "↺ auto"; alert("Failed: " + (err?.message || "error")); }
+      return;
+    }
+    const sd = e.target.closest("[data-srcdoc]");
+    if (sd) {
+      e.preventDefault();
+      openDocViewer({ id: Number(sd.getAttribute("data-srcdoc")), filename: sd.getAttribute("data-srcname") || "" });
       return;
     }
     // terms pill lives inside a <details> summary — stop the toggle, open editor
