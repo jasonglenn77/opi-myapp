@@ -125,10 +125,16 @@ export async function reviewPage(routeFn) {
   });
   const root = document.getElementById("rvRoot");
 
+  // 0089: the checks are saved on the server and shown at once; when the data
+  // changed since, the server rebuilds them in the background ("refreshing")
+  // and this re-asks quietly until the new result is in.
+  let pollTimer = null;
   async function load(fresh = false) {
     try {
       st.data = await api(`/review${fresh ? "?fresh=1" : ""}`);
       render();
+      clearTimeout(pollTimer);
+      if (st.data.refreshing && document.body.contains(root)) pollTimer = setTimeout(() => load(), 8000);
     } catch (e) {
       root.innerHTML = `<div class="card p-6 text-sm text-red-700">Couldn't load the review: ${escapeHtml(e?.message || String(e))}</div>`;
     }
@@ -171,6 +177,7 @@ export async function reviewPage(routeFn) {
             ${c.label}<span class="rv-badge ${d.counts[c.key]?.open ? "" : "rv-badge-zero"}">${d.counts[c.key]?.open || 0}</span></button>`).join("")}
         </div>
         <div class="rv-sources">
+          ${d.refreshing ? `<span style="font-weight:600;color:#b45309" title="The data changed since these checks last ran; they're being re-run now and this page updates by itself">Checks updating…</span>` : ""}
           ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")} ${runLine("payment_import", "Crew payments")} ${runLine("b250", "B250 cash flow")}
           <button type="button" class="rv-btn" data-refresh ${st.busy ? "disabled" : ""}>${st.busy ? "Reading Google… (documents take ~10 min — you can leave this page)" : "Refresh from Google"}</button>
         </div>
@@ -305,7 +312,7 @@ export async function reviewPage(routeFn) {
       if (!confirm("Undo the change made in the app and use the value in the Google Drive file?")) return;
       rl.disabled = true;
       api(`/review/overrides/${rl.dataset.release}/release`, { method: "POST" })
-        .then((r) => { alert(r.applied_now ? "Done: the app now uses the Drive file's value." : "Done: the next Job Schedule import (nightly, or Refresh from Google) applies the file's value."); load(true); })
+        .then((r) => { alert(r.applied_now ? "Done: the app now uses the Drive file's value." : "Done: the next Job Schedule import (nightly, or Refresh from Google) applies the file's value."); load(); })
         .catch((e) => { rl.disabled = false; alert(`Failed: ${e?.message || e}`); });
       return;
     }

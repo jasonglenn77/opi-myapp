@@ -13,28 +13,34 @@ from . import b250_cash, review, run
 
 router = APIRouter(prefix="/api/review", tags=["review"])
 
-# The comparison reads a few thousand rows (~15s), so it's cached; a refresh
-# from Drive or a nightly sync drops the cache. Review state is applied live.
-_cache = {"at": 0, "data": None}
-_TTL = 600
-
-
+# The checks take ~15s, so the result is saved (page_snapshots, 0089) and served
+# at once; it is rebuilt in the background when the data it reads changes, and
+# right after a refresh from Drive / an upload. Review states are applied live.
 def _require(user):
     if not any(has_capability(user, c) for c in (PAGE_CUSTOMERS, PAGE_ESTIMATE, PAGE_ASSIGNMENT)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
 
-def _items(force=False):
-    if force or not _cache["data"] or time.time() - _cache["at"] > _TTL:
-        _cache["data"], _cache["at"] = review.build(), time.time()
-    return _cache["data"]
+def _invalidate():
+    from app import snapshots
+    snapshots.refresh_async(review.SNAP_KEY, review.build_raw, review.data_sig)
 
 
 @router.get("")
 def get_review(fresh: bool = False, user=Depends(get_current_user)):
     _require(user)
-    d = _items(force=fresh)
-    return {**d, "runs": run.last_runs(), "built_at": _cache["at"], "b250": b250_cash.latest_meta()}
+    d = review.cached(force=fresh)
+    snap = d.get("snapshot") or {}
+    return {**d, "runs": run.last_runs(), "built_at": time.time() - (snap.get("age") or 0),
+            "refreshing": bool(snap.get("refreshing")), "b250": b250_cash.latest_meta()}
+
+
+@router.get("/summary")
+def get_summary(user=Depends(get_current_user)):
+    """Counts only (the Overview tile) - no item list."""
+    _require(user)
+    d = review.cached()
+    return {"counts": d["counts"], "refreshing": bool((d.get("snapshot") or {}).get("refreshing"))}
 
 
 @router.post("/b250-upload")
@@ -53,7 +59,7 @@ async def b250_upload(file: UploadFile = File(...), user=Depends(get_current_use
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Couldn't read the workbook: {str(e)[:200]}")
-    _cache["data"] = None
+    _invalidate()
     return out
 
 
@@ -76,11 +82,7 @@ def set_state(body: StateIn, user=Depends(get_current_user)):
     _require(user)
     if body.status not in ("open", "fixed", "ignored"):
         raise HTTPException(status_code=400, detail="status must be open, fixed or ignored")
-    review.set_state(body.key, body.status, body.note, user, body.fingerprint)
-    if _cache["data"]:
-        for it in _cache["data"]["items"]:
-            if it["key"] == body.key:
-                it["state"], it["note"], it["state_by"] = body.status, body.note, user.get("email")
+    review.set_state(body.key, body.status, body.note, user, body.fingerprint)   # applied live by overlay()
     return {"ok": True}
 
 
@@ -91,7 +93,7 @@ def release_override(override_id: int, user=Depends(get_current_user)):
     from . import overrides
     res = overrides.release(override_id, user.get("email"))
     record_audit(user, "data_review.use_drive_value", "app_override", override_id, None, res)
-    _cache["data"] = None
+    _invalidate()
     return res
 
 
@@ -110,6 +112,6 @@ def refresh(source: Optional[str] = None, user=Depends(get_current_user)):
             else:
                 run.refresh_all(who=who, actor=user)
         finally:
-            _cache["data"] = None
+            review.refresh_snapshot()
     threading.Thread(target=work, daemon=True).start()
     return {"started": True}

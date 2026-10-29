@@ -49,13 +49,13 @@ export async function overviewPage(routeFn) {
     const exp4 = m.planned.filter((r) => r.kind === "expense" && !r.overdue && r.date <= in4);
     const late = m.planned.filter((r) => r.overdue);
     const rv = st.review;
-    const openRv = rv ? rv.items.filter((i) => i.state === "open") : null;
+    const openRv = rv ? Object.values(rv.counts || {}).reduce((a, c) => a + (c.open || 0), 0) : null;
     return `<div class="grid gap-3" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr))">
       ${tile("#/money", `Next payday · ${day(m.next_payday)}`, fmtMoney(sum(payday)), `${payday.length} crew payments`)}
       ${tile("#/money", "Crew pay, next 4 weeks", fmtMoney(sum(crew4)), `${new Set(crew4.map((r) => r.entity_id)).size} projects`)}
       ${tile("#/money", "Expenses, next 4 weeks", fmtMoney(sum(exp4)), "planned, not yet billed")}
       ${tile("#/money", "Past due", fmtMoney(sum(late)), `${late.length} planned payments or bills`, late.length ? "text-rose-700" : "")}
-      ${tile("#/review", "Data Review", openRv ? openRv.length.toLocaleString() : "…", openRv ? "open items where records disagree" : "checking…", openRv?.length ? "text-amber-700" : "")}
+      ${tile("#/review", "Data Review", openRv != null ? openRv.toLocaleString() : "…", openRv != null ? "open items where records disagree" : "checking…", openRv ? "text-amber-700" : "")}
     </div>`;
   }
 
@@ -285,5 +285,5 @@ export async function overviewPage(routeFn) {
   render();
   loadSummary();
   api("/money/schedule?weeks_back=0&weeks_ahead=5").then((m) => { st.money = m; render(); }).catch(() => {});
-  api("/review").then((r) => { st.review = r; render(); }).catch(() => {});
+  api("/review/summary").then((r) => { st.review = r; render(); }).catch(() => {});
 }

@@ -136,9 +136,34 @@ def _load():
     return {"jobs": jobs, "built": time.time()}
 
 
+def data_sig():
+    """Fingerprint of what _load reads (estimates, bills/purchases, job dates)."""
+    with engine.connect() as conn:
+        return "|".join(str(conn.execute(text(q)).scalar()) for q in (
+            "SELECT MAX(id) FROM qbo_sync_runs",
+            "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(id), '')) FROM qbo_transactions",
+            "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM project_schedule_items",
+            "SELECT CURDATE()"))
+
+
+SNAP_KEY = "jobcost"
+
+
+def refresh_snapshot():
+    from app import snapshots
+    data = snapshots.rebuild(SNAP_KEY, _load, data_sig)
+    if data is not None:
+        _cache["data"], _cache["at"] = data, time.time()
+    return data
+
+
 def dataset(force=False):
+    """0089: from memory, else the saved snapshot (rebuilt in the background when
+    the QuickBooks / schedule data changed), else built now."""
     if force or not _cache["data"] or time.time() - _cache["at"] > CACHE_SECONDS:
-        _cache["data"], _cache["at"] = _load(), time.time()
+        from app import snapshots
+        data, _ = snapshots.serve(SNAP_KEY, _load, data_sig, max_age=CACHE_SECONDS * 6, force=force)
+        _cache["data"], _cache["at"] = data, time.time()
     return _cache["data"]
 
 

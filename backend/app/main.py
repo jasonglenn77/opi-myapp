@@ -1707,3 +1707,19 @@ def delete_crew_time_off(time_off_id: int, user=Depends(_time_off_manager)):
     record_audit(user, "crew.time_off_remove", "crew_time_off", time_off_id, row["company_name"],
                  _time_off_audit_payload({**row, "lead_ids": [l["id"] for l in row["leads"]]}))
     return {"ok": True}
+
+
+# 0089: each worker loads the saved Tracker results (and recomposes only what
+# changed) in the background as it starts, so the first visit after a deploy
+# is fast too.
+@app.on_event("startup")
+def _warm_page_snapshots():
+    import threading
+
+    def run():
+        try:
+            from app.tracker.routes import refresh_snapshot
+            refresh_snapshot()
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()

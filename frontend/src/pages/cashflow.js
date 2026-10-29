@@ -1,4 +1,5 @@
 import { openDocViewer, DOC_ICON } from "../utils/doc-viewer.js";
+import { openProjectDrawer } from "../utils/project-drawer.js";
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { fmtMoney } from "../utils/format.js";
@@ -450,7 +451,8 @@ export async function cashflowPage(routeFn) {
     // clicking a project row → open its Billing & Schedule tab, and remember to
     // send "← Back to Cash Flow" (scoped to this exact project).
     grid.querySelectorAll("a[data-cf-proj]").forEach(a =>
-      a.addEventListener("click", () => {
+      a.addEventListener("click", (e) => {
+        if (openInDrawer(e, a)) return;
         try {
           sessionStorage.setItem("opi_entity_tab", "billing");
           const pid = (a.getAttribute("href") || "").split("/").pop();
@@ -731,7 +733,8 @@ export async function cashflowPage(routeFn) {
     alertsEl.innerHTML = html;
     const ub = document.getElementById("cfUnschedBox"); if (ub) ub.addEventListener("toggle", () => { unOpen = ub.open; });
     const ob = document.getElementById("cfOverdueBox"); if (ob) ob.addEventListener("toggle", () => { odOpen = ob.open; });
-    alertsEl.querySelectorAll("a[data-cf-proj]").forEach(a => a.addEventListener("click", () => {
+    alertsEl.querySelectorAll("a[data-cf-proj]").forEach(a => a.addEventListener("click", (e) => {
+      if (openInDrawer(e, a)) return;
       try {
         sessionStorage.setItem("opi_entity_tab", "billing");
         const pid = (a.getAttribute("href") || "").split("/").pop();
@@ -780,6 +783,21 @@ export async function cashflowPage(routeFn) {
   }
 
   let lastSig = null;  // signature of the last-rendered numbers (skip no-op re-renders)
+  // A project link opens its Billing & Schedule in a side panel (ctrl/cmd-click
+  // still opens the full workspace). Each save there refreshes the forecast.
+  let refreshTimer = null;
+  function openInDrawer(e, a) {
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return false;
+    const pid = (a.getAttribute("href") || "").split("/").pop();
+    if (!pid) return false;
+    e.preventDefault();
+    openProjectDrawer({
+      entityId: decodeURIComponent(pid), name: a.textContent.trim(), backLabel: "Cash Flow", backHash: "#/cashflow",
+      onChange: () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => load(true), 1200); },
+    });
+    return true;
+  }
+
   async function load(silent = false) {
     // `silent` = a background poll while the cache recomputes: don't blank the
     // grid, and only re-render if the numbers actually changed (no flash).

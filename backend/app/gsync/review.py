@@ -596,17 +596,79 @@ def _optional_items(conn):
     return out
 
 
-def build():
+def build_raw():
+    """The slow part: every check, without the Fixed / Ignored states (0089:
+    saved as a page snapshot; the states are applied live by overlay())."""
     with engine.connect() as conn:
         p_items, p_meta = pipeline_items(conn)
         s_items, s_meta = schedule_items(conn)
         x_items, _ = sheets_items(conn)
         o_items = _optional_items(conn)
         c_items = crew_boss_items(conn) + unscheduled_won_items(conn)
+    return {"items": p_items + s_items + x_items + o_items + c_items, "meta": {**p_meta, **s_meta}}
+
+
+# Everything the checks read, as one cheap fingerprint: when it moves, the saved
+# Data Review is rebuilt in the background.
+_SIG_SQL = [
+    "SELECT MAX(finished_at) FROM gsync_runs",
+    "SELECT MAX(id) FROM qbo_sync_runs",
+    "SELECT MAX(id) FROM gsync_b250_snapshot",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM project_invoice_milestones",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM project_payment_installments",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM project_schedule_items",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM app_overrides",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(id), '')) FROM documents",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM opportunities",
+    "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM project_payment_schedules",
+]
+
+
+def data_sig():
+    out = []
+    with engine.connect() as conn:
+        for q in _SIG_SQL:
+            try:
+                out.append(str(conn.execute(text(q)).scalar()))
+            except Exception:
+                conn.rollback()
+                out.append("-")
+    return "|".join(out)
+
+
+SNAP_KEY = "review"
+
+
+def refresh_snapshot():
+    from app import snapshots
+    return snapshots.rebuild(SNAP_KEY, build_raw, data_sig)
+
+
+def cached(force=False):
+    """Data Review from the saved snapshot (rebuilt in the background when the
+    data changed), with the live Fixed / Ignored states."""
+    from app import snapshots
+    raw, meta = snapshots.serve(SNAP_KEY, build_raw, data_sig, max_age=1800, force=force)
+    out = overlay(raw)
+    out["snapshot"] = meta
+    return out
+
+
+def build():
+    return overlay(build_raw())
+
+
+def overlay(raw):
+    with engine.connect() as conn:
         state = {r["item_key"]: dict(r) for r in conn.execute(text(
             "SELECT item_key, status, note, fingerprint, updated_by_email, updated_at FROM data_review_state")).mappings()}
         last_refresh = conn.execute(text("SELECT MAX(finished_at) FROM gsync_runs WHERE ok = 1")).scalar()
-    items = p_items + s_items + x_items + o_items + c_items
+        try:   # app edits resolved since the snapshot was built drop out at once
+            open_ov = {r[0] for r in conn.execute(text("SELECT id FROM app_overrides WHERE resolved_at IS NULL")).all()}
+        except Exception:
+            open_ov = None
+    items = [dict(i) for i in raw["items"]
+             if open_ov is None or i.get("category") != "app_edits" or (i.get("ref") or {}).get("override_id") in open_ov]
     for it in items:
         st = state.get(it["key"])
         it["state"] = "open"
@@ -630,7 +692,7 @@ def build():
             "counts": {c: {"open": counts[(c, "open")], "fixed": counts[(c, "fixed")], "ignored": counts[(c, "ignored")]}
                        for c in ("todo", "pipeline", "schedule", "sheets", "documents", "old_estimates", "billing",
                                  "payments", "sources", "app_edits")},
-            "meta": {**p_meta, **s_meta}}
+            "meta": raw.get("meta") or {}}
 
 
 def set_state(key, status, note, user, fingerprint):

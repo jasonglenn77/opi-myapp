@@ -228,7 +228,9 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
         return {"ok": True}
     sets, params = ["edited = 1"], {"id": mid}
     if any(f in fields for f in ("invoice_date", "due_date", "expected_paid_date")):
-        sets.append("date_basis = 'manual'")   # 0087: a person's date is never moved automatically
+        # 0087: a person's date is never moved automatically (a row that IS a
+        # QuickBooks invoice keeps following the invoice)
+        sets.append("date_basis = IF(qbo_invoice_id IS NULL, 'manual', date_basis)")
     # A hand-set amount / % is an override the schedule's automatic true-up
     # (billing/align.py) must respect; a date/label edit isn't (the row's amount
     # keeps following the estimate so the schedule still adds up).

@@ -645,11 +645,16 @@ function render(container, entityId, d) {
 
   const reload = async () => {
     const y = window.scrollY;
+    const scroller = container.closest("[data-scroll-host]");
+    const sy = scroller ? scroller.scrollTop : 0;
     try {
       const fresh = await api(`/billing/project/${encodeURIComponent(entityId)}`);
       render(container, entityId, fresh);
       window.scrollTo(0, y);
+      if (scroller) scroller.scrollTop = sy;
     } catch (_) {}
+    // every edit ends in a reload: let the Cash Flow drawer know the plan changed
+    window.dispatchEvent(new CustomEvent("opi:billing-changed", { detail: { entityId } }));
   };
   const root = container.firstElementChild; // replaced every render → no listener stacking
 
@@ -714,7 +719,9 @@ function render(container, entityId, d) {
     }
     if (e.target.closest("[data-goto-cos]")) {
       e.preventDefault();
-      document.querySelector('#tabBar [data-tab="changeorders"]')?.click();
+      const tab = document.querySelector('#tabBar [data-tab="changeorders"]');
+      if (tab) tab.click();
+      else location.hash = `#/entity/project/${encodeURIComponent(entityId)}?tab=changeorders`;   // from the Cash Flow drawer
       return;
     }
     const ad = e.target.closest("[data-autodates]");
@@ -860,6 +867,7 @@ function openTermsEditor(entityId, d, terms, container) {
       || ["realized", "committed", "retainage"].includes(m.tier) || m.qbo_invoice_id).length, 0);
   const overlay = document.createElement("div");
   overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.style.zIndex = "100";   // above the Cash Flow project drawer
   overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
     <div class="text-base font-bold text-ink-900 mb-1">Invoice terms</div>
     <div class="text-[12px] text-black/55 mb-3">Percent split of each estimate's value + days to pay. Applying re-seeds the milestone schedules below; milestones already invoiced or paid are kept.</div>
@@ -924,6 +932,7 @@ function openCrewSplitEditor(entityId, estimateQboId, crews, existing, container
        { company_crew_id: companies[1] ? companies[1].id : "", pct: 50 }];
   const overlay = document.createElement("div");
   overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.style.zIndex = "100";   // above the Cash Flow project drawer
   overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-5">
     <div class="text-base font-bold text-ink-900 mb-1">Split crew payments — estimate ${escapeHtml(estimateQboId)}</div>
     <div class="text-[12px] text-black/55 mb-3">One payment schedule (same dates); each installment's amount is divided across the companies by these percentages. The first company becomes the estimate's primary crew.</div>
@@ -1067,6 +1076,7 @@ function rollupScript(g, project, scope) {
 function openOfferScriptModal(text) {
   const overlay = document.createElement("div");
   overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.style.zIndex = "100";   // above the Cash Flow project drawer
   overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-5">
     <div class="text-base font-bold text-ink-900 mb-1">Crew job offer</div>
     <div class="text-[12px] text-black/50 mb-3">Copy this to send the crew — edit first if you like.</div>
@@ -1093,6 +1103,7 @@ function openOfferScriptModal(text) {
 function openCrewRoster(entityId, start, end, onPick) {
   const wrap = document.createElement("div");
   wrap.className = "fixed inset-0 z-[100]";
+  wrap.style.zIndex = "100";   // above the Cash Flow project drawer
   wrap.innerHTML = `<div data-backdrop class="absolute inset-0 bg-black/30"></div>
     <div class="absolute top-0 right-0 h-full w-full max-w-md bg-white shadow-xl overflow-y-auto">
       <div class="sticky top-0 bg-white border-b border-black/10 px-4 py-3 flex items-center justify-between z-10">

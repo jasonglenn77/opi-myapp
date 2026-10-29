@@ -135,6 +135,13 @@ def _signatures(conn, only=None):
         SELECT entity_id, MAX(updated_at), COUNT(*) FROM project_estimate_billing
         {"WHERE entity_id = :only" if only else ""} GROUP BY entity_id
     """), p).all())
+    try:   # change orders (pending COs on the billing composition)
+        add(conn.execute(text(f"""
+            SELECT project_qbo_id, MAX(updated_at), COUNT(*) FROM project_change_orders
+            {"WHERE project_qbo_id = :only" if only else ""} GROUP BY project_qbo_id
+        """), p).all())
+    except Exception:
+        conn.rollback()
     try:   # 0079 expected-paid overrides on actual invoices
         add(conn.execute(text(f"""
             SELECT entity_id, MAX(updated_at), COUNT(*), COUNT(expected_paid_date) FROM qbo_invoice_expected_paid
@@ -174,15 +181,46 @@ def _setup(entity_id):
         _ensure_invoice_schedules(conn, entity_id, ctx)
 
 
+_preloaded = {"done": False}
+
+
+def _preload():
+    """0089: a fresh worker (after a deploy / restart) starts from every
+    project's last saved composition in one query, instead of recomposing all
+    ~600 projects (~23s); _billing still recomposes any whose signature moved."""
+    if _preloaded["done"]:
+        return
+    try:
+        from app import snapshots
+        snaps = snapshots.get_many("tracker:")
+        with _cache_lock:
+            for k, (payload, sig) in snaps.items():
+                _cache.setdefault(k.split(":", 1)[1], (sig, payload))
+    except Exception:
+        pass
+    _preloaded["done"] = True
+
+
 def _billing(conn, entity_id, sig):
+    sj = json.dumps(sig)
     with _cache_lock:
         hit = _cache.get(entity_id)
-    if hit and hit[0] == sig:
+    if hit and hit[0] == sj:
         return hit[1]
     comp = _compose_estimates(conn, entity_id)
     with _cache_lock:
-        _cache[entity_id] = (sig, comp)
+        _cache[entity_id] = (sj, comp)
+    try:   # shared with the other workers and kept across restarts
+        from app import snapshots
+        snapshots.put(f"tracker:{entity_id}", comp, sj)
+    except Exception:
+        pass
     return comp
+
+
+def refresh_snapshot():
+    """Nightly warm-up: recompose (and save) every project whose data changed."""
+    return len(_build() or [])
 
 
 # ── row composition ─────────────────────────────────────────────────────────
@@ -303,6 +341,7 @@ def _build(only=None):
             _setup(e)
         except Exception:
             pass   # the row still renders from whatever exists
+    _preload()
     with engine.connect() as conn:
         pms = _pms(conn, only)
         est_dates = _estimate_dates(conn, only)
