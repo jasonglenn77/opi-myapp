@@ -105,3 +105,52 @@ B250 (12 weeks: B250 $1.91M, app $1.60M) is not missing data. It comes from:
    evenly (Amazon Dallas $231k), not from a sheet.
 3. **Crew naming.** The B250 names some crews differently (ABM = A&B Installations, Gomez = JG
    Pallet Rack); Data Review maps them by payment amounts and compares per crew.
+
+## Contractor controls (2026-11-01, migration 0090)
+
+From Luke's 10/31 request after finding labor payments were being mismanaged. Three pieces:
+
+**Contractor Payments** is the one home for crew pay. The plan is the Payment Schedule in Drive, the
+actual is QuickBooks contract labor tagged to the job. Crews are paid in lump runs that cover
+several jobs, so paid-to-date is compared per job and crew, never row by row. Every difference
+becomes an item with its own decisions, and the decision (who, when, why) is kept. If the amount
+moves afterward the item is marked changed. Every edit to a crew payment is now logged.
+
+- The budget is estimate labor + Pending estimates + lodging recorded as included. Ashley and Julie
+  say change orders can lag or never get entered, so spend can run ahead of the estimate. A change
+  order that was never created can't be seen in the data, so a labor overage can be marked "change
+  order coming" with an amount.
+- Some crew amounts include lodging (no sheet or bill labels it). "Includes lodging" on a schedule
+  records the amount. The dates stay as they are.
+- Approve and Hold are records for whoever runs payroll. The app doesn't pay crews.
+
+**Progress Checks** run on every job, with sign-offs at 25/50/75/100% on jobs of $500k and up, or
+any job switched on. Costs are compared to the job's own plan, not a straight line, moved back by
+how long each cost takes to reach QuickBooks. "How costs reach QuickBooks" on the Assumptions page
+holds the measured table (share tagged to a job, days to entry, share billed after job end) and
+sets how far each cost can be trusted. As of 10/31: crew labor, lifts, propane and lodging are
+reliable; materials and travel are weak, because many card charges never get a job tag.
+
+**Costs before QuickBooks.** QuickBooks stays the record of what was spent. A receipt, a typed entry
+or a job picked for an untagged card charge only fills the gap. Nightly, an entry that matches a
+line on the same job clears itself, so nothing counts twice. An entry that matches an untagged
+charge is flagged so the office can tag it, and the receipt tells them which job it was.
+
+**Completion date.** OPI doesn't record one. The export shows the last scheduled day, marked
+complete, the Project Completion Form, last invoice and last cost, plus a best date: the form when
+there is one, otherwise the last scheduled day. Status history only starts in April 2026, and last
+cost trails the job by about two weeks, so neither is used as the best date. The Project Completion
+Form is the real fix, once crews use it.
+
+**Crew forms.** Contractor Payments lists what's on file for every job on its Crew forms tab, and a
+finished job with no Project Completion Form becomes an item needing a decision. Forms come from
+Drive, matched by file name in the project folders, and from the Crew Portal. As of 10/31 the app
+holds none from the Crew Portal, so everything found is a Drive file. A Word copy of the Completion
+Form has blank signature lines, so it counts as an unsigned draft. A PDF or photo is taken as
+signed, because a file name can't prove it. Daily forms have never been filed on most jobs, so a
+missing one is shown but doesn't become an item. The best completion date doesn't read Drive forms
+yet: their dates are inside the document.
+
+Found while building: some non-crew items are booked to Contract Labor with no job, such as a
+$20,000 loan to Ruiz Services and its repayments, plus software and legal bills. They are listed on
+Contractor Payments.

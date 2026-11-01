@@ -2094,12 +2094,16 @@ const RECEIPT_CATS = [
   ["travel", "Travel"],
   ["materials", "Materials"],
   ["propane_fuel", "Propane / Fuel"],
+  ["lodging", "Lodging"],
+  ["lifts", "Lift rental"],
+  ["rentals", "Other rental"],
   ["other", "Other"],
 ];
 const RECEIPT_CAT_LABEL = Object.fromEntries(RECEIPT_CATS);
 // Receipt category → the Overview expense-burndown category it overlays.
 const RECEIPT_TO_EXPENSE_CAT = {
   travel: "Travel", materials: "Materials", propane_fuel: "Propane", other: "Other",
+  lodging: "Lodging", lifts: "Rentals", rentals: "Rentals",
 };
 const RECEIPT_STATUS_CHIP = {
   uploaded:   `<span class="pm-chip pm-chip-review">Uploaded</span>`,

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from app.audit import diff_fields, record_audit
 from app.db import engine
 from app.gsync import overrides as OV
 from app.auth import get_current_user
@@ -29,6 +30,26 @@ router = APIRouter(prefix="/api/payments", tags=["payments"])
 def _require(user):
     if not has_capability(user, PAGE_CUSTOMERS):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+def _inst_row(conn, inst_id):
+    r = conn.execute(text("""SELECT i.schedule_id, i.seq, i.pay_date, i.amount, i.send_invoice_date, i.status, i.note,
+                                    s.entity_id, s.source_file_name
+                             FROM project_payment_installments i JOIN project_payment_schedules s ON s.id = i.schedule_id
+                             WHERE i.id = :id"""), {"id": inst_id}).mappings().first()
+    return dict(r) if r else None
+
+
+def _audit_inst(user, action, inst_id, before, after=None):
+    """Every change to a crew payment row is logged: who, when, old -> new."""
+    base = before or after or {}
+    fields = ("pay_date", "amount", "send_invoice_date", "status", "note")
+    detail = {"entity_id": base.get("entity_id"), "schedule_id": base.get("schedule_id"), "seq": base.get("seq")}
+    if before and after:
+        detail["changes"] = diff_fields(before, after, fields)
+    else:
+        detail["row"] = {f: base.get(f) for f in fields}
+    record_audit(user, action, "crew_installment", inst_id, base.get("source_file_name"), detail)
 
 
 def _project_meta(conn, entity_id):
@@ -304,6 +325,9 @@ def generate(entity_id: str, body: GenerateReq, user=Depends(get_current_user)):
                                  VALUES (:sid,:seq,:pd,:amt,:inv,:st,:nt)"""),
                          {"sid": sid, "seq": r["seq"], "pd": r["pay_date"], "amt": r["amount"],
                           "inv": r["send_invoice_date"], "st": r["status"], "nt": r["note"]})
+    record_audit(user, "crew_schedule.generate", "crew_schedule", sid, body.estimate_doc_number,
+                 {"entity_id": entity_id, "contract_labor": body.contract_labor, "crew_id": body.crew_id,
+                  "rows": len(rows), "replaced": bool(exists)})
     return {"ok": True}
 
 
@@ -315,10 +339,14 @@ class SchedulePatch(BaseModel):
 def patch_schedule(sid: int, body: SchedulePatch, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
-        n = conn.execute(text("UPDATE project_payment_schedules SET crew_id=:c WHERE id=:id"),
-                         {"c": body.crew_id, "id": sid}).rowcount
-    if not n:
+        old = conn.execute(text("SELECT entity_id, crew_id FROM project_payment_schedules WHERE id=:id"),
+                           {"id": sid}).mappings().first()
+        conn.execute(text("UPDATE project_payment_schedules SET crew_id=:c WHERE id=:id"),
+                     {"c": body.crew_id, "id": sid})
+    if not old:
         raise HTTPException(status_code=404, detail="No schedule to update")
+    record_audit(user, "crew_schedule.crew", "crew_schedule", sid, None,
+                 {"entity_id": old["entity_id"], "changes": {"crew_id": [old["crew_id"], body.crew_id]}})
     return {"ok": True}
 
 
@@ -326,8 +354,14 @@ def patch_schedule(sid: int, body: SchedulePatch, user=Depends(get_current_user)
 def delete_schedule(sid: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
+        old = conn.execute(text("""SELECT s.entity_id, s.crew_id, s.source_file_name, COALESCE(SUM(i.amount), 0) AS total, COUNT(i.id) AS n
+                                   FROM project_payment_schedules s LEFT JOIN project_payment_installments i ON i.schedule_id = s.id
+                                   WHERE s.id=:id GROUP BY s.id"""), {"id": sid}).mappings().first()
         conn.execute(text("DELETE FROM project_payment_installments WHERE schedule_id=:sid"), {"sid": sid})
         conn.execute(text("DELETE FROM project_payment_schedules WHERE id=:id"), {"id": sid})
+    if old:
+        record_audit(user, "crew_schedule.delete", "crew_schedule", sid, old["source_file_name"],
+                     {"entity_id": old["entity_id"], "crew_id": old["crew_id"], "rows": old["n"], "total": old["total"]})
     return {"ok": True}
 
 
@@ -360,7 +394,9 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
     sets.append("edited=1")
     with engine.begin() as conn:
         old = _sheet_row(conn, inst_id)
-        n = conn.execute(text(f"UPDATE project_payment_installments SET {', '.join(sets)} WHERE id=:id"), params).rowcount
+        before = _inst_row(conn, inst_id)
+        conn.execute(text(f"UPDATE project_payment_installments SET {', '.join(sets)} WHERE id=:id"), params)
+        after = _inst_row(conn, inst_id)
         if old:   # 0088: a change to a value read from the Drive Payment Schedule is kept + listed on Data Review
             new = {"pay_date": params.get("pd"), "send_invoice_date": params.get("inv"), "amount": params.get("amt")}
             for f, v in new.items():
@@ -369,8 +405,9 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
                         or (f == "amount" and body.amount is not None)):
                     OV.record(conn, OV.PAYMENT, "project_payment_installments", inst_id, f, v, old[f],
                               user_email=user.get("email"), **_ov_ctx(old))
-    if not n:
+    if not before:
         raise HTTPException(status_code=404, detail="Installment not found")
+    _audit_inst(user, "crew_payment.update", inst_id, before, after)
     return {"ok": True}
 
 
@@ -409,6 +446,8 @@ def add_installment(sid: int, body: InstallmentBody, user=Depends(get_current_us
                       "new payment (date and amount to be set)" if not body.pay_date else f"{body.pay_date} ${float(body.amount or 0):,.0f}",
                       None, user_email=user.get("email"), entity_id=s["entity_id"], file_id=s["source_file_id"],
                       file_name=s["source_file_name"], sheet_ref=None)
+        added = _inst_row(conn, new_id)
+    _audit_inst(user, "crew_payment.add", new_id, None, added)
     return {"ok": True}
 
 
@@ -417,6 +456,7 @@ def delete_installment(inst_id: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
         old = _sheet_row(conn, inst_id)
+        before = _inst_row(conn, inst_id)
         conn.execute(text("DELETE FROM project_payment_installments WHERE id=:id"), {"id": inst_id})
         if old:   # 0088: the import would put a Drive row back; remember it was removed in the app
             OV.record(conn, OV.PAYMENT, "project_payment_schedules", old["schedule_id"], f"deleted:{old['seq']}", None,
@@ -424,4 +464,6 @@ def delete_installment(inst_id: int, user=Depends(get_current_user)):
         conn.execute(text("""UPDATE app_overrides SET resolved_at = NOW(), resolved_how = 'row_deleted'
                              WHERE target_table = 'project_payment_installments' AND target_id = :id AND resolved_at IS NULL"""),
                      {"id": inst_id})
+    if before:
+        _audit_inst(user, "crew_payment.delete", inst_id, before)
     return {"ok": True}

@@ -179,6 +179,52 @@ export async function assumptionsPage(routeFn) {
     </section>`;
   }
 
+  // How each cost type gets into QuickBooks. Kept as a measured stat so it can be
+  // shared as it stands (also a tab in the Excel export).
+  function captureCard(d) {
+    const it = d.items.find((i) => i.key === "expense_capture");
+    const cats = it?.calibrated?.categories;
+    if (!cats) return "";
+    const share = (v) => v == null ? "—" : (v >= 0.99 && v < 1) ? `${(Math.floor(v * 1000) / 10).toFixed(1)}%` : `${Math.round(v * 100)}%`;
+    const lag = (v) => v == null ? "—" : `${Math.round(v)} days`;
+    const tone = (v) => v == null ? "" : v >= 0.9 ? "text-emerald-700" : v >= 0.7 ? "text-amber-700" : "text-rose-700";
+    const ROWS = [["Crew labor", "Crew labor"], ["Lifts", "Lifts"], ["Other rentals", "Other rentals"], ["Propane", "Propane"], ["Lodging", "Lodging"], ["Materials", "Materials"], ["Travel", "Travel"]];
+    const fmtD = (s) => s ? new Date(`${s}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "";
+    return `<section class="card p-5">
+      <h2 class="text-base font-bold">How costs reach QuickBooks</h2>
+      <p class="text-sm text-black/60 mt-1" style="max-width:52rem">How complete and how timely each cost type is, which decides how far a progress check can trust it. <b>Tagged to a job</b> is the share of dollars that carry a project in QuickBooks. <b>Entered after the charge</b> is the dollar-weighted days from the bill or charge date to the day it was keyed in. <b>Billed after job end</b> is the share dated after the job's last scheduled day. Re-measured nightly. Also a tab in the Excel export.</p>
+      <div class="overflow-x-auto mt-3"><table class="w-full text-sm">
+        <thead><tr class="text-[11px] uppercase tracking-wide text-black/45"><th class="py-2 pr-3 text-left">Cost</th><th class="py-2 pr-3 text-right">Tagged to a job</th><th class="py-2 pr-3 text-right">Bills tagged</th><th class="py-2 pr-3 text-right">Cards tagged</th><th class="py-2 pr-3 text-right">Entered after the charge</th><th class="py-2 pr-3 text-right">Billed after job end</th><th class="py-2 text-right">Not tagged</th></tr></thead>
+        <tbody>${ROWS.filter(([k]) => cats[k]).map(([k, l]) => { const c = cats[k]; return `<tr class="border-t border-black/[0.06]">
+          <td class="py-2 pr-3 font-semibold">${escapeHtml(l)}</td>
+          <td class="py-2 pr-3 text-right tabular-nums font-bold ${tone(c.tagged_share)}">${share(c.tagged_share)}</td>
+          <td class="py-2 pr-3 text-right tabular-nums">${share(c.bills?.tagged_share)}</td>
+          <td class="py-2 pr-3 text-right tabular-nums">${share(c.cards?.tagged_share)}</td>
+          <td class="py-2 pr-3 text-right tabular-nums">${lag(c.entry_lag_days)}</td>
+          <td class="py-2 pr-3 text-right tabular-nums">${share(c.after_end_share)}</td>
+          <td class="py-2 text-right tabular-nums">$${Math.round(c.untagged || 0).toLocaleString()}</td></tr>`; }).join("")}</tbody>
+      </table></div>
+      <div class="text-xs text-black/45 mt-2">From QuickBooks bills, card purchases and checks since ${fmtD(it.basis?.since)}. Owner pay and company overhead are left out.</div>
+    </section>`;
+  }
+
+  // 0090: sign-off size and tolerances used by Progress Checks
+  function progressCard(d) {
+    const v = d.progress_rules || {};
+    const editing = st.editing === "progress_rules";
+    return `<section class="card p-5">
+      <h2 class="text-base font-bold">Progress checks</h2>
+      <p class="text-sm text-black/60 mt-1" style="max-width:52rem">Every job gets checkpoints at 25, 50, 75 and 100 percent of its scheduled days. Jobs of <b>${fmtMoney(v.signoff_min)}</b> or more need a sign-off at each one, and any job can be switched on or off. A cost shows <b>over budget</b> past ${pct(v.over_pct)} above estimate plus pending, and <b>ahead of</b> or <b>behind plan</b> when it is more than ${pct(v.variance_pct)} (and ${fmtMoney(v.variance_abs)}) away from the plan.</p>
+      ${d.can_edit ? (editing ? `<form id="asProgEdit" class="grid gap-3 bg-sky-50 rounded-lg p-3 mt-3"><div class="flex flex-wrap gap-3">
+        <label class="text-xs grid gap-1"><span class="text-black/55">Sign-off from ($)</span><input name="signoff_min" type="number" min="0" step="1000" value="${v.signoff_min}" class="input w-32 tabular-nums"></label>
+        <label class="text-xs grid gap-1"><span class="text-black/55">Over budget past (%)</span><input name="over_pct" type="number" min="0" max="100" step="1" value="${Math.round(v.over_pct * 100)}" class="input w-28 tabular-nums"></label>
+        <label class="text-xs grid gap-1"><span class="text-black/55">Off plan past (%)</span><input name="variance_pct" type="number" min="0" max="100" step="1" value="${Math.round(v.variance_pct * 100)}" class="input w-28 tabular-nums"></label>
+        <label class="text-xs grid gap-1"><span class="text-black/55">And more than ($)</span><input name="variance_abs" type="number" min="0" step="100" value="${v.variance_abs}" class="input w-28 tabular-nums"></label></div>
+        <div class="flex gap-2"><button class="btn-primary text-xs" type="submit">Save</button><button class="btn-ghost text-xs" type="button" data-cancel>Cancel</button></div></form>`
+        : `<div class="mt-3"><button class="btn-ghost text-xs" data-edit="progress_rules">Change</button></div>`) : ""}
+    </section>`;
+  }
+
   function render() {
     const d = st.data;
     const timing = d.items.filter((i) => i.group === "expense_timing").sort((a, b) => (b.basis?.amount || 0) - (a.basis?.amount || 0));
@@ -208,6 +254,10 @@ export async function assumptionsPage(routeFn) {
             <tbody>${timing.map((it) => timingRow(it, d)).join("") || `<tr><td colspan="7" class="py-4 text-black/45">Not measured yet.</td></tr>`}</tbody>
           </table></div>
         </section>
+
+        ${captureCard(d)}
+
+        ${progressCard(d)}
 
         ${invoiceCard(d)}
 
@@ -267,6 +317,16 @@ export async function assumptionsPage(routeFn) {
   root.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
+    if (ev.target.id === "asProgEdit") {
+      const override = { signoff_min: Number(f.get("signoff_min")), over_pct: Number(f.get("over_pct")) / 100,
+                         variance_pct: Number(f.get("variance_pct")) / 100, variance_abs: Number(f.get("variance_abs")) };
+      try {
+        st.data = await api("/assumptions/progress_rules", { method: "PATCH", body: JSON.stringify({ override, note: null }) });
+        st.editing = null; st.msg = "Progress check rules saved.";
+      } catch (e) { st.msg = `Couldn't save: ${e?.message || e}`; }
+      render();
+      return;
+    }
     if (ev.target.id === "asInvEdit") {
       const num = (n) => { const v = f.get(n); return v === "" || v == null ? null : Number(v); };
       const kinds = {};

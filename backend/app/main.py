@@ -65,6 +65,9 @@ from app.gsync.docs_routes import router as drive_docs_router
 from app.assumptions.routes import router as assumptions_router
 from app.money.routes import router as money_router
 from app.jobcost.routes import router as jobcost_router
+from app.crewpay.routes import router as crewpay_router
+from app.progress.routes import router as progress_router
+from app.reports.routes import router as reports_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -98,6 +101,9 @@ app.include_router(drive_docs_router)
 app.include_router(assumptions_router)
 app.include_router(money_router)
 app.include_router(jobcost_router)
+app.include_router(crewpay_router)
+app.include_router(progress_router)
+app.include_router(reports_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 

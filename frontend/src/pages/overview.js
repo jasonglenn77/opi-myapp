@@ -80,7 +80,7 @@ export async function overviewPage(routeFn) {
       <thead><tr class="text-[11px] uppercase tracking-wide text-black/45">
         <th class="py-2 pr-3 text-left">Cost category</th>
         <th class="py-2 px-2 text-left">${active ? "Spent so far vs estimate" : "Actual vs estimate"}</th>
-        ${th("Estimated")}${th(active ? "Spent so far" : "Actual")}${th(active ? "Spent / est." : "Actual / est.", "All jobs' actual dollars divided by all jobs' estimated dollars")}
+        ${th("Estimated")}${th("Pending", "Cost on Pending estimates. Staff can run behind on change orders, so spend can arrive before the estimate is accepted. Not counted as approved.")}${th(active ? "Spent so far" : "Actual")}${th(active ? "Spent / est." : "Actual / est.", "All jobs' actual dollars divided by all jobs' estimated dollars")}
         ${th("Typical job", "The median job's actual / estimate, so a few extreme jobs don't skew it")}
         ${th(`Jobs over ${Math.round(s.rules.over_pct * 100)}%`, "Jobs whose actual ran more than this above their estimate, and the dollars above estimate")}
         ${th("No cost recorded", "Jobs with an estimate for this category but no QuickBooks cost tagged to the job")}
@@ -93,13 +93,14 @@ export async function overviewPage(routeFn) {
           <td class="py-2.5 pr-3 font-semibold whitespace-nowrap"><span class="text-black/35 mr-1">${open ? "▾" : "▸"}</span>${escapeHtml(r.category)}<div class="text-[11px] font-normal text-black/40 ml-4">${r.jobs} jobs</div></td>
           <td class="py-2.5 px-2">${barCell(r)}</td>
           <td class="py-2.5 px-2 text-right tabular-nums">${k(r.estimated)}</td>
+          <td class="py-2.5 px-2 text-right tabular-nums text-black/55">${r.pending ? k(r.pending) : "—"}</td>
           <td class="py-2.5 px-2 text-right tabular-nums">${k(r.actual)}</td>
           <td class="py-2.5 px-2 text-right tabular-nums font-bold ${active ? "" : tone}">${pct(r.ratio)}</td>
           <td class="py-2.5 px-2 text-right tabular-nums">${pct(r.typical)}</td>
-          <td class="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">${r.over_jobs ? `<span class="text-rose-700 font-semibold">${r.over_jobs}</span> <span class="text-black/45">· ${k(r.over_amount)}</span>` : "0"}</td>
+          <td class="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">${r.over_jobs ? `<span class="text-rose-700 font-semibold">${r.over_jobs}</span> <span class="text-black/45">· ${k(r.over_amount)}</span>${r.over_with_pending ? `<div class="text-[10px] text-black/45" title="Jobs over estimate that have pending labor or cost in this category, and how much of the overage it covers">${r.over_with_pending} with pending · ${k(r.over_explained)}</div>` : ""}` : "0"}</td>
           <td class="py-2.5 px-2 text-right tabular-nums">${r.zero_jobs ? `<span class="text-amber-700 font-semibold">${r.zero_jobs}</span>` : "0"}</td>
           <td class="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">${r.unbudgeted_jobs ? `${r.unbudgeted_jobs} <span class="text-black/45">· ${k(r.unbudgeted_amount)}</span>` : "0"}</td>
-        </tr>${open ? `<tr><td colspan="9" class="p-0">${catPanel(r)}</td></tr>` : ""}`;
+        </tr>${open ? `<tr><td colspan="10" class="p-0">${catPanel(r)}</td></tr>` : ""}`;
       }).join("")}</tbody></table></div>`;
   }
 

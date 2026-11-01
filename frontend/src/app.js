@@ -19,6 +19,8 @@ import { crewOpsPage } from "./pages/crew-ops.js";
 import { trackerPage } from "./pages/tracker.js";
 import { reviewPage } from "./pages/review.js";
 import { assumptionsPage } from "./pages/assumptions.js";
+import { crewPaymentsPage } from "./pages/crew-payments.js";
+import { progressPage } from "./pages/progress.js";
 import { moneyPage } from "./pages/money.js";
 import { overviewPage } from "./pages/overview.js";
 import { pmPage } from "./pages/pm.js";
@@ -38,6 +40,7 @@ const ROUTE_CAPS = {
   "#/financials": "page.financials",
   "#/cashflow":   "page.cashflow",
   "#/revenue":    "page.cashflow",
+  "#/crew-payments": "page.cashflow",
   "#/customers":  "page.customers",
   "#/pipeline":   "page.estimate",
   "#/estimate":   "page.estimate",
@@ -63,7 +66,7 @@ const ROUTE_ORDER = [
 function requiredCapForHash(hash) {
   if (hash.startsWith("#/entity/")) return "page.customers";
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return "page.estimate";
-  if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops")) return "page.crew_portal";
+  if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops") && !hash.startsWith("#/crew-payments")) return "page.crew_portal";
   if (hash === "#/pm" || hash.startsWith("#/pm/")) return "page.pm_portal";
   return ROUTE_CAPS[hash] || null;
 }
@@ -185,7 +188,7 @@ async function route() {
     if (pmMatch) return pmPage(route, { projectId: decodeURIComponent(pmMatch[1]) });
     return pmPage(route, null);
   }
-  if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops")) {
+  if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops") && !hash.startsWith("#/crew-payments")) {
     const cm = hash.match(/^#\/crew\/child\/([^/]+)(?:\/project\/(.+))?$/);
     if (cm) return crewPortalPage(route, { childId: decodeURIComponent(cm[1]), projectId: cm[2] ? decodeURIComponent(cm[2]) : null });
     return crewPortalPage(route, null);
@@ -198,6 +201,8 @@ async function route() {
   if (hash === "#/tracker") return trackerPage(route);
   if (hash === "#/review") return reviewPage(route);
   if (hash === "#/assumptions") return assumptionsPage(route);
+  if (hash === "#/crew-payments") return crewPaymentsPage(route);
+  if (hash === "#/progress") return progressPage(route);
   if (hash === "#/money") return moneyPage(route);
   if (hash === "#/overview") return overviewPage(route);
   if (hash === "#/users") return usersPage(route);

@@ -43,6 +43,7 @@ export async function usersPage(routeFn) {
     "teams.manage": "Manage PMs & work crews",
     "qbo.sync": "Run QuickBooks syncs",
     "projects.admin_tools": "Project admin tools (refresh/reset)",
+    "financial.signoff": "Approve or hold crew payments, sign off progress checks",
   };
   const capLabel = (c) => CAP_LABELS[c] || c;
 

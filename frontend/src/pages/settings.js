@@ -18,6 +18,7 @@ const CAP_LABELS = {
   "page.crew_portal": "Crew Portal",
   "page.customers": "Customers & Jobs",
   "page.settings": "Settings (roles)",
+  "financial.signoff": "Approve or hold crew payments, sign off progress checks",
   "project.view_all": "See all projects (not just assigned)",
   "assignment.edit_any": "Edit any project's schedule",
   "assignment.edit_own": "Edit own assigned schedule items",

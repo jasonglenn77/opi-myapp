@@ -132,6 +132,62 @@ def measure_expense_timing(conn):
     return out
 
 
+CAPTURE_MONTHS = 12
+
+
+def measure_expense_capture(conn):
+    """How well each job cost category reaches QuickBooks, split bills / cards:
+    the share of dollars tagged to a job, days from the charge to the entry
+    (dollar-weighted), and the share dated after the job's end. Decides how far a
+    progress check can trust a category. Review only; never applied to amounts."""
+    from app.jobcost.service import category_of
+    since = date.today() - timedelta(days=int(CAPTURE_MONTHS * 30.4))
+    windows = _project_windows(conn)
+    rows = conn.execute(text("""
+        SELECT l.line_customer_qbo_id AS e, t.entity_type AS et, t.txn_date AS d, DATE(t.meta_create_time) AS cd,
+               COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')),
+                 SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1)) AS item,
+               l.amount AS a
+        FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
+        WHERE t.entity_type IN ('Bill', 'Purchase') AND t.txn_date >= :since
+    """), {"since": since}).mappings().all()
+    agg = defaultdict(lambda: {"tagged": 0.0, "untagged": 0.0, "lag": [], "after": 0.0, "dated": 0.0})
+    for r in rows:
+        cat = category_of(r["item"])
+        if not cat or cat == "Other":      # "Other" untagged is mostly company spend, not job cost
+            continue
+        a = float(r["a"] or 0)
+        for k in (cat, f"{cat}|{r['et']}"):
+            g = agg[k]
+            g["tagged" if r["e"] else "untagged"] += a
+            if r["e"] and r["cd"] and r["d"]:
+                g["lag"].append(((r["cd"] - r["d"]).days, a))
+            w = windows.get(r["e"]) if r["e"] else None
+            if w and r["d"]:
+                g["dated"] += a
+                g["after"] += a if r["d"] > w[1] else 0.0
+
+    def row(g):
+        total = g["tagged"] + g["untagged"]
+        return {"tagged": round(g["tagged"], 2), "untagged": round(g["untagged"], 2),
+                "tagged_share": round(g["tagged"] / total, 4) if total else None,
+                "entry_lag_days": _wavg(g["lag"]),
+                "after_end_share": round(g["after"] / g["dated"], 4) if g["dated"] else None}
+    cats = {}
+    for name in ("Crew labor", "Lifts", "Other rentals", "Materials", "Lodging", "Propane", "Travel"):
+        if name in agg:
+            cats[name] = {**row(agg[name]),
+                          "bills": row(agg[f"{name}|Bill"]) if f"{name}|Bill" in agg else None,
+                          "cards": row(agg[f"{name}|Purchase"]) if f"{name}|Purchase" in agg else None}
+    return {"calibrated": {"categories": cats}, "basis": {"since": str(since), "months": CAPTURE_MONTHS}}
+
+
+def expense_capture(conn):
+    """The measured matrix: {category: {...}}, or {} before the first measure."""
+    v = conn.execute(text("SELECT calibrated FROM forecast_assumptions WHERE akey = 'expense_capture'")).scalar()
+    return (_load(v) or {}).get("categories", {})
+
+
 def measure_estimate_accuracy(conn):
     """Actual / estimate per category on projects that ended 45+ days ago
     within the window. Review-only: never applied to forecast amounts."""
@@ -365,6 +421,9 @@ def recalibrate():
             _upsert(conn, "lodging_billing", "lodging_billing", "Lodging billing (Hotel Engine)", lb["calibrated"], lb["basis"])
         it = measure_invoice_timing(conn)
         _upsert(conn, "invoice_timing", "invoice_timing", "Invoice dates", it["calibrated"], it["basis"])
+        cap = measure_expense_capture(conn)
+        _upsert(conn, "expense_capture", "expense_capture", "How costs reach QuickBooks", cap["calibrated"], cap["basis"])
+        _upsert(conn, "progress_rules", "progress_rules", "Progress check rules", {}, {})
         acc = measure_estimate_accuracy(conn)
         for cat, v in acc.items():
             _upsert(conn, f"estimate_accuracy.{cat}", "estimate_accuracy",

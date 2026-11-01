@@ -142,8 +142,12 @@ def warm():
     from app.gsync import review
     from app.jobcost import service as JC
     from app.tracker import routes as TR
+    from app.crewpay import service as CP
+    from app.progress import service as PR
+    from app.receipts import matching
     for name, fn in (("review", review.refresh_snapshot), ("jobcost", JC.refresh_snapshot),
-                     ("tracker", TR.refresh_snapshot)):
+                     ("tracker", TR.refresh_snapshot), ("receipts", matching.match_all),
+                     ("crewpay", CP.refresh_snapshot), ("progress", PR.refresh_snapshot)):
         t = time.time()
         try:
             fn()

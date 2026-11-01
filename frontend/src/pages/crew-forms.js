@@ -570,6 +570,9 @@ const RC_CATS = [
   ["travel", "Travel"],
   ["materials", "Materials"],
   ["propane_fuel", "Propane / Fuel"],
+  ["lodging", "Lodging"],
+  ["lifts", "Lift rental"],
+  ["rentals", "Other rental"],
   ["other", "Other"],
 ];
 const RC_CAT_LABEL = Object.fromEntries(RC_CATS);

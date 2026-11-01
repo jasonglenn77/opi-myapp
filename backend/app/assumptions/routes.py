@@ -22,6 +22,7 @@ from app.audit import record_audit
 from app.auth import get_current_user
 from app.db import engine
 from app.permissions import has_capability, PAGE_CASHFLOW, PAGE_CUSTOMERS, PAGE_SETTINGS
+from app.progress import service as PR
 from . import calibrate as CAL, catalog
 
 router = APIRouter(prefix="/api/assumptions", tags=["assumptions"])
@@ -74,7 +75,7 @@ def get_assumptions(user=Depends(get_current_user)):
         })
     return {"items": items, "rules": rules, "buckets": CAL.BUCKETS,
             "window_months": CAL.WINDOW_MONTHS, "min_projects": CAL.MIN_PROJECTS,
-            "can_edit": has_capability(user, PAGE_SETTINGS)}
+            "progress_rules": PR.rules(), "can_edit": has_capability(user, PAGE_SETTINGS)}
 
 
 class OverrideBody(BaseModel):

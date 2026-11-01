@@ -48,13 +48,14 @@ USERS_MANAGE        = "users.manage"          # create/edit users & permissions
 TEAMS_MANAGE        = "teams.manage"          # create/edit PMs & work crews
 QBO_SYNC            = "qbo.sync"              # run QuickBooks syncs
 PROJECTS_ADMIN      = "projects.admin_tools"  # refresh financials, reset statuses, etc.
+FINANCIAL_SIGNOFF   = "financial.signoff"     # approve/hold crew payments, sign off progress checks
 
 ALL_CAPABILITIES: List[str] = [
     PAGE_DASHBOARD, PAGE_FINANCIALS, PAGE_ESTIMATE, PAGE_SCHEDULE,
     PAGE_ASSIGNMENT, PAGE_TEAMS, PAGE_USERS, PAGE_QUICKBOOKS, PAGE_CASHFLOW,
     PAGE_CREW_PORTAL, PAGE_CUSTOMERS, PAGE_SETTINGS, PAGE_PM_PORTAL,
     PROJECT_VIEW_ALL, ASSIGNMENT_EDIT_ANY, ASSIGNMENT_EDIT_OWN,
-    USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN,
+    USERS_MANAGE, TEAMS_MANAGE, QBO_SYNC, PROJECTS_ADMIN, FINANCIAL_SIGNOFF,
 ]
 
 # ---------------------------------------------------------------------------

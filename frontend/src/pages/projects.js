@@ -1,6 +1,7 @@
-import { api } from "../api.js";
+import { api, hasCapability } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
+import { openFinancialExport } from "../utils/financial-export.js";
 
 export async function projectsPage(routeFn) {
   // Data loads progressively AFTER the shell is rendered:
@@ -622,6 +623,16 @@ export async function projectsPage(routeFn) {
     showLogout: true,
     routeFn,
   });
+
+  if (hasCapability("page.cashflow")) {
+    const clear = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Clear Filters");
+    const btn = document.createElement("button");
+    btn.className = clear?.className || "btn-ghost text-xs";
+    btn.textContent = "Export to Excel";
+    btn.style.marginLeft = "8px";
+    btn.addEventListener("click", () => openFinancialExport());
+    clear?.insertAdjacentElement("afterend", btn);
+  }
 
   // ── Viewport layout ───────────────────────────────────────────────────────
   // Desktop (lg+) gets a locked-viewport layout: the body never scrolls, the

@@ -16,6 +16,10 @@ Rules (also listed on the Assumptions page):
   finished     = scheduled end date at least FINISHED_AFTER_DAYS ago, or the
                  project's status is completed
   active       = started, not finished
+  pending      = cost lines on Pending estimates tagged to the project. OPI staff
+                 can run behind on change orders, so spend may arrive before the
+                 estimate is accepted. Pending is shown beside the estimate, and
+                 never added to it silently.
   over         = actual more than OVER_PCT above estimate
   typical job  = the median job's actual / estimate
 """
@@ -99,6 +103,48 @@ def _load():
             if cat and r[2]:
                 est[str(r[0])][cat] += float(r[2])
 
+        pend = defaultdict(lambda: defaultdict(float))
+        for r in conn.execute(text("""
+            SELECT t.customer_qbo_id AS e, l.item_name AS item,
+                   SUM(CASE WHEN l.item_name LIKE 'Contract Labor%' THEN COALESCE(l.cost_amount, l.amount)
+                            ELSE COALESCE(l.cost_amount, 0) END) AS v
+            FROM qbo_transactions t
+            JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id AND qc.is_project = 1
+            JOIN qbo_sales_transaction_lines l ON l.transaction_id = t.id AND l.line_level = 'child'
+            WHERE t.entity_type = 'Estimate' AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) = 'Pending'
+            GROUP BY t.customer_qbo_id, l.item_name
+        """)).all():
+            cat = category_of(r[1])
+            if cat and r[2]:
+                pend[str(r[0])][cat] += float(r[2])
+
+        contract, pend_contract = defaultdict(float), defaultdict(float)
+        for r in conn.execute(text("""
+            WITH latest AS (
+              SELECT t.customer_qbo_id, t.total_amt, JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) AS st,
+                     ROW_NUMBER() OVER (PARTITION BY t.customer_qbo_id, COALESCE(t.doc_number, CONCAT('__nd__', t.qbo_id))
+                                        ORDER BY t.id DESC) AS rn
+              FROM qbo_transactions t
+              JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id AND qc.is_project = 1
+              WHERE t.entity_type = 'Estimate')
+            SELECT customer_qbo_id, st, SUM(total_amt) FROM latest WHERE rn = 1 GROUP BY customer_qbo_id, st
+        """)).all():
+            if r[1] in ("Accepted", "Converted", "Closed"):
+                contract[str(r[0])] += float(r[2] or 0)
+            elif r[1] == "Pending":
+                pend_contract[str(r[0])] += float(r[2] or 0)
+
+        billed = defaultdict(lambda: [0.0, 0.0])    # invoiced, still open
+        for r in conn.execute(text("""
+            SELECT t.customer_qbo_id, t.entity_type, SUM(t.total_amt), SUM(t.balance_amt)
+            FROM qbo_transactions t JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id AND qc.is_project = 1
+            WHERE t.entity_type IN ('Invoice', 'CreditMemo') GROUP BY t.customer_qbo_id, t.entity_type
+        """)).all():
+            sign = -1 if r[1] == "CreditMemo" else 1
+            billed[str(r[0])][0] += sign * float(r[2] or 0)
+            if sign > 0:
+                billed[str(r[0])][1] += float(r[3] or 0)
+
         act = defaultdict(lambda: defaultdict(float))
         for r in conn.execute(text("""
             SELECT l.line_customer_qbo_id AS e,
@@ -125,13 +171,17 @@ def _load():
         elif p["start"] <= today:
             state = "active"
         else:
-            continue  # not started: nothing to compare yet
-        cats = set(est.get(pid, {})) | set(act.get(pid, {}))
+            state = "upcoming"
+        cats = set(est.get(pid, {})) | set(act.get(pid, {})) | set(pend.get(pid, {}))
         if not cats:
             continue
-        jobs.append({"id": pid, "name": p["name"], "pm": p["pm"], "state": state,
+        jobs.append({"id": pid, "name": p["name"], "pm": p["pm"], "state": state, "status": p["status"],
                      "start": str(p["start"]), "end": str(p["end"]),
+                     "contract": round(contract.get(pid, 0.0), 2), "pending_contract": round(pend_contract.get(pid, 0.0), 2),
+                     "invoiced": round(billed[pid][0], 2) if pid in billed else 0.0,
+                     "open_ar": round(billed[pid][1], 2) if pid in billed else 0.0,
                      "est": {c: round(est[pid].get(c, 0.0), 2) for c in cats},
+                     "pend": {c: round(pend[pid].get(c, 0.0), 2) for c in cats if pend[pid].get(c)},
                      "act": {c: round(act[pid].get(c, 0.0), 2) for c in cats}})
     return {"jobs": jobs, "built": time.time()}
 
@@ -186,8 +236,11 @@ def summary(scope="finished", months=12):
     for cat in CATEGORIES:
         ratios, e_tot, a_tot, over_n, zero_n, over_amt = [], 0.0, 0.0, 0, 0, 0.0
         unbudgeted_n, unbudgeted_amt = 0, 0.0
+        p_tot, p_explained, p_over_n, p_cleared = 0.0, 0.0, 0, 0
         for j in jobs:
             e, a = j["est"].get(cat, 0.0), j["act"].get(cat, 0.0)
+            p = (j.get("pend") or {}).get(cat, 0.0)
+            p_tot += p
             if e <= 0:
                 if a > 0:
                     unbudgeted_n += 1
@@ -199,6 +252,10 @@ def summary(scope="finished", months=12):
             if a > e * (1 + OVER_PCT):
                 over_n += 1
                 over_amt += a - e
+                if p > 0:
+                    p_over_n += 1
+                    p_explained += min(p, a - e)
+                    p_cleared += 1 if a <= (e + p) * (1 + OVER_PCT) else 0
             if a <= 0:
                 zero_n += 1
         if not ratios and not unbudgeted_n:
@@ -211,6 +268,8 @@ def summary(scope="finished", months=12):
             "ratio": round(a_tot / e_tot, 4) if e_tot else None,
             "typical": round(rs[len(rs) // 2], 4) if rs else None,
             "over_jobs": over_n, "over_amount": round(over_amt, 2),
+            "pending": round(p_tot, 2), "over_with_pending": p_over_n,
+            "over_explained": round(p_explained, 2), "over_cleared": p_cleared,
             "zero_jobs": zero_n,
             "unbudgeted_jobs": unbudgeted_n, "unbudgeted_amount": round(unbudgeted_amt, 2),
         })
@@ -231,13 +290,15 @@ def category_jobs(cat, scope="finished", months=12):
     out = []
     for j in _scoped(scope, months):
         e, a = j["est"].get(cat, 0.0), j["act"].get(cat, 0.0)
+        p = (j.get("pend") or {}).get(cat, 0.0)
         if e <= 0 and a <= 0:
             continue
         out.append({"id": j["id"], "name": j["name"], "pm": j["pm"], "start": j["start"], "end": j["end"],
                     "state": j["state"], "elapsed": _elapsed(j) if j["state"] == "active" else None,
-                    "estimated": e, "actual": a, "variance": round(a - e, 2),
+                    "estimated": e, "pending": p, "actual": a, "variance": round(a - e, 2),
                     "ratio": round(a / e, 4) if e > 0 else None,
                     "flag": ("unbudgeted" if e <= 0 else "zero" if a <= 0
+                             else "pending" if a > e * (1 + OVER_PCT) and a <= (e + p) * (1 + OVER_PCT)
                              else "over" if a > e * (1 + OVER_PCT) else "ok")})
     out.sort(key=lambda r: -r["variance"])
     return out
