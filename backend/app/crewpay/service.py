@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.jobcost import service as JC
-from . import forms as FORMS
+from . import forms as FORMS, misfiled as MISFILED
 
 LAB = "Crew labor"
 WINDOW_DAYS = 365            # finished jobs reviewed: ended in the last year
@@ -60,8 +60,11 @@ ISSUE_TYPES = {
     "file": ("Payment file not matched to a project", 3, [["fix_sheet", "Rename or move the file"], ["explained", "Ignore this file"]]),
     "app_edit": ("Changed in the app, not in Drive", 3, [["fix_sheet", "Update the sheet"], ["explained", "Keep it in the app only"]]),
     "no_forms": ("Crew forms missing", 3, [["get_form", "Get it from the crew"], ["explained", "Not needed"]]),
+    "misfiled_estimate": ("Pending estimate filed under the customer", 2,
+                          [["move_in_qbo", "Belongs to this job: move it in QuickBooks"], ["explained", "Separate quote"]]),
 }
-OPEN_STATUSES = ("hold", "update_schedule", "still_owed", "create_schedule", "record_in_qbo", "fix_sheet", "fix_setup", "tag_in_qbo", "not_recorded", "get_form")
+OPEN_STATUSES = ("hold", "update_schedule", "still_owed", "create_schedule", "record_in_qbo", "fix_sheet", "fix_setup", "tag_in_qbo", "not_recorded", "get_form",
+                 "move_in_qbo")
 DECISION_LABELS = {k: v for t in ISSUE_TYPES.values() for k, v in t[2]}
 
 
@@ -90,9 +93,9 @@ def _crews(conn):
     return co, by_vendor
 
 
-def _paid_lines(conn):
+def _paid_lines(conn, entity_id=None):
     """Contract labor bills and checks. Owner pay sits on payroll accounts, so
-    the item test keeps it out."""
+    the item test keeps it out. One job's lines when entity_id is given."""
     return conn.execute(text("""
         SELECT l.id AS line_id, l.line_customer_qbo_id AS e, t.entity_type AS type, t.txn_date AS d, t.doc_number AS doc, t.qbo_id AS txn,
                COALESCE(t.vendor_qbo_id, JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.EntityRef.value'))) AS vendor,
@@ -100,11 +103,11 @@ def _paid_lines(conn):
                         JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.EntityRef.name'))) AS vendor_name,
                l.description AS descr, l.amount AS a
         FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
-        WHERE t.entity_type IN ('Bill', 'Purchase')
+        WHERE t.entity_type IN ('Bill', 'Purchase')""" + (" AND l.line_customer_qbo_id = :e" if entity_id is not None else "") + """
           AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')),
                        SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1))
               LIKE 'Contract Labor%'
-    """)).mappings().all()
+    """), {"e": str(entity_id)} if entity_id is not None else {}).mappings().all()
 
 
 def _schedules(conn):
@@ -131,7 +134,8 @@ def data_sig():
             "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), ''), '/', COALESCE(SUM(lodging_included), 0)) FROM project_payment_schedules",
             "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(updated_at), '')) FROM app_overrides WHERE resolved_at IS NULL",
             "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(id), 0), '/', COUNT(drive_removed_at)) FROM documents",
-            "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(id), 0)) FROM form_submissions"))
+            "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(id), 0)) FROM form_submissions",
+            "SELECT CONCAT(COUNT(*), '/', COALESCE(MAX(read_at), '')) FROM completion_form_dates"))
 
 
 def build():
@@ -361,6 +365,23 @@ def build():
                   f"crew paid {_money(f['paid'])}. This clears once it's in the project's documents.")
     form_rows.sort(key=lambda f: (-len(f["missing"]), f["job"]))
 
+    # Pending estimates under the customer that look like this job's change orders
+    with engine.connect() as conn:
+        misfiled = [m for m in MISFILED.find(conn, jobs) if in_scope(jobs.get(m["entity_id"]))]
+    by_job = defaultdict(list)
+    for m in misfiled:
+        by_job[m["entity_id"]].append(m)
+        looks = "Reads like a change order for this job." if m["why"] == "change order" else "Same company and site, dated during or soon after this job."
+        issue("misfiled_estimate", m["entity_id"], None, m["amount"],
+              f"Estimate {m['doc']} ({m['date']}) is Pending under {m['customer']}, not on the job: \"{m['memo']}\". {looks} "
+              "Until it's moved to the job in QuickBooks it isn't counted as pending here. It could also be a separate quote.", m["qbo_id"])
+    for i in issues:
+        if i["type"] in ("paid_over", "labor_over") and by_job.get(i["entity_id"]):
+            ms = by_job[i["entity_id"]]
+            i["detail"] = i["detail"].replace(", so a change order may not have been created.", ".")
+            i["detail"] +=f" {_money(sum(m['amount'] for m in ms))} more is on Pending estimate{'s' if len(ms) > 1 else ''} " \
+                           f"{', '.join(m['doc'] for m in ms)} filed under the customer, which may belong to this job."
+
     issues.sort(key=lambda i: (i["severity"], -abs(i["amount"] or 0)))
 
     # upcoming pay runs (approve / hold)
@@ -488,7 +509,7 @@ def job_detail(entity_id):
         bills = [{"date": str(l["d"]), "type": "Card/check" if l["type"] == "Purchase" else "Bill", "doc": l["doc"],
                   "crew": (by_vendor.get(str(l["vendor"] or "")) or {}).get("name") or l["vendor_name"],
                   "description": l["descr"], "amount": float(l["a"] or 0)}
-                 for l in sorted((x for x in _paid_lines(conn) if str(x["e"] or "") == str(entity_id)), key=lambda x: str(x["d"]))]
+                 for l in sorted(_paid_lines(conn, entity_id), key=lambda x: str(x["d"]))]
         log = [{"at": str(r["created_at"]), "who": r["actor_email"], "action": r["action"], "file": r["target_label"],
                 "detail": json.loads(r["detail"]) if isinstance(r["detail"], str) else r["detail"]}
                for r in conn.execute(text("""

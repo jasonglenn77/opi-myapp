@@ -63,7 +63,7 @@ def rules(conn):
          "drives": "Labor over estimate, schedule vs estimate, and the over-budget flag on pay runs.",
          "where": "crewpay/service.py build"},
         {"area": "Job cost", "name": "Completion date",
-         "value": "The crew's Project Completion Form when there is one, otherwise the last scheduled day. Flagged at 30 days apart",
+         "value": "The date written on the crew's Project Completion Form (read nightly from Drive), otherwise the last scheduled day. Flagged at 30 days apart",
          "drives": "Completion date filters and columns in the Excel export. OPI has no official completion date.",
          "where": "jobcost/completion.py"},
         {"area": "Job cost", "name": "Costs not in QuickBooks yet",

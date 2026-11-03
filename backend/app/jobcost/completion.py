@@ -7,8 +7,10 @@ signal is kept and one best date is chosen:
   marked_complete  first time the status was set to completed. The history only
                    starts in April 2026, and imports flip the status by date, so
                    it is a record date rather than proof of the last day of work.
-  completion_form  the crew's Project Completion Form, when one was filed. This
-                   is the only signal that comes from the job site, so it wins.
+  completion_form  the date written on the crew's Project Completion Form, from
+                   Drive or the Crew Portal (crewpay/form_dates.py reads it). This is
+                   the only signal that comes from the job site, so it wins. A scan or
+                   photo whose date can't be read falls back to the last scheduled day.
   final_invoice    last invoice in QuickBooks
   last_cost        last bill or card charge tagged to the job. Bills trail the
                    job (rentals, lodging statements), so it is never the best date.
@@ -52,12 +54,11 @@ def load(conn):
         if eid and st and len(st) > 1 and st[1] == "completed" and not out[eid]["marked_complete"]:
             out[eid]["marked_complete"] = r["changed_at"].date()
 
-    for r in conn.execute(text("""
-        SELECT project_qbo_id, MAX(COALESCE(report_date, DATE(submitted_at)))
-        FROM form_submissions WHERE form_code = 'completion' GROUP BY project_qbo_id
-    """)).all():
-        if str(r[0]) in out:
-            out[str(r[0])]["completion_form"] = r[1]
+    from app.crewpay import forms as FORMS
+    for e, files in FORMS.load(conn).items():
+        if e in out and any(not f["draft"] for f in files.get("completion", [])):
+            out[e]["completion_form"] = FORMS.completed_on(files)
+            out[e]["form_undated"] = out[e]["completion_form"] is None
     for r in conn.execute(text("""
         SELECT customer_qbo_id, MAX(txn_date) FROM qbo_transactions
         WHERE entity_type = 'Invoice' AND total_amt > 0 GROUP BY customer_qbo_id
@@ -76,6 +77,8 @@ def load(conn):
     for d in out.values():
         src = "completion_form" if d["completion_form"] else "last_scheduled"
         d["best"], d["best_source"] = d[src], BEST_LABEL[src]
+        if d.get("form_undated"):
+            d["best_source"] += " (form's date not readable)"
         pts = [v for v in (d["completion_form"], d["last_scheduled"], d["final_invoice"]) if isinstance(v, date)]
         d["gap_days"] = (max(pts) - min(pts)).days if len(pts) > 1 else 0
         d["flag"] = d["gap_days"] >= GAP_FLAG_DAYS

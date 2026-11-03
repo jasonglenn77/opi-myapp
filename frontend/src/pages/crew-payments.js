@@ -30,7 +30,7 @@ const C = {
   quiet: "text-slate-600 bg-slate-100 border-black/10",
 };
 const SEV = { 1: "#be123c", 2: "#b45309", 3: "#64748b" };
-const OPEN = ["hold", "update_schedule", "still_owed", "create_schedule", "record_in_qbo", "fix_sheet", "fix_setup", "tag_in_qbo", "not_recorded", "get_form"];
+const OPEN = ["hold", "update_schedule", "still_owed", "create_schedule", "record_in_qbo", "fix_sheet", "fix_setup", "tag_in_qbo", "not_recorded", "get_form", "move_in_qbo"];
 const isOpen = (i) => !i.decision || i.changed || OPEN.includes(i.decision.status);
 const TABS = [["issues", "Needs a decision"], ["jobs", "By job"], ["runs", "Pay runs"], ["crews", "By crew"], ["forms", "Crew forms"]];
 
@@ -246,7 +246,7 @@ export async function crewPaymentsPage(routeFn) {
         ${FORM_VIEWS.map(([k, l, fn]) => `<button class="pd-btn" data-formview="${k}" aria-pressed="${st.formView === k}"${st.formView === k ? ` style="background:#1c2430;color:#fff;border-color:#1c2430"` : ""}>${l} <span class="tabular-nums" style="opacity:.7">${base.filter(fn).length}</span></button>`).join("")}
         <label class="text-xs text-black/55" style="margin-left:auto;max-width:100%">Show <select id="cpFormScope" class="input text-xs" style="width:auto;max-width:100%">${[["recent", "Last 12 months and open jobs"], ["all", "All projects"]].map(([k, l]) => `<option value="${k}"${st.formScope === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>
       </div>
-      <p class="text-xs text-black/50 mt-2">Numbers are forms on file. Jobs that haven't started need nothing yet, and a completion form is only due once a job finishes. A Word copy of the completion form has blank signature lines, so it counts as an unsigned draft.</p>
+      <p class="text-xs text-black/50 mt-2">Numbers are forms on file. Jobs that haven't started need nothing yet, and a completion form is only due once a job finishes. A Word copy of the completion form has blank signature lines, so it counts as an unsigned draft. The date shown is the one written on the form; scans and photos can't be read.</p>
       <div class="overflow-x-auto mt-2"><table class="w-full text-sm">
       <thead><tr class="text-[11px] uppercase tracking-wide text-black/45"><th class="py-2 pr-3 text-left">Job</th><th class="py-2 pr-3 text-left">Crew</th><th class="py-2 pr-3 text-left">Kickoff</th><th class="py-2 pr-3 text-left">Daily</th><th class="py-2 pr-3 text-left">Completion</th><th class="py-2 text-right"></th></tr></thead>
       <tbody>${rows.map((f) => `<tr class="border-t border-black/[0.06] align-top">
@@ -255,7 +255,7 @@ export async function crewPaymentsPage(routeFn) {
         <td class="py-2 pr-3">${escapeHtml(f.crew || "—")}</td>
         <td class="py-2 pr-3">${cell(f.kickoff, f.missing.includes("kickoff"))}</td>
         <td class="py-2 pr-3">${cell(f.daily, f.missing.includes("daily"))}</td>
-        <td class="py-2 pr-3">${cell(f.completion, f.missing.includes("completion"))}${f.draft ? ` ${chip("Unsigned draft", C.warn, "A Word copy is on file, with blank signature lines.")}` : ""}</td>
+        <td class="py-2 pr-3">${cell(f.completion, f.missing.includes("completion"))}${f.draft ? ` ${chip("Unsigned draft", C.warn, "A Word copy is on file, with blank signature lines.")}` : ""}${f.completed_on ? `<div class="text-[11px] text-black/45">Dated ${day(f.completed_on)}</div>` : ""}</td>
         <td class="py-2 text-right whitespace-nowrap"><button class="pd-btn" data-forms="${escapeHtml(f.entity_id)}" data-name="${escapeHtml(f.job)}">View forms</button></td></tr>`).join("") || `<tr><td colspan="6" class="py-4 text-black/45">No jobs with these filters.</td></tr>`}</tbody></table></div>
     </section>`;
   }

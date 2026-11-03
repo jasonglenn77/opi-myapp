@@ -40,7 +40,7 @@ export async function openFinancialExport(preset = {}) {
         <label class="text-xs grid gap-1"><span class="text-black/55">From</span><input type="date" name="date_from" class="input"></label>
         <label class="text-xs grid gap-1"><span class="text-black/55">To</span><input type="date" name="date_to" class="input"></label>
       </div>
-      <p class="text-xs text-black/50">OPI has no official completion date. The best date is the crew's Project Completion Form when there is one, otherwise the last scheduled day. Every date is in the workbook, and jobs where they disagree by 30 days or more are flagged.</p>
+      <p class="text-xs text-black/50">OPI has no official completion date. The best date is the one written on the crew's Project Completion Form, otherwise the last scheduled day (scans and photos of the form can't be read yet). Every date is in the workbook, and jobs where they disagree by 30 days or more are flagged.</p>
       <div data-preview class="text-sm font-semibold" aria-live="polite"></div>
       <div data-err class="text-sm text-red-700"></div>
       <div class="flex gap-2 justify-end">

@@ -13,7 +13,8 @@ contents on three or more projects is a blank copy, not a filled-in form.
 
 A Word copy of the Completion Form has blank signature lines (checked on a sample
 10/2026), so it counts as a draft: it's listed, but the form still shows as missing.
-A PDF or photo is taken as signed, because a file name can't prove it.
+A PDF or photo is taken as signed, because a file name can't prove it. The date
+written on each form is read by form_dates.py.
 
 Daily forms have never been filed on most jobs, so a missing one shows on the
 Crew forms tab but doesn't become an issue.
@@ -58,9 +59,9 @@ def expected(state):
 def load(conn):
     """{entity_id: {group: [form]}} for every project with a form on file."""
     docs = conn.execute(text("""
-        SELECT id, entity_type, entity_id, folder, original_filename AS f, drive_md5 AS md5,
-               COALESCE(LEFT(drive_modified, 10), DATE(created_at)) AS d
-        FROM documents
+        SELECT documents.id, entity_type, entity_id, folder, original_filename AS f, documents.drive_md5 AS md5,
+               COALESCE(LEFT(drive_modified, 10), DATE(created_at)) AS d, c.form_date
+        FROM documents LEFT JOIN completion_form_dates c ON c.document_id = documents.id
         WHERE entity_type IN ('project', 'opportunity') AND drive_removed_at IS NULL
           AND (folder LIKE '6%' OR folder LIKE '7%' OR folder LIKE '10%')
           AND original_filename REGEXP 'completion|kick-? ?off|jha|hazard|forklift|lift |stand-?up|daily|tool ?box|^installing-|^assembly-'
@@ -84,7 +85,8 @@ def load(conn):
             continue
         seen.add((e, d["md5"]))
         out[e][g].append({"id": d["id"], "name": d["f"], "date": str(d["d"]) if d["d"] else None,
-                          "draft": g == "completion" and bool(_DRAFT.search(d["f"].lower().strip()))})
+                          "draft": g == "completion" and bool(_DRAFT.search(d["f"].lower().strip())),
+                          "form_date": d["form_date"] if g == "completion" else None})
 
     titles = dict(conn.execute(text("SELECT code, title FROM form_templates")).all())
     for r in conn.execute(text("""
@@ -95,9 +97,10 @@ def load(conn):
             answers = json.loads(r["answers"]) if isinstance(r["answers"], (str, bytes)) else r["answers"]
         except ValueError:
             answers = None
-        out[str(r["e"])][APP_GROUP.get(r["form_code"], "other")].append(
+        g = APP_GROUP.get(r["form_code"], "other")
+        out[str(r["e"])][g].append(
             {"sub_id": r["id"], "name": titles.get(r["form_code"]) or r["form_code"], "date": str(r["d"]) if r["d"] else None,
-             "draft": False, "answers": answers})
+             "draft": False, "answers": answers, "form_date": r["d"] if g == "completion" else None})
     for r in conn.execute(text("SELECT DISTINCT entity_id FROM project_kickoff_responses WHERE form_key = 'crew'")).all():
         out[str(r[0])]["kickoff"].append({"name": "Crew kickoff filled in on the project", "date": None, "draft": False, "kickoff_tab": True})
     return out
@@ -107,10 +110,17 @@ def row(job, files, crew, paid):
     """One job on the Crew forms tab."""
     c = {g: sum(1 for f in files.get(g, []) if not f["draft"]) for g in GROUPS}
     missing = [g for g in expected(job["state"]) if not c[g]]
+    done = completed_on(files)
     return {"entity_id": job["id"], "job": job["name"], "pm": job["pm"], "state": job["state"], "end": job["end"], "crew": crew,
             "paid": round(paid, 2), "kickoff": c["kickoff"], "daily": c["daily"], "completion": c["completion"], "other": c["other"],
             "draft": sum(1 for f in files.get("completion", []) if f["draft"]),
-            "missing": missing, "none": not any(c.values())}
+            "completed_on": str(done) if done else None, "missing": missing, "none": not any(c.values())}
+
+
+def completed_on(files):
+    """The latest date written on a signed Completion Form (phases each get one), or None."""
+    dates = [f["form_date"] for f in files.get("completion", []) if not f["draft"] and f.get("form_date")]
+    return max(dates) if dates else None
 
 
 def for_job(conn, entity_id):

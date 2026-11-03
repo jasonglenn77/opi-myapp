@@ -31,6 +31,8 @@ docker exec myapp-backend python -m app.gsync.run --cron || echo "[$(ts)] gsync 
 # payment lag) from the freshly synced bills; shown on the Assumptions page.
 # New expense schedules use them; existing rows are re-spread only on request.
 docker exec myapp-backend python -m app.assumptions.calibrate || echo "[$(ts)] assumptions recalibrate failed"
+# Read the date written on any new Project Completion Forms (best completion date).
+docker exec myapp-backend python -m app.crewpay.form_dates || echo "[$(ts)] completion form dates failed"
 # Rebuild the saved page results (Tracker, Data Review, Overview job cost) from
 # tonight's data so the first person in the morning doesn't wait (0089).
 docker exec myapp-backend python -m app.snapshots warm || echo "[$(ts)] page snapshot warm failed"

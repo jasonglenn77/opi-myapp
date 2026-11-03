@@ -252,11 +252,11 @@ def build(status=None, pm=None, crew=None, date_from=None, date_to=None, date_fi
     crew_data = CP.dataset()
     labels = {"kickoff": "Kickoff checklist", "daily": "Daily forms", "completion": "Completion form"}
     rows = [[f["job"], f["crew"], f["pm"], {"finished": "Finished", "active": "In progress"}.get(f["state"], "Not started"), f["kickoff"], f["daily"],
-             f["completion"], f["draft"], ", ".join(labels[g] for g in f["missing"]) or "Nothing missing"]
+             f["completion"], f["draft"], _d(f.get("completed_on")), ", ".join(labels[g] for g in f["missing"]) or "Nothing missing"]
             for f in crew_data.get("forms", []) if f["entity_id"] in by_id]
     _sheet(wb, "Crew forms", "CrewForms", [
         ("Project", 44, "text"), ("Crew", 24, "text"), ("PM", 16, "text"), ("Status", 11, "text"), ("Kickoff forms", 10, "text"), ("Daily forms", 10, "text"),
-        ("Signed completion forms", 12, "text"), ("Unsigned drafts", 10, "text"), ("Missing", 44, "text")], rows)
+        ("Signed completion forms", 12, "text"), ("Unsigned drafts", 10, "text"), ("Date on completion form", 12, "date"), ("Missing", 44, "text")], rows)
 
     issues = [i for i in crew_data["issues"] if not i.get("entity_id") or i["entity_id"] in by_id]
     rows = [[i["label"], i["job"], i["crew"], i["pm"], i["amount"], i["detail"],
@@ -283,10 +283,10 @@ def build(status=None, pm=None, crew=None, date_from=None, date_to=None, date_fi
     notes = [("Exported", f"{datetime.now():%m/%d/%Y %I:%M %p} by {who or 'unknown'}"), ("Filters", filters), ("Projects", str(len(jobs))),
              ("", ""),
              ("Estimate", "Latest version of each Accepted, Converted or Closed QuickBooks estimate on the project. Cost basis is the estimate's YOUR RATE cost; contract labor uses the line amount when no cost is set, the same as the Billing tab."),
-             ("Pending", "Pending QuickBooks estimates on the project. Staff can run behind on change orders, so spend may arrive first. Pending is shown beside the estimate and is never counted as approved. A change order that was never entered can't appear here."),
+             ("Pending", "Pending QuickBooks estimates on the project. Staff can run behind on change orders, so spend may arrive first. Pending is shown beside the estimate and is never counted as approved. A change order that was never entered can't appear here. A Pending estimate filed under the customer instead of the job isn't counted either; Contractor Payments lists the ones that look like they belong to a job."),
              ("Actual", "QuickBooks bills and card or check purchases tagged to the project. Job cost that was never tagged to a project is not included."),
              ("Crew labor", "Lines on Contract Labor items. Owner pay sits on General and Admin Payroll accounts and is not included."),
-             ("Completion (best)", "OPI has no official completion date. Best = the crew's Project Completion Form when one exists, otherwise the last scheduled day. All the other dates are shown so they can be compared. Marked complete only exists from April 2026."),
+             ("Completion (best)", "OPI has no official completion date. Best = the date written on the crew's Project Completion Form, otherwise the last scheduled day. Scans and photos of the form can't be read, so those jobs use the last scheduled day and say so in Completion source. All the other dates are shown so they can be compared. Marked complete only exists from April 2026."),
              ("Scheduled vs paid", "Crews are paid in lump runs covering several jobs, so compare totals by job and crew, not row by row."),
              ("Crew forms", "Drive files are matched by name in the project folders, plus forms sent through the Crew Portal. A Word copy of the Completion Form has blank signature lines, so it counts as an unsigned draft. A PDF or photo is taken as signed, which a file name can't prove."),
              ("Expense timing", "Measured from the last 12 months of QuickBooks: how much of each cost type gets a job tag, how long entry takes, and how much lands after the job ends. The same numbers are on the Assumptions page.")]

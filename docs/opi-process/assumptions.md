@@ -137,8 +137,11 @@ line on the same job clears itself, so nothing counts twice. An entry that match
 charge is flagged so the office can tag it, and the receipt tells them which job it was.
 
 **Completion date.** OPI doesn't record one. The export shows the last scheduled day, marked
-complete, the Project Completion Form, last invoice and last cost, plus a best date: the form when
-there is one, otherwise the last scheduled day. Status history only starts in April 2026, and last
+complete, the Project Completion Form, last invoice and last cost, plus a best date: the date
+written on the form when it can be read, otherwise the last scheduled day. The app reads each form
+once (nightly for new ones). On 11/2, 173 of 266 signed forms had a readable date: the online form's
+PDF has a Date answer, and some paper forms have a typed date. Scans, photos and handwriting can't
+be read. Status history only starts in April 2026, and last
 cost trails the job by about two weeks, so neither is used as the best date. The Project Completion
 Form is the real fix, once crews use it.
 
@@ -148,8 +151,16 @@ Drive, matched by file name in the project folders, and from the Crew Portal. As
 holds none from the Crew Portal, so everything found is a Drive file. A Word copy of the Completion
 Form has blank signature lines, so it counts as an unsigned draft. A PDF or photo is taken as
 signed, because a file name can't prove it. Daily forms have never been filed on most jobs, so a
-missing one is shown but doesn't become an item. The best completion date doesn't read Drive forms
-yet: their dates are inside the document.
+missing one is shown but doesn't become an item.
+
+**Pending estimates filed under the customer.** Estimates tagged to a job count as pending on it.
+Some change orders are entered under the customer instead, so the job's overage looks unexplained.
+Contractor Payments lists a Pending estimate under the customer as a lead when it's dated from a
+week before a job starts to 90 days after it ends, its memo names the job's company, and it either
+reads like a change order (add, additional, modification, change order) or names the job's city.
+It's never added to the job's numbers: staff decide, and move it to the job in QuickBooks. Found
+11/2: "Adding 3rd Crew" for DHL Las Vegas ($113,200) and "Additions & Modifications" for Ben E
+Keith ($202,040), the two largest crew-pay gaps.
 
 Found while building: some non-crew items are booked to Contract Labor with no job, such as a
 $20,000 loan to Ruiz Services and its repayments, plus software and legal bills. They are listed on
