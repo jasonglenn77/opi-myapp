@@ -11,6 +11,8 @@ after it ends, and its memo names the job's company, and either:
 
 An estimate whose memo names a different city ("... in Burlington, NJ") is skipped,
 and so is one carrying any project's number: that's the project's own quote.
+So is one whose number is also on an estimate under a project: it was re-created
+on the job, and the customer's Pending copy was left behind.
 This is a lead: it could be a next phase or a quote that went nowhere, so it's never
 added to the job's numbers until staff move it to the job in QuickBooks.
 """
@@ -45,6 +47,10 @@ def find(conn, jobs):
     projects = conn.execute(text("SELECT qbo_id, parent_qbo_id, display_name FROM qbo_customers WHERE is_project = 1")).all()
     parents = {str(r[0]): str(r[1]) for r in projects if r[1]}
     numbers = {p[0] for p in (_parts(r[2]) for r in projects) if p}
+    # QuickBooks keeps the customer's copy when an estimate is re-created on the job
+    numbers |= {str(r[0]) for r in conn.execute(text("""
+        SELECT DISTINCT t.doc_number FROM qbo_transactions t JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id
+        WHERE t.entity_type = 'Estimate' AND qc.is_project = 1 AND t.doc_number IS NOT NULL""")).all()}
     by_parent = defaultdict(list)
     for e, j in jobs.items():
         p, parts = parents.get(str(e)), _parts(j.get("name"))

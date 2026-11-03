@@ -4,6 +4,7 @@ Exports.
   GET /api/reports/financials/options   what the filters can be set to
   GET /api/reports/financials/preview   how many projects the filters select
   GET /api/reports/financials.xlsx      the workbook (see financials.py)
+  POST /api/reports/financials.xlsx     the workbook for a given list of projects (Financials page)
 
 Needs page.cashflow: this holds crew pay and margins across every job.
 """
@@ -12,6 +13,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 from app.audit import record_audit
 from app.auth import get_current_user
@@ -71,6 +73,27 @@ def export(status: Optional[List[str]] = Query(None), pm: Optional[str] = None, 
     body, n = F.build(status, pm, crew, _day(date_from), _day(date_to), date_field, q, who=user.get("email"))
     record_audit(user, "report.financials_export", "report", None, "Financial audit export",
                  {"status": status, "pm": pm, "crew": crew, "from": date_from, "to": date_to, "date_field": date_field, "projects": n})
+    return _xlsx(body)
+
+
+class ExportIds(BaseModel):
+    project_qbo_ids: List[str]
+    filters: Optional[str] = None   # what the page was filtered on, for the audit log
+
+
+@router.post("/financials.xlsx")
+def export_ids(req: ExportIds, user=Depends(get_current_user)):
+    """The Financials page: export exactly the projects its table is filtered to."""
+    _require(user)
+    if not req.project_qbo_ids:
+        raise HTTPException(status_code=400, detail="No projects in this view")
+    body, n = F.build(who=user.get("email"), ids=req.project_qbo_ids)
+    record_audit(user, "report.financials_export", "report", None, "Financial audit export",
+                 {"from_page": "financials", "filters": req.filters, "projects": n})
+    return _xlsx(body)
+
+
+def _xlsx(body):
     name = f"OPI Financial Audit {datetime.now():%Y-%m-%d}.xlsx"
     return Response(body, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})

@@ -72,6 +72,19 @@ def _tol(v):
     return max(TOL_ABS, TOL_PCT * abs(v))
 
 
+def covered_ids(items, paid):
+    """Bills don't match a schedule's rows one to one, so a crew's QuickBooks
+    payments on a job pay its rows off in pay-date order (the forecast's rule).
+    Returns the unpaid rows that money already covers."""
+    out, left = set(), float(paid or 0)
+    for i in sorted(items, key=lambda i: (i["pay_date"] or date.max, i["id"])):
+        amt = float(i["amount"] or 0)
+        if i["status"] != "paid" and left >= amt - _tol(amt):
+            out.add(i["id"])
+        left -= amt
+    return out
+
+
 def _money(v):
     return f"${float(v):,.0f}"
 
@@ -184,10 +197,6 @@ def build():
                 r["to_date"] += amt
                 if i["sheet_paid"] and not i["qbo_txn_id"]:
                     r["sheet_marked"] += amt
-            elif d and i["status"] != "paid" and (r["next_date"] is None or d < r["next_date"]):
-                r["next_date"], r["next_amount"] = d, amt
-            elif d and d == r["next_date"] and i["status"] != "paid":
-                r["next_amount"] += amt
         live.append((s, items, e, key))
 
     no_job = []
@@ -210,6 +219,22 @@ def build():
         r["paid"] += amt
         if l["d"] and (r["last_paid"] is None or l["d"] > r["last_paid"]):
             r["last_paid"] = l["d"]
+
+    by_row = defaultdict(list)
+    for s, items, e, key in live:
+        by_row[(e, key)] += items
+    covered = set()
+    for k, items in by_row.items():
+        covered |= covered_ids(items, rows[k]["paid"])
+        r = rows[k]
+        for i in items:
+            d = i["pay_date"]
+            if not d or d <= today or i["status"] == "paid" or i["id"] in covered:
+                continue
+            if r["next_date"] is None or d < r["next_date"]:
+                r["next_date"], r["next_amount"] = d, float(i["amount"])
+            elif d == r["next_date"]:
+                r["next_amount"] += float(i["amount"])
 
     def in_scope(j):
         return j and (j["state"] in ("active", "upcoming") or j["end"] >= str(since))
@@ -302,6 +327,8 @@ def build():
         if len(r["schedules"]) > 1:
             seen = {}
             for s in r["schedules"]:
+                if s["source"] == "sheet_covered":
+                    continue      # one per change order, so equal totals are normal
                 twin = next((o for o in seen if abs(o - s["total"]) <= max(1.0, 0.01 * s["total"])), None)
                 if twin is not None:
                     issue("duplicate", e, r["crew"], s["total"],
@@ -314,7 +341,7 @@ def build():
         if not in_scope(j) or j["state"] == "finished":
             continue
         start, end = date.fromisoformat(j["start"]), date.fromisoformat(j["end"])
-        off = [i for i in items if i["status"] != "paid" and i["pay_date"]
+        off = [i for i in items if i["status"] != "paid" and i["id"] not in covered and i["pay_date"]
                and (i["pay_date"] < start - timedelta(days=14) or i["pay_date"] > end + timedelta(days=45))]
         if off:
             issue("dates", e, rows[(e, key)]["crew"], sum(float(i["amount"]) for i in off),
@@ -396,7 +423,7 @@ def build():
         cr = rows[(e, key)]
         for i in items:
             d = i["pay_date"]
-            if not d or i["status"] == "paid" or not (today - timedelta(days=RUN_DAYS_BACK) <= d <= today + timedelta(weeks=RUN_WEEKS_AHEAD)):
+            if not d or i["status"] == "paid" or i["id"] in covered or not (today - timedelta(days=RUN_DAYS_BACK) <= d <= today + timedelta(weeks=RUN_WEEKS_AHEAD)):
                 continue
             if d <= today and cr["paid"] >= cr["to_date"] - _tol(cr["to_date"]):
                 continue          # bills don't match rows one to one: the crew is paid up on this job
@@ -510,6 +537,16 @@ def job_detail(entity_id):
                   "crew": (by_vendor.get(str(l["vendor"] or "")) or {}).get("name") or l["vendor_name"],
                   "description": l["descr"], "amount": float(l["a"] or 0)}
                  for l in sorted(_paid_lines(conn, entity_id), key=lambda x: str(x["d"]))]
+        # the same burn-down as the list: each crew's bills pay its rows off in date order
+        paid_by = defaultdict(float)
+        for b in bills:
+            paid_by[b["crew"]] += b["amount"]
+        for crew in {s["crew"] for s in out}:
+            mine = [r for s in out if s["crew"] == crew for r in s["rows"]]
+            ids = covered_ids([{"id": r["id"], "status": r["status"], "amount": r["amount"],
+                                "pay_date": date.fromisoformat(r["date"]) if r["date"] else None} for r in mine], paid_by.get(crew))
+            for r in mine:
+                r["covered"] = r["id"] in ids
         log = [{"at": str(r["created_at"]), "who": r["actor_email"], "action": r["action"], "file": r["target_label"],
                 "detail": json.loads(r["detail"]) if isinstance(r["detail"], str) else r["detail"]}
                for r in conn.execute(text("""

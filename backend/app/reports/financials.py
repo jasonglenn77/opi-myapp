@@ -90,13 +90,17 @@ def _crew_names(rows):
     return out
 
 
-def select_jobs(conn, status=None, pm=None, crew=None, date_from=None, date_to=None, date_field="best", q=None):
+def select_jobs(conn, status=None, pm=None, crew=None, date_from=None, date_to=None, date_field="best", q=None, ids=None):
+    """`ids` (project QuickBooks ids) = exactly the projects a page has filtered to."""
     done = COMP.load(conn)
     crew_rows = CP.dataset()["rows"]
     crews = _crew_names(crew_rows)
     states = {s for s in (status or []) if s}
+    only = {str(i) for i in ids} if ids is not None else None
     out = []
     for j in JC.dataset()["jobs"]:
+        if only is not None and j["id"] not in only:
+            continue
         c = done.get(j["id"]) or {}
         if states and j["state"] not in states and (j.get("status") or "") not in states:
             continue
@@ -172,9 +176,9 @@ def _lines(conn, ids):
     return out
 
 
-def build(status=None, pm=None, crew=None, date_from=None, date_to=None, date_field="best", q=None, who=None):
+def build(status=None, pm=None, crew=None, date_from=None, date_to=None, date_field="best", q=None, who=None, ids=None):
     with engine.connect() as conn:
-        jobs = select_jobs(conn, status, pm, crew, date_from, date_to, date_field, q)
+        jobs = select_jobs(conn, status, pm, crew, date_from, date_to, date_field, q, ids)
         ids = [j["id"] for j in jobs] or ["-"]
         lines = _lines(conn, ids)
         cap = CAL.expense_capture(conn)

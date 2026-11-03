@@ -419,10 +419,25 @@ function openJobPanel(entityId, name, onChange) {
     const j = d.job || { est: {}, act: {}, pend: {} };
     const lab = j.est?.["Crew labor"] || 0, pend = j.pend?.["Crew labor"] || 0, paid = d.bills.reduce((s, b) => s + b.amount, 0);
     const sched = d.schedules.reduce((s, x) => s + x.total, 0), lod = d.schedules.reduce((s, x) => s + x.lodging, 0);
+    const owed = d.schedules.reduce((t, s) => t + s.rows.reduce((u, r) => u + (r.status === "paid" || r.covered ? 0 : r.amount), 0), 0);
     const stat = (l, v) => `<div><div class="text-[10px] uppercase tracking-wide font-bold text-black/45">${l}</div><div class="font-extrabold tabular-nums">${money0(v)}</div></div>`;
+    const status = (r) => r.status === "paid" ? chip(r.paid_source === "sheet" ? "Marked paid on sheet" : "Paid", r.paid_source === "sheet" ? C.warn : C.good)
+      : r.covered ? `<span title="QuickBooks bills from this crew on this job already add up past this row. Bills rarely match the sheet's rows one for one, so the app pays rows off in date order.">${chip("Covered by payments", C.good)}</span>`
+      : chip("Scheduled", C.quiet);
+    // change-order labor the app added (not on any Drive sheet): one card, one row per estimate
+    const cos = d.schedules.filter((s) => s.source === "sheet_covered");
+    const coCard = cos.length ? `<section class="card p-4">
+        <div class="flex flex-wrap items-start gap-2">
+          <div style="flex:1;min-width:200px"><div class="font-bold text-sm">Change-order labor not on the Drive sheet</div>
+            <div class="text-xs text-black/50">Added by the app from each accepted estimate's Contract Labor line, because the Payment Schedule wasn't updated for it. Not in any Drive file.</div></div>
+          <div class="font-bold tabular-nums text-sm">${fmtMoney(cos.reduce((t, s) => t + s.total, 0))}</div>
+        </div>
+        <div class="overflow-x-auto mt-2"><table class="w-full text-xs"><thead><tr class="text-[10px] uppercase tracking-wide text-black/45"><th class="py-1 pr-2 text-left">Estimate</th><th class="py-1 pr-2 text-left">Crew</th><th class="py-1 pr-2 text-left">Pay date</th><th class="py-1 pr-2 text-right">Amount</th><th class="py-1 text-left">Status</th></tr></thead>
+        <tbody>${cos.flatMap((s) => s.rows.map((r) => `<tr class="border-t border-black/[0.05]"><td class="py-1 pr-2">#${escapeHtml(s.estimate || "")}</td><td class="py-1 pr-2">${escapeHtml(s.crew || "No crew set")}</td><td class="py-1 pr-2 tabular-nums">${day(r.date)}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtMoney(r.amount)}</td><td class="py-1">${status(r)}</td></tr>`)).join("")}</tbody></table></div>
+      </section>` : "";
     body.innerHTML = `
-      <section class="card p-4 flex flex-wrap" style="gap:12px 32px">${stat("Estimate labor", lab)}${stat("Pending", pend)}${lod ? stat("Lodging in schedule", lod) : ""}${stat("Schedule", sched)}${stat("Paid", paid)}</section>
-      ${d.schedules.map((s) => `<section class="card p-4">
+      <section class="card p-4 flex flex-wrap" style="gap:12px 32px">${stat("Estimate labor", lab)}${stat("Pending", pend)}${lod ? stat("Lodging in schedule", lod) : ""}${stat("Schedule", sched)}${stat("Paid", paid)}${stat("Still owed", owed)}</section>
+      ${d.schedules.filter((s) => s.source !== "sheet_covered").map((s) => `<section class="card p-4">
         <div class="flex flex-wrap items-start gap-2">
           <div style="flex:1;min-width:200px"><div class="font-bold text-sm">${escapeHtml(s.file || `Estimate ${s.estimate || ""}`)}</div>
             <div class="text-xs text-black/50">${escapeHtml(s.crew || "No crew set")}${s.source === "sheet" ? " · read from Drive" : " · built in the app"}${s.modified ? ` · sheet updated ${day(s.modified)}` : ""}</div></div>
@@ -436,8 +451,9 @@ function openJobPanel(entityId, name, onChange) {
         </form>
         <div class="overflow-x-auto mt-2"><table class="w-full text-xs"><thead><tr class="text-[10px] uppercase tracking-wide text-black/45"><th class="py-1 pr-2 text-left">Pay date</th><th class="py-1 pr-2 text-right">Amount</th><th class="py-1 pr-2 text-left">Status</th><th class="py-1 text-left">Note</th></tr></thead>
         <tbody>${s.rows.map((r) => `<tr class="border-t border-black/[0.05]"><td class="py-1 pr-2 tabular-nums">${day(r.date)}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtMoney(r.amount)}</td>
-          <td class="py-1 pr-2">${r.status === "paid" ? chip(r.paid_source === "sheet" ? "Marked paid on sheet" : "Paid", r.paid_source === "sheet" ? C.warn : C.good) : chip("Scheduled", C.quiet)}</td><td class="py-1 text-black/55">${escapeHtml(r.note || "")}</td></tr>`).join("")}</tbody></table></div>
-      </section>`).join("") || `<div class="card p-4 text-sm text-black/50">No Payment Schedule for this job.</div>`}
+          <td class="py-1 pr-2">${status(r)}</td><td class="py-1 text-black/55">${escapeHtml(r.note || "")}</td></tr>`).join("")}</tbody></table></div>
+      </section>`).join("") || (cos.length ? "" : `<div class="card p-4 text-sm text-black/50">No Payment Schedule for this job.</div>`)}
+      ${coCard}
       <section class="card p-4"><h3 class="font-bold text-sm">QuickBooks crew bills</h3>
         <div class="overflow-x-auto mt-2"><table class="w-full text-xs"><thead><tr class="text-[10px] uppercase tracking-wide text-black/45"><th class="py-1 pr-2 text-left">Date</th><th class="py-1 pr-2 text-left">Crew</th><th class="py-1 pr-2 text-left">Doc</th><th class="py-1 pr-2 text-left">Description</th><th class="py-1 text-right">Amount</th></tr></thead>
         <tbody>${d.bills.map((b) => `<tr class="border-t border-black/[0.05]"><td class="py-1 pr-2 tabular-nums whitespace-nowrap">${day(b.date)}</td><td class="py-1 pr-2">${escapeHtml(b.crew || "")}</td><td class="py-1 pr-2">${escapeHtml(b.doc || b.type)}</td><td class="py-1 pr-2 text-black/55">${escapeHtml(b.description || "")}</td><td class="py-1 text-right tabular-nums">${fmtMoney(b.amount)}</td></tr>`).join("") || `<tr><td colspan="5" class="py-2 text-black/45">No crew bills on this job.</td></tr>`}</tbody></table></div></section>

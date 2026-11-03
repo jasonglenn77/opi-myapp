@@ -1,6 +1,7 @@
 // The financial audit export: pick status, PM, crew and a completion date range,
 // see how many projects that selects, download the workbook. Opened from
-// Financials, Contractor Payments and Progress Checks.
+// Contractor Payments and Progress Checks. Financials skips the dialog and
+// exports its filtered table (exportFinancialRows).
 //
 //   import { openFinancialExport } from "../utils/financial-export.js";
 //   openFinancialExport({ crew: "MTY" });
@@ -74,13 +75,7 @@ export async function openFinancialExport(preset = {}) {
     err.textContent = "";
     btn.disabled = true; btn.textContent = "Building…";
     try {
-      const res = await fetch(`/api/reports/financials.xlsx?${qs()}`, { headers: { Authorization: "Bearer " + getToken() } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || "OPI Financial Audit.xlsx";
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(await res.blob()); a.download = name;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      await download(await fetch(`/api/reports/financials.xlsx?${qs()}`, { headers: { Authorization: "Bearer " + getToken() } }));
       close();
     } catch (e) {
       err.textContent = `The export failed: ${e?.message || e}. Try fewer projects or try again.`;
@@ -88,4 +83,24 @@ export async function openFinancialExport(preset = {}) {
     }
   });
   preview();
+}
+
+// The Financials page: export exactly the projects its table is filtered to,
+// no dialog. `filters` is a short description for the audit log.
+export async function exportFinancialRows(projectQboIds, filters = "") {
+  const res = await fetch("/api/reports/financials.xlsx", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + getToken(), "Content-Type": "application/json" },
+    body: JSON.stringify({ project_qbo_ids: projectQboIds, filters }),
+  });
+  await download(res);
+}
+
+async function download(res) {
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || "OPI Financial Audit.xlsx";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await res.blob()); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }

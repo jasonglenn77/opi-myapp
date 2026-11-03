@@ -1,7 +1,7 @@
 import { api, hasCapability } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
-import { openFinancialExport } from "../utils/financial-export.js";
+import { exportFinancialRows } from "../utils/financial-export.js";
 
 export async function projectsPage(routeFn) {
   // Data loads progressively AFTER the shell is rendered:
@@ -630,7 +630,17 @@ export async function projectsPage(routeFn) {
     btn.className = clear?.className || "btn-ghost text-xs";
     btn.textContent = "Export to Excel";
     btn.style.marginLeft = "8px";
-    btn.addEventListener("click", () => openFinancialExport());
+    btn.title = "Download the projects in the table below, as filtered";
+    btn.addEventListener("click", async () => {
+      const ids = sorted(filtered()).map((r) => r.project_qbo_id).filter(Boolean);
+      if (!ids.length) { alert("No projects in this view to export."); return; }
+      const active = Object.entries(state.filters || {}).filter(([, v]) => v && (!Array.isArray(v) || v.length));
+      const desc = [state.q ? `search "${state.q}"` : "", ...active.map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : v}`)].filter(Boolean).join("; ");
+      btn.disabled = true; btn.textContent = `Building ${ids.length} projects…`;
+      try { await exportFinancialRows(ids, desc || "no filters"); }
+      catch (e) { alert(`The export failed: ${e?.message || e}. Try fewer projects or try again.`); }
+      finally { btn.disabled = false; btn.textContent = "Export to Excel"; }
+    });
     clear?.insertAdjacentElement("afterend", btn);
   }
 
