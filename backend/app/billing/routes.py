@@ -190,7 +190,7 @@ def _ensure_invoice_schedule(conn, entity_id, ctx):
     if sid:
         return
     contract = float(ctx.get("contract_value") or 0)
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
     if contract <= 0:
         return  # no baseline yet -> nothing to schedule
     net_days = 30
@@ -215,7 +215,7 @@ def _ensure_invoice_schedule(conn, entity_id, ctx):
 
 
 def _ensure_crew_schedules(conn, entity_id, ctx, meta):
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
     if not start or not end or end < start:
         return  # no timeline -> can't place bi-weekly installments
     default_crew = _default_crew_for_project(conn, entity_id, meta)
@@ -279,7 +279,7 @@ def _ensure_expense_installments(conn, entity_id, ctx):
     an even spread across the project weeks. The office can then edit
     amounts/dates, add or delete rows."""
     from app.assumptions.calibrate import expense_timing, profile_split, lodging_billing, lodging_split
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
     if not start or not end or end < start:
         return
     for cat, est in (_estimate_costs_by_category(conn, entity_id) or {}).items():
@@ -528,7 +528,7 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
     from app.billing.invoice_dates import plan_dates, single_invoice, change_order_ids
     from app.assumptions.calibrate import invoice_timing, invoice_kind
     it = invoice_timing(conn)
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
     t = _project_terms(conn, entity_id)
     net_days = t["net_days"]
     cos = None
@@ -1750,7 +1750,7 @@ def update_terms(entity_id: str, body: TermsUpdate, user=Depends(get_current_use
                                     terms_net_days=VALUES(terms_net_days)
         """), {"e": entity_id, "p": percents_str, "n": net_days})
 
-        start, end = _pd(ctx.get("start_date")), _pd(ctx.get("end_date"))
+        start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
         date_for = {"po": start, "start": start, "end": end}
         lines = _terms_lines(percents)
         terms_note = f"{' / '.join(_fmt_pct(p) + '%' for p in percents)}, net-{net_days}"
@@ -1820,7 +1820,7 @@ def _drift_reasons(conn, entity_id, ctx, inv):
     """Has the schedule fallen out of sync with the current dates / estimate?
     Only flags UNEDITED schedules (edited ones are intentionally preserved)."""
     reasons = []
-    cur_start, cur_end = ctx.get("start_date"), ctx.get("end_date")
+    cur_start, cur_end = ctx.get("start_date"), ctx.get("job_end")
     if cur_start and cur_end:
         for (s, insts) in _load_schedules(conn, entity_id).values():
             if not s:
@@ -1865,7 +1865,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         # Books close ONLY when the office marks the project completed — not when
         # invoices happen to be paid.
         op_status = _canonical_status(conn, entity_id)
-        has_dates = bool(ctx.get("start_date") and ctx.get("end_date"))
+        has_dates = bool(ctx.get("start_date") and ctx.get("job_end"))
         books_closed = op_status == "completed"
 
         crew_vendor_ids = _all_crew_vendor_ids(conn, entity_id)
@@ -1887,7 +1887,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
                               if assigned else None),
         })
         exp = _compose_expenses(conn, entity_id, books_closed,
-                                _pd(ctx.get("start_date")), _pd(ctx.get("end_date")))
+                                _pd(ctx.get("start_date")), _pd(ctx.get("job_end")))
         estimates = _compose_estimates(conn, entity_id)
         crew_rollups = _compose_crew_rollups(conn, entity_id, books_closed)
         crews = _crew_choices(conn)

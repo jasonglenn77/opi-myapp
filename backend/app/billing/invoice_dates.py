@@ -7,7 +7,8 @@ Owner rules (2026-10-28):
     estimate size under which most of OPI's estimates were billed in one invoice
     (assumptions/calibrate.py measure_invoice_timing, shown on the Assumptions page).
   * Mobilization is invoiced on the project start date; the Final (and a single
-    full invoice) on the end date. When the job dates move, these move with them.
+    full invoice) on the end date — the last overage day when the Job Schedule
+    has orange overage days (2026-11-02). When the job dates move, these move with them.
   * Due date = invoice date + the schedule's net terms. Expected paid = invoice
     date + how long customers have actually taken to pay that kind of invoice.
     The deposit (no job-date rule) uses its measured timing before the start.
@@ -72,7 +73,7 @@ def change_order_ids(conn, entity_id):
 
 def _ctx(conn, entity_id):
     r = conn.execute(text("""
-        SELECT MIN(psi.start_date), MAX(psi.end_date)
+        SELECT MIN(psi.start_date), MAX(DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY))
         FROM qbo_customers qc JOIN projects p ON p.qbo_customer_id = qc.id
         JOIN project_schedule_items psi ON psi.project_id = p.id
         WHERE qc.qbo_id = :e AND qc.is_project = 1

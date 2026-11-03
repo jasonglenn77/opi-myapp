@@ -66,6 +66,7 @@ const TYPES = {
   unknown_crew: "Crew company unknown",
   total_mismatch: "Payments don't add up to the Contract Value",
   paid_over_sheet: "Crews paid more in QuickBooks than the sheet",
+  labor_not_on_sheet: "Change-order labor not on the sheet",
   off_calendar: "Pay dates off the payroll calendar",
   bad_date: "Date problems on the sheet",
   sheet_paid_no_qbo: "Marked paid on the sheet, no QuickBooks payment",

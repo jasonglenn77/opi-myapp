@@ -606,7 +606,7 @@ export async function cashflowPage(routeFn) {
           <svg class="cfx-chev" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Opening balance source</span>
           <span class="text-[12px] text-black/55">${b.source === "b250"
-            ? `Bank balance from the B250 · <b class="text-ink-900">${fmtMoney(b.balance)}</b> <span class="text-black/40">(QuickBooks books ${fmtMoney(b.books_balance)})</span>`
+            ? `Bank balance from the B250${b.b250?.through ? `, end of week ${mdY(b.b250.through)}` : ""} · <b class="text-ink-900">${fmtMoney(b.balance)}</b> <span class="text-black/40">(QuickBooks books ${fmtMoney(b.books_balance)})</span>`
             : `${b.included_count} of ${(b.accounts || []).length} QuickBooks bank accounts (books) · <b class="text-ink-900">${fmtMoney(b.balance)}</b>`}</span>
           ${dupBadge}
           <span class="cfx-bank-sync">Last synced ${fmtWhen(b.last_synced, true)}</span>
@@ -616,7 +616,7 @@ export async function cashflowPage(routeFn) {
             <span class="font-semibold text-black/70">Start week 1 from:</span>
             <label class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${b.source === "b250" ? "border-ink-900 bg-black/[0.04]" : "border-black/15"} ${b.b250 ? "cursor-pointer" : "opacity-50"}">
               <input type="radio" name="cfOpenSrc" value="b250" ${b.source === "b250" ? "checked" : ""} ${b.b250 ? "" : "disabled"}>
-              Bank balance from the B250 <b>${b.b250 ? fmtMoney(b.b250.balance) : "—"}</b>${b.b250 ? ` <span class="text-black/40">tab "${escapeHtml(b.b250.tab || "")}", ${fmtWhen(b.b250.as_of)}</span>` : ""}
+              Bank balance from the B250${b.b250?.through ? `, end of week ${mdY(b.b250.through)}` : ""} <b>${b.b250 ? fmtMoney(b.b250.balance) : "—"}</b>${b.b250 ? ` <span class="text-black/40">tab "${escapeHtml(b.b250.tab || "")}", ${fmtWhen(b.b250.as_of)}</span>` : ""}
             </label>
             <label class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${b.source === "qbo" ? "border-ink-900 bg-black/[0.04]" : "border-black/15"} cursor-pointer">
               <input type="radio" name="cfOpenSrc" value="qbo" ${b.source === "qbo" ? "checked" : ""}>

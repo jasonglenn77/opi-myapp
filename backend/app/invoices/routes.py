@@ -55,7 +55,8 @@ def _project_ctx(conn, entity_id):
         return None
     qcid = qc["id"]
     dates = conn.execute(text("""
-        SELECT MIN(psi.start_date) AS start_date, MAX(psi.end_date) AS end_date
+        SELECT MIN(psi.start_date) AS start_date, MAX(psi.end_date) AS end_date,
+               MAX(DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY)) AS job_end
         FROM projects p JOIN project_schedule_items psi ON psi.project_id = p.id
         WHERE p.qbo_customer_id = :qcid
     """), {"qcid": qcid}).mappings().first()
@@ -72,6 +73,9 @@ def _project_ctx(conn, entity_id):
         "name": qc["display_name"],
         "start_date": str(dates["start_date"]) if dates and dates["start_date"] else None,
         "end_date": str(dates["end_date"]) if dates and dates["end_date"] else None,
+        # the real last day: the Job Schedule's orange overage days included
+        # (2026-11-02 owner: the final invoice, crew pay and expenses follow it)
+        "job_end": str(dates["job_end"]) if dates and dates["job_end"] else None,
         "contract_value": contract,
     }
 

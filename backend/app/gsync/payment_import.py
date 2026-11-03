@@ -47,7 +47,11 @@ Map
   Contract Labor); other scope files -> estimate_qbo_id 'gs-<hash of the file id>'.
   When a project-level file exists, the other accepted estimates' generated
   even-split schedules are folded in (source 'sheet_covered': one $0 undated
-  row, contract 0) so change orders aren't counted twice.
+  row, contract 0) so change orders aren't counted twice — except labor the
+  sheet can't include (2026-11-02): change orders accepted after the sheet's
+  last edit, or accepted labor above the sheet's total, whichever is larger,
+  becomes one payment after the sheet's last row / the job's end (Data Review
+  'labor_not_on_sheet').
   Crew company: the file-name suffix (company / code / lead name), a lead
   named in the comments, the schedule's crew already in the app, the single
   company assigned on the Assignment, the single crew vendor on the project's
@@ -814,8 +818,52 @@ def plan_project(conn, ref, entity_id, files, holds_map, today):
         f0 = next((d["file"] for d in desired if not d["file"].get("estimate_qbo_id")), desired[0]["file"])
         issues.append(("paid_over_sheet", f0, {"paid": paid_all, "sheet": sheet_all,
                                                "covered": [[e["doc_number"], e["contract_labor"]] for e in covered]}))
+    _labor_not_on_sheet(conn, entity_id, ests, desired, covered, issues)
     return {"entity_id": entity_id, "desired": desired, "covered": covered, "existing": existing,
             "issues": issues, "hold": hold}
+
+
+def _labor_not_on_sheet(conn, entity_id, ests, desired, covered, issues):
+    """Owner rule 2026-11-02: accepted Contract Labor the project-level sheet
+    can't include is still owed. A change order accepted after the sheet was
+    last edited can't be on it, and accepted labor above the sheet's total isn't
+    on it either: the larger of the two is set on the folded estimates (newest
+    first, each up to its own labor) as one payment on the first payroll Friday
+    after the sheet's last row and the job's end (overage days included)."""
+    proj = [d for d in desired if not d["file"].get("estimate_qbo_id")]
+    real = {e["qbo_id"]: e for e in ests}
+    cov = [e for e in covered if e["qbo_id"] in real]
+    if not proj or not cov:
+        return
+    keys = {d["key"] for d in proj}
+    labor = sum(real[k]["contract_labor"] for k in keys if k in real) + sum(e["contract_labor"] for e in cov)
+    sheet = sum(d["total"] for d in proj)
+    edited = max((d["file"]["modified"] or "")[:10] for d in proj)
+    newer = [e for e in cov if (real[e["qbo_id"]]["txn_date"] or "") > edited]
+    short = round(max(labor - sheet, sum(e["contract_labor"] for e in newer)), 2)
+    if short <= EPS:
+        return
+    from app.invoices.routes import _project_ctx
+    last = max((_d(r["pay_date"]) for d in proj for r in d["rows"] if r["pay_date"]), default=None)
+    end = _d((_project_ctx(conn, entity_id) or {}).get("job_end"))
+    pay = max([x for x in (last and last + timedelta(days=14), end) if x], default=None)
+    while pay and not on_cycle(pay):
+        pay += timedelta(days=1)
+    by_date = lambda e: real[e["qbo_id"]]["txn_date"] or ""          # noqa: E731
+    order = sorted(newer, key=by_date, reverse=True) + sorted([e for e in cov if e not in newer], key=by_date, reverse=True)
+    left, added = short, []
+    for e in order:
+        amt = round(min(left, e["contract_labor"]), 2)
+        if amt <= EPS:
+            break
+        left = round(left - amt, 2)
+        why = "accepted after the sheet was last edited" if e in newer else "accepted labor above the sheet's total"
+        e["extra"] = {"amount": amt, "pay_date": _iso(pay), "crew_id": proj[0]["crew_id"],
+                      "note": f"Not on the Drive Payment Schedule: estimate #{e['doc_number']} labor ({why})"[:255]}
+        added.append([e["doc_number"], amt, e in newer])
+    issues.append(("labor_not_on_sheet", proj[0]["file"], {"labor": labor, "sheet": sheet, "edited": edited,
+                                                          "added": round(short - left, 2), "pay_date": _iso(pay),
+                                                          "estimates": added}))
 
 
 # ── apply ────────────────────────────────────────────────────────────────────
@@ -893,11 +941,16 @@ def apply_project(conn, plan, holds_map, today, do_apply):
     for e in plan["covered"]:
         keep_keys.add(e["qbo_id"])
         ex = plan["existing"].get(e["qbo_id"])
-        note = f"Included in the Drive Payment Schedule ({primary['name']})"[:255]
-        d = {"rows": [{"seq": 1, "pay_date": None, "amount": 0.0, "send_invoice_date": None, "note": note,
+        x = e.get("extra")      # labor the sheet can't include (_labor_not_on_sheet)
+        note = x["note"] if x else f"Included in the Drive Payment Schedule ({primary['name']})"[:255]
+        pay = x and x["pay_date"]
+        d = {"rows": [{"seq": 1, "pay_date": pay, "amount": x["amount"] if x else 0.0,
+                       "send_invoice_date": _iso(_d(pay) - timedelta(days=7)) if pay else None, "note": note,
                        "sheet_paid": 0, "qbo_txn_id": None}], "key": e["qbo_id"]}
-        vals = {"contract_labor": 0.0, "source": "sheet_covered", "source_file_id": primary["file_id"],
+        vals = {"contract_labor": x["amount"] if x else 0.0, "source": "sheet_covered", "source_file_id": primary["file_id"],
                 "source_file_name": primary["name"][:255], "source_modified": primary["modified"]}
+        if x and x["crew_id"]:
+            vals["crew_id"] = x["crew_id"]
         sid = ex["id"] if ex else None
         if ex:
             full = conn.execute(text("SELECT * FROM project_payment_schedules WHERE id = :i"), {"i": sid}).mappings().first()
@@ -914,9 +967,10 @@ def apply_project(conn, plan, holds_map, today, do_apply):
                 sid = conn.execute(text("""INSERT INTO project_payment_schedules
                     (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, contract_labor, invoice_lead_days,
                      source, source_file_id, source_file_name, source_modified, synced_at)
-                    VALUES (:e, :k, :dn, NULL, 0, 7, 'sheet_covered', :f, :fn, :fm, NOW())"""),
+                    VALUES (:e, :k, :dn, :c, :cl, 7, 'sheet_covered', :f, :fn, :fm, NOW())"""),
                     {"e": eid, "k": e["qbo_id"], "dn": e["doc_number"], "f": primary["file_id"],
-                     "fn": primary["name"][:255], "fm": primary["modified"]}).lastrowid
+                     "fn": primary["name"][:255], "fm": primary["modified"],
+                     "c": vals.get("crew_id"), "cl": vals["contract_labor"]}).lastrowid
         changes += _sync_rows(conn, sid, d, None, holds_map, eid, do_apply, covered=True)
 
     # sheet-owned schedules no longer backed by a file -> released

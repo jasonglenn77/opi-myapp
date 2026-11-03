@@ -12,6 +12,7 @@ Types
   unknown_crew          crew company couldn't be worked out (file name, comments, app, Assignment, QBO bills)
   total_mismatch        the rows don't add up to the sheet's Contract Value
   paid_over_sheet       QBO Contract-Labor bills on the project exceed every sheet's total
+  labor_not_on_sheet    accepted change-order labor the sheet can't include, added by the app
   off_calendar          pay dates not on the company bi-weekly payroll Friday
   bad_date              typos fixed / TBD dates / send-invoice dates that didn't fit
   sheet_paid_no_qbo     row marked pd/paid on the sheet, no QBO crew bill found
@@ -72,7 +73,7 @@ def payment_items(conn):
         for iss in p.get("_issues") or []:
             t = iss.get("type")
             k = f"{r['file_id']}"
-            if not active and t in ("paid_over_sheet", "qbo_paid_not_marked", "off_calendar", "bad_date"):
+            if not active and t in ("paid_over_sheet", "labor_not_on_sheet", "qbo_paid_not_marked", "off_calendar", "bad_date"):
                 continue                                    # finished long ago: history, not a worklist
             if t == "unmatched_file":
                 out.append(_item(CAT, t, k, sev("high"), f"{r['name']} in {where or 'Drive'}: not matched to a project",
@@ -115,6 +116,16 @@ def payment_items(conn):
                                  + " Likely a phase or change order that isn't on any sheet.",
                                  fix="Add the missing phase / change order to the Payment Schedule (or a separate "
                                      "\"Payment Schedule - <scope>\" file).", link=link, ref=ref, sheet=iss["sheet"], qbo=iss["paid"]))
+            elif t == "labor_not_on_sheet":
+                ests = iss.get("estimates") or []
+                out.append(_item(CAT, t, k, sev("medium"),
+                                 f"{proj}: {_money(iss['added'])} of crew labor isn't on the Payment Schedule",
+                                 f"Accepted estimates carry {_money(iss['labor'])} of Contract Labor; the sheet totals "
+                                 f"{_money(iss['sheet'])} (last edited {_md(iss['edited'])}). Added as one payment on "
+                                 f"{_md(iss['pay_date']) if iss.get('pay_date') else 'no date (job not dated)'}: "
+                                 + ", ".join(f"#{d} {_money(v)}" + (" (newer than the sheet)" if n else "") for d, v, n in ests) + ".",
+                                 fix="Add the change order(s) to the Payment Schedule with their real pay dates — the app then "
+                                     "uses the sheet's rows instead.", link=link, ref=ref, sheet=iss["sheet"], app=iss["labor"]))
             elif t == "off_calendar":
                 out.append(_item(CAT, t, k, sev("medium") if active else "low",
                                  f"{base}: {len(iss['dates'])} pay date(s) off the payroll calendar",

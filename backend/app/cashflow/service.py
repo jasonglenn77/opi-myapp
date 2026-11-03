@@ -234,20 +234,30 @@ def set_setting(key, value, actor=None):
 
 
 def b250_opening():
-    """The opening cash typed on the latest B250 copy: the bank's own balance
-    (Julie copies it from the QuickBooks bank screen). None if no copy."""
+    """Cash at the end of the B250's latest actual week: the bank's own balance
+    (Julie copies it from the QuickBooks bank screen). A week is actual when its
+    opening is typed, not a formula; Julie fills its flows with what happened, so
+    its ending is the real balance the forecast starts from. None if no copy."""
     try:
         with engine.connect() as conn:
             r = conn.execute(text("""
-                SELECT s.tab_name, s.week1_end, s.loaded_at, s.file_modified, s.source, l.amount
+                SELECT s.id, s.tab_name, s.week1_end, s.loaded_at, s.file_modified, s.source, l.amount
                 FROM gsync_b250_snapshot s
                 JOIN gsync_b250_lines l ON l.snapshot_id = s.id AND l.section = 'opening'
                 ORDER BY s.id DESC LIMIT 1""")).mappings().first()
+            if not r or r["amount"] is None:
+                return None
+            last = conn.execute(text("""
+                SELECT MAX(week_end) FROM gsync_b250_lines
+                WHERE snapshot_id = :s AND label LIKE 'Opening%' AND is_formula = 0"""), {"s": r["id"]}).scalar()
+            end = conn.execute(text("""
+                SELECT amount FROM gsync_b250_lines
+                WHERE snapshot_id = :s AND section = 'total' AND label LIKE 'Ending%' AND week_end = :w"""),
+                {"s": r["id"], "w": last}).scalar() if last else None
     except Exception:
         return None
-    if not r or r["amount"] is None:
-        return None
-    return {"balance": round(float(r["amount"]), 2), "tab": r["tab_name"],
+    return {"balance": round(float(end if end is not None else r["amount"]), 2), "tab": r["tab_name"],
+            "through": last.isoformat() if end is not None and last else None,
             "week1_end": r["week1_end"].isoformat() if r["week1_end"] else None,
             # file_modified is text on some databases, a datetime on others
             "as_of": str(r["file_modified"] or r["loaded_at"] or "").replace(" ", "T")[:19] or None,

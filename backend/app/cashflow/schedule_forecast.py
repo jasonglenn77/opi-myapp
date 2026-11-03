@@ -29,7 +29,7 @@ WEEK_END_WEEKDAY = 4  # Friday
 # schedule-row timestamps, so a logic change alone wouldn't invalidate it. A
 # mismatch wipes project_cash_cache + marks the singleton cache stale (no
 # manual clear needed on deploy).
-LOGIC_VERSION = "2026-10-26.overdue-v1"
+LOGIC_VERSION = "2026-11-02.overage-end-v1"
 _PAID_STATUSES = ("paid", "realized", "complete", "completed")
 
 
@@ -83,13 +83,13 @@ def _project_events(conn, entity_id):
     books_closed = op_status == "completed"
     if books_closed:
         return None  # trust actuals; nothing scheduled remains
-    has_dates = bool(ctx.get("start_date") and ctx.get("end_date"))
+    has_dates = bool(ctx.get("start_date") and ctx.get("job_end"))
 
     cvi = B._all_crew_vendor_ids(conn, entity_id)
     est = B._compose_estimates(conn, entity_id)
     crew = B._compose_crew(conn, entity_id, meta, cvi, books_closed)
     exp = B._compose_expenses(conn, entity_id, books_closed,
-                              B._pd(ctx.get("start_date")), B._pd(ctx.get("end_date")))
+                              B._pd(ctx.get("start_date")), B._pd(ctx.get("job_end")))
 
     events, backlog_in, backlog_out = [], 0.0, 0.0
 
@@ -215,7 +215,7 @@ def _project_events(conn, entity_id):
         # A/R is already on the grid by its due date, paid is already in the bank.
         backlog_detail = {
             "entity_id": entity_id, "name": ctx["name"], "status": op_status,
-            "start_date": _iso(ctx.get("start_date")), "end_date": _iso(ctx.get("end_date")),
+            "start_date": _iso(ctx.get("start_date")), "end_date": _iso(ctx.get("job_end")),
             "paid": paid, "ar": ar, "to_bill": to_bill,
             "crew_out": crew_out, "exp_out": exp_out, "out": est_out,
             "net": round(to_bill - est_out, 2),
