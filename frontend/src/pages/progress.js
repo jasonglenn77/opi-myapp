@@ -235,8 +235,8 @@ export async function progressPage(routeFn) {
   function render() {
     root.innerHTML = `<div class="grid gap-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="inline-flex rounded-lg border border-black/10 overflow-hidden text-sm" role="tablist">
-          ${[["jobs", "Jobs"], ["costs", "Costs not in QuickBooks yet"]].map(([k, l]) => `<button role="tab" aria-selected="${st.tab === k}" data-tab="${k}" class="px-3 py-2 font-semibold ${st.tab === k ? "bg-ink-900 text-white" : "bg-white text-black/60 hover:bg-slate-200 hover:text-ink-900"}">${l}</button>`).join("")}
+        <div class="tabs" role="tablist">
+          ${[["jobs", "Jobs"], ["costs", "Costs not in QuickBooks yet"]].map(([k, l]) => `<button role="tab" aria-selected="${st.tab === k}" data-tab="${k}" class="tab">${l}</button>`).join("")}
         </div>
         <button class="pd-btn" id="prExport">Export to Excel</button>
       </div>

@@ -266,7 +266,7 @@ export async function crewPaymentsPage(routeFn) {
     root.innerHTML = `<div class="grid gap-4" style="grid-template-columns:minmax(0,1fr)">
       ${tiles()}
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="inline-flex rounded-lg border border-black/10 text-sm" style="max-width:100%;overflow-x:auto" role="tablist">${TABS.map(([k, l]) => `<button role="tab" aria-selected="${st.tab === k}" data-tab="${k}" class="px-3 py-2 font-semibold whitespace-nowrap ${st.tab === k ? "bg-ink-900 text-white" : "bg-white text-black/60 hover:bg-slate-200 hover:text-ink-900"}">${l}${counts[k] ? ` <span class="text-xs opacity-70">${counts[k]}</span>` : ""}</button>`).join("")}</div>
+        <div class="tabs" role="tablist">${TABS.map(([k, l]) => `<button role="tab" aria-selected="${st.tab === k}" data-tab="${k}" class="tab">${l}${counts[k] ? ` <span class="tab-n">${counts[k]}</span>` : ""}</button>`).join("")}</div>
         <div class="flex gap-2"><button class="pd-btn" id="cpExport">Export to Excel</button></div>
       </div>
       ${filters()}
