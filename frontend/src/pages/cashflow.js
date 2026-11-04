@@ -798,7 +798,21 @@ export async function cashflowPage(routeFn) {
     return true;
   }
 
+  // One forecast request at a time: a load asked for while one is running waits
+  // and runs once after it (with the latest inputs), so page start, edits and
+  // the recompute poll can't stack several heavy requests on the database.
+  let loading = false, queued = null;
   async function load(silent = false) {
+    if (loading) { queued = { silent: queued ? queued.silent && silent : silent }; return; }
+    loading = true;
+    try { await loadOnce(silent); }
+    finally {
+      loading = false;
+      if (queued) { const q = queued; queued = null; load(q.silent); }
+    }
+  }
+
+  async function loadOnce(silent) {
     // `silent` = a background poll while the cache recomputes: don't blank the
     // grid, and only re-render if the numbers actually changed (no flash).
     if (!silent) grid.innerHTML = `<div class="p-4 text-sm text-black/50">Loading…</div>`;
