@@ -27,7 +27,11 @@ from . import estimate as EST
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
 CAP = "page.assignment"
-WON_WINDOW_DAYS = 150     # won within this many days shows up (older jobs are set up already)
+# Jobs with a QuickBooks project show however long ago they were won (a job won in
+# spring can start in January); _visible() drops them once finished or long under
+# way. Won jobs with no project yet only count if won recently: older unlinked
+# pipeline rows are history, not work.
+WON_WINDOW_DAYS = 150
 # Only "100% Won" pipeline rows: "80% Red Flag > Goes to Ops Tab" also counts as
 # won in the pipeline, but the customer hasn't ordered (the estimate is still
 # Pending in QuickBooks), so there's nothing to set up yet.
@@ -60,7 +64,8 @@ def _gather(conn, opp_ids=None):
     since = date.today() - timedelta(days=WON_WINDOW_DAYS)
     where = "o.id IN :ids" if opp_ids else \
         ("o.status = 'won' AND o.pipeline_status LIKE '100%%' "
-         "AND COALESCE(o.order_date, DATE(o.decided_at), DATE(o.updated_at)) >= :since")
+         "AND (o.project_qbo_id IS NOT NULL "
+         "OR COALESCE(o.order_date, DATE(o.decided_at), DATE(o.updated_at)) >= :since)")
     opps = [dict(r) for r in conn.execute(_q(f"""
         SELECT o.id, o.title, o.quote_number, o.project_qbo_id, o.pipeline_status, o.order_date, o.decided_at,
                o.order_value, o.contract_value, o.labor_days, o.travel_days, o.workbook_url, o.city, o.state,
