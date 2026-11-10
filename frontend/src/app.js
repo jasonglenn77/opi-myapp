@@ -30,6 +30,7 @@ import { pipelinePage } from "./pages/opportunities.js";
 import { settingsPage, lookupValuesPage, rateTablesPage } from "./pages/settings.js";
 import { estimateTrackingPage } from "./pages/estimate-tracking.js";
 import { entityDetailPage } from "./pages/entity-detail.js";
+import { setupPage } from "./pages/setup.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -46,6 +47,7 @@ const ROUTE_CAPS = {
   "#/estimate":   "page.estimate",
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
+  "#/setup":      "page.assignment",
   "#/crew-ops":   "page.assignment",
   "#/tracker":    "page.customers",
   "#/review":     "page.customers",
@@ -197,6 +199,7 @@ async function route() {
   if (hash === "#/dashboard") { location.hash = "#/projects"; return; }
   if (hash === "#/schedule") return schedulePage(route);
   if (hash === "#/assignment") return assignmentPage(route);
+  if (hash === "#/setup") return setupPage(route);
   if (hash === "#/crew-ops") return crewOpsPage(route);
   if (hash === "#/tracker") return trackerPage(route);
   if (hash === "#/review") return reviewPage(route);

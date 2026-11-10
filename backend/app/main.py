@@ -68,6 +68,7 @@ from app.jobcost.routes import router as jobcost_router
 from app.crewpay.routes import router as crewpay_router
 from app.progress.routes import router as progress_router
 from app.reports.routes import router as reports_router
+from app.setup.routes import router as setup_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -104,6 +105,7 @@ app.include_router(jobcost_router)
 app.include_router(crewpay_router)
 app.include_router(progress_router)
 app.include_router(reports_router)
+app.include_router(setup_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
