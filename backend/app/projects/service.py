@@ -45,11 +45,14 @@ def ensure_project_row_for_qbo_customer(conn, qbo_customer_id: int) -> int:
     if row:
         return int(row["id"])
 
+    # INSERT IGNORE: two requests can provision at once (the Assignments page on
+    # two workers); the second must not fail on the unique key.
     conn.execute(text("""
-        INSERT INTO projects (qbo_customer_id) VALUES (:cid)
+        INSERT IGNORE INTO projects (qbo_customer_id) VALUES (:cid)
     """), {"cid": qbo_customer_id})
 
-    new_id = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+    new_id = conn.execute(text("SELECT id FROM projects WHERE qbo_customer_id = :cid LIMIT 1"),
+                          {"cid": qbo_customer_id}).scalar()
     return int(new_id)
 
 def provision_master_rows_for_all_projects():

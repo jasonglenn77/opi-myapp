@@ -181,7 +181,7 @@ export async function progressPage(routeFn) {
             <td class="py-2 pr-3">${j.signoffs_due ? chip(`${j.signoffs_due} due`, C.warn) : j.signoff_required ? chip("Up to date", C.good) : `<span class="text-xs text-black/35">Off</span>`}</td></tr>
             ${open ? `<tr><td colspan="8" class="p-0">${detail(j)}</td></tr>` : ""}`;
         }).join("") || `<tr><td colspan="8" class="py-4 px-3 text-black/45">No jobs with these filters.</td></tr>`}</tbody></table></div></section>
-      <p class="text-xs text-black/50" style="max-width:52rem">Each cost is compared to the job's own plan, not a straight line: crew labor to the Payment Schedule, other costs to the expense schedule, moved back by how long that cost takes to reach QuickBooks. Budget tolerances are on the <a class="text-sky-700 hover:underline" href="#/assumptions">Assumptions</a> page, with the table of how each cost reaches QuickBooks.</p>
+      <p class="text-xs text-white/60" style="max-width:52rem">Each cost is compared to the job's own plan, not a straight line: crew labor to the Payment Schedule, other costs to the expense schedule, moved back by how long that cost takes to reach QuickBooks. Budget tolerances are on the <a class="text-sky-300 hover:underline" href="#/assumptions">Assumptions</a> page, with the table of how each cost reaches QuickBooks.</p>
     </div>`;
   }
 

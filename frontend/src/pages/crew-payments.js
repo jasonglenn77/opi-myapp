@@ -271,7 +271,7 @@ export async function crewPaymentsPage(routeFn) {
       </div>
       ${filters()}
       <div class="grid gap-3" id="cpBody" style="grid-template-columns:minmax(0,1fr)">${st.tab === "issues" ? issuesTab() : st.tab === "jobs" ? jobsTab() : st.tab === "runs" ? runsTab() : st.tab === "forms" ? formsTab() : crewsTab()}</div>
-      <p class="text-xs text-black/50" style="max-width:52rem">Paid means QuickBooks bills and checks for contract labor tagged to the job. A job and crew match within ${fmtMoney(d.rules.tol_abs)} or ${Math.round(d.rules.tol_pct * 100)}%, the same tolerance the Cash Flow forecast uses. Updated from QuickBooks and Drive nightly.</p>
+      <p class="text-xs text-white/60" style="max-width:52rem">Paid means QuickBooks bills and checks for contract labor tagged to the job. A job and crew match within ${fmtMoney(d.rules.tol_abs)} or ${Math.round(d.rules.tol_pct * 100)}%, the same tolerance the Cash Flow forecast uses. Updated from QuickBooks and Drive nightly.</p>
     </div>`;
     if (st.focus) { const el = document.getElementById(st.focus); if (el) { el.focus(); el.setSelectionRange?.(el.value.length, el.value.length); } }
   }

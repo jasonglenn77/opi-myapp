@@ -13,6 +13,7 @@ import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { fmtMoney } from "../utils/format.js";
 import { escapeHtml } from "../utils/html.js";
+import { mountToday } from "../utils/today.js";
 
 const pct = (v) => (v == null ? "—" : `${Math.round(v * 100)}%`);
 const k = (n) => Math.abs(n) >= 1e6 ? `$${(n / 1e6).toFixed(2)}M` : Math.abs(n) >= 1000 ? `$${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : `$${Math.round(n)}`;
@@ -28,10 +29,11 @@ export async function overviewPage(routeFn) {
   setShell({
     title: "Overview",
     subtitle: "Company-wide: money coming due, job cost against estimate, and records that need attention.",
-    bodyHtml: `<div id="ovRoot" class="grid" style="grid-template-columns:minmax(0,1fr);gap:20px"><div class="card p-6 text-sm text-black/45">Loading…</div></div>`,
+    bodyHtml: `<div id="ovToday" class="mb-6"></div><div id="ovRoot" class="grid" style="grid-template-columns:minmax(0,1fr);gap:20px"><div class="card p-6 text-sm text-black/45">Loading…</div></div>`,
     routeFn,
   });
   const root = document.getElementById("ovRoot");
+  mountToday(document.getElementById("ovToday"));
   const qs = () => `scope=${st.scope}&months=${st.scope === "active" ? 0 : st.months}`;
 
   // ---- money + review tiles --------------------------------------------------

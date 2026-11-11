@@ -69,6 +69,16 @@ from app.crewpay.routes import router as crewpay_router
 from app.progress.routes import router as progress_router
 from app.reports.routes import router as reports_router
 from app.setup.routes import router as setup_router
+from app.help.routes import router as help_router, notif_router
+from app.closeout.routes import router as closeout_router
+from app.issues.routes import router as issues_router
+from app.running.routes import router as running_router
+from app.paydates.routes import router as paydates_router
+from app.msauth.routes import router as msauth_router
+from app.cashplan.routes import router as cashplan_router
+from app.custportal.routes import router as custportal_router
+from app.margins.routes import router as margins_router
+from app.coregister.routes import router as coregister_router
 
 app = FastAPI()
 app.include_router(qbo_router)
@@ -106,6 +116,17 @@ app.include_router(crewpay_router)
 app.include_router(progress_router)
 app.include_router(reports_router)
 app.include_router(setup_router)
+app.include_router(help_router)
+app.include_router(notif_router)
+app.include_router(closeout_router)
+app.include_router(issues_router)
+app.include_router(running_router)
+app.include_router(paydates_router)
+app.include_router(msauth_router)
+app.include_router(cashplan_router)
+app.include_router(custportal_router)
+app.include_router(margins_router)
+app.include_router(coregister_router)
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -253,6 +274,15 @@ def get_user_by_email(email: str):
 
 @app.post("/api/login")
 def login(req: LoginRequest):
+    # Security: after LOCK_FAILS wrong tries for an email in LOCK_MINUTES, refuse
+    # for the rest of the window (slows password guessing; the audit log counts).
+    from .db import engine as _eng
+    with _eng.connect() as conn:
+        fails = conn.execute(text(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'auth.login_failed' AND target_label = :e "
+            "AND created_at > NOW() - INTERVAL 15 MINUTE"), {"e": (req.email or "").lower()}).scalar() or 0
+    if fails >= 8:
+        raise HTTPException(status_code=429, detail="Too many failed sign-ins. Wait 15 minutes, or reset your password.")
     user = get_user_by_email(req.email)
 
     # Keep error generic so we don't leak whether email exists
@@ -545,7 +575,8 @@ def crew_hub(_u=Depends(require_capability("page.assignment"))):
 @app.get("/api/config")
 def public_config():
     """Public: flags the frontend needs before login (e.g. whether email is enabled)."""
-    return {"email_enabled": mailer.is_configured()}
+    from app.msauth.routes import enabled as _ms_enabled
+    return {"email_enabled": mailer.is_configured(), "microsoft_enabled": _ms_enabled()}
 
 
 @app.post("/api/auth/forgot-password")

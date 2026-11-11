@@ -178,6 +178,7 @@ async function pmHome(routeFn) {
     <div class="w-full">
       ${data.pm && data.pm.name ? `<div class="text-xs text-white/60 mb-3">Signed in as PM ${escapeHtml(data.pm.name)}</div>` : ""}
       ${notice}
+      <div id="pmMyWork" class="mb-5"></div>
       <div id="pmFormsQueue" class="mb-5"></div>
       ${filterBar}
       <div id="pmSections">
@@ -210,6 +211,8 @@ async function pmHome(routeFn) {
     formCounts = map;
     rerenderSections();
   });
+
+  mountMyWork(document.getElementById("pmMyWork"), data.pm && data.pm.name);
 
   document.getElementById("pmAllToggle")?.addEventListener("click", () => {
     try { sessionStorage.setItem(ALL_KEY, data.scope === "all" ? "0" : "1"); } catch (_) {}
@@ -2375,4 +2378,26 @@ function mount(routeFn, bodyHtml) {
     showLogout: true,
     routeFn,
   });
+}
+
+
+// "My work": the PM's own slice of Setup, Closeout, past-due dates and issues
+// (GET /api/pm/my-work). Each job opens its PM project page.
+async function mountMyWork(el, pmName) {
+  if (!el) return;
+  if (!pmName) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="text-xs text-white/50">Loading your work…</div>`;
+  let d;
+  try { d = await api("/pm/my-work"); } catch (_) { el.innerHTML = ""; return; }
+  if (!d.sections || !d.sections.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="text-lg font-extrabold mb-2">My work</div>
+    <div class="grid gap-3 sm:grid-cols-2">${d.sections.map((s) => `
+      <div class="card p-4">
+        <div class="flex items-baseline justify-between gap-2"><div class="font-bold text-ink-900">${escapeHtml(s.label)}</div>
+          <div class="text-xl font-extrabold tabular-nums ${s.count && (s.key === "dates" || s.key === "issues") ? "text-rose-700" : "text-ink-900"}">${s.count}</div></div>
+        ${s.items.length ? `<div class="mt-2 grid gap-1">${s.items.map((i) => `<a href="${i.id ? `#/pm/project/${encodeURIComponent(i.id)}` : s.href}" class="block rounded-lg px-2 py-1 hover:bg-slate-50">
+            <div class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(i.name || "")}</div><div class="text-[11px] text-black/50 truncate">${escapeHtml(i.note || "")}</div></a>`).join("")}</div>`
+          : `<div class="text-sm text-black/45 mt-1">Nothing here.</div>`}
+        ${s.count > s.items.length ? `<div class="text-[11px] text-black/45 mt-1">${s.count - s.items.length} more</div>` : ""}
+      </div>`).join("")}</div>`;
 }

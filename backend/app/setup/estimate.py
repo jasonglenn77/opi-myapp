@@ -190,6 +190,7 @@ def draft(conn, opp_id):
     if po_docs:
         po = {**po_info(conn, po_docs[0]), "document_id": po_docs[0]["id"], "filename": po_docs[0]["original_filename"]}
     out["po"] = po
+    out["actual"] = _actual(conn, opp["project_qbo_id"]) if opp.get("project_qbo_id") else None
     if not src:
         out["warnings"].append(f"No QuickBooks estimate #{opp['quote_number']} found for this quote.")
         return out
@@ -228,4 +229,83 @@ def draft(conn, opp_id):
         out["warnings"].append("No percentage payment terms on the quote. Check the PO for how to invoice.")
     if po and po.get("total") and abs(total - po["total"]) > 1:
         out["warnings"].append(f"Draft total {total:,.2f} differs from the PO total {po['total']:,.2f}.")
+    if out["actual"]:
+        out["compare"] = _compare(out, po)
     return out
+
+
+def _actual(conn, project_qbo_id):
+    """What QuickBooks already has on the project: its first estimate (groups and
+    lines, as entered) and its first invoice. None when neither exists yet."""
+    est = conn.execute(text("""
+        SELECT id, qbo_id, doc_number, txn_date, total_amt,
+               JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.TxnStatus')) AS status
+        FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id = :p
+        ORDER BY txn_date, id LIMIT 1"""), {"p": project_qbo_id}).mappings().first()
+    inv = conn.execute(text("""
+        SELECT qbo_id, doc_number, txn_date, due_date, total_amt, balance_amt FROM qbo_transactions
+        WHERE entity_type = 'Invoice' AND customer_qbo_id = :p ORDER BY txn_date, id LIMIT 1"""),
+        {"p": project_qbo_id}).mappings().first()
+    n_est = conn.execute(text("SELECT COUNT(*) FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id = :p"),
+                         {"p": project_qbo_id}).scalar() or 0
+    if not est and not inv:
+        return None
+    out = {"estimate": None, "invoice": None, "estimates_on_project": int(n_est)}
+    if est:
+        groups, texts = _groups(conn, est["id"])
+        po_text = next((t["description"] for t in texts if re.search(r"\bP\.?O\.?\s*#?", t["description"] or "", re.I)), None)
+        out["estimate"] = {"qbo_id": est["qbo_id"], "doc_number": est["doc_number"], "date": str(est["txn_date"]),
+                           "total": float(est["total_amt"] or 0), "status": est["status"], "groups": groups, "po_line": po_text}
+    if inv:
+        out["invoice"] = {"qbo_id": inv["qbo_id"], "doc_number": inv["doc_number"], "date": str(inv["txn_date"]),
+                          "due": str(inv["due_date"]) if inv["due_date"] else None,
+                          "amount": float(inv["total_amt"] or 0), "balance": float(inv["balance_amt"] or 0)}
+    return out
+
+
+def _compare(d, po):
+    """The app's draft next to the project's estimate in QuickBooks: group by group,
+    line by line, and the checks the office makes (total = PO, PO line on top,
+    OH&P moved into the other lines, first invoice at the terms' percent)."""
+    act = d["actual"]
+    est, inv = act.get("estimate"), act.get("invoice")
+    checks = []
+    groups = []
+    if est:
+        pending = {i: g for i, g in enumerate(est["groups"])}
+        for g in d.get("groups") or []:
+            hit = next((i for i, a in pending.items() if a["name"] == g["name"]), None)
+            a = pending.pop(hit) if hit is not None else None
+            alines = list(a["lines"]) if a else []
+            lines = []
+            for l in g["lines"]:
+                j = next((k for k, x in enumerate(alines) if x["item"] == l["item"]), None)
+                x = alines.pop(j) if j is not None else None
+                if abs(l["amount"]) < 0.005 and (not x or abs(x["amount"]) < 0.005):
+                    continue
+                lines.append({"item": l["item"], "draft": l["amount"], "actual": x["amount"] if x else None})
+            for x in alines:
+                if abs(x["amount"]) >= 0.005:
+                    lines.append({"item": x["item"], "draft": None, "actual": x["amount"]})
+            groups.append({"name": g["name"], "draft": g["total"], "actual": a["total"] if a else None, "lines": lines})
+        for a in pending.values():
+            if abs(a["total"]) >= 0.005:
+                groups.append({"name": a["name"], "draft": None, "actual": a["total"],
+                               "lines": [{"item": x["item"], "draft": None, "actual": x["amount"]} for x in a["lines"] if abs(x["amount"]) >= 0.005]})
+        po_total = po and po.get("total")
+        if po_total:
+            ok = abs(est["total"] - po_total) <= 1
+            checks.append({"ok": ok, "text": f"Estimate total {est['total']:,.2f} {'matches' if ok else 'differs from'} the PO total {po_total:,.2f}"})
+        if d.get("total") is not None:
+            ok = abs(est["total"] - d["total"]) <= 1
+            checks.append({"ok": ok, "text": f"Estimate total {'matches' if ok else 'differs from'} the app's draft ({d['total']:,.2f})"})
+        checks.append({"ok": bool(est.get("po_line")), "text": "PO line on the estimate" if est.get("po_line") else "No PO line found on the estimate"})
+        ohp_left = round(sum(x["amount"] for g in est["groups"] for x in g["lines"] if _is_ohp(x["item"])), 2)
+        checks.append({"ok": abs(ohp_left) < 1, "text": "OH&P spread into the other lines" if abs(ohp_left) < 1 else f"OH&P lines still carry {ohp_left:,.2f}"})
+    fi = d.get("first_invoice") or {}
+    if inv and fi.get("percent") and (est or d.get("total")):
+        base = est["total"] if est else d["total"]
+        pct = 100 * inv["amount"] / base if base else None
+        ok = pct is not None and abs(pct - fi["percent"]) <= 0.6
+        checks.append({"ok": ok, "text": f"First invoice #{inv['doc_number']} {inv['amount']:,.2f} = {pct:.1f}% of the estimate (terms say {fi['percent']}%)" if pct is not None else "First invoice found"})
+    return {"groups": groups, "checks": checks}

@@ -163,6 +163,21 @@ def _gather(conn, opp_ids=None):
                 if company and city:
                     hit = next((p for p in projects if company in p[1].lower() and city in p[1].lower()), None)
             o["same_site"] = {"qbo_id": str(hit[0]), "name": hit[1]} if hit else None
+        # Another quote with the same title already became the project (e.g. 6340 and
+        # 6341 were both priced; 6341 was the one entered in QuickBooks).
+        titles = list({(o["title"] or "").strip().lower() for o in unlinked if o["title"]})
+        if titles:
+            sib = {}
+            for r in conn.execute(_q("""
+                SELECT LOWER(TRIM(o.title)) AS t, o.id, o.quote_number, o.project_qbo_id, qc.display_name
+                FROM opportunities o JOIN qbo_customers qc ON qc.qbo_id = o.project_qbo_id
+                WHERE o.project_qbo_id IS NOT NULL AND LOWER(TRIM(o.title)) IN :t""", "t"), {"t": titles}).mappings():
+                sib.setdefault(r["t"], r)
+            for o in unlinked:
+                r = sib.get((o["title"] or "").strip().lower())
+                if r and r["id"] != o["id"]:
+                    o["same_site"] = {"qbo_id": str(r["project_qbo_id"]), "name": r["display_name"],
+                                      "sibling_quote": r["quote_number"]}
     subjects = [o["key"] for o in rows] + [f"opp:{o['id']}" for o in opps]
     d["marks"] = {}
     for r in conn.execute(_q("""SELECT subject, step_key, status, note, by_email, at FROM project_setup_steps
@@ -238,8 +253,13 @@ def _flags(o, steps, item, today):
     fl = []
     won = o["order_date"] or (o["decided_at"].date() if o["decided_at"] else None)
     start = item.get("start_date")
-    if st["qbo_project"] != "done" and won and (today - won).days >= 2:
+    sib = (o.get("same_site") or {}).get("sibling_quote")
+    if st["qbo_project"] != "done" and sib:
+        fl.append(("warn", f"Not in QuickBooks: quote {sib} with the same title is. Duplicate quote?"))
+    elif st["qbo_project"] != "done" and won and (today - won).days >= 2:
         fl.append(("bad", f"Won {(today - won).days} days ago, not in QuickBooks"))
+    elif st["qbo_project"] != "done" and not won:
+        fl.append(("bad", "Not in QuickBooks (no won date on the pipeline)"))
     if st["first_invoice"] == "todo" and won and (today - won).days >= 7:
         fl.append(("warn", "First invoice not sent"))
     if start:
@@ -253,7 +273,7 @@ def _flags(o, steps, item, today):
         fl.append(("info", "Crew offer waiting"))
     if any(s.get("warning") for s in steps):
         fl.append(("warn", "Crew pay scheduled, no crew yet"))
-    if o.get("same_site"):
+    if o.get("same_site") and not sib:
         fl.append(("info", f"Same site as {o['same_site']['name']}: may be added scope"))
     return [{"tone": t, "text": x} for t, x in fl]
 

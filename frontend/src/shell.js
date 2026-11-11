@@ -1,5 +1,6 @@
 // Shell management: showing/hiding auth vs main UI, setting page title/subtitle/body, binding global handlers, etc.
 import { clearToken, getMe, api } from "./api.js";
+import { initHelp } from "./utils/help.js";
 
 /**
  * Show/hide nav (and any other tagged element) based on the current user's
@@ -334,4 +335,6 @@ export function setShell({ title = "", subtitle = "", bodyHtml = "", showLogout 
 
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn) logoutBtn.classList.toggle("hidden", !showLogout);
+
+  initHelp();
 }

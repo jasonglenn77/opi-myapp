@@ -329,3 +329,56 @@ def crew_hierarchy(user=Depends(require_capability("page.crew_portal"))):
         "scope": "all" if see_all else ("crew" if work_crew_id else "none"),
         "parents": parents,
     }
+
+
+# ── Foreman view: one project as the crew lead needs it (crew-foreman.js) ────
+@router.get("/project/{qbo_id}/foreman")
+def foreman(qbo_id: str, user=Depends(require_capability("page.crew_portal"))):
+    """Dates, site details (wire guidance, travel, overage, equipment, notes, days
+    off), PM and crews, crew forms on file vs due, and the crew documents. No money."""
+    from app.permissions import visible_project_qbo_ids
+    if qbo_id.startswith("c") and qbo_id[1:].isdigit():   # internal customer id (crew portal routes use it)
+        with engine.connect() as conn:
+            q = conn.execute(text("SELECT qbo_id FROM qbo_customers WHERE id = :i"), {"i": int(qbo_id[1:])}).scalar()
+        qbo_id = str(q) if q else qbo_id
+    vis = visible_project_qbo_ids(user)
+    if vis is not None and str(qbo_id) not in vis:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Project not found")
+    with engine.connect() as conn:
+        p = conn.execute(text("""SELECT qc.qbo_id, qc.display_name, p.id pid FROM qbo_customers qc
+                                 JOIN projects p ON p.qbo_customer_id = qc.id WHERE qc.qbo_id = :q"""), {"q": qbo_id}).mappings().first()
+        if not p:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Project not found")
+        items = conn.execute(text("""
+            SELECT s.id, s.status, s.start_date, s.end_date, s.wire_guidance, s.travel_days, s.overage_days, s.equipment_type, s.notes, s.non_working,
+                   (SELECT GROUP_CONCAT(DISTINCT TRIM(CONCAT(COALESCE(pm.first_name,''),' ',COALESCE(pm.last_name,''))) SEPARATOR ', ')
+                      FROM project_schedule_item_project_managers spm JOIN project_managers pm ON pm.id = spm.project_manager_id
+                     WHERE spm.schedule_item_id = s.id AND spm.unassigned_at IS NULL) pms,
+                   (SELECT GROUP_CONCAT(DISTINCT wc.name SEPARATOR ', ') FROM project_schedule_item_work_crews swc
+                      JOIN work_crews wc ON wc.id = swc.work_crew_id WHERE swc.schedule_item_id = s.id AND swc.unassigned_at IS NULL) crews
+            FROM project_schedule_items s WHERE s.project_id = :pid ORDER BY s.start_date IS NULL, s.start_date, s.sort_order"""),
+            {"pid": p["pid"]}).mappings().all()
+        forms = conn.execute(text("""SELECT form_code, COUNT(*) n, MAX(report_date) last, SUM(red_flag) flags
+                                     FROM form_submissions WHERE project_qbo_id = :q GROUP BY form_code"""), {"q": qbo_id}).mappings().all()
+        docs = conn.execute(text("""SELECT id, original_filename, folder, created_at FROM documents
+                                    WHERE entity_type = 'project' AND entity_id = :q AND drive_removed_at IS NULL
+                                      AND (folder LIKE '10_crew_documents%%' OR folder LIKE '6_project_management/1_kickoff%%')
+                                    ORDER BY created_at DESC LIMIT 40"""), {"q": qbo_id}).mappings().all()
+    try:
+        from app.crewpay import forms as FORMS
+        with engine.connect() as conn:
+            files = FORMS.for_job(conn, qbo_id)
+    except Exception:
+        files = None
+    s = lambda v: str(v) if v is not None else None
+    return {
+        "qbo_id": qbo_id, "name": p["display_name"],
+        "items": [{"status": i["status"], "start": s(i["start_date"]), "end": s(i["end_date"]), "wire_guidance": i["wire_guidance"],
+                   "travel_days": i["travel_days"], "overage_days": i["overage_days"], "equipment": i["equipment_type"],
+                   "notes": i["notes"], "days_off": i["non_working"], "pms": i["pms"], "crews": i["crews"]} for i in items],
+        "forms": [{"code": f["form_code"], "count": int(f["n"]), "last": s(f["last"]), "red_flags": int(f["flags"] or 0)} for f in forms],
+        "form_files": files,
+        "documents": [{"id": d["id"], "name": d["original_filename"], "folder": d["folder"], "date": s(d["created_at"])[:10] if d["created_at"] else None} for d in docs],
+    }

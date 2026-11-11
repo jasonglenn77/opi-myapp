@@ -575,3 +575,51 @@ def pm_set_crew_lead(qbo_id: str, req: CrewLeadRequest,
                      {"changes": {"crew": [res.get("old_label"), res.get("new_label")]},
                       "project_qbo_id": str(qbo_id), "via": "pm_portal"})
     return res
+
+
+# ── My work: the PM's own slice of every queue (PM Portal home) ─────────────
+@router.get("/my-work")
+def my_work(pm: Optional[str] = None, user=Depends(require_capability("page.pm_portal"))):
+    """Counts and short lists for one PM: jobs still being set up, finished jobs
+    not closed, invoices / crew pay past due, open issues on their jobs. A PM sees
+    their own; someone without a PM link (office, owners) can pass ?pm=Name."""
+    with engine.connect() as conn:
+        mine = None
+        if user.get("project_manager_id"):
+            r = conn.execute(text("SELECT TRIM(CONCAT(COALESCE(first_name,''),' ',COALESCE(last_name,''))) FROM project_managers WHERE id = :i"),
+                             {"i": user["project_manager_id"]}).scalar()
+            mine = r or None
+    name = mine or pm
+    if not name:
+        return {"pm": None, "sections": []}
+    has = lambda pms: name in (pms or []) if isinstance(pms, list) else name in (pms or "").split(", ")
+    out = []
+    try:
+        from app.setup.routes import queue as setup_queue
+        jobs = [j for j in setup_queue(False, user={**user, "capabilities": {"page.assignment"}})["jobs"] if has(j.get("pms"))]
+        out.append({"key": "setup", "label": "New jobs being set up", "href": "#/setup", "count": len(jobs),
+                    "items": [{"id": j.get("project_qbo_id"), "name": j.get("project_name") or j.get("title"), "note": f"{j['done']}/{j['total']} steps done"} for j in jobs[:6]]})
+    except Exception:
+        pass
+    try:
+        from app.closeout.routes import queue as co_queue
+        jobs = [j for j in co_queue(user=user)["jobs"] if has(j.get("pms"))]
+        out.append({"key": "closeout", "label": "Finished, not closed", "href": "#/closeout", "count": len(jobs),
+                    "items": [{"id": j["entity_id"], "name": j["name"], "note": ", ".join(f["text"] for f in j["flags"][:2]) or f"{j['done']}/{j['total']} steps"} for j in jobs[:6]]})
+    except Exception:
+        pass
+    try:
+        from app.paydates.routes import pay_dates
+        items = [i for i in pay_dates(None, None, user=user)["items"] if has(i.get("pm")) and i["state"] in ("overdue", "late")]
+        out.append({"key": "dates", "label": "Invoices and crew pay past due", "href": "#/pay-dates", "count": len(items),
+                    "items": [{"id": i["entity_id"], "name": i["job"], "note": f"{i['what']} · ${i['amount']:,.0f} · {i['date'] or 'no date'}"} for i in items[:6]]})
+    except Exception:
+        pass
+    try:
+        from app.issues.routes import issues as all_issues
+        items = [i for i in all_issues(False, user=user)["items"] if has(i.get("pm")) and i["sev"] == "bad"]
+        out.append({"key": "issues", "label": "Problems on my jobs", "href": "#/issues", "count": len(items),
+                    "items": [{"id": i["entity_id"], "name": i["job"] or i["title"], "note": i["title"]} for i in items[:6]]})
+    except Exception:
+        pass
+    return {"pm": name, "sections": out}

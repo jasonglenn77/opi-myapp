@@ -1,4 +1,4 @@
-import { getToken, clearToken, fetchMe, getMe, hasCapability } from "./api.js";
+import { getToken, setToken, clearToken, fetchMe, getMe, hasCapability } from "./api.js";
 import { setShell, applyNavPermissions } from "./shell.js";
 import { loginPage } from "./pages/login.js";
 import { setPasswordPage } from "./pages/set-password.js";
@@ -21,6 +21,7 @@ import { reviewPage } from "./pages/review.js";
 import { assumptionsPage } from "./pages/assumptions.js";
 import { crewPaymentsPage } from "./pages/crew-payments.js";
 import { progressPage } from "./pages/progress.js";
+import { runningPage } from "./pages/running.js";
 import { moneyPage } from "./pages/money.js";
 import { overviewPage } from "./pages/overview.js";
 import { pmPage } from "./pages/pm.js";
@@ -31,6 +32,15 @@ import { settingsPage, lookupValuesPage, rateTablesPage } from "./pages/settings
 import { estimateTrackingPage } from "./pages/estimate-tracking.js";
 import { entityDetailPage } from "./pages/entity-detail.js";
 import { setupPage } from "./pages/setup.js";
+import { helpMinePage, helpAdminPage } from "./pages/help.js";
+import { closeoutPage } from "./pages/closeout.js";
+import { issuesPage } from "./pages/issues.js";
+import { changeOrdersRegisterPage } from "./pages/change-orders-register.js";
+import { payDatesPage } from "./pages/pay-dates.js";
+import { cashPlanPage } from "./pages/cash-plan.js";
+import { clientPage } from "./pages/client.js";
+import { customerPortalAdminPage } from "./pages/customer-portal-admin.js";
+import { marginsPage } from "./pages/margins.js";
 // Base Quoting Metrics is embedded inside the Estimate page now; the standalone
 // route is intentionally retired. The mountable function is still exported from
 // base-quoting-metrics.js and is consumed by estimate.js.
@@ -48,6 +58,13 @@ const ROUTE_CAPS = {
   "#/schedule":   "page.schedule",
   "#/assignment": "page.assignment",
   "#/setup":      "page.assignment",
+  "#/closeout":   "page.assignment",
+  "#/issues":     "page.customers",
+  "#/change-orders": "page.customers",
+  "#/pay-dates":  "page.cashflow",
+  "#/cashflow-plan": "page.cashflow",
+  "#/customer-portal": "page.customers",
+  "#/margins":    "page.financials",
   "#/crew-ops":   "page.assignment",
   "#/tracker":    "page.customers",
   "#/review":     "page.customers",
@@ -104,11 +121,21 @@ async function route() {
   // PUBLIC route: crew field forms (#/field) are passcode-gated inside the
   // page itself (crew tokens, not user tokens) — same pattern as #/set-password.
   if (hash.startsWith("#/field")) return crewFormsPage(route);
+  // PUBLIC route: the customer portal (private link -> customer session; backend/app/custportal).
+  if (hash.startsWith("#/client")) return clientPage();
+
+  // Back from "Sign in with Microsoft" (backend/app/msauth): keep the app token, drop it from the URL.
+  if (hash.startsWith("#/sso")) {
+    const t = (hash.match(/token=([^&]+)/) || [])[1];
+    if (t) setToken(decodeURIComponent(t), true);
+    history.replaceState(null, "", location.pathname + "#/projects");
+    return route();
+  }
 
   // Auto-login UX: if token exists, validate via /me before rendering the landing page.
   // Only clear the token on genuine auth failures (401/403). Transient server errors
   // (500, 503, network blips) must NOT log the user out — those tokens are still valid.
-  if (hash !== "#/login" && !hash.startsWith("#/set-password")) {
+  if (!hash.startsWith("#/login") && !hash.startsWith("#/set-password")) {
     const token = getToken();
     if (!token) {
       location.hash = "#/login";
@@ -162,7 +189,7 @@ async function route() {
     }
   }
 
-  if (hash === "#/login") return loginPage(route);
+  if (hash.startsWith("#/login")) return loginPage(route);
   if (hash.startsWith("#/set-password")) return setPasswordPage(route);
   if (hash === "#/projects") return projectsHubPage(route);
   if (hash === "#/financials") return projectsPage(route);
@@ -200,12 +227,22 @@ async function route() {
   if (hash === "#/schedule") return schedulePage(route);
   if (hash === "#/assignment") return assignmentPage(route);
   if (hash === "#/setup") return setupPage(route);
+  if (hash === "#/closeout") return closeoutPage(route);
+  if (hash === "#/issues") return issuesPage(route);
+  if (hash === "#/change-orders") return changeOrdersRegisterPage(route);
+  if (hash === "#/pay-dates") return payDatesPage(route);
+  if (hash === "#/cashflow-plan") return cashPlanPage(route);
+  if (hash === "#/customer-portal") return customerPortalAdminPage(route);
+  if (hash === "#/margins") return marginsPage(route);
+  if (hash === "#/help-mine") return helpMinePage(route);
+  if (hash === "#/help-admin") return helpAdminPage(route);
   if (hash === "#/crew-ops") return crewOpsPage(route);
   if (hash === "#/tracker") return trackerPage(route);
   if (hash === "#/review") return reviewPage(route);
   if (hash === "#/assumptions") return assumptionsPage(route);
   if (hash === "#/crew-payments") return crewPaymentsPage(route);
   if (hash === "#/progress") return progressPage(route);
+  if (hash === "#/running") return runningPage(route);
   if (hash === "#/money") return moneyPage(route);
   if (hash === "#/overview") return overviewPage(route);
   if (hash === "#/users") return usersPage(route);

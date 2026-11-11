@@ -25,6 +25,16 @@ export function loginPage(routeFn, message = "") {
     }
   } catch (_) {}
 
+  // Coming back from Microsoft with a problem (msauth/routes.py).
+  const SSO_ERR = {
+    no_account: "Your Microsoft account isn't set up in the app yet. Ask an admin to add you on the Users page.",
+    domain: "Use your OnPoint Installers Microsoft account.",
+    cancelled: "Microsoft sign-in was cancelled.",
+    expired: "That sign-in took too long. Try again.",
+  };
+  const ssoErr = (location.hash.match(/sso_error=([a-z_]+)/) || [])[1];
+  if (ssoErr && !message) message = SSO_ERR[ssoErr] || "Microsoft sign-in didn't work. Try again, or use your password.";
+
   root.innerHTML = `
     <div class="w-full max-w-md relative">
       <a
@@ -53,6 +63,13 @@ export function loginPage(routeFn, message = "") {
         ${expiredNote ? `<div class="mb-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm px-3 py-2">${expiredNote}</div>` : ""}
         ${setNote ? `<div class="mb-4 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">${setNote}</div>` : ""}
 
+        <div id="msWrap" class="hidden mb-4">
+          <a href="/api/auth/microsoft/start" class="w-full inline-flex items-center justify-center gap-2.5 rounded-xl border border-black/20 bg-white px-4 py-2.5 text-sm font-bold text-ink-900 hover:bg-slate-50">
+            <svg width="18" height="18" viewBox="0 0 21 21" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>
+            Sign in with Microsoft
+          </a>
+          <div class="flex items-center gap-3 my-4 text-xs text-black/40"><span class="flex-1 h-px bg-black/10"></span>or with your password<span class="flex-1 h-px bg-black/10"></span></div>
+        </div>
         <form id="loginForm" class="space-y-4">
           <div>
             <div class="label mb-1">Email</div>
@@ -105,7 +122,7 @@ export function loginPage(routeFn, message = "") {
       routeFn();
     } catch (err) {
       console.error("Login error:", err);
-      loginPage(routeFn, "Login failed. Check email/password.");
+      loginPage(routeFn, err && err.status === 429 ? "Too many failed sign-ins. Wait 15 minutes, or reset your password." : "Login failed. Check email/password.");
     }
   };
 
@@ -113,6 +130,7 @@ export function loginPage(routeFn, message = "") {
 
   // Forgot-password relies on email delivery — hide it until SMTP is configured.
   api("/config").then((c) => {
+    if (c && c.microsoft_enabled) document.getElementById("msWrap")?.classList.remove("hidden");
     if (c && !c.email_enabled) {
       const fl = document.getElementById("forgotLink");
       if (fl && fl.parentElement) fl.parentElement.classList.add("hidden");
