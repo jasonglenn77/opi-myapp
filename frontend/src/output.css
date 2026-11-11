@@ -12737,6 +12737,13 @@ body.hp-explaining, body.hp-explaining * {
   color:rgba(0,0,0,.58);
 }
 
+.hp-q {
+  font-size:21px;
+  font-weight:800;
+  line-height:1;
+  font-family:inherit;
+}
+
 .after\:absolute::after {
   content: var(--tw-content);
   position: absolute;

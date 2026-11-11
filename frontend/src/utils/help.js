@@ -16,7 +16,7 @@ let toursSeen = null;         // {tour_key: 'done'|'skipped'}
 let pollTimer = null;
 let offeredThisSession = new Set();
 
-const ICON_HELP = `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 015.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
+const ICON_HELP = `<span class="hp-q" aria-hidden="true">?</span>`;
 const ICON_BELL = `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/></svg>`;
 
 function curHash() { return (location.hash || "#/projects").split("?")[0]; }
