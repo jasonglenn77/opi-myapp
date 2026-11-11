@@ -1406,6 +1406,44 @@ def _upsert_one_transaction_and_lines_inner(
             })
             counters["line"] += 1
 
+def refetch_payment_touched(realm_id: str, access_token: str) -> int:
+    """Re-pull open invoices/bills that a LATER payment was applied to.
+
+    Applying a Payment (or BillPayment) changes the invoice's/bill's balance,
+    but the incremental SELECT only re-fetches rows whose LastUpdatedTime moved
+    past the watermark, and a missed window (e.g. a backfill that once advanced
+    the watermark) leaves them stuck "open" for good. On 2026-06-11 eleven
+    invoices (#3894 among them, ~$212K) were paid in QBO yet stayed Sent A/R
+    here for five months. So every sync looks for open rows with a payment
+    newer than our copy and fetches them again by Id. Cheap: usually none."""
+    pairs = (("Payment", "Invoice"), ("BillPayment", "Bill"))
+    total = 0
+    with engine.connect() as conn:
+        for pay_ent, tgt_ent in pairs:
+            ids = [r[0] for r in conn.execute(text("""
+                SELECT DISTINCT t.qbo_id
+                FROM qbo_transactions p
+                JOIN JSON_TABLE(p.raw_json, '$.Line[*].LinkedTxn[*]' COLUMNS (
+                         tid VARCHAR(40) PATH '$.TxnId', typ VARCHAR(40) PATH '$.TxnType')) j ON TRUE
+                JOIN qbo_transactions t
+                  ON t.realm_id = p.realm_id AND t.entity_type = :tgt AND t.qbo_id = j.tid COLLATE utf8mb4_unicode_ci
+                WHERE p.realm_id = :r AND p.entity_type = :pay AND j.typ COLLATE utf8mb4_unicode_ci = :tgt
+                  AND COALESCE(t.balance_amt, 0) > 0.005
+                  AND (t.meta_last_updated_time IS NULL
+                       OR p.meta_last_updated_time > t.meta_last_updated_time)
+                LIMIT 600
+            """), {"r": realm_id, "pay": pay_ent, "tgt": tgt_ent}).fetchall()]
+            for i in range(0, len(ids), 30):
+                chunk = ids[i:i + 30]
+                id_list = ",".join("'" + str(x).replace("'", "") + "'" for x in chunk)
+                data = _qbo_query(realm_id, access_token,
+                                  f"SELECT * FROM {tgt_ent} WHERE Id IN ({id_list}) MAXRESULTS 100")
+                rows = data.get("QueryResponse", {}).get(tgt_ent, []) or []
+                if rows:
+                    upsert_transactions_and_lines(realm_id, tgt_ent, rows)
+                    total += len(rows)
+    return total
+
 def run_transactions_sync(triggered_by: str = "manual") -> dict:
     run_id = log_sync_start("transactions", triggered_by)
     try:
@@ -1434,6 +1472,13 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             upserted_txns_total += up_txn
             upserted_lines_total += up_line
             upserted_sales_lines_total += up_sales_line
+
+        # Invoices/bills a later payment closed but the watermark skipped.
+        refetched = 0
+        try:
+            refetched = refetch_payment_touched(realm_id, access_token)
+        except Exception:
+            pass
 
         # Bank deposits / transfers / card payments (own watermark, best-effort).
         cash_movements = None
@@ -1490,6 +1535,7 @@ def run_transactions_sync(triggered_by: str = "manual") -> dict:
             "lines_upserted": upserted_lines_total,
             "sales_lines_upserted": upserted_sales_lines_total,
             "transactions_deleted": deleted_total,
+            "payment_touched_refetched": refetched,
             "cash_movements": cash_movements,
             "run_id": run_id,
         }
@@ -1561,7 +1607,10 @@ def run_entities_backfill(entities: list[str], triggered_by: str = "backfill") -
     if not ents:
         raise ValueError(f"No valid entities. Allowed: {', '.join(sorted(allowed))}")
 
-    run_id = log_sync_start("transactions", triggered_by)
+    # Own sync_type: a backfill must NOT advance the incremental 'transactions'
+    # watermark (on 2026-06-13 it did, and the next sync skipped ~13 hours of
+    # invoice updates).
+    run_id = log_sync_start("transactions_backfill", triggered_by)
     try:
         realm_id, access_token = get_valid_access_token()
         per_entity = {}
