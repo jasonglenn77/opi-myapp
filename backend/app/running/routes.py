@@ -66,12 +66,28 @@ def _q(sql, *names):
     return text(sql).bindparams(*[bindparam(n, expanding=True) for n in names])
 
 
+_rebuilding = {"on": False}
+
+
 def _issues():
+    """Issues' list, shared with the Issues page's cache. When it's stale, serve
+    the last one and rebuild in the background (a rebuild takes ~15s on prod),
+    so Running Jobs never waits on it except the very first time."""
     from app.issues import routes as IR
+    import threading
     import time
     now = time.time()
-    if not IR._cache["data"] or now - IR._cache["at"] > IR.CACHE_SECONDS:
-        IR._cache["data"], IR._cache["at"] = IR.build(), now
+    if IR._cache["data"] is None:
+        IR._cache["data"], IR._cache["at"] = IR.build(), time.time()
+    elif now - IR._cache["at"] > IR.CACHE_SECONDS and not _rebuilding["on"]:
+        _rebuilding["on"] = True
+
+        def run():
+            try:
+                IR._cache["data"], IR._cache["at"] = IR.build(), time.time()
+            finally:
+                _rebuilding["on"] = False
+        threading.Thread(target=run, daemon=True).start()
     return IR._cache["data"]
 
 

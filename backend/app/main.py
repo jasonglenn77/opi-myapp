@@ -1761,4 +1761,9 @@ def _warm_page_snapshots():
             refresh_snapshot()
         except Exception:
             pass
+        try:   # Issues feeds Running Jobs too: have it ready in this worker
+            from app.running.routes import _issues
+            _issues()
+        except Exception:
+            pass
     threading.Thread(target=run, daemon=True).start()
