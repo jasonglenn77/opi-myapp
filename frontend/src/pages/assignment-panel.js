@@ -45,7 +45,28 @@ const EQUIP_OPTIONS = ["", "Equip", "No Equip", "Electric"];
 
 const pmName = (pm) => (`${pm.first_name || ""} ${pm.last_name || ""}`.trim() || pm.email || `PM ${pm.id}`);
 
-export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
+const STATUS_LABEL = { needs_attention: "Not started", pending: "Not started", not_started: "Not started", in_progress: "In progress",
+  on_hold: "On hold", completed: "Finished", canceled: "Canceled" };
+const fmtHd = (v) => { if (!v) return "—"; const [y, m, d] = String(v).slice(0, 10).split("-"); return `${Number(m)}/${Number(d)}/${y.slice(2)}`; };
+const lastDay = (it) => {
+  if (!it.end_date) return null;
+  const t = new Date(`${String(it.end_date).slice(0, 10)}T00:00:00`);
+  t.setDate(t.getDate() + (Number(it.overage_days) || 0));
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+};
+
+// opts.show: which parts to show (Project Setup's cards each show one job):
+//   "dates"   start, end (quoted), overage, days off, hold bar, add / delete a set of dates, history
+//   "pm"      the PM picker per line
+//   "crew"    the crew picker + days off per line
+//   "details" wire guidance, travel days, equipment
+// Default: everything (the project workspace's Assignment tab). The status is
+// worked out from the dates (projects/lifecycle.py) and is shown, not picked.
+const ALL_PARTS = ["dates", "pm", "crew", "details", "notes"];
+
+export async function mountAssignmentPanel(container, qboCustomerId, onChange, opts = {}) {
+  const show = new Set(opts.show || ALL_PARTS);
+  const has = (k) => show.has(k);
   container.innerHTML = `<div class="p-4 text-sm text-black/40">Loading assignment…</div>`;
   let bundle;
   try {
@@ -59,7 +80,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
   // Shared crew-editor context (companies + flat crews incl. parents).
   const ctx = bundle;
 
-  const remount = () => mountAssignmentPanel(container, qboCustomerId, onChange);
+  const remount = () => mountAssignmentPanel(container, qboCustomerId, onChange, opts);
   const opt = (v, label, sel) => `<option value="${escapeHtml(String(v))}" ${String(sel) === String(v) ? "selected" : ""}>${escapeHtml(label)}</option>`;
   // 'On hold' is driven by the hold bar (it shifts dates) — the select only
   // offers it while the project is on hold or the line already shows it.
@@ -114,25 +135,26 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
     <div class="ap-line" data-sid="${it.id}">
       <div class="ap-deck">
         <span class="ap-idx">#${i + 1}${it.is_extra_row ? `<span class="text-[10px] text-black/30"> (extra)</span>` : ""}</span>
-        ${field("Status", `<select data-f="status" class="input text-xs py-1.5 ap-status">${statusOptions(it.status || "needs_attention")}</select>`)}
-        ${field("Start", `<input data-f="start_date" type="date" value="${escapeHtml(it.start_date ? String(it.start_date).slice(0, 10) : "")}" class="input text-xs py-1.5"/>`)}
-        ${field("End", `<input data-f="end_date" type="date" value="${escapeHtml(it.end_date ? String(it.end_date).slice(0, 10) : "")}" class="input text-xs py-1.5"/>`)}
-        ${field("Project manager", `<button data-assign="pm" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 min-w-[9rem]">${pmSummary(it.active_project_managers)}</button>`, "ap-grow")}
-        ${field("Crew (company · lead · slot)", `<button data-crew-edit="${it.id}" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 whitespace-normal" style="min-width:11rem;">${crewSummary(it.active_work_crews)}</button>`, "ap-grow2")}
+        ${field("Status", `<span class="ap-status-ro" title="Worked out from the dates: not started, in progress, finished. Put on hold with the hold bar.">${escapeHtml(STATUS_LABEL[it.status] || "Not started")}</span>`)}
+        ${has("dates") ? field("Start", `<input data-f="start_date" type="date" value="${escapeHtml(it.start_date ? String(it.start_date).slice(0, 10) : "")}" class="input text-xs py-1.5"/>`) : field("Dates", `<span class="ap-ro">${fmtHd(it.start_date)} to ${fmtHd(lastDay(it))}</span>`)}
+        ${has("dates") ? field("Quoted end", `<input data-f="end_date" type="date" value="${escapeHtml(it.end_date ? String(it.end_date).slice(0, 10) : "")}" class="input text-xs py-1.5" title="The end the price was built on (the green cell on the Job Schedule)"/>`) : ""}
+        ${has("dates") ? field("Overage days", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16" title="Calendar days worked past the quoted end (orange on the Job Schedule)"/>`) : ""}
+        ${has("dates") ? field("Last day", `<span class="ap-ro" title="Quoted end + overage days">${fmtHd(lastDay(it))}</span>`) : ""}
+        ${has("pm") ? field("Project manager", `<button data-assign="pm" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 min-w-[9rem]">${pmSummary(it.active_project_managers)}</button>`, "ap-grow") : ""}
+        ${has("crew") ? field("Crew (company · lead · slot)", `<button data-crew-edit="${it.id}" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 whitespace-normal" style="min-width:11rem;">${crewSummary(it.active_work_crews)}</button>`, "ap-grow2") : ""}
       </div>
       <div class="ap-deck">
-        ${field("Wire", `<label class="inline-flex items-center" style="height:30px;"><input data-f="wire_guidance" type="checkbox" class="h-4 w-4 cursor-pointer" ${it.wire_guidance ? "checked" : ""}/></label>`)}
-        ${field("Travel", `<select data-f="travel_days" class="input text-xs py-1.5 w-20">${travelOptions(it.travel_days)}</select>`)}
-        ${field("Overage", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16"/>`)}
-        ${field("Days off", `<button type="button" data-nwd-edit="${it.id}" class="nwd-btn" title="Non-working days (weekends off / specific dates)">${nonWorkingButtonLabel(it.non_working)}</button>`)}
-        ${field("Equipment", `<select data-f="equipment_type" class="input text-xs py-1.5 w-28">${equipOptions(it.equipment_type)}</select>`)}
-        ${field("Notes", `<input data-f="notes" type="text" value="${escapeHtml(it.notes || "")}" placeholder="—" title="${escapeHtml(it.notes || "")}" class="input text-xs py-1.5 w-full"/>`, "ap-notes")}
+        ${has("details") ? field("Wire", `<label class="inline-flex items-center" style="height:30px;"><input data-f="wire_guidance" type="checkbox" class="h-4 w-4 cursor-pointer" ${it.wire_guidance ? "checked" : ""}/></label>`) : ""}
+        ${has("details") ? field("Travel", `<select data-f="travel_days" class="input text-xs py-1.5 w-20">${travelOptions(it.travel_days)}</select>`) : ""}
+        ${has("dates") || has("crew") ? field("Days off", `<button type="button" data-nwd-edit="${it.id}" class="nwd-btn" title="Non-working days (weekends off / specific dates)">${nonWorkingButtonLabel(it.non_working)}</button>`) : ""}
+        ${has("details") ? field("Equipment", `<select data-f="equipment_type" class="input text-xs py-1.5 w-28">${equipOptions(it.equipment_type)}</select>`) : ""}
+        ${has("notes") ? field("Notes", `<input data-f="notes" type="text" value="${escapeHtml(it.notes || "")}" placeholder="—" title="${escapeHtml(it.notes || "")}" class="input text-xs py-1.5 w-full"/>`, "ap-notes") : ""}
         <div class="ap-f ap-actions">
           <span class="ap-l">&nbsp;</span>
           <div class="flex items-center gap-2" style="height:30px;">
             <span data-savestate class="text-[11px] text-black/30"></span>
-            ${historyBadgeHtml(it.id, histCount, _openHist.has(String(it.id)))}
-            <button data-del class="text-black/30 hover:text-red-600 text-sm" title="Delete this schedule item">✕</button>
+            ${has("dates") ? historyBadgeHtml(it.id, histCount, _openHist.has(String(it.id))) : ""}
+            ${has("dates") ? `<button data-del class="text-black/30 hover:text-red-600 text-sm" title="Delete this set of dates">✕</button>` : ""}
           </div>
         </div>
       </div>
@@ -144,8 +166,11 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
     ? items.map(lineHtml).join("")
     : `<div class="py-4 text-center text-sm text-black/40">No schedule items yet — add one below.</div>`;
 
-  const fmtHd = (v) => { if (!v) return "—"; const [y, m, d] = String(v).slice(0, 10).split("-"); return `${Number(m)}/${Number(d)}/${y.slice(2)}`; };
-  const holdBar = hold
+  const allCanceled = items.length > 0 && items.every((x) => x.status === "canceled");
+  const cancelBtn = !has("dates") ? "" : allCanceled
+    ? `<div class="hold-bar-wrap hold-on"><span class="hold-pill">Canceled</span><span class="hold-bar-txt">This project is canceled.</span><button type="button" class="hold-btn hold-btn-go" data-restore>Restore</button></div>`
+    : `<div class="flex justify-end -mt-1 mb-2"><button type="button" class="text-[11px] text-black/45 hover:text-red-600 underline decoration-dotted" data-cancelproj>Cancel this project…</button></div>`;
+  const holdBar = !has("dates") || allCanceled ? "" : hold
     ? `<div class="hold-bar-wrap hold-on" data-hold-bar title="${escapeHtml(holdTitle(hold))}">
         <span class="hold-pill${hold.overdue ? " hold-pill-late" : ""}">On hold until ${fmtHd(hold.expected_resume)}</span>
         <span class="hold-bar-txt">Since <b>${fmtHd(hold.hold_start)}</b>${hold.shift_days ? ` · remaining work moved <b>${hold.shift_days} days</b>` : ""}${hold.reason ? ` · ${escapeHtml(hold.reason)}` : ""}${hold.note ? ` <span class="text-black/45">— ${escapeHtml(hold.note)}</span>` : ""}${hold.overdue ? ` · <b style="color:#b91c1c">resume date has passed</b>` : ""}${hold.created_by_name ? ` <span class="text-black/40">(${escapeHtml(hold.created_by_name)})</span>` : ""}</span>
@@ -160,14 +185,15 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
   container.innerHTML = `
     <div class="p-4 sm:p-5 text-ink-900">
       ${holdBar}
+      ${cancelBtn}
       <div class="flex items-start gap-3 flex-wrap mb-3">
-        <div class="text-xs text-black/50 flex-1" style="min-width:220px;">Assign the PM(s), crew(s), dates, and schedule detail for each schedule item. A project can have more than one schedule item (extra crews / phases). Changes save automatically.</div>
+        <div class="text-xs text-black/50 flex-1" style="min-width:220px;">${escapeHtml(opts.intro || "Assign the PM(s), crew(s), dates, and schedule detail for each set of dates. A project can have more than one (extra crews / phases). Changes save automatically.")}</div>
         <span data-ccx-slot></span>
       </div>
       <div data-rows>${bodyLines}</div>
-      <div class="pt-3">
-        <button data-add class="text-xs font-semibold text-emerald-700 hover:underline">+ Add schedule item</button>
-      </div>
+      ${has("dates") ? `<div class="pt-3">
+        <button data-add class="text-xs font-semibold text-emerald-700 hover:underline">+ Add another set of dates</button>
+      </div>` : ""}
     </div>`;
 
   const rowsHost = container.querySelector("[data-rows]");
@@ -195,18 +221,20 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
 
   function payloadFor(line, it) {
     const g = (f) => line.querySelector(`[data-f="${f}"]`);
+    const v = (f, cur) => { const el = g(f); return el ? (el.type === "checkbox" ? (el.checked ? 1 : 0) : el.value) : cur; };
+    const iso = (x) => (x ? String(x).slice(0, 10) : null);
     const pmIds = (it.active_project_managers || []).map((a) => Number(a.project_manager_id));
     return {
       schedule_item_id: it.id || null,
       qbo_customer_id: Number(qboCustomerId),
-      status: g("status").value,
-      start_date: g("start_date").value || null,
-      end_date: g("end_date").value || null,
-      wire_guidance: g("wire_guidance").checked ? 1 : 0,
-      travel_days: Number(g("travel_days").value) || 0,
-      overage_days: Number(g("overage_days").value) || 0,
-      equipment_type: g("equipment_type").value || null,
-      notes: g("notes").value || null,
+      status: it.status || "not_started",
+      start_date: v("start_date", iso(it.start_date)) || null,
+      end_date: v("end_date", iso(it.end_date)) || null,
+      wire_guidance: Number(v("wire_guidance", it.wire_guidance ? 1 : 0)) ? 1 : 0,
+      travel_days: Number(v("travel_days", it.travel_days)) || 0,
+      overage_days: Number(v("overage_days", it.overage_days)) || 0,
+      equipment_type: v("equipment_type", it.equipment_type) || null,
+      notes: v("notes", it.notes) || null,
       // 0062: non-working days ride the normal payload (null = none).
       non_working: it.non_working || null,
       project_manager_ids: pmIds,
@@ -443,6 +471,22 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange) {
     openHoldDialog({ qboCustomerId, projectName: pname, hold, onDone: afterHold }));
   container.querySelector("[data-hold-resume]")?.addEventListener("click", () =>
     resumeHold({ qboCustomerId, hold, onDone: afterHold }));
+
+  // 2026-11-12: Cancel / Restore (with a reason) are the manual statuses; the
+  // rest follow the dates.
+  const qboId = bundle.qbo && bundle.qbo.qbo_id;
+  container.querySelector("[data-cancelproj]")?.addEventListener("click", async () => {
+    const reason = prompt(`Cancel ${pname || "this project"}? Every set of dates is canceled and it leaves the schedules and the cash forecast.\n\nWhy is it canceled?`);
+    if (reason === null) return;
+    if (!reason.trim()) { alert("Say why it's canceled (kept in the history)."); return; }
+    try { await api(`/projects/${encodeURIComponent(qboId)}/status`, { method: "POST", body: JSON.stringify({ status: "canceled", reason }) }); if (onChange) onChange(); remount(); }
+    catch (e) { alert("Couldn't cancel: " + (e?.message || e)); }
+  });
+  container.querySelector("[data-restore]")?.addEventListener("click", async () => {
+    if (!confirm("Restore this project? Its status follows its dates again.")) return;
+    try { await api(`/projects/${encodeURIComponent(qboId)}/status`, { method: "POST", body: JSON.stringify({ status: "not_started", reason: "Restored" }) }); if (onChange) onChange(); remount(); }
+    catch (e) { alert("Couldn't restore: " + (e?.message || e)); }
+  });
 
   container.querySelector("[data-add]")?.addEventListener("click", async () => {
     try {

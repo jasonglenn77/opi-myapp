@@ -32,15 +32,18 @@ function rangeShort(a, b) {
 // Operational status → label + pill styling. Order drives the filter pills.
 // Status = the project's final assignment-row status (set on the Assignment
 // page). Order drives the filter pills.
+// 2026-11-12: the status is worked out from the job (backend projects/lifecycle.py):
+// set up, started, ended, closed out; On hold and Canceled are the manual ones.
 const OP_STATUS = {
-  needs_attention: { label: "Needs attention", cls: "bg-rose-100 text-rose-800" },
-  pending:         { label: "Pending",         cls: "bg-amber-100 text-amber-800" },
-  not_started:     { label: "Not started",     cls: "bg-slate-200 text-slate-700" },
-  in_progress:     { label: "In progress",     cls: "bg-indigo-100 text-indigo-800" },
-  on_hold:         { label: "On hold",         cls: "bg-slate-200 text-slate-700" },
-  completed:       { label: "Complete",        cls: "bg-emerald-100 text-emerald-800" },
-  canceled:        { label: "Canceled",        cls: "bg-black/10 text-black/50" },
+  setup:       { label: "Setup",       cls: "bg-amber-100 text-amber-800" },
+  ready:       { label: "Ready",       cls: "bg-sky-100 text-sky-800" },
+  in_progress: { label: "In progress", cls: "bg-indigo-100 text-indigo-800" },
+  closing:     { label: "Closing",     cls: "bg-orange-100 text-orange-800" },
+  closed:      { label: "Closed",      cls: "bg-emerald-100 text-emerald-800" },
+  on_hold:     { label: "On hold",     cls: "bg-slate-200 text-slate-700" },
+  canceled:    { label: "Canceled",    cls: "bg-black/10 text-black/50" },
 };
+const lifeOf = (p) => (p.life && p.life.status) || ({ completed: "closing", not_started: "setup", needs_attention: "setup", pending: "setup" }[p.operational_status] || p.operational_status);
 const statusBadge = (s) => {
   const m = OP_STATUS[s] || { label: s || "—", cls: "bg-black/10 text-black/50" };
   return `<span class="inline-flex items-center gap-1 text-[10.5px] font-bold rounded-full px-2 py-0.5 whitespace-nowrap ${m.cls}">${escapeHtml(m.label)}</span>`;
@@ -314,7 +317,7 @@ export async function projectsHubPage(routeFn) {
   };
 
   const renderFilters = () => {
-    const counts = all.reduce((m, p) => { m[p.operational_status] = (m[p.operational_status] || 0) + 1; return m; }, {});
+    const counts = all.reduce((m, p) => { const k = lifeOf(p); m[k] = (m[k] || 0) + 1; return m; }, {});
     const pills = [["all", "All"], ...Object.keys(OP_STATUS).map((k) => [k, OP_STATUS[k].label])];
     filtersEl.innerHTML =
       pills.map(([k, label]) => {
@@ -449,7 +452,8 @@ export async function projectsHubPage(routeFn) {
   // Assignment page (Projects hub reflects it, doesn't edit it).
   const statusCell = (p) => {
     const h = holdsByEntity.get(String(p.project_qbo_id));
-    return h ? `<span class="inline-flex flex-col items-start gap-0.5">${statusBadge(p.operational_status)}${holdPillHtml(h)}</span>` : statusBadge(p.operational_status);
+    const badge = statusBadge(lifeOf(p)) + (p.life && p.life.needs_review ? ` <span class="inline-flex items-center text-[10px] font-bold rounded-full px-1.5 py-0.5 bg-rose-100 text-rose-800" title="A change sent it back to Project Setup">Re-review</span>` : "");
+    return h ? `<span class="inline-flex flex-col items-start gap-0.5">${badge}${holdPillHtml(h)}</span>` : badge;
   };
 
   const rowHtml = (p) => {
@@ -458,7 +462,7 @@ export async function projectsHubPage(routeFn) {
     const open = openSet.has(String(p.project_qbo_id));
     return `
       <tr class="ph-row border-b border-black/5 hover:bg-black/[0.02] cursor-pointer ${open ? "open bg-black/[0.02]" : ""} ${hasAtt ? "ph-att" : ""}"
-          data-qid="${escapeHtml(String(p.project_qbo_id))}" data-status="${escapeHtml(p.operational_status || "")}" data-key="${escapeHtml(searchKey(p))}"
+          data-qid="${escapeHtml(String(p.project_qbo_id))}" data-status="${escapeHtml(lifeOf(p) || "")}" data-key="${escapeHtml(searchKey(p))}"
           data-schedule="${scheduleClass(p)}" data-pm="${escapeHtml(wrapNames(p.all_project_managers))}" data-crew="${escapeHtml(wrapNames(p.all_work_crews))}"
           data-value="${finVal(p)}" data-profit="${profitClass(p)}" data-outstanding="${outstandingTotal(p) > 0.5 ? 1 : 0}" data-flags="${flagScore(p) > 0 ? 1 : 0}">
         <td class="py-2 pl-3 pr-3 align-top">${statusCell(p)}</td>

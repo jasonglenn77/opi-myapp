@@ -85,24 +85,23 @@ export const TOURS = {
   "#/setup": {
     title: "Project Setup",
     steps: [
-      { title: "Project Setup: from won to ready", body: "Every 100% won job that still has setup work: getting it into QuickBooks with its estimate and first invoice, assigning a PM and crew, setting dates, and checking the invoice, crew pay and expense schedules the app builds. Most steps tick themselves from QuickBooks and the app; a job leaves the list once every step is done." },
-      { el: "#suRoot .su-kpis", title: "What needs attention", body: "Jobs not in QuickBooks yet, first invoices to send, jobs starting within 14 days with gaps, crew offers waiting, and schedules to review.\nClick a tile to show only those jobs; click it again (or the ✕ chip) to clear it." },
-      { el: "#suRoot .su-bar-row .tabs", title: "Views", body: "All new jobs, only the urgent ones, or the jobs with a step still open in QuickBooks, Assignment or Schedules. Search and the PM filter sit beside them." },
-      { el: "#suList", title: "The queue", body: "Pick a job. The bar shows how many of its steps are done; the chips say what's next and what's wrong (red first)." },
-      { el: "#suDetail [data-head], #suDetail section", title: "The job at a glance", body: "The job, its order value and every step in three columns, ticked or not. Click any step to jump to it below." },
-      { el: "#su-Docs", title: "Documents to work from", body: "The PO, the estimator's quote and the quoting metrics sheet, opened right here." },
-      { el: "#su-QuickBooks", title: "Step cards: QuickBooks", body: "Each step is a card: click it to open its tools. The next step to do opens by itself.\nHere: the PO, linking the QuickBooks project, the project's estimate next to the app's draft (with checks: total = PO, PO line, OH&P spread), and the first invoice at the terms' percent." },
-      { el: "#su-Assignment", title: "Assignment", body: "• PM: each PM's workload; click a PM for their jobs on a timeline.\n• Crew: the offer, and crew availability; click a crew for each day and what they're booked on.\n• Dates and details: the same editor as the Assignments page, shown inside whichever card you open." },
-      { el: "#su-Schedules", title: "Schedules", body: "The invoice, crew pay and expense schedules the app built from the estimates and dates. Check each one, fix any date or amount, then Mark reviewed." },
-      { title: "Next", body: "Once every step is done the job moves on: follow it in Running Jobs. Problems found here also show in Issues." },
+      { title: "Project Setup: from won to ready, and back when things change", body: "Every new job (100% won) until it's set up: QuickBooks, the PM, crew and dates, and the three schedules. A project that's already set up comes back here when something changes: its dates move, a change order comes in, the crew or the contract value changes. Only the steps that change affects reopen." },
+      { el: "#suRoot .su-kpis", title: "What needs attention", body: "Back for re-review, not in QuickBooks yet, first invoices to send, jobs starting within 14 days with gaps, crew offers waiting, and schedules to review. Click a tile to show only those jobs; click it again (or the ✕ chip) to clear it." },
+      { el: "#suRoot .su-bar-row .tabs", title: "To do and All active", body: "• To do: new jobs still being set up, plus every project a change sent back.\n• Back for re-review: only those.\n• Urgent: jobs with a red or amber flag.\n• All active: every live project (Setup, Ready, In progress), to edit anything in place." },
+      { el: "#suList", title: "The list", body: "Pick a job. The chips show its status (worked out from the job: Setup, Ready, In progress), what's next and what's wrong (red first)." },
+      { el: "#suDetail [data-head], #suDetail section", title: "The job at a glance", body: "Its status, Open workspace, Open in Pipeline (the pipeline record in a side panel, without leaving), the alerts, and every step in three columns. Click a step to jump to it." },
+      { el: "#su-QuickBooks", title: "QuickBooks", body: "• PO: drop the PO in to upload it, or say why there isn't one yet (with the date it's expected).\n• The project and its estimate (with the app's draft to copy from). Not done yet? Say why.\n• First invoice: once sent, its number, dates, terms, amount and status, and the date the money is expected (Billing and Cash Flow follow). Not sent yet: its planned send, due and expected dates, and why it's waiting.\nA note on any of these alerts the office." },
+      { el: "#su-Assignment", title: "Assignment", body: "• Dates: start, quoted end and overage days for each set of dates, Hold or Cancel, and the history. When a date moves, the app asks why and whether a change order is needed.\n• PM: who's free, then pick one or more.\n• Crew: who's free (by week on long jobs), the offer (sent from the app, or record one sent outside it with the signed copy), then the crew for each set of dates.\n• Job details: wire guidance, travel and equipment, with hints found in the PO and the estimate." },
+      { el: "#su-Schedules", title: "Schedules", body: "Each step shows only its own part: the customer invoices (contract, what's paid, sent and due, the schedule, QuickBooks invoices, pending change orders), the crew payment schedule, or the expense schedule. Check it, fix any date or amount, then Mark reviewed." },
+      { title: "Re-review", body: "A step a change reopened shows red with what changed (\"End 12/4 → 12/18, by Ashley\"). Check it, then press Reviewed. Everyone in the office gets a bell alert when a project comes back." },
     ],
   },
   "#/assignment": {
     title: "Assignments",
     steps: [
-      { title: "Assignments", body: "Every project's PM, crew, dates and job details in one sheet, like the old Job Schedule. Use it to assign or change many jobs quickly; changes save as you go and are kept in each job's history." },
+      { title: "Assignments", body: "Every project's PM, crew, dates and job details in one sheet, like the old Job Schedule. Use it to assign or change many jobs quickly; changes save as you go and are kept in each job's history. A date change sends a set-up job back to Project Setup for re-review." },
       { el: "#assignCardHeader", title: "Search and filters", body: "Search by job, and use each column's filter to narrow (status, PM, crew, dates)." },
-      { el: "#assignThead", title: "Columns", body: "Status, PM, work crew, start and end, wire guidance, travel days, overage, equipment, notes, and whether the project is in QuickBooks. Click a heading to sort." },
+      { el: "#assignThead", title: "Columns", body: "Status, PM, work crew, start and end, wire guidance, travel days, overage, equipment, notes, and whether the project is in QuickBooks. Click a heading to sort. The status follows the dates (not started, in progress, finished); put a job on hold from its Assignment." },
       { el: "#assignTableScroll", title: "Edit in place", body: "Change a cell and it saves. A project can have more than one line (extra crews or phases)." },
       { title: "Next", body: "• One job's setup step by step → Project Setup\n• Who's busy when → Schedules" },
     ],
@@ -144,8 +143,8 @@ export const TOURS = {
   "#/projects": {
     title: "All Projects",
     steps: [
-      { title: "All Projects", body: "Every QuickBooks project, whatever its stage: not started, in progress, on hold, complete or canceled. Use it to find any job and open its workspace." },
-      { el: "#phFilters", title: "Status and search", body: "Filter by status (the counts show how many) and search by name. Completed and canceled jobs are here too." },
+      { title: "All Projects", body: "Every QuickBooks project, whatever its stage. The status is worked out from the job:\n• Setup: setup steps still open (or a change reopened one).\n• Ready: set up, start date ahead.\n• In progress: between its start and last day.\n• Closing: past its last day, Closeout not finished.\n• Closed: closed out.\n• On hold and Canceled are set by a person, with a reason." },
+      { el: "#phFilters", title: "Status and search", body: "Filter by status (the counts show how many) and search by name. A red Re-review chip means a change sent the job back to Project Setup." },
       { el: "#phList", title: "Projects", body: "Flags show what's off (no crew, offer waiting, invoice overdue, missing kickoff). Click a project to open its workspace." },
       { title: "The workspace", body: "A project's own page: overview, assignment, documents, kickoff, change orders, billing and schedules, and financials. Help → Tour this page there explains each tab." },
     ],
@@ -154,7 +153,7 @@ export const TOURS = {
     title: "Project workspace",
     steps: [
       { title: "One project, everything about it", body: "This job's page: everything the app knows about it, on tabs. It's where you open a job from almost anywhere in the app." },
-      { el: "#tabBar", title: "The tabs", body: "• Overview: status, dates, team and money at a glance.\n• Assignment: PM, crew, dates and job details.\n• Documents: the job's Drive folders.\n• Kickoff & Process: the kickoff checklist.\n• Change Orders: estimates after the original.\n• Billing & Schedule: invoice, crew pay and expense schedules.\n• Financials: contract, invoiced, costs and margin." },
+      { el: "#tabBar", title: "The tabs", body: "• Overview: status, dates, team and money at a glance.\n• Assignment: PM, crew, dates (quoted end, overage days, last day), job details, Hold or Cancel.\n• Documents: the job's Drive folders.\n• Kickoff & Process: the kickoff checklist.\n• Change Orders: estimates after the original.\n• Billing & Schedule: invoice, crew pay and expense schedules.\n• Financials: contract, invoiced, costs and margin." },
       { el: "#tabBody", title: "The open tab", body: "Changes save as you go and are recorded in the job's history." },
     ],
   },
@@ -201,12 +200,13 @@ export const TOURS = {
   "#/closeout": {
     title: "Project Closeout",
     steps: [
-      { title: "Project Closeout: finished to closed", body: "Every finished job that isn't closed: the final invoice, getting paid and retainage, paying the crew in full, unpaid bills, change orders, the completion form, sign-off, and a last look at the margin. A job leaves once every step is done." },
-      { el: "#coRoot .su-kpis", title: "What's still open", body: "Still to bill, owed to OPI, owed to crews, missing paperwork, and jobs ready to close. Click a tile to show those jobs." },
-      { el: "#coRoot .su-bar-row", title: "Views and filters", body: "The same groups as tabs, plus search and PM." },
+      { title: "Project Closeout: finished to closed", body: "Every finished job, whatever its age, until it's closed out: the final invoice, getting paid and retainage, paying the crew in full, unpaid bills, change orders, the completion form, then the Review: the 100% sign-off and a last look at the margin. Every job gets the Review, whatever its size." },
+      { el: "#coRoot .su-kpis", title: "What's still open", body: "Still to bill, owed to OPI, owed to crews, forms and status, and jobs ready to close. Click a tile to show those jobs; the ✕ chip clears it." },
+      { el: "#coRoot .su-bar-row .tabs", title: "Which jobs", body: "• Ended since Oct 1: the current close-out work (some jobs take about 30 days).\n• Older: open items: ended earlier with money or a change order still open.\n• Older: paperwork only: ended earlier, only paperwork gaps (no crew-pay schedule in the app, no completion form).\n• Closed: jobs already closed out, to look back or reopen." },
       { el: "#coList", title: "The queue", body: "Pick a job. The bar shows its steps done; chips say what's open." },
       { el: "#coDetail", title: "Step cards", body: "The job's money at the top, then its steps by Job, Money in, Money out and Review. Click a step to open what's behind it: the invoices, crew payments, unpaid bills, completion paperwork or cost by category. The next step to do opens by itself." },
-      { title: "Marking steps", body: "Most steps tick themselves from QuickBooks and Drive. Mark the rest Not needed (with why), and press Close out on the margin step when the numbers are right." },
+      { title: "Closing out", body: "Most steps tick themselves from QuickBooks and the app. Mark the rest Not needed (with why). Owners sign off the 100% review here (or on Progress Checks). Close out on the margin step closes the job; any step still open is marked Reviewed with your note." },
+      { el: "#coBulk", title: "Close out many at once", body: "Owners can close out every job in the list shown (for example the older paperwork-only ones) with one note. Each job keeps the note in its history, and Closed → Undo reopens one.", optional: true },
     ],
   },
   "#/change-orders": {

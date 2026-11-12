@@ -7,17 +7,23 @@ steps the data can answer tick themselves, the rest are marked here.
   GET  /api/closeout/queue                       finished jobs still being closed out
   GET  /api/closeout/job/{entity_id}             one job: steps + the numbers behind them
   GET  /api/closeout/job/{entity_id}/detail      what's behind each step (for the step cards)
-  POST /api/closeout/job/{entity_id}/step/{step} {status: done|not_needed|null, note}
+  POST /api/closeout/job/{entity_id}/step/{step} {status: done|not_needed|reviewed|null, note, close_all}
+  POST /api/closeout/bulk-close                  {entity_ids: [...], note}: close out many jobs at once
 
-Which jobs: a project whose status is Completed, or whose last scheduled day has
-passed (not Canceled). It stays until every step is done or marked not needed.
-Jobs that finished more than OLD_DAYS ago only show while money is still open
-(unbilled, unpaid, or crew owed): older paperwork gaps are history, not work.
+Which jobs (owner decision 2026-11-12): every project whose status is Completed,
+or whose last scheduled day has passed (not Canceled), at any age, until it is
+CLOSED OUT: the Review step "Closed out: final margin reviewed" is marked done.
+Every job needs the Review (the 100% sign-off and the margin), whatever its size.
+Closing out with steps still open marks them "reviewed" (seen and accepted as
+they are) with the closer's note. Each job carries a bucket for the views:
+  recent      ended on or after CUTOVER (Oct 1 2026: some jobs take ~30 days to close)
+  open        ended earlier, with real open items (money or a pending change order)
+  paperwork   ended earlier, only paperwork gaps (no crew-pay schedule, no form...)
 """
 import json
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -25,18 +31,18 @@ from sqlalchemy import bindparam, text
 
 from app.audit import record_audit
 from app.auth import require_capability
+from app.permissions import FINANCIAL_SIGNOFF, has_capability
 from app.billing import retainage as RET
 from app.db import engine
 
 router = APIRouter(prefix="/api/closeout", tags=["closeout"])
 CAP = "page.assignment"
-OLD_DAYS = 180          # finished longer ago than this: only while money is open
-MONEY_DAYS = 730        # ... and not older than two years at all
+CUTOVER = date(2026, 10, 1)   # jobs ending from here on are the current closeout work
 TOL = 1.0               # dollars
 
 # (key, group, label, auto|manual)
 STEPS = [
-    ("marked_complete", "Job", "Job marked complete in the app", "auto"),
+    ("marked_complete", "Job", "Job finished (past its last day)", "auto"),
     ("completion_form", "Job", "Completion form on file", "auto"),
     ("change_orders", "Job", "Change orders settled (none pending)", "auto"),
     ("final_invoice", "Money in", "Final invoice sent (nothing left to bill)", "auto"),
@@ -44,11 +50,12 @@ STEPS = [
     ("retainage", "Money in", "Retainage collected", "auto"),
     ("crew_paid", "Money out", "Crew paid in full", "auto"),
     ("expenses", "Money out", "Bills on the job paid", "auto"),
-    ("signoff", "Review", "100% progress check signed off", "auto"),
+    ("signoff", "Review", "100% sign-off", "auto"),
     ("margin", "Review", "Closed out: final margin reviewed", "manual"),
 ]
 STEP_KEYS = {s[0] for s in STEPS}
-MARKS = {"done", "not_needed"}
+MARKS = {"done", "not_needed", "reviewed"}
+MONEY_STEPS = ("final_invoice", "paid", "retainage", "crew_paid", "expenses", "change_orders")
 
 
 def _q(sql, *expanding):
@@ -83,7 +90,7 @@ def _projects(conn, ids=None):
             if st == "canceled":
                 continue
             finished = st == "completed" or (r["end"] and r["end"] < today)
-            if not finished or (r["end"] and r["end"] < today - timedelta(days=MONEY_DAYS)):
+            if not finished:
                 continue
         out[str(r["e"])] = dict(r)
     return out
@@ -183,11 +190,6 @@ def _gather(conn, ids=None):
     for r in conn.execute(_q("""SELECT entity_id, decision, signed_by, signed_at FROM progress_signoffs
                                 WHERE entity_id IN :ids AND milestone = 100""", "ids"), p).mappings():
         d["signoff"][str(r["entity_id"])] = dict(r)
-    # Progress Checks only asks for a sign-off on big jobs (or ones switched on): same rule here.
-    from app.progress import service as PROG
-    d["signoff_min"] = float(PROG.rules(conn)["signoff_min"])
-    d["signoff_switch"] = {str(r[0]): r[1] for r in conn.execute(_q(
-        "SELECT entity_id, signoff FROM progress_settings WHERE entity_id IN :ids", "ids"), p).all()}
 
     # Completion form: a non-draft file in the completion folder, or a crew-portal submission.
     for r in conn.execute(_q("""SELECT entity_id, MAX(created_at) FROM documents
@@ -243,7 +245,7 @@ def _steps(e, d):
 
     auto = {
         "marked_complete": (P["status"] == "completed",
-                            "Status is Completed" if P["status"] == "completed" else f"Status is {(P['status'] or 'not set').replace('_', ' ')}"),
+                            "Past its last day" if P["status"] == "completed" else f"Status is {(P['status'] or 'not set').replace('_', ' ')}: if the work is done, move the end date on the Assignment"),
         "completion_form": (bool(form), f"From {form['source']}" if form else "No completion form in the Drive folder or the crew portal"),
         "change_orders": (co_n == 0, "None pending" if co_n == 0 else f"{co_n} change order{'s' if co_n != 1 else ''} or estimate{'s' if co_n != 1 else ''} still pending"),
         "final_invoice": (contract > 0 and unbilled <= tol_bill,
@@ -256,13 +258,10 @@ def _steps(e, d):
                       (f"Paid ${paid:,.0f} of ${sched:,.0f} scheduled" if owed <= TOL else f"${owed:,.0f} still owed (paid ${paid:,.0f} of ${sched:,.0f}, as on Contractor Payments)")),
         "expenses": (n_exp == 0, "No unpaid bills on this job in QuickBooks" if n_exp == 0 else f"{n_exp} unpaid bill{'s' if n_exp != 1 else ''} on this job (${exp_amt:,.0f} of job lines)"),
         "signoff": (bool(so and so["decision"] == "approved"),
-                    f"Approved by {so['signed_by']}" if so and so["decision"] == "approved" else ("On hold" if so else "Not signed off on Progress Checks")),
+                    f"Approved by {so['signed_by']}" if so and so["decision"] == "approved" else
+                    ("On hold on Progress Checks" if so else "Not signed off yet: sign off here or on Progress Checks (every job, any size)")),
         "margin": (False, ""),
     }
-    sw = d.get("signoff_switch", {}).get(e)
-    required = bool(sw) if sw is not None else contract >= d.get("signoff_min", 0)
-    if not required and not so:
-        auto["signoff"] = (True, f"Not required (jobs under ${d.get('signoff_min', 0):,.0f} skip sign-off)")
     out = []
     for key, group, label, how in STEPS:
         ok, why = auto[key]
@@ -286,7 +285,7 @@ def _steps(e, d):
 def _row(e, d, today):
     P = d["p"][e]
     steps, money = _steps(e, d)
-    done = sum(1 for s in steps if s["state"] in ("done", "not_needed"))
+    done = sum(1 for s in steps if s["state"] in ("done", "not_needed", "reviewed"))
     end = P["end"]
     flags = []
     if money["unbilled"] > TOL:
@@ -298,8 +297,18 @@ def _row(e, d, today):
     if not d["forms"].get(e):
         flags.append({"text": "No completion form", "tone": "info"})
     c = d["cost"].get(e) or {}
+    st_of = {s["key"]: s["state"] for s in steps}
+    closed = st_of.get("margin") == "done"
+    if end and end >= CUTOVER:
+        bucket = "recent"
+    elif (money["unbilled"] > TOL or money["open_ar"] > TOL or money["retainage"] > TOL or money["crew_owed"] > TOL
+          or money["bills_open"] > TOL or st_of.get("change_orders") == "todo") and any(st_of.get(k) == "todo" for k in MONEY_STEPS):
+        bucket = "open"
+    else:
+        bucket = "paperwork"
     return {
         "entity_id": e, "name": P["name"], "dealer": d["dealer"].get(e), "pms": d["pms"][e],
+        "closed": closed, "bucket": bucket,
         "start": str(P["start"]) if P["start"] else None, "end": str(end) if end else None,
         "days_since_end": (today - end).days if end else None,
         "status": P["status"], "steps": steps, "done": done, "total": len(steps), "money": money, "flags": flags,
@@ -309,24 +318,25 @@ def _row(e, d, today):
 
 
 def _visible(r, today):
-    if r["done"] >= r["total"]:
-        return False
-    m = r["money"]
-    money_open = m["unbilled"] > TOL or m["open_ar"] > TOL or m["crew_owed"] > TOL or m["retainage"] > TOL
-    old = r["days_since_end"] is not None and r["days_since_end"] > OLD_DAYS
-    return money_open or not old
+    """Every finished job until it's closed out (2026-11-12: no age cut-off)."""
+    return not r["closed"]
 
 
 @router.get("/queue")
-def queue(user=Depends(require_capability(CAP))):
+def queue(closed: int = 0, user=Depends(require_capability(CAP))):
+    """Jobs not closed out yet; closed=1: the ones that are (newest end first)."""
     today = date.today()
     with engine.connect() as conn:
         d = _gather(conn)
     rows = [_row(e, d, today) for e in d["p"]]
+    if closed:
+        done = sorted((r for r in rows if r["closed"]), key=lambda r: r["end"] or "", reverse=True)
+        return {"jobs": done, "cutover": str(CUTOVER), "can_sign": has_capability(user, FINANCIAL_SIGNOFF)}
     jobs = [r for r in rows if _visible(r, today)]
     jobs.sort(key=lambda r: (r["end"] or "9999"))
-    closed_recent = sum(1 for r in rows if r["done"] >= r["total"] and (r["days_since_end"] or 0) <= 60)
-    return {"jobs": jobs, "closed_recent": closed_recent, "old_days": OLD_DAYS}
+    closed_recent = sum(1 for r in rows if r["closed"] and (r["days_since_end"] or 0) <= 60)
+    return {"jobs": jobs, "closed_recent": closed_recent, "cutover": str(CUTOVER),
+            "can_sign": has_capability(user, FINANCIAL_SIGNOFF)}
 
 
 @router.get("/job/{entity_id}")
@@ -341,6 +351,31 @@ def job(entity_id: str, user=Depends(require_capability(CAP))):
 class StepMark(BaseModel):
     status: Optional[str] = None
     note: Optional[str] = None
+    close_all: Optional[bool] = None    # closing out: mark every open step "reviewed" too
+
+
+def _mark(conn, entity_id, step, status, note, user):
+    if status is None:
+        conn.execute(text("DELETE FROM project_closeout_steps WHERE entity_id = :e AND step_key = :k"), {"e": entity_id, "k": step})
+        return
+    conn.execute(text("""
+        INSERT INTO project_closeout_steps (entity_id, step_key, status, note, by_user_id, by_email)
+        VALUES (:e, :k, :s, :n, :u, :m)
+        ON DUPLICATE KEY UPDATE status = VALUES(status), note = VALUES(note), by_user_id = VALUES(by_user_id),
+                                by_email = VALUES(by_email), at = CURRENT_TIMESTAMP"""),
+                 {"e": entity_id, "k": step, "s": status, "n": note or None, "u": user.get("id"), "m": user.get("email")})
+
+
+def _close_out(conn, entity_id, row, note, user):
+    """Close one job out: every step still to do is marked reviewed (with the
+    note), then the margin step done. The 100% sign-off needs sign-off access."""
+    open_steps = [s["key"] for s in row["steps"] if s["state"] == "todo" and s["key"] != "margin"]
+    if "signoff" in open_steps and not has_capability(user, FINANCIAL_SIGNOFF):
+        raise HTTPException(403, "The 100% sign-off needs someone with sign-off access (owners). Ask them to close this job out.")
+    for k in open_steps:
+        _mark(conn, entity_id, k, "reviewed", note or "Reviewed at close-out", user)
+    _mark(conn, entity_id, "margin", "done", note, user)
+    return open_steps
 
 
 @router.post("/job/{entity_id}/step/{step}")
@@ -348,23 +383,60 @@ def mark_step(entity_id: str, step: str, req: StepMark, user=Depends(require_cap
     if step not in STEP_KEYS:
         raise HTTPException(400, "Unknown step")
     if req.status is not None and req.status not in MARKS:
-        raise HTTPException(400, "status must be done or not_needed")
+        raise HTTPException(400, "status must be done, not_needed or reviewed")
+    if step == "signoff" and req.status is not None and not has_capability(user, FINANCIAL_SIGNOFF):
+        raise HTTPException(403, "The 100% sign-off needs someone with sign-off access (owners).")
+    reviewed = []
     with engine.begin() as conn:
-        if req.status is None:
-            conn.execute(text("DELETE FROM project_closeout_steps WHERE entity_id = :e AND step_key = :k"), {"e": entity_id, "k": step})
+        if step == "margin" and req.status == "done" and req.close_all:
+            d = _gather(conn, [entity_id])
+            if entity_id not in d["p"]:
+                raise HTTPException(404, "Not a project with a schedule")
+            reviewed = _close_out(conn, entity_id, _row(entity_id, d, date.today()), req.note, user)
         else:
-            conn.execute(text("""
-                INSERT INTO project_closeout_steps (entity_id, step_key, status, note, by_user_id, by_email)
-                VALUES (:e, :k, :s, :n, :u, :m)
-                ON DUPLICATE KEY UPDATE status = VALUES(status), note = VALUES(note), by_user_id = VALUES(by_user_id),
-                                        by_email = VALUES(by_email), at = CURRENT_TIMESTAMP"""),
-                         {"e": entity_id, "k": step, "s": req.status, "n": req.note or None, "u": user.get("id"), "m": user.get("email")})
+            _mark(conn, entity_id, step, req.status, req.note, user)
         d = _gather(conn, [entity_id])
     if entity_id not in d["p"]:
         raise HTTPException(404, "Not a project with a schedule")
     row = _row(entity_id, d, date.today())
-    record_audit(user, "closeout.step", "project", entity_id, row["name"], {"step": step, "status": req.status, "note": req.note})
+    record_audit(user, "closeout.step", "project", entity_id, row["name"],
+                 {"step": step, "status": req.status, "note": req.note, "reviewed": reviewed})
     return row
+
+
+class BulkClose(BaseModel):
+    entity_ids: List[str]
+    note: str
+
+
+@router.post("/bulk-close")
+def bulk_close(req: BulkClose, user=Depends(require_capability(CAP))):
+    """Close out many finished jobs at once (e.g. the older paperwork-only ones):
+    every open step is marked reviewed with the note, then the job is closed.
+    Needs sign-off access, since it signs off each job's 100% review."""
+    if not has_capability(user, FINANCIAL_SIGNOFF):
+        raise HTTPException(403, "Closing out jobs in bulk needs sign-off access (owners).")
+    note = (req.note or "").strip()
+    if not note:
+        raise HTTPException(400, "Add a note saying why these jobs are being closed (kept with each job).")
+    ids = [str(x) for x in dict.fromkeys(req.entity_ids)][:1000]
+    today = date.today()
+    closed, skipped = [], []
+    with engine.begin() as conn:
+        d = _gather(conn, ids)
+        for e in ids:
+            if e not in d["p"]:
+                skipped.append(e)
+                continue
+            row = _row(e, d, today)
+            if row["closed"]:
+                skipped.append(e)
+                continue
+            reviewed = _close_out(conn, e, row, f"Bulk close: {note}", user)
+            closed.append((e, row["name"], reviewed))
+    for e, name, reviewed in closed:
+        record_audit(user, "closeout.bulk_close", "project", e, name, {"note": note, "reviewed": reviewed})
+    return {"ok": True, "closed": len(closed), "skipped": len(skipped)}
 
 
 # ── Step detail: what's behind each step, for the expandable step cards ─────────
@@ -517,15 +589,13 @@ def _det_bills(conn, e):
 
 def _det_signoff(conn, e, d, money):
     from app import snapshots
-    sw = d.get("signoff_switch", {}).get(e)
-    smin = d.get("signoff_min", 0)
-    required = bool(sw) if sw is not None else money["contract"] >= smin
+    required = True       # 2026-11-12: every job gets the 100% review at close-out
+    rule = "every job at close-out"
     signs = [{"milestone": r["milestone"], "decision": r["decision"], "note": r["note"], "by": r["signed_by"],
               "at": str(r["signed_at"]) if r["signed_at"] else None}
              for r in conn.execute(text("""SELECT milestone, decision, note, signed_by, signed_at FROM progress_signoffs
                                            WHERE entity_id = :e ORDER BY milestone"""), {"e": e}).mappings()]
-    rule = ("switched on for this job" if sw else "switched off for this job") if sw is not None else f"jobs of ${smin:,.0f} or more"
-    out = {"required": required, "rule": rule, "signoff_min": smin, "signoffs": signs, "progress": None}
+    out = {"required": required, "rule": rule, "signoffs": signs, "progress": None}
     got = snapshots.get("progress")
     j = next((x for x in (got[0].get("jobs", []) if got else []) if str(x.get("id")) == e), None)
     if j:

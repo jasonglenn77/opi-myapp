@@ -722,7 +722,7 @@ export async function assignmentPage(routeFn) {
 
   setShell({
     title: "Assignment",
-    subtitle: "Assign PMs, crews, dates, and status per schedule item across all projects.",
+    subtitle: "Assign PMs, crews and dates per schedule line across all projects. The status follows the dates.",
     bodyHtml,
     showLogout: true,
     routeFn,
@@ -1175,11 +1175,7 @@ export async function assignmentPage(routeFn) {
             <td class="py-2 px-2 whitespace-nowrap ${cellClass(row, "project_status")}"
                 data-cell="${rowKey(row)}"
                 data-field="project_status">
-              ${isEditing(rowKey(row), "project_status") ? renderStatusEditor(row) : `
-                <button type="button" class="inline-flex items-center" data-edit-cell="${rowKey(row)}" data-field="project_status">
-                  ${statusPill(row.project_status)}
-                </button>
-              `}
+              <span class="inline-flex items-center" title="Worked out from the dates (not started, in progress, finished). Put a job on hold from its Assignment.">${statusPill(row.project_status)}</span>
             </td>
 
             <td class="py-2 px-2 overflow-visible ${cellClass(row, "primary_project_manager")}"

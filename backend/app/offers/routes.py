@@ -207,8 +207,8 @@ def crew_availability(start: str, end: str, crews_needed: Optional[int] = None,
         raise HTTPException(status_code=400, detail="Invalid dates (YYYY-MM-DD)")
     if we < ws:
         ws, we = we, ws
-    if (we - ws).days > 186:
-        raise HTTPException(status_code=400, detail="Pick a range of 6 months or less")
+    if (we - ws).days > 731:      # 2026-11-12: long jobs (6+ months) too; the page summarises by week
+        raise HTTPException(status_code=400, detail="Pick a range of 2 years or less")
     days = [ws + timedelta(days=i) for i in range((we - ws).days + 1)]
 
     with engine.connect() as conn:
@@ -380,12 +380,66 @@ def send_offer(entity_id: str, body: OfferCreate, user=Depends(get_current_user)
         company_id = _company_of(conn, body.crew_id)
         if not company_id:
             raise HTTPException(status_code=400, detail="Unknown crew")
+        # 2026-11-12: an offer sent from the app carries the crew payment schedule,
+        # so the schedule has to exist first.
+        n_pay = conn.execute(text("""SELECT COUNT(*) FROM project_payment_installments i
+            JOIN project_payment_schedules s ON s.id = i.schedule_id WHERE s.entity_id = :e"""), {"e": entity_id}).scalar()
+        if not n_pay:
+            raise HTTPException(status_code=400, detail="Build the crew payment schedule first (Project Setup → Schedules → "
+                                                         "Crew payment schedule): the offer is sent with it.")
         res = conn.execute(text("""
             INSERT INTO work_offers (entity_id, crew_id, labor_amount, scope, status, sent_at, created_by_user_id)
             VALUES (:e,:c,:amt,:sc,'sent',NOW(),:u)
         """), {"e": entity_id, "c": company_id, "amt": body.labor_amount,
                "sc": (body.scope or None), "u": user.get("id")})
     return {"ok": True, "id": res.lastrowid}
+
+
+class OutsideOffer(BaseModel):
+    crew_id: int
+    labor_amount: Optional[float] = None
+    sent_date: str
+    accepted_date: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.post("/project/{entity_id}/outside")
+def record_outside_offer(entity_id: str, body: OutsideOffer, user=Depends(get_current_user)):
+    """An offer sent outside the app (email, text, the Drive sheet): record when
+    it went out and, if known, when the crew accepted. The signed offer is
+    uploaded to the job's documents separately (7 Notes)."""
+    _require_office(user)
+    from datetime import date as _date
+    try:
+        sent = _date.fromisoformat(body.sent_date[:10])
+        acc = _date.fromisoformat(body.accepted_date[:10]) if body.accepted_date else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Dates as YYYY-MM-DD")
+    with engine.begin() as conn:
+        if not _project_exists(conn, entity_id):
+            raise HTTPException(status_code=404, detail="Project not found")
+        company_id = _company_of(conn, body.crew_id)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="Unknown crew")
+        res = conn.execute(text("""
+            INSERT INTO work_offers (entity_id, crew_id, labor_amount, scope, status, sent_at, responded_at,
+                                     response_note, created_by_user_id, responded_by_user_id)
+            VALUES (:e, :c, :amt, :sc, :st, :sent, :acc, :n, :u, :ru)"""),
+            {"e": entity_id, "c": company_id, "amt": body.labor_amount or 0, "sc": None,
+             "st": "accepted" if acc else "sent", "sent": sent, "acc": acc,
+             "n": ("Sent outside the app" + (f": {body.note}" if body.note else ""))[:500],
+             "u": user.get("id"), "ru": user.get("id") if acc else None})
+        oid = res.lastrowid
+        if acc:
+            conn.execute(text("UPDATE work_offers SET status = 'withdrawn' WHERE entity_id = :e AND id <> :i AND status = 'sent'"),
+                         {"e": entity_id, "i": oid})
+    out = {"ok": True, "id": oid}
+    if acc:
+        try:
+            out.update(_auto_assign_accepted_offer(oid, int(user.get("id"))))
+        except Exception as exc:  # noqa: BLE001
+            out.update({"assigned": False, "assign_error": str(exc)})
+    return out
 
 
 @router.post("/project/{entity_id}/backfill")

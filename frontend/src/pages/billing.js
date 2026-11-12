@@ -144,7 +144,10 @@ export function prefetchBilling(entityId) {
 /** 0078: forget a warmed bundle (e.g. after a hold shifted the dates). */
 export function dropBillingPrefetch(entityId) { _prefetch.delete(entityId); }
 
-export async function mountBillingPanel(container, entityId) {
+// opts.only: "invoice" | "crew" | "expense" shows just that part (Project Setup's
+// schedule steps); the contract / dates bar and the banners always show.
+export async function mountBillingPanel(container, entityId, opts = {}) {
+  if (opts.only) container.dataset.blOnly = opts.only; else delete container.dataset.blOnly;
   container.innerHTML = `<div class="p-6 text-sm text-black/50">Loading billing & schedule…</div>`;
   let d = null;
   if (_prefetch.has(entityId)) {
@@ -550,7 +553,7 @@ function render(container, entityId, d) {
       ${needsDates}
 
       <!-- project roll-up -->
-      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
+      <div data-bl-sec="summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
         ${kpi("Contract", est.contract_total)}
         ${kpi("Collected", est.collected, "text-emerald-700")}
         ${kpi("Open A/R", est.open_ar, "", retHeld > 0.5 ? `<span class="bl-ret-txt font-semibold">incl. ${money(retHeld)} retainage</span>` : "")}
@@ -558,7 +561,7 @@ function render(container, entityId, d) {
         ${kpi("Crew left", crewLeft, "text-black/60")}
         ${kpi("Expenses", exp.estimate_total, "text-black/60")}
       </div>
-      <div class="card p-4 sm:p-5">
+      <div class="card p-4 sm:p-5" data-bl-sec="cash">
         <div class="text-sm font-bold text-ink-900 mb-3">Cash summary — paid vs. expected</div>
         ${burnRow("Customer invoices", money(est.contract_total) + " · " + est.accepted.length + " estimate" + (est.accepted.length === 1 ? "" : "s"), invBar)}
         ${(() => { const nr = roll.rollups.filter((r) => !r.is_other).length; return burnRow("Crew payments", money(crewLaborEst) + " · " + nr + " rollup" + (nr === 1 ? "" : "s"), crewBar); })()}
@@ -571,7 +574,7 @@ function render(container, entityId, d) {
       </div>
 
       <!-- INVOICES -->
-      <details open class="group card overflow-hidden">
+      <details open class="group card overflow-hidden" data-bl-sec="invoice">
         <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Customer invoices</span>
@@ -586,7 +589,7 @@ function render(container, entityId, d) {
       </details>
 
       <!-- CREW PAYMENTS -->
-      <details open class="group card overflow-hidden">
+      <details open class="group card overflow-hidden" data-bl-sec="crew">
         <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Crew payments</span>
@@ -602,7 +605,7 @@ function render(container, entityId, d) {
       </details>
 
       <!-- EXPENSES -->
-      <details open class="group card overflow-hidden">
+      <details open class="group card overflow-hidden" data-bl-sec="expense">
         <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Project expenses</span>
@@ -612,8 +615,15 @@ function render(container, entityId, d) {
         ${(exp.by_category && exp.by_category.length) ? exp.by_category.map(expenseCat).join("") : `<div class="px-4 py-4 text-[12.5px] text-black/45">No estimate cost lines to plan from.</div>`}
       </details>
 
-      ${contribHtml}
+      <div data-bl-sec="contrib">${contribHtml}</div>
     </div>`;
+  const only = container.dataset.blOnly;
+  if (only) {
+    container.querySelectorAll("[data-bl-sec]").forEach((el) => {
+      const k = el.dataset.blSec;
+      el.style.display = k === only || (only === "invoice" && k === "summary") ? "" : "none";
+    });
+  }
 
   // CR5 B3: crew-consistency chip near the crew section (fetched lazily so the
   // tab renders without waiting on it; re-fetched on every re-render so crew

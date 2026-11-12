@@ -947,9 +947,17 @@ def projects_basic(user=Depends(get_current_user)):
 
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
+        # 2026-11-12: the status shown is worked out from the job (projects/lifecycle.py)
+        from app.projects import lifecycle as LC
+        life = LC.statuses(conn)
 
     # operational_status now = the final assignment row's status (from the SQL).
-    visible = filter_visible([dict(r) for r in rows], user, key="qbo_customer_id")
+    out = [dict(r) for r in rows]
+    for r in out:
+        lv = life.get(str(r.get("project_qbo_id") or ""))
+        if lv:
+            r["life"] = lv
+    visible = filter_visible(out, user, key="qbo_customer_id")
     return {"projects": visible[:1000]}
 
 
@@ -1646,6 +1654,7 @@ def project_card(qbo_id: str, user=Depends(get_current_user)):
 
 class ProjectStatusUpdate(BaseModel):
     status: str
+    reason: Optional[str] = None
 
 
 @router.post("/projects/{qbo_id}/status")
@@ -1680,6 +1689,16 @@ def set_project_status(qbo_id: str, body: ProjectStatusUpdate, user=Depends(get_
                                     {"status": [it["status"], body.status]})
     if not n:
         raise HTTPException(status_code=404, detail="Project has no schedule rows")
+    if body.status in ("canceled", "not_started"):
+        # 2026-11-12: Cancel / Restore are the only statuses a person sets (with a
+        # reason); every other status follows the dates (projects/lifecycle.py).
+        from app.audit import record_audit
+        from app.projects import lifecycle as LC
+        if body.status == "not_started":
+            with engine.begin() as conn:
+                LC.sync_line_status(conn)
+        record_audit(user, "project.cancel" if body.status == "canceled" else "project.restore", "project", qbo_id, None,
+                     {"reason": body.reason, "entity_id": qbo_id})
     return {"ok": True, "updated": n}
 
 

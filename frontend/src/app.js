@@ -87,7 +87,7 @@ function requiredCapForHash(hash) {
   if (hash.startsWith("#/estimate") || hash === "#/base-quoting-metrics") return "page.estimate";
   if (hash.startsWith("#/crew") && !hash.startsWith("#/crew-ops") && !hash.startsWith("#/crew-payments")) return "page.crew_portal";
   if (hash === "#/pm" || hash.startsWith("#/pm/")) return "page.pm_portal";
-  return ROUTE_CAPS[hash] || null;
+  return ROUTE_CAPS[hash] || ROUTE_CAPS[hash.split("?")[0]] || null;
 }
 
 function firstAllowedRoute() {
@@ -226,7 +226,7 @@ async function route() {
   if (hash === "#/dashboard") { location.hash = "#/projects"; return; }
   if (hash === "#/schedule") return schedulePage(route);
   if (hash === "#/assignment") return assignmentPage(route);
-  if (hash === "#/setup") return setupPage(route);
+  if (hash.split("?")[0] === "#/setup") return setupPage(route);   // #/setup?job=<key> opens that job (bell alerts)
   if (hash === "#/closeout") return closeoutPage(route);
   if (hash === "#/issues") return issuesPage(route);
   if (hash === "#/change-orders") return changeOrdersRegisterPage(route);

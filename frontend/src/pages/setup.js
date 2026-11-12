@@ -21,6 +21,8 @@ import { mountAssignmentPanel } from "./assignment-panel.js";
 import { mountBillingPanel } from "./billing.js";
 import { stepCardHtml, bindStepCards } from "../utils/stepcards.js";
 import { projectLink } from "../utils/ui.js";
+import { toast } from "../utils/help.js";
+import { getMe } from "../api.js";
 
 const day = (s) => s ? new Date(`${String(s).slice(0, 10)}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric", year: "2-digit" }) : "—";
 const money0 = (n) => `${n < 0 ? "-" : ""}$${Math.round(Math.abs(n || 0)).toLocaleString()}`;
@@ -35,7 +37,7 @@ const C = {
 };
 const STATE = {
   done: ["Done", C.good], not_needed: ["Not needed", C.quiet], todo: ["To do", C.warn],
-  waiting: ["Waiting", C.info], locked: ["Later", C.quiet],
+  waiting: ["Waiting", C.info], locked: ["Later", C.quiet], review: ["Re-review", C.bad],
 };
 const ICON = {
   done: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#059669"/><path d="M6 10.5l2.5 2.5L14 7.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
@@ -43,11 +45,12 @@ const ICON = {
   todo: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#fff" stroke="#d97706" stroke-width="2"/></svg>`,
   waiting: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5"/><path d="M10 6v4l2.5 1.5" stroke="#0284c7" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>`,
   locked: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="2 2"/></svg>`,
+  review: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#fff1f2" stroke="#e11d48" stroke-width="2"/><path d="M10 5.5v5.5M10 13.6v.4" stroke="#e11d48" stroke-width="2" stroke-linecap="round"/></svg>`,
 };
-const VIEWS = [
-  ["all", "All new jobs"], ["action", "Urgent"], ["QuickBooks", "QuickBooks"], ["Assignment", "Assignment"],
-  ["Schedules", "Schedules"],
-];
+// To do: new jobs being set up + projects a change sent back. All active: every
+// live project (Setup, Ready, In progress), to edit in place.
+const VIEWS = [["todo", "To do"], ["review", "Back for re-review"], ["action", "Urgent"], ["all", "All active"]];
+const LIFE = { setup: C.warn, ready: C.info, in_progress: C.good, closing: C.warn, closed: C.quiet, on_hold: C.bad, canceled: C.quiet };
 const MANUAL = { details: "Mark checked", invoice_schedule: "Mark reviewed", crew_schedule: "Mark reviewed", expense_schedule: "Mark reviewed" };
 
 export async function setupPage(routeFn) {
@@ -62,13 +65,17 @@ export async function setupPage(routeFn) {
     soon: ["Starting soon with gaps", (j) => j.flags.some((f) => f.text.startsWith("Starts in"))],
     offers: ["Crew offers waiting", (j) => stepOf(j, "crew").state === "waiting"],
     sched: ["Schedules to review", (j) => openIn(j, "Schedules")],
+    review: ["Back for re-review", (j) => j.needs_review > 0 || j.unanswered_dates > 0],
   };
-  const st = { kpi: null, jobs: [], view: VIEWS.some(([k]) => k === saved.view) ? saved.view : "all", q: "", pm: "", sel: saved.sel || null, open: false, cache: {} };
+  const want = new URLSearchParams((location.hash.split("?")[1] || "")).get("job");
+  const st = { kpi: null, jobs: [], view: VIEWS.some(([k]) => k === saved.view) ? saved.view : "todo", q: "", pm: "",
+    sel: want || saved.sel || null, open: !!want, cache: {}, scope: null, meta: {} };
+  if (want && st.view === "all") st.view = "todo";
   const remember = () => { try { sessionStorage.setItem("opi_setup", JSON.stringify({ view: st.view, sel: st.sel })); } catch (_) {} };
 
   setShell({
     title: "Project Setup",
-    subtitle: "New jobs (100% won) that still have setup steps to finish: QuickBooks, assignment and schedules. A job leaves this list once every step is done.",
+    subtitle: "To do: new jobs (100% won) still being set up, and any project a change sent back for re-review (dates moved, a change order, the crew or the contract changed). All active: every live project, to edit in place.",
     bodyHtml: `<div id="suRoot"><div class="card p-6 text-sm text-black/45">Loading won jobs…</div></div>`,
     routeFn,
   });
@@ -76,8 +83,10 @@ export async function setupPage(routeFn) {
 
   async function load(keepDetail = false) {
     try {
-      const d = await api("/setup/queue");
-      st.jobs = d.jobs;
+      const scope = st.view === "all" ? "all" : "todo";
+      const d = await api(`/setup/queue?scope=${scope}`);
+      st.jobs = d.jobs; st.scope = scope; st.meta = d;
+      if (want && !st.jobs.some((j) => j.key === want) && scope === "todo") { st.view = "all"; return load(keepDetail); }
       if (!st.sel || !st.jobs.some((j) => j.key === st.sel)) st.sel = visible()[0]?.key || st.jobs[0]?.key || null;
       render(keepDetail);
     } catch (e) {
@@ -94,7 +103,7 @@ export async function setupPage(routeFn) {
     return st.jobs.filter((j) => {
       if (st.kpi && KPI[st.kpi] && !KPI[st.kpi][1](j)) return false;
       if (st.view === "action" && !needsAction(j)) return false;
-      if (["QuickBooks", "Assignment", "Schedules"].includes(st.view) && !openIn(j, st.view)) return false;
+      if (st.view === "review" && !KPI.review[1](j)) return false;
       if (st.pm && !(j.pms || []).includes(st.pm)) return false;
       if (q && !`${j.project_name || ""} ${j.title || ""} ${j.quote_number || ""} ${j.dealer || ""} ${j.customer || ""}`.toLowerCase().includes(q)) return false;
       return true;
@@ -108,6 +117,7 @@ export async function setupPage(routeFn) {
         <div class="text-2xl font-extrabold tabular-nums ${bad && n(k) ? "text-rose-700" : ""}">${n(k)}</div>
         <div class="text-xs text-black/50">${caption}</div></button>`;
     return `<div class="su-kpis">
+      ${tile("review", "Dates, change order, crew or contract changed", true)}
       ${tile("noqbo", "Won, project still to create", true)}
       ${tile("firstinv", "In QuickBooks, nothing invoiced")}
       ${tile("soon", "Within 14 days, no PM, crew or dates", true)}
@@ -130,7 +140,7 @@ export async function setupPage(routeFn) {
           <span class="text-[11px] font-bold tabular-nums text-black/55">${j.done}/${j.total}</span>
         </div>
         <div class="su-bar" aria-hidden="true"><span style="width:${pct}%"></span></div>
-        <div class="flex flex-wrap gap-1 mt-1.5">${chip(j.stage === "Ready" ? "Ready" : `Next: ${j.stage}`, j.stage === "Ready" ? C.good : C.quiet)}${j.flags.map((f) => chip(f.text, C[f.tone])).join("")}</div>
+        <div class="flex flex-wrap gap-1 mt-1.5">${j.life ? chip(j.life.label, LIFE[j.life.status] || C.quiet, j.life.why || "") : ""}${chip(j.stage === "Ready" ? "Set up" : `Next: ${j.stage}`, j.stage === "Ready" ? C.good : C.quiet)}${j.flags.map((f) => chip(f.text, C[f.tone])).join("")}</div>
       </button>`;
     }).join("");
   }
@@ -138,7 +148,7 @@ export async function setupPage(routeFn) {
   function render(keepDetail) {
     const pms = [...new Set(st.jobs.flatMap((j) => j.pms || []))].sort();
     const counts = Object.fromEntries(VIEWS.map(([k]) => [k, null]));
-    const prev = st.view; for (const [k] of VIEWS) { st.view = k; counts[k] = visible().length; } st.view = prev;
+    const prev = st.view; for (const [k] of VIEWS) { st.view = k; counts[k] = (k === "all") === (st.scope === "all") ? visible().length : ""; } st.view = prev;
     const detailEl = keepDetail ? document.getElementById("suDetail") : null;
     root.classList.toggle("su-open", st.open);
     root.innerHTML = `
@@ -175,13 +185,20 @@ export async function setupPage(routeFn) {
 
   function headParts(j, s) {
     const btns = [];
+    if (s.state === "review") {
+      const blocked = s.key === "dates" && j.unanswered_dates > 0;
+      btns.push(`<button class="pd-btn" data-reviewed="${s.key}"${blocked ? ` disabled title="Answer the date changes below first"` : ""}>Reviewed</button>`);
+      const hint = s.note ? `${noteLine(s.note)}` : "";
+      return { key: s.key, state: s.state, label: s.label, detail: s.detail, actions: btns.join(""), hint };
+    }
     if (s.mark) btns.push(`<button class="pd-btn" data-mark="${s.key}" data-status="">Undo</button>`);
     else if (MANUAL[s.key] && s.state === "todo") btns.push(`<button class="pd-btn" data-mark="${s.key}" data-status="${s.key === "details" ? "done" : "confirmed"}">${MANUAL[s.key]}</button>`);
-    else if (s.state === "todo" && ["first_invoice", "po"].includes(s.key)) {
+    else if (s.state === "todo" && ["first_invoice", "po", "qbo_estimate"].includes(s.key)) {
       btns.push(`<button class="pd-btn" data-mark="${s.key}" data-status="done" title="Done outside what the app can see">Mark done</button>`);
       if (s.key === "first_invoice") btns.push(`<button class="pd-btn" data-mark="${s.key}" data-status="not_needed">Not needed</button>`);
     }
-    const hint = s.state === "locked" ? (j.project_qbo_id ? "after the dates are set" : "after the project is in QuickBooks") : "";
+    const hint = s.state === "locked" ? (j.project_qbo_id ? "after the dates are set" : "after the project is in QuickBooks")
+      : (s.note && s.state !== "done" ? noteLine(s.note) : "");
     return { key: s.key, state: s.state, label: s.label, detail: s.detail, actions: btns.join(""), hint };
   }
 
@@ -214,9 +231,10 @@ export async function setupPage(routeFn) {
           </div>
           <div class="text-right"><div class="text-[10px] uppercase tracking-wide font-bold text-black/45">Order value</div><div class="font-extrabold tabular-nums">${money0(j.value)}</div></div>
         </div>
-        <div class="flex flex-wrap gap-2 mt-3" data-flags>
-          ${j.project_qbo_id ? `<button class="pd-btn" data-act="workspace">Open project workspace</button>` : ""}
-          <a class="pd-btn" href="#/pipeline">Pipeline</a>
+        <div class="flex flex-wrap gap-2 mt-3 items-center" data-flags>
+          ${j.life ? chip(`Status: ${j.life.label}`, LIFE[j.life.status] || C.quiet, "Worked out from the job: set up, started, ended, closed out") : ""}
+          ${j.project_qbo_id ? `<a class="pd-btn" href="${projectLink(j.project_qbo_id)}">Open workspace</a>` : ""}
+          ${j.opportunity_id ? `<button class="pd-btn" data-act="pipeline">Open in Pipeline</button>` : `<span class="text-xs text-black/45">No pipeline row</span>`}
           ${j.flags.map((f) => chip(f.text, C[f.tone])).join(" ")}
         </div>
         <div class="su-stages mt-3">${STAGES.map((sg) => `<div class="su-stage" data-stage="${sg}">
@@ -224,7 +242,6 @@ export async function setupPage(routeFn) {
           <div class="grid gap-1 mt-1.5" data-links>${j.steps.filter((s) => s.stage === sg).map(stepLink).join("")}</div></div>`).join("")}</div>
         <div class="text-[11px] text-black/45 mt-2">Click a step to open it below.</div>
       </section>
-      <section class="card p-4" id="su-Docs"><h3 class="su-h">Documents to work from</h3><div data-docs class="text-sm text-black/45 mt-2">Loading…</div></section>
       ${STAGES.map((sg) => `<section class="card p-4 su-sec" id="su-${sg}">
         <div class="flex flex-wrap items-center gap-2"><h3 class="su-h flex-1">${sg} <span class="text-xs font-bold text-black/40 tabular-nums" data-n>${stageCount(j, sg)}</span></h3>
           <button type="button" class="su-linkbtn" data-openall="${sg}">Open all</button></div>
@@ -237,13 +254,9 @@ export async function setupPage(routeFn) {
       root.classList.remove("su-open");
       document.querySelector(`.su-job[data-key="${CSS.escape(j.key)}"]`)?.scrollIntoView({ block: "center" });
     });
-    box.querySelector("[data-act=workspace]")?.addEventListener("click", () =>
-      openProjectDrawer({ entityId: j.project_qbo_id, name: j.project_name, onChange: () => reloadJob(j.key), backLabel: "Project Setup", backHash: "#/setup" }));
+    box.querySelector("[data-act=pipeline]")?.addEventListener("click", () => openPipelineDrawer(j));
     D.cards = bindStepCards(box, { onOpen: (key, body) => buildBody(j, key, body) });
-    box.addEventListener("sc:reopen", (e) => {
-      if (EDITOR_STEPS.includes(e.detail.key)) placeEditor(j, e.detail.body.querySelector("[data-editor-slot]"));
-      if (SCHED_STEPS.includes(e.detail.key)) placeBilling(j, e.detail.body.querySelector("[data-billing-slot]"));
-    });
+
     box.addEventListener("click", (e) => {
       const a = e.target.closest("[data-jump]");
       if (a) { e.preventDefault(); D.cards.open(a.dataset.jump); return; }
@@ -259,9 +272,8 @@ export async function setupPage(routeFn) {
       }
     });
     wireMarks(j, box);
-    renderDocs(j);
     // open the first step still to do (without jumping the page there)
-    const next = j.steps.find((s) => s.state === "todo" || s.state === "waiting");
+    const next = j.steps.find((s) => s.state === "review") || j.steps.find((s) => s.state === "todo" || s.state === "waiting");
     if (next) D.cards.open(next.key, { scroll: false });
   }
 
@@ -282,17 +294,38 @@ export async function setupPage(routeFn) {
         }
         for (const s of row.steps) D.cards.setHead(s.key, headParts(row, s));
         wireMarks(row, box);
+        const fl = box.querySelector("[data-flags]");
+        if (fl) {
+          fl.querySelectorAll(".inline-flex").forEach((c) => c.remove());
+          fl.insertAdjacentHTML("afterbegin", row.life ? chip(`Status: ${row.life.label}`, LIFE[row.life.status] || C.quiet) : "");
+          fl.insertAdjacentHTML("beforeend", row.flags.map((f) => chip(f.text, C[f.tone])).join(" "));
+        }
       }
     } catch (_) { /* the next full load catches up */ }
   }
 
   function wireMarks(j, sec) {
+    sec.querySelectorAll("[data-reviewed]").forEach((b) => {
+      if (b.dataset.wired) return;
+      b.dataset.wired = "1";
+      b.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const note = prompt("Re-checked after the change. A note for the record (optional):", "");
+        if (note === null) return;
+        b.disabled = true;
+        try {
+          await api(`/setup/job/${encodeURIComponent(j.key)}/review/${b.dataset.reviewed}`, { method: "POST", body: JSON.stringify({ note }) });
+          await reloadJob(j.key);
+        } catch (e) { b.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
+      });
+    });
     sec.querySelectorAll("[data-mark]").forEach((b) => {
       if (b.dataset.wired) return;
       b.dataset.wired = "1";
       b.addEventListener("click", async () => {
         b.disabled = true;
         try {
+          if (b.dataset.status && b.dataset.mark === "qbo_estimate" && !confirm("Mark the estimate done? It ticks itself once the next QuickBooks sync brings it in.")) { b.disabled = false; return; }
           await api(`/setup/job/${encodeURIComponent(j.key)}/step/${b.dataset.mark}`, { method: "POST", body: JSON.stringify({ status: b.dataset.status || null }) });
           await reloadJob(j.key);
         } catch (e) { b.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
@@ -322,25 +355,6 @@ export async function setupPage(routeFn) {
     catch (_) { alert(b.dataset.copy); }
   }));
 
-  // ── Documents (top card) ────────────────────────────────────────────────
-  async function renderDocs(j) {
-    const el = document.querySelector("#su-Docs [data-docs]");
-    let files;
-    try { files = await getDocs(j); } catch (e) { el.textContent = `Couldn't load documents: ${e?.message || e}`; return; }
-    const pick = (k) => (files[k] || []).filter((f) => !f.link_only);
-    const group = (label, list, empty) => `<div><div class="text-[10px] uppercase tracking-wide font-bold text-black/45 mb-1">${label}</div>
-      ${list.length ? list.slice(0, 6).map(docBtn).join("") : `<div class="text-xs text-black/45">${empty}</div>`}</div>`;
-    const wb = (j.workbook_url || "").match(/\/d\/([\w-]+)/)?.[1];
-    el.className = "su-docs mt-2";
-    el.innerHTML = group("Purchase order", pick("5_purchase_orders"), "No PO in Drive yet (5 Purchase Orders).")
-      + group("Estimator's quote", pick("4_quotes"), "No quote PDF (4 Quotes).")
-      + `<div><div class="text-[10px] uppercase tracking-wide font-bold text-black/45 mb-1">Quoting metrics</div>
-          ${wb ? `<button class="pd-btn" data-sheet="${wb}">${DOC_ICON}<span>Roll-up sheet</span></button> <a class="pd-btn" href="${escapeHtml(j.workbook_url)}" target="_blank" rel="noopener">Open in Google Sheets</a>` : `<div class="text-xs text-black/45">No workbook linked on the pipeline row.</div>`}
-          <div class="text-xs text-black/55 mt-1.5">${escapeHtml([j.labor_days ? `${j.labor_days} labor days` : null, j.travel_days ? `${j.travel_days} travel days` : null, j.target_start ? `target ${day(j.target_start)} to ${day(j.target_end)}` : null].filter(Boolean).join(" · "))}</div></div>`;
-    wireDocs(el);
-    el.querySelector("[data-sheet]")?.addEventListener("click", (e) => openDocViewer({ drive: e.currentTarget.dataset.sheet, sheet: "0. ROLL UP Quoting Metrics", filename: "Quoting metrics" }));
-  }
-
   // ── Step bodies ─────────────────────────────────────────────────────────
   async function buildBody(j, key, body) {
     const fn = BODY[key];
@@ -350,24 +364,83 @@ export async function setupPage(routeFn) {
   const BODY = {
     po: bodyPo, qbo_project: bodyProject, qbo_estimate: bodyEstimate, first_invoice: bodyFirstInvoice,
     pm: bodyPm, crew: bodyCrew, dates: bodyDates, details: bodyDetails,
-    invoice_schedule: bodySchedule, crew_schedule: bodySchedule, expense_schedule: bodySchedule,
+    invoice_schedule: (j, b) => bodySchedule(j, b, "invoice_schedule"), crew_schedule: (j, b) => bodySchedule(j, b, "crew_schedule"),
+    expense_schedule: (j, b) => bodySchedule(j, b, "expense_schedule"),
   };
 
+  // A note on a step that can't be done yet: a reason, an expected date (PO), a
+  // note. Saving alerts the office (bell).
+  const noteLine = (n) => `Note: ${[noteReason(n), n.expected_date ? `expected ${day(n.expected_date)}` : null, n.note].filter(Boolean).join(" · ")} (${(n.by || "").split("@")[0]}, ${day(n.at)})`;
+  const noteReason = (n) => { for (const list of Object.values(st.meta.note_reasons || {})) { const hit = list.find(([k]) => k === n.reason_code); if (hit) return hit[1]; } return n.reason_code; };
+  function noteForm(j, step, title) {
+    const reasons = (st.meta.note_reasons || {})[step] || [];
+    const cur = (j.steps.find((s) => s.key === step) || {}).note;
+    return `<form class="su-sub mt-3 grid gap-2" data-noteform="${step}">
+      <h4 class="font-bold text-sm">${title}</h4>
+      ${cur ? `<div class="text-xs text-black/60">Last note: ${escapeHtml(noteLine(cur))}</div>` : ""}
+      <div class="flex flex-wrap gap-2 items-end">
+        <label class="text-xs grid gap-1"><span class="text-black/55">Why</span><select name="reason" class="input text-sm"><option value="">Pick one…</option>${reasons.map(([k, l]) => `<option value="${k}">${escapeHtml(l)}</option>`).join("")}</select></label>
+        ${step === "po" ? `<label class="text-xs grid gap-1"><span class="text-black/55">Expected</span><input name="expected" type="date" class="input text-sm"></label>` : ""}
+        <label class="text-xs grid gap-1" style="flex:1;min-width:200px"><span class="text-black/55">Note</span><input name="note" class="input text-sm" placeholder="Anything the office should know"></label>
+        <button type="submit" class="btn-primary text-sm">Save and notify</button>
+      </div></form>`;
+  }
+  function wireNoteForm(j, body) {
+    body.querySelectorAll("[data-noteform]").forEach((f) => f.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(f);
+      if (!fd.get("reason") && !fd.get("note")) { alert("Pick a reason or write a note."); return; }
+      try {
+        await api(`/setup/job/${encodeURIComponent(j.key)}/note`, { method: "POST", body: JSON.stringify({ step: f.dataset.noteform, reason_code: fd.get("reason") || null, note: fd.get("note") || null, expected_date: fd.get("expected") || null }) });
+        toast("Saved. The office was notified.");
+        await reloadJob(j.key);
+        f.reset();
+      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+    }));
+  }
+
   async function bodyPo(j, body) {
-    const [files, d] = await Promise.all([getDocs(j), getDraft(j).catch(() => null)]);
+    const [files, d] = await Promise.all([getDocs(j).catch(() => ({})), getDraft(j).catch(() => null)]);
     const pos = (files["5_purchase_orders"] || []).filter((f) => !f.link_only);
     const po = d?.po;
+    const done = (j.steps.find((s) => s.key === "po") || {}).state === "done";
     body.innerHTML = `
       <div class="text-[10px] uppercase tracking-wide font-bold text-black/45 mb-1">Purchase order files</div>
-      ${pos.length ? pos.map(docBtn).join("") : `<div class="text-xs text-black/55">No PO in the job's Drive folder (5 Purchase Orders) yet. Drop it there; the nightly Drive sync picks it up.</div>`}
+      ${pos.length ? pos.map(docBtn).join("") : `<div class="text-xs text-black/55">No PO in the job's folder (5 Purchase Orders) yet.</div>`}
+      <label class="su-drop mt-2" data-drop><input type="file" accept=".pdf,.png,.jpg,.jpeg,.heic,.doc,.docx,.xlsx,.msg,.eml" multiple hidden>
+        <span><b>Drop the PO here</b> or click to upload. It's saved in the job's 5 Purchase Orders folder.</span></label>
       ${po ? `<div class="su-facts mt-2">
           <div><span>PO number</span><b>${escapeHtml(po.po_number || "not read")}</b></div>
           <div><span>PO total</span><b>${po.total != null ? money2(po.total) : "not read"}</b></div>
           <div><span>Order value on the pipeline</span><b>${money2(j.value)}</b></div>
         </div>
         ${po.total != null && Math.abs(po.total - (j.value || 0)) > 1 ? `<div class="su-warn mt-2">The PO total and the pipeline's order value differ by ${money2(po.total - (j.value || 0))}.</div>` : ""}
-        ${po.snippet ? `<details class="mt-2"><summary class="text-xs font-semibold text-black/60 cursor-pointer">What the app read from the PO</summary><pre class="su-snippet">${escapeHtml(po.snippet)}</pre></details>` : ""}` : ""}`;
+        ${po.snippet ? `<details class="mt-2"><summary class="text-xs font-semibold text-black/60 cursor-pointer">What the app read from the PO</summary><pre class="su-snippet">${escapeHtml(po.snippet)}</pre></details>` : ""}` : ""}
+      ${done ? "" : noteForm(j, "po", "No PO yet?")}`;
     wireDocs(body);
+    wireNoteForm(j, body);
+    const drop = body.querySelector("[data-drop]");
+    const input = drop.querySelector("input");
+    const upload = async (fileList) => {
+      const list = [...fileList];
+      if (!list.length) return;
+      drop.classList.add("busy"); drop.querySelector("span").textContent = `Uploading ${list.length} file${list.length === 1 ? "" : "s"}…`;
+      try {
+        for (const f of list) {
+          const fd = new FormData(); fd.append("file", f);
+          const where = j.opportunity_id ? `opportunity/${j.opportunity_id}` : `project/${encodeURIComponent(j.project_qbo_id)}`;
+          await api(`/documents/${where}?folder=5_purchase_orders`, { method: "POST", body: fd });
+        }
+        delete st.cache[`docs:${j.key}`]; delete st.cache[`draft:${j.key}`];
+        toast("PO uploaded.");
+        await reloadJob(j.key);
+        bodyPo(D?.j || j, body);
+      } catch (e) { drop.classList.remove("busy"); alert(`Couldn't upload: ${e?.message || e}`); }
+    };
+    input.addEventListener("change", () => upload(input.files));
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files); });
   }
 
   async function bodyProject(j, body) {
@@ -444,10 +517,18 @@ export async function setupPage(routeFn) {
       draftHtml(j, d, body.querySelector("[data-draft]"));
       return;
     }
-    body.innerHTML = `<div class="flex flex-wrap items-center gap-2"><div class="text-xs text-black/55 flex-1">Not in QuickBooks yet. The app drafted it from the estimator's estimate and the PO: copy it in, then this step ticks itself after the next sync.</div>
-        <button class="pd-btn" disabled title="Pushing to QuickBooks needs write access to be switched on. For now, copy the lines in.">Send to QuickBooks (coming)</button></div>
-      <div data-draft class="mt-2"></div>`;
+    const isAdmin = (getMe()?.user?.role || getMe()?.role) === "admin";
+    body.innerHTML = `<div class="flex flex-wrap items-center gap-2"><div class="text-xs text-black/55 flex-1">Not in QuickBooks yet. The app drafted it from the estimator's estimate and the PO: copy it in, then this step ticks itself after the next sync (or press Sync now).</div>
+        ${isAdmin && j.project_qbo_id ? `<button class="pd-btn" data-qbosync title="Pull the latest estimates and invoices from QuickBooks now">Sync now</button>` : ""}</div>
+      <div data-draft class="mt-2"></div>
+      ${noteForm(j, "qbo_estimate", "Estimate not done yet?")}`;
     draftHtml(j, d, body.querySelector("[data-draft]"));
+    wireNoteForm(j, body);
+    body.querySelector("[data-qbosync]")?.addEventListener("click", async (e) => {
+      const b = e.currentTarget; b.disabled = true; b.textContent = "Syncing…";
+      try { await api("/qbo/sync/transactions", { method: "POST" }); delete st.cache[`draft:${j.key}`]; await reloadJob(j.key); toast("QuickBooks synced."); bodyEstimate(D?.j || j, body); }
+      catch (er) { b.disabled = false; b.textContent = "Sync now"; alert(`Couldn't sync: ${er?.message || er}`); }
+    });
   }
 
   function draftHtml(j, d, el) {
@@ -482,39 +563,87 @@ export async function setupPage(routeFn) {
   }
 
   async function bodyFirstInvoice(j, body) {
-    const d = await getDraft(j).catch(() => ({}));
-    const inv = d.actual?.invoice, fi = d.first_invoice || {};
-    const base = d.actual?.estimate?.total ?? d.total;
-    const check = (d.compare?.checks || []).find((c) => c.text.startsWith("First invoice"));
-    body.innerHTML = `
-      ${inv ? `<div class="su-facts">
-          <div><span>First invoice</span><b>#${escapeHtml(inv.doc_number || "")} · ${day(inv.date)}</b></div>
-          <div><span>Amount</span><b>${money2(inv.amount)}${base ? ` (${(100 * inv.amount / base).toFixed(1)}%)` : ""}</b></div>
-          <div><span>Still open</span><b class="${inv.balance > 0 ? "" : "text-emerald-700"}">${inv.balance > 0 ? `${money2(inv.balance)}${inv.due ? `, due ${day(inv.due)}` : ""}` : "Paid"}</b></div>
-        </div>` : `<div class="text-sm">${fi.amount ? `Send the first invoice: <b>${fi.percent}% = ${money2(fi.amount)}</b> ${copyBtn(fi.amount.toFixed(2))}` : "No percentage payment terms on the quote: check the PO for how to invoice."}</div>`}
-      ${check ? `<div class="flex items-start gap-2 text-sm mt-2">${check.ok ? ICON.done : ICON.todo}<span>${escapeHtml(check.text)}</span></div>` : ""}
-      ${d.terms ? `<div class="text-xs text-black/55 mt-2"><span class="font-semibold text-black/70">Payment terms:</span> ${escapeHtml(d.terms.replace(/\s+/g, " ").slice(0, 260))}</div>` : ""}
-      ${j.project_qbo_id ? `<div class="text-xs text-black/50 mt-2">The whole invoice schedule is under Schedules below.</div>` : ""}`;
+    const [d, fi] = await Promise.all([getDraft(j).catch(() => ({})), j.project_qbo_id ? api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice`).catch(() => ({})) : Promise.resolve({})]);
+    const inv = fi.invoice, ms = fi.milestone, plan = d.first_invoice || {};
+    const dateIn = (name, v, label, hint) => `<label class="text-xs grid gap-1"><span class="text-black/55" title="${escapeHtml(hint || "")}">${label}</span><input type="date" name="${name}" value="${escapeHtml(v || "")}" class="input text-sm"></label>`;
+    body.innerHTML = inv ? `
+      <div class="su-facts">
+        <div><span>Invoice</span><b>#${escapeHtml(inv.doc_number || "")}${inv.estimate ? ` <span class="text-black/45 font-normal">· estimate #${escapeHtml(inv.estimate)}</span>` : ""}</b></div>
+        <div><span>Sent</span><b>${day(inv.date)}</b></div>
+        <div><span>Amount</span><b>${money2(inv.amount)}${inv.pct != null ? ` (${inv.pct}% of ${money0(fi.contract)})` : ""}</b></div>
+        <div><span>Terms</span><b>${escapeHtml(inv.terms || ms?.terms || "—")}</b></div>
+        <div><span>Due</span><b>${day(inv.due)}</b></div>
+        <div><span>Status</span><b class="${inv.balance > 0.01 ? "" : "text-emerald-700"}">${escapeHtml(inv.status)}${inv.balance > 0.01 && inv.balance < inv.amount ? ` · ${money2(inv.balance)} open` : ""}</b></div>
+      </div>
+      ${ms ? `<form class="su-sub mt-3 flex flex-wrap gap-2 items-end" data-msform="${ms.id}">
+          ${dateIn("expected_paid_date", ms.expected_paid_date, "Expected pay date", "When the money is expected to land. Blank = the due date.")}
+          <button type="submit" class="btn-primary text-sm">Save</button>
+          <span class="text-xs text-black/50" style="flex:1;min-width:200px">Updates the invoice's row on Billing &amp; Schedule, and Cash Flow follows.</span></form>` : ""}`
+      : `
+      <div class="text-sm">${ms ? `Planned: <b>${escapeHtml(ms.label || "First invoice")}</b> ${money2(ms.amount)}${ms.pct != null ? ` (${ms.pct}%)` : ""}${ms.terms ? ` · terms ${escapeHtml(ms.terms)}` : ""}`
+        : plan.amount ? `Send the first invoice: <b>${plan.percent}% = ${money2(plan.amount)}</b> ${copyBtn(plan.amount.toFixed(2))}` : "No percentage payment terms on the quote: check the PO for how to invoice."}</div>
+      ${ms ? `<form class="su-sub mt-2 flex flex-wrap gap-2 items-end" data-msform="${ms.id}">
+          ${dateIn("invoice_date", ms.invoice_date, "Send date")}${dateIn("due_date", ms.due_date, "Due date")}${dateIn("expected_paid_date", ms.expected_paid_date, "Expected received", "Blank = the due date")}
+          <button type="submit" class="btn-primary text-sm">Save dates</button>
+          <span class="text-xs text-black/50" style="flex:1;min-width:200px">The first row of the invoice schedule: Billing &amp; Schedule and Cash Flow follow.</span></form>` : ""}
+      ${d.terms ? `<div class="text-xs text-black/55 mt-2"><span class="font-semibold text-black/70">Payment terms on the quote:</span> ${escapeHtml(d.terms.replace(/\s+/g, " ").slice(0, 260))}</div>` : ""}
+      ${noteForm(j, "first_invoice", "First invoice not sent yet?")}`;
     wireCopy(body);
+    wireNoteForm(j, body);
+    body.querySelector("[data-msform]")?.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const f = ev.currentTarget, fd = new FormData(f), patch = {};
+      for (const [k, v] of fd.entries()) patch[k] = v || null;
+      try {
+        await api(`/invoices/milestone/${f.dataset.msform}`, { method: "PATCH", body: JSON.stringify({ ...patch, via: "project_setup" }) });
+        toast("Saved. Billing & Schedule and Cash Flow follow.");
+      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+    });
   }
 
-  // PM, crew, dates and details share one editor (the Assignments-page editor),
-  // shown inside whichever of those cards was opened last.
-  const editorSlot = (what) => `<div class="su-sub mt-3"><div class="flex items-center gap-2"><h4 class="font-bold text-sm flex-1">${what}</h4><span class="text-xs text-black/45">Saves as you go · same editor as the Assignments page</span></div><div data-editor-slot class="mt-2"></div></div>`;
-  function placeEditor(j, slot) {
+  // ── Pipeline record in a side drawer ────────────────────────────────────
+  async function openPipelineDrawer(j) {
+    const wrap = document.createElement("div");
+    wrap.className = "pd-backdrop";
+    wrap.innerHTML = `<div class="pd-panel" role="dialog" aria-modal="true" aria-label="Pipeline record" style="width:min(720px,96vw)">
+      <div class="pd-head"><div class="pd-title"><div class="pd-name">${escapeHtml(j.title || "")}</div><div class="pd-sub">Pipeline · quote #${escapeHtml(String(j.quote_number || ""))}</div></div>
+        <a class="pd-btn" href="#/pipeline">Open the Pipeline page</a>
+        <button class="pd-x" data-x aria-label="Close">×</button></div>
+      <div class="pd-body"><div class="card p-4 text-sm" data-pbody>Loading…</div></div></div>`;
+    document.body.appendChild(wrap);
+    const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", onKey);
+    wrap.addEventListener("click", (e) => { if (e.target === wrap || e.target.closest("[data-x]")) close(); });
+    const el = wrap.querySelector("[data-pbody]");
+    try {
+      const [{ opportunity: o }, files] = await Promise.all([api(`/opportunities/${j.opportunity_id}`), getDocs(j).catch(() => ({}))]);
+      const f = (k, v) => (v == null || v === "" ? "" : `<div><span>${k}</span><b>${v}</b></div>`);
+      const pct = (v) => (v == null ? null : `${(Number(v) * (Number(v) <= 1 ? 100 : 1)).toFixed(1)}%`);
+      const docs = ["4_quotes", "5_purchase_orders", "1_request_for_quote", "2_drawings_calcs"].flatMap((k) => (files[k] || []).filter((x) => !x.link_only).slice(0, 4));
+      el.innerHTML = `<div class="su-facts">
+          ${f("Status", escapeHtml(o.pipeline_status || o.status || ""))}${f("Customer", escapeHtml(o.customer_name || ""))}${f("Contact", escapeHtml(o.contact_name || ""))}
+          ${f("Estimator", escapeHtml(o.estimator_name || o.quoted_by || ""))}${f("RFQ received", day(o.rfq_received_date || o.received_at))}${f("Quote sent", day(o.quote_sent_date || o.sent_at))}
+          ${f("Won", day(o.order_date || o.decided_at))}${f("Contract value", o.contract_value != null ? money2(o.contract_value) : null)}${f("Order value", o.order_value != null ? money2(o.order_value) : null)}
+          ${f("OH&amp;P", o.ohp_pct != null ? `${pct(o.ohp_pct)}${o.ohp_amount ? ` · ${money0(o.ohp_amount)}` : ""}` : null)}${f("Labor days", o.labor_days)}${f("Travel days", o.travel_days)}
+          ${f("Target dates", o.target_start_date ? `${day(o.target_start_date)} to ${day(o.target_end_date)}` : null)}${f("Revisions", o.total_revisions || o.revision_count)}
+          ${f("Last contact", o.last_contact_date ? `${day(o.last_contact_date)}${o.last_comm_type ? ` · ${escapeHtml(o.last_comm_type)}` : ""}` : null)}${f("Follow-ups", o.follow_up_count)}
+        </div>
+        ${o.workbook_url ? `<div class="mt-3"><a class="pd-btn" href="${escapeHtml(o.workbook_url)}" target="_blank" rel="noopener">Quoting Metrics workbook ↗</a></div>` : ""}
+        ${o.notes ? `<div class="mt-3 text-xs text-black/70 whitespace-pre-line">${escapeHtml(o.notes)}</div>` : ""}
+        ${docs.length ? `<div class="text-[10px] uppercase tracking-wide font-bold text-black/45 mt-3 mb-1">Documents</div>${docs.map(docBtn).join("")}` : ""}`;
+      wireDocs(el);
+    } catch (e) { el.textContent = `Couldn't load the pipeline record: ${e?.message || e}`; }
+  }
+
+  // Each Assignment card shows only its part of the assignment editor (the same
+  // editor as the project workspace), and each Schedules card only its part of
+  // the Billing panel.
+  function mountPart(j, slot, show, intro) {
     if (!slot) return;
     if (!j.project_internal_id) { slot.innerHTML = `<div class="text-xs text-black/50">Opens once the project is in QuickBooks.</div>`; return; }
-    if (!D.editor) {
-      const el = document.createElement("div");
-      el.className = "su-embed";
-      D.editor = el;
-      mountAssignmentPanel(el, j.project_internal_id, () => onAssignChange(j));
-    }
-    document.querySelectorAll("#suDetail [data-editor-slot]").forEach((s) => {
-      if (s !== slot && s.contains(D.editor)) s.innerHTML = `<button type="button" class="pd-btn" data-move-editor>Show the editor here</button>`;
-    });
-    slot.innerHTML = "";
-    slot.appendChild(D.editor);
+    slot.classList.add("su-embed");
+    mountAssignmentPanel(slot, j.project_internal_id, () => onAssignChange(j), { show, intro });
   }
   function onAssignChange(j) {
     clearTimeout(st.assignTimer);
@@ -528,63 +657,101 @@ export async function setupPage(routeFn) {
         const pm = document.querySelector('#suDetail .sc[data-sc="pm"] [data-pms]');
         if (pm) loadPmWorkload(fresh, pm);
       }
+      const dc = document.querySelector('#suDetail .sc[data-sc="dates"] [data-dchanges]');
+      if (dc) setTimeout(() => loadDateChanges(D?.j || j, dc), 1500);
     }, 600);
   }
-  function remountEditor(j) {
-    if (D?.editor) mountAssignmentPanel(D.editor, j.project_internal_id, () => onAssignChange(j));
-  }
-  root.addEventListener("click", (e) => {
-    const b = e.target.closest("[data-move-editor]");
-    if (b && D) placeEditor(D.j, b.closest("[data-editor-slot]"));
-    const m = e.target.closest("[data-move-billing]");
-    if (m && D) placeBilling(D.j, m.closest("[data-billing-slot]"));
-  });
+  const partSlot = (title) => `<div class="su-sub mt-3"><h4 class="font-bold text-sm">${title}</h4><div data-part class="mt-2"></div></div>`;
 
   async function bodyPm(j, body) {
-    body.innerHTML = `<div class="text-xs text-black/55">Who's free: each PM's running and upcoming jobs, and how many overlap this one. Click a PM to see their jobs on a timeline. Pick the PM in the editor below (Project manager).</div>
-      <div data-pms class="text-xs text-black/45 mt-2">Loading…</div>${editorSlot("Assign the PM")}`;
+    body.innerHTML = `<div class="su-sub"><h4 class="font-bold text-sm">PM availability</h4>
+        <div class="text-xs text-black/55 mt-0.5">Each PM's running and upcoming jobs and how many overlap this one. Click a PM for their jobs on a timeline.</div>
+        <div data-pms class="text-xs text-black/45 mt-2">Loading…</div></div>${partSlot("Assign the PM(s)")}`;
     loadPmWorkload(j, body.querySelector("[data-pms]"));
-    placeEditor(j, body.querySelector("[data-editor-slot]"));
+    mountPart(j, body.querySelector("[data-part]"), ["pm"], "Pick one or more PMs for each set of dates (click the PM box). Saves as you go.");
   }
   async function bodyCrew(j, body) {
     body.innerHTML = `
-      <div class="su-sub"><h4 class="font-bold text-sm">Crew offer</h4><div data-offers class="text-xs text-black/45 mt-1.5">${j.project_qbo_id ? "Loading…" : "Opens once the project is in QuickBooks."}</div></div>
-      <div class="su-sub mt-3"><h4 class="font-bold text-sm">Crew availability${j.start ? ` · ${day(j.start)} to ${day(j.end)}` : ""}</h4>
-        <div class="text-xs text-black/55 mt-0.5">${j.start ? "Click a crew to see each day and what they're booked on." : ""}</div>
-        <div data-avail class="text-xs text-black/45 mt-1.5">${j.start ? "Loading…" : "Set the dates (Start and end dates step) to see which crews are free."}</div></div>
-      ${editorSlot("Assign the crew")}`;
-    if (j.project_qbo_id) loadOffers(j, body.querySelector("[data-offers]"));
+      <div class="su-sub"><h4 class="font-bold text-sm">Crew availability${j.start ? ` · ${day(j.start)} to ${day(j.end)}` : ""}</h4>
+        <div class="text-xs text-black/55 mt-0.5">${j.start ? "Click a crew to see each day (each week on long jobs) and what they're booked on." : ""}</div>
+        <div data-avail class="text-xs text-black/45 mt-1.5">${j.start ? "Loading…" : "Set the dates first (Start and end dates) to see which crews are free."}</div></div>
+      <div class="su-sub mt-3"><h4 class="font-bold text-sm">Crew offer</h4><div data-offers class="text-xs text-black/45 mt-1.5">${j.project_qbo_id ? "Loading…" : "Opens once the project is in QuickBooks."}</div></div>
+      ${partSlot("Assign the crew to each set of dates")}`;
     if (j.start) loadAvailability(j, body.querySelector("[data-avail]"));
-    placeEditor(j, body.querySelector("[data-editor-slot]"));
+    if (j.project_qbo_id) loadOffers(j, body.querySelector("[data-offers]"));
+    mountPart(j, body.querySelector("[data-part]"), ["crew"], "Pick the crew (company, lead, slot) for each set of dates, and any days off. Saves as you go.");
   }
   async function bodyDates(j, body) {
-    body.innerHTML = `<div class="text-xs text-black/55">${j.target_start ? `The quote targeted ${day(j.target_start)} to ${day(j.target_end)}${j.labor_days ? ` (${j.labor_days} labor days${j.travel_days ? `, ${j.travel_days} travel` : ""})` : ""}. ` : ""}Set Start and End in the editor; the schedules below are built from them.</div>${editorSlot("Set the dates")}`;
-    placeEditor(j, body.querySelector("[data-editor-slot]"));
+    body.innerHTML = `<div class="text-xs text-black/55">${j.target_start ? `The quote targeted ${day(j.target_start)} to ${day(j.target_end)}${j.labor_days ? ` (${j.labor_days} labor days${j.travel_days ? `, ${j.travel_days} travel` : ""})` : ""}. ` : ""}Quoted end = the end the price was built on (green on the Job Schedule). Overage days = calendar days worked past it (orange). Moving a date sends the job back here and asks why.</div>
+      <div data-dchanges class="mt-2"></div>
+      ${partSlot("Start, end and overage for each set of dates")}`;
+    if (j.project_qbo_id) loadDateChanges(j, body.querySelector("[data-dchanges]"));
+    mountPart(j, body.querySelector("[data-part]"), ["dates"], "Change a date and it saves; the change is kept in the history with why it moved. Put the job on hold with the bar above.");
   }
   async function bodyDetails(j, body) {
-    body.innerHTML = `<div class="text-xs text-black/55">Check wire guidance, travel days, days off and equipment in the editor, then press "Mark checked" on this step.</div>${editorSlot("Job details")}`;
-    placeEditor(j, body.querySelector("[data-editor-slot]"));
+    body.innerHTML = `<div class="text-xs text-black/55">Wire guidance, travel days and equipment, then press "Mark checked". Hints below come from the PO and the estimate.</div>
+      <div data-hints class="mt-2 text-xs text-black/45">${j.project_qbo_id || j.opportunity_id ? "Looking for hints…" : ""}</div>
+      ${partSlot("Job details")}`;
+    loadHints(j, body.querySelector("[data-hints]"));
+    mountPart(j, body.querySelector("[data-part]"), ["details"], "Wire guidance, travel days and equipment for each set of dates.");
+  }
+  async function bodySchedule(j, body, key) {
+    const only = { invoice_schedule: "invoice", crew_schedule: "crew", expense_schedule: "expense" }[key];
+    const what = { invoice: "The customer invoices: contract value, dates, what's paid, sent and due, the invoice schedule (edit any row), the QuickBooks invoices and pending change orders.",
+      crew: "The crew payment schedule: what each crew is paid and when (payroll Fridays). An offer sent from the app goes out with it.",
+      expense: "The expense schedule: lodging, rentals and other costs by category and week." }[only];
+    body.innerHTML = `<div class="text-xs text-black/55">${what} Check it, fix any date or amount, then press "Mark reviewed".</div><div data-billing-slot class="mt-2"></div>`;
+    const slot = body.querySelector("[data-billing-slot]");
+    if (!j.project_qbo_id || !j.start) { slot.innerHTML = `<div class="text-xs text-black/50">${j.project_qbo_id ? "Set the start and end dates first. The schedules are built from them." : "Opens once the project is in QuickBooks and has dates."}</div>`; return; }
+    slot.classList.add("su-embed");
+    mountBillingPanel(slot, j.project_qbo_id, { only });
   }
 
-  // The three schedules share one billing panel, shown in the card opened last.
-  function placeBilling(j, slot) {
-    if (!slot) return;
-    if (!j.project_qbo_id || !j.start) { slot.innerHTML = `<div class="text-xs text-black/50">${j.project_qbo_id ? "Set the start and end dates first. The schedules are built from them." : "Opens once the project is in QuickBooks and has dates."}</div>`; return; }
-    if (!D.billing) {
-      const el = document.createElement("div");
-      el.className = "su-embed";
-      D.billing = el;
-      mountBillingPanel(el, j.project_qbo_id);
-    }
-    document.querySelectorAll("#suDetail [data-billing-slot]").forEach((s) => {
-      if (s !== slot && s.contains(D.billing)) s.innerHTML = `<button type="button" class="pd-btn" data-move-billing>Show the schedules here</button>`;
-    });
-    slot.innerHTML = "";
-    slot.appendChild(D.billing);
+  // ── Date changes: why it moved, change order? (and the end-date history) ─
+  async function loadDateChanges(j, el) {
+    if (!el) return;
+    let d;
+    try { d = await api(`/setup/job/${encodeURIComponent(j.key)}/dates`); }
+    catch (e) { el.textContent = `Couldn't load the date history: ${e?.message || e}`; return; }
+    const reasons = d.reasons || [];
+    const open = d.changes.filter((c) => !c.answered_at);
+    const done = d.changes.filter((c) => c.answered_at);
+    const rlabel = Object.fromEntries(reasons);
+    const coTxt = { yes: "change order needed", no: "no change order", sent: "change order already sent" };
+    el.innerHTML = `
+      ${open.length ? `<div class="su-warn"><b>${open.length} date change${open.length === 1 ? "" : "s"} to answer.</b> Why did it move, and is a change order needed? Then press Reviewed on this step.</div>
+        <div class="grid gap-2 mt-2">${open.map((c) => `<form class="su-sub grid gap-2" data-answer="${c.id}">
+          <div class="text-sm"><b>${escapeHtml(c.summary)}</b> <span class="text-black/50 text-xs">· ${escapeHtml(c.source === "job_schedule" ? "from the Job Schedule" : c.changed_by || "")} ${day(c.changed_at)}</span></div>
+          <div class="flex flex-wrap gap-2 items-end">
+            <label class="text-xs grid gap-1"><span class="text-black/55">Why did it move?</span><select name="reason" class="input text-sm" required><option value="">Pick one…</option>${reasons.filter(([k]) => k !== "on_hold").map(([k, l]) => `<option value="${k}">${escapeHtml(l)}</option>`).join("")}</select></label>
+            <label class="text-xs grid gap-1"><span class="text-black/55">Change order needed?</span><select name="co" class="input text-sm" required><option value="">Pick one…</option><option value="no">No</option><option value="yes">Yes (opens a to-do)</option><option value="sent">Already sent</option></select></label>
+            <label class="text-xs grid gap-1" style="flex:1;min-width:180px"><span class="text-black/55">Note</span><input name="note" class="input text-sm" placeholder="What happened"></label>
+            <button class="btn-primary text-sm" type="submit">Save</button>
+          </div></form>`).join("")}</div>` : ""}
+      ${done.length ? `<details class="mt-2"${open.length ? "" : " open"}><summary class="text-xs font-semibold text-black/60 cursor-pointer">Date history (${done.length})</summary>
+        <div class="overflow-x-auto mt-1"><table class="w-full text-xs su-table"><thead><tr><th class="text-left">When</th><th class="text-left">Change</th><th class="text-left">Why</th><th class="text-left">By</th></tr></thead>
+        <tbody>${done.map((c) => `<tr><td>${day(c.changed_at)}</td><td>${escapeHtml(c.summary)}</td><td>${escapeHtml([rlabel[c.reason_code] || c.reason_code, coTxt[c.co_needed], c.note].filter(Boolean).join(" · "))}</td><td class="text-black/55">${escapeHtml(c.source === "job_schedule" ? "Job Schedule" : c.changed_by || "")}</td></tr>`).join("")}</tbody></table></div></details>` : (open.length ? "" : `<div class="text-xs text-black/45">No date changes since setup.</div>`)}`;
+    el.querySelectorAll("[data-answer]").forEach((f) => f.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(f);
+      try {
+        await api(`/setup/date-change/${f.dataset.answer}`, { method: "POST", body: JSON.stringify({ reason_code: fd.get("reason"), co_needed: fd.get("co"), note: fd.get("note") || null }) });
+        await reloadJob(j.key);
+        loadDateChanges(D?.j || j, el);
+      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+    }));
   }
-  async function bodySchedule(j, body) {
-    body.innerHTML = `<div class="text-xs text-black/55">Invoices, crew pay and expenses for this job (the same panel as the project's Billing tab). Check the rows, fix any date or amount, then press "Mark reviewed" on this step.</div><div data-billing-slot class="mt-2"></div>`;
-    placeBilling(j, body.querySelector("[data-billing-slot]"));
+
+  // ── Job-detail hints from the PO and the estimate ───────────────────────
+  async function loadHints(j, el) {
+    if (!el || (!j.project_qbo_id && !j.opportunity_id)) return;
+    let d;
+    try { d = await api(`/setup/job/${encodeURIComponent(j.key)}/hints`); } catch (_) { el.textContent = ""; return; }
+    const lab = { wire: "Wire guidance", travel: "Travel", equipment: "Equipment" };
+    const any = Object.values(d).some((v) => v.length);
+    el.className = "mt-2";
+    el.innerHTML = any ? `<div class="su-facts">${Object.entries(lab).map(([k, l]) => `<div><span>${l}</span><b class="font-normal text-xs">${(d[k] || []).length ? d[k].slice(0, 3).map((h) => `<div class="mb-1"><span class="text-black/45">${escapeHtml(h.source)}:</span> ${escapeHtml(h.text)}</div>`).join("") : '<span class="text-black/40">nothing found</span>'}</b></div>`).join("")}</div>`
+      : `<div class="text-xs text-black/45">No wire, travel or equipment words in the PO or the estimate.</div>`;
   }
 
   // ── PM workload (click a PM for their jobs on a timeline) ───────────────
@@ -661,6 +828,7 @@ export async function setupPage(routeFn) {
     let d;
     try { d = await api(`/offers/crew-availability?start=${j.start}&end=${j.end}`); }
     catch (e) { el.textContent = `Couldn't load availability: ${e?.message || e}`; return; }
+    st.availWeekly = (d.companies[0]?.days || []).length > 92;
     const rows = [...d.companies].sort((a, b) => b.min_free_weekdays - a.min_free_weekdays);
     el.className = "overflow-x-auto mt-1.5";
     el.innerHTML = `<table class="w-full text-xs su-table su-clicktable"><thead><tr><th class="text-left">Crew company</th><th class="text-left">Boss</th><th class="text-right">Free the whole time</th><th class="text-left">Booked on</th><th></th></tr></thead>
@@ -692,15 +860,35 @@ export async function setupPage(routeFn) {
     const byProj = {};
     for (const b of c.bookings || []) (byProj[b.project || "—"] ||= { entity_id: b.entity_id, rows: [] }).rows.push(b);
     const canOffer = !!document.querySelector('#suDetail .sc[data-sc="crew"] form[data-new]:not([hidden])');
-    return `<div class="su-days">${(c.days || []).map((x) => `<div class="su-day${x.weekday >= 5 ? " wkend" : ""}${x.free <= 0 ? " full" : ""}${x.off ? " off" : ""}" title="${escapeHtml(`${x.date}: ${x.booked} booked, ${x.off} off, ${x.free} free of ${c.capacity}`)}">
+    // long jobs (over ~3 months): one box per week = the fewest crews free on a weekday that week
+    const weeks = [];
+    if (st.availWeekly) {
+      for (const x of c.days || []) {
+        const t = new Date(`${x.date}T00:00:00`); const mon = new Date(t); mon.setDate(t.getDate() - ((t.getDay() + 6) % 7));
+        const k = mon.toISOString().slice(0, 10);
+        let w = weeks[weeks.length - 1];
+        if (!w || w.k !== k) { w = { k, free: null, off: 0 }; weeks.push(w); }
+        if (x.weekday < 5) { w.free = w.free == null ? x.free : Math.min(w.free, x.free); w.off = Math.max(w.off, x.off); }
+      }
+    }
+    const grid = st.availWeekly
+      ? `<div class="su-days">${weeks.map((w) => `<div class="su-day${(w.free ?? 1) <= 0 ? " full" : ""}${w.off ? " off" : ""}" title="${escapeHtml(`Week of ${w.k}: at least ${w.free ?? "—"} free of ${c.capacity} every weekday`)}">
+          <span>wk</span><b>${w.free ?? "—"}</b><span>${new Date(`${w.k}T00:00:00`).toLocaleDateString([], { month: "numeric", day: "numeric" })}</span></div>`).join("")}</div>
+        <div class="text-[11px] text-black/50 mt-1">Long job: one box per week, the fewest crews free on any weekday that week, out of ${c.capacity}. Red = fully booked.</div>`
+      : `<div class="su-days">${(c.days || []).map((x) => `<div class="su-day${x.weekday >= 5 ? " wkend" : ""}${x.free <= 0 ? " full" : ""}${x.off ? " off" : ""}" title="${escapeHtml(`${x.date}: ${x.booked} booked, ${x.off} off, ${x.free} free of ${c.capacity}`)}">
         <span>${wd[x.weekday]}</span><b>${x.free}</b><span>${new Date(`${x.date}T00:00:00`).getDate()}</span></div>`).join("")}</div>
-      <div class="text-[11px] text-black/50 mt-1">Crews free each day, out of ${c.capacity}. Red = fully booked.</div>
+      <div class="text-[11px] text-black/50 mt-1">Crews free each day, out of ${c.capacity}. Red = fully booked.</div>`;
+    return `${grid}
       ${Object.keys(byProj).length ? `<div class="grid gap-0.5 mt-2">${Object.entries(byProj).map(([name, g]) => `<div class="text-xs"><a class="font-semibold underline" href="${g.entity_id ? projectLink(g.entity_id) : "#"}">${escapeHtml(name)}</a>
           <span class="text-black/55">${g.rows.map((b) => `${escapeHtml(b.slot || "")}${b.lead ? ` ${escapeHtml(b.lead)}` : ""} ${day(b.from)} to ${day(b.thru)}`).join("; ")}</span></div>`).join("")}</div>` : `<div class="text-xs text-black/55 mt-2">Not booked on anything during this job.</div>`}
       ${(c.time_off || []).length ? `<div class="text-xs text-amber-800 mt-1">Time off: ${(c.time_off || []).map((t) => escapeHtml(`${t.lead || "whole company"} ${t.start || t.from || ""} to ${t.end || t.thru || ""}`)).join("; ")}</div>` : ""}
       ${canOffer ? `<button type="button" class="pd-btn mt-2" data-offer-crew>Offer the job to ${escapeHtml(c.name)}</button>` : ""}`;
   }
 
+  const remountEditor = (j) => {
+    const slot = document.querySelector('#suDetail .sc[data-sc="crew"] [data-part]');
+    if (slot) mountPart(j, slot, ["crew"], "Pick the crew (company, lead, slot) for each set of dates, and any days off. Saves as you go.");
+  };
   async function loadOffers(j, el) {
     let d;
     try { d = await api(`/offers/project/${encodeURIComponent(j.project_qbo_id)}`); }
@@ -720,7 +908,18 @@ export async function setupPage(routeFn) {
           ${chip(...(status[o.status] || [o.status, C.quiet]))}<span class="text-xs text-black/45">sent ${day(o.sent_at)}${o.responded_at ? `, answered ${day(o.responded_at)}` : ""}</span>
           ${o.status === "sent" ? `<span class="flex gap-1.5 ml-auto"><button class="pd-btn" data-resp="${o.id}" data-st="accepted">Accepted</button><button class="pd-btn" data-resp="${o.id}" data-st="declined">Declined</button><button class="pd-btn" data-wd="${o.id}">Withdraw</button></span>` : ""}
         </div>`).join("")}</div>` : `<div class="text-xs text-black/50">No offer sent yet.</div>`}
-      ${!d.accepted && !d.offers.length && stepOf(D?.j || j, "crew").state === "done" ? `<div class="text-xs text-black/55 mt-1">The crew was assigned in the editor without an offer on record. <button type="button" class="su-linkbtn" data-showoffer>Record an offer anyway</button></div>` : ""}
+      ${!d.accepted && !d.offers.length && (D?.j || j).crews?.length ? `<div class="su-warn mt-1">A crew is assigned (${escapeHtml((D?.j || j).crews.join(", "))}) but no offer is on record. Was an offer sent outside the app? <button type="button" class="su-linkbtn" data-showoutside>Yes, record it</button> <button type="button" class="su-linkbtn" data-showoffer>No, send one from the app</button></div>` : ""}
+      ${d.accepted ? "" : `<details class="su-sub mt-3" data-outside><summary class="text-xs font-semibold text-black/70 cursor-pointer">Offer sent outside the app (email, text, the Drive sheet)</summary>
+        <form class="grid gap-2 mt-2" data-outform>
+          <div class="flex flex-wrap gap-2">
+            <label class="text-xs grid gap-1" style="flex:1;min-width:180px"><span class="text-black/55">Crew company</span><select name="crew" class="input text-sm" required><option value="">Choose a crew…</option>${d.crews.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select></label>
+            <label class="text-xs grid gap-1" style="width:140px"><span class="text-black/55">Labor amount</span><input name="amount" type="number" step="0.01" min="0" class="input text-sm tabular-nums" value="${d.suggested_labor || ""}"></label>
+            <label class="text-xs grid gap-1"><span class="text-black/55">Sent</span><input name="sent" type="date" class="input text-sm" required></label>
+            <label class="text-xs grid gap-1"><span class="text-black/55">Accepted (if yes)</span><input name="accepted" type="date" class="input text-sm"></label>
+          </div>
+          <label class="su-drop" data-odrop><input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.heic,.doc,.docx,.xlsx" hidden><span><b>Drop the signed offer here</b> or click to pick it (saved in the job's 7 Notes folder).</span></label>
+          <div><button type="submit" class="btn-primary text-sm">Record the offer</button></div>
+        </form></details>`}
       ${d.accepted ? "" : `<form data-new class="grid gap-2 mt-3 su-offer"${!d.offers.length && stepOf(D?.j || j, "crew").state === "done" ? " hidden" : ""}>
         <div class="flex flex-wrap gap-2">
           <label class="text-xs grid gap-1" style="flex:1;min-width:180px"><span class="text-black/55">Crew company</span><select name="crew" class="input text-sm" required><option value="">Choose a crew…</option>${d.crews.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}${c.boss_name ? ` (${escapeHtml(c.boss_name)})` : ""}</option>`).join("")}</select></label>
@@ -728,7 +927,7 @@ export async function setupPage(routeFn) {
         </div>
         <label class="text-xs grid gap-1"><span class="text-black/55">Scope (from the accepted estimates' labor lines; edit as needed)</span><textarea name="scope" rows="3" class="input text-sm">${escapeHtml(d.suggested_scope || "")}</textarea></label>
         <div class="flex flex-wrap gap-2 items-center"><button type="button" class="pd-btn" data-copytext>Copy offer text</button><button type="submit" class="btn-primary text-sm">Record offer as sent</button>
-          <span class="text-xs text-black/50">The app doesn't email crews yet: copy the text to the crew boss, then record it here.</span></div>
+          <span class="text-xs text-black/50">Needs the crew payment schedule first (Schedules below): the offer goes out with it. The app doesn't email crews yet: copy the text to the crew boss, then record it here.</span></div>
       </form>`}`;
     el.querySelectorAll("[data-resp]").forEach((b) => b.addEventListener("click", async () => {
       b.disabled = true;
@@ -741,7 +940,30 @@ export async function setupPage(routeFn) {
       catch (e) { alert(`Couldn't withdraw: ${e?.message || e}`); }
     }));
     const form = el.querySelector("[data-new]");
-    el.querySelector("[data-showoffer]")?.addEventListener("click", (ev) => { form.hidden = false; ev.target.parentElement.remove(); });
+    el.querySelector("[data-showoffer]")?.addEventListener("click", (ev) => { if (form) form.hidden = false; ev.target.parentElement.remove(); });
+    el.querySelector("[data-showoutside]")?.addEventListener("click", (ev) => { const o = el.querySelector("[data-outside]"); if (o) { o.open = true; o.scrollIntoView({ block: "center" }); } ev.target.parentElement.remove(); });
+    const out = el.querySelector("[data-outform]");
+    if (out) {
+      const odrop = out.querySelector("[data-odrop]"), ofile = odrop.querySelector("input");
+      const showName = () => { odrop.querySelector("span").innerHTML = ofile.files[0] ? `<b>${escapeHtml(ofile.files[0].name)}</b> (click to change)` : "<b>Drop the signed offer here</b> or click to pick it (saved in the job's 7 Notes folder)."; };
+      ofile.addEventListener("change", showName);
+      odrop.addEventListener("dragover", (e) => { e.preventDefault(); odrop.classList.add("over"); });
+      odrop.addEventListener("dragleave", () => odrop.classList.remove("over"));
+      odrop.addEventListener("drop", (e) => { e.preventDefault(); odrop.classList.remove("over"); if (e.dataTransfer.files.length) { ofile.files = e.dataTransfer.files; showName(); } });
+      out.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = new FormData(out);
+        try {
+          if (ofile.files[0]) {
+            const fd = new FormData(); fd.append("file", ofile.files[0]);
+            await api(`/documents/project/${encodeURIComponent(j.project_qbo_id)}?folder=7_notes`, { method: "POST", body: fd });
+          }
+          const r = await api(`/offers/project/${encodeURIComponent(j.project_qbo_id)}/outside`, { method: "POST", body: JSON.stringify({ crew_id: Number(f.get("crew")), labor_amount: Number(f.get("amount") || 0) || null, sent_date: f.get("sent"), accepted_date: f.get("accepted") || null }) });
+          toast(r.assign_error ? `Recorded. Couldn't put the crew on the schedule: ${r.assign_error}` : "Offer recorded.");
+          await reloadJob(j.key); loadOffers(D?.j || j, el); remountEditor(j);
+        } catch (e) { alert(`Couldn't record it: ${e?.message || e}`); }
+      });
+    }
     form?.querySelector("[data-copytext]").addEventListener("click", async (ev) => {
       const f = new FormData(form);
       const crew = d.crews.find((c) => String(c.id) === f.get("crew"));
@@ -767,7 +989,11 @@ export async function setupPage(routeFn) {
     if (kp) { st.kpi = st.kpi === kp.dataset.kpi ? null : kp.dataset.kpi; st.view = "all"; st.open = false; if (!visible().some((j) => j.key === st.sel)) st.sel = visible()[0]?.key || st.sel; render(); return; }
     if (e.target.closest("[data-clearkpi]")) { st.kpi = null; render(true); return; }
     const v = e.target.closest("[data-view]");
-    if (v && root.contains(v) && !v.closest("#suDetail")) { st.view = v.dataset.view; st.kpi = null; st.open = false; remember(); render(); return; }
+    if (v && root.contains(v) && !v.closest("#suDetail")) {
+      st.view = v.dataset.view; st.kpi = null; st.open = false; remember();
+      if ((st.view === "all") !== (st.scope === "all")) { root.querySelector("#suList").innerHTML = `<div class="p-4 text-sm text-black/45">Loading…</div>`; load(); } else render();
+      return;
+    }
     const job = e.target.closest(".su-job");
     if (job) {
       st.sel = job.dataset.key; remember();

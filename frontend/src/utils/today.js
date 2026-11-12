@@ -28,7 +28,8 @@ const TILES = [
   { key: "closeout", cap: "page.assignment", href: "#/closeout", label: "Finished, not closed", load: async () => {
       const d = await api("/closeout/queue");
       const unb = d.jobs.reduce((a, j) => a + j.money.unbilled, 0);
-      return { value: d.jobs.length, caption: `${money0(unb)} still to bill on finished jobs`, bad: unb > 0 };
+      const recent = d.jobs.filter((j) => j.bucket === "recent").length;
+      return { value: d.jobs.length, caption: `${recent} ended since Oct 1 · ${money0(unb)} still to bill`, bad: unb > 0 };
     } },
   { key: "issues", cap: "page.customers", href: "#/issues", label: "Open problems", load: async () => {
       const d = await api("/issues");

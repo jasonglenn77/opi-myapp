@@ -14,7 +14,7 @@ import { chip, C } from "./ui.js";
 
 export const STATE_CHIP = {
   done: ["Done", C.good], not_needed: ["Not needed", C.quiet], todo: ["To do", C.warn],
-  waiting: ["Waiting", C.info], locked: ["Later", C.quiet], confirmed: ["Done", C.good],
+  waiting: ["Waiting", C.info], locked: ["Later", C.quiet], confirmed: ["Done", C.good], reviewed: ["Reviewed", C.quiet], review: ["Re-review", C.bad],
 };
 export const STATE_ICON = {
   done: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="#059669"/><path d="M6 10.5l2.5 2.5L14 7.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
@@ -24,6 +24,8 @@ export const STATE_ICON = {
   locked: `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="2 2"/></svg>`,
 };
 STATE_ICON.confirmed = STATE_ICON.done;
+STATE_ICON.review = `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#fff1f2" stroke="#e11d48" stroke-width="2"/><path d="M10 5.5v5.5M10 13.6v.4" stroke="#e11d48" stroke-width="2" stroke-linecap="round"/></svg>`;
+STATE_ICON.reviewed = `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="8.5" fill="#f1f5f9" stroke="#64748b"/><path d="M6 10.5l2.5 2.5L14 7.5" stroke="#64748b" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 const CHEV = `<svg class="sc-chev" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M7 5l5 5-5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 

@@ -564,6 +564,9 @@ a.ff-rc-row:hover { background:#eef4ff; border-color:rgba(37,99,235,.45); }
 .ap-idx { font-size:11px; font-weight:700; color:rgba(0,0,0,.45);
           align-self:center; padding-bottom:6px; }
 .ap-status { width:150px; }            /* the full "Needs attention" label fits */
+.ap-status-ro, .ap-ro { display:inline-flex; align-items:center; height:30px; font-size:12px; font-weight:600;
+                        color:#111827; white-space:nowrap; }
+.ap-status-ro { padding:0 8px; border-radius:6px; background:#f1f5f9; color:#334155; font-size:11px; }
 .ap-grow  { flex:1 1 150px; min-width:140px; }
 .ap-grow2 { flex:1.4 1 190px; min-width:170px; }
 .ap-notes { flex:1 1 180px; min-width:150px; }
@@ -1832,3 +1835,9 @@ body.hp-explaining, body.hp-explaining * { cursor:help !important; }
 .text-white\/30, .text-white\/35, .text-white\/40, .text-white\/45 { color:rgba(255,255,255,.6); }
 .sc-hint { color:rgba(0,0,0,.58); }
 .hp-q { font-size:21px; font-weight:800; line-height:1; font-family:inherit; }
+
+/* Project Setup: drop zones (PO, signed crew offer) */
+.su-drop { display:flex; align-items:center; justify-content:center; text-align:center; gap:6px; border:1.5px dashed rgba(0,0,0,.22);
+           border-radius:10px; padding:12px; font-size:12px; color:rgba(0,0,0,.6); cursor:pointer; background:#fafafa; }
+.su-drop:hover, .su-drop.over { border-color:#059669; background:#ecfdf5; color:#065f46; }
+.su-drop.busy { opacity:.6; pointer-events:none; }

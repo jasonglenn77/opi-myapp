@@ -8,9 +8,14 @@ about into notifications (notify.py), once each:
   audit_log                       invoice schedule edits, crew-pay edits, change
                                   orders, closeout and crew-pay decisions
 
-Who hears: the project's PMs (users linked to a PM), plus anyone who switched on
-"Alerts for every project" in their notification settings (the owners), never
-the person who made the change. One run's changes are grouped into one alert
+Who hears (2026-11-12): the project's PMs (users linked to a PM) and every
+office user (page.assignment) by default; anyone can switch a kind off in their
+notification settings, or "Change alerts for every project" off to hear only
+about their own projects. Never the person who made the change.
+
+Each run also (setup/reviews.py) turns the same changes into re-review items on
+Project Setup, alerts everyone when a project goes back to setup (setup.review),
+and keeps schedule-line statuses in step with the dates (projects/lifecycle.py). One run's changes are grouped into one alert
 per project and kind. Routine automatic
 moves (the nightly invoice re-dating and alignment) are not announced.
 
@@ -19,6 +24,7 @@ poll (at most once a minute per worker) instead of needing a scheduler.
 """
 import json
 import time
+import zlib
 from collections import defaultdict
 
 from sqlalchemy import bindparam, text
@@ -26,7 +32,7 @@ from sqlalchemy import bindparam, text
 from app.db import engine
 from .notify import notify
 
-WATCH_ALL = "watch.all_projects"   # notification_prefs kind: in_app=1 means "tell me about every project"
+WATCH_ALL = "watch.all_projects"   # notification_prefs kind: on by default for office users; in_app=0 = only my projects
 _last = {"at": 0.0}
 MIN_GAP = 60
 
@@ -167,6 +173,43 @@ def _audit(conn, owners, start):
     return max(last, rows[-1]["id"]), sent
 
 
+def office_users():
+    """Every active office user (page.assignment), minus those who switched
+    "Change alerts for every project" off."""
+    from .notify import users_with_capability
+    with engine.connect() as conn:
+        off = {r[0] for r in conn.execute(text(
+            "SELECT user_id FROM notification_prefs WHERE kind = :k AND in_app = 0"), {"k": WATCH_ALL}).all()}
+    return [u for u in users_with_capability("page.assignment") if u not in off]
+
+
+def _setup_reviews(office):
+    """Changes -> re-review items on Project Setup, one alert per project."""
+    from app.setup import reviews as RV
+    from app.projects import lifecycle as LC
+    try:
+        with engine.begin() as conn:
+            back = RV.process(conn)
+            LC.sync_line_status(conn)
+            names, emails = {}, {}
+            if back:
+                names = {str(q): n for q, n in conn.execute(text("SELECT qbo_id, display_name FROM qbo_customers WHERE qbo_id IN :e")
+                                                             .bindparams(bindparam("e", expanding=True)), {"e": list(back)}).all()}
+                emails = {str(em).lower(): uid for uid, em in conn.execute(text("SELECT id, email FROM users WHERE is_active = 1")).all() if em}
+    except Exception:
+        return 0
+    sent = 0
+    for e, why in back.items():
+        lines = list(dict.fromkeys(why))
+        text_all = " ".join(lines).lower()
+        made_by = {uid for em, uid in emails.items() if em in text_all}     # never alert the person who made the change
+        sent += notify([u for u in office if u not in made_by], "setup.review", f"Back to Project Setup: {names.get(e, e)}",
+                       body="\n".join(lines[:10]) + "\nRe-check the steps it reopened on Project Setup.",
+                       link=f"#/setup?job={e}", subject=e,
+                       dedupe_key=f"setup.review:{e}:{zlib.crc32(chr(10).join(lines).encode())}")
+    return sent
+
+
 def run(force=False):
     """Announce new changes. Returns how many notifications were stored."""
     now = time.time()
@@ -179,10 +222,7 @@ def run(force=False):
         if not got:
             return 0
         try:
-            with engine.connect() as conn:
-                owners = [r[0] for r in conn.execute(text(
-                    "SELECT p.user_id FROM notification_prefs p JOIN users u ON u.id = p.user_id AND u.is_active = 1 "
-                    "WHERE p.kind = :k AND p.in_app = 1"), {"k": WATCH_ALL}).all()]
+            owners = office_users()
             with engine.begin() as conn:
                 marks = dict(conn.execute(text("SELECT name, last_id FROM notification_watermark")).all())
             if not marks:
@@ -193,7 +233,7 @@ def run(force=False):
             with engine.begin() as conn:
                 conn.execute(text("UPDATE notification_watermark SET last_id = :v WHERE name = 'schedule_history'"), {"v": h_last})
                 conn.execute(text("UPDATE notification_watermark SET last_id = :v WHERE name = 'audit_log'"), {"v": a_last})
-            sent = n1 + n2
+            sent = n1 + n2 + _setup_reviews(owners)
         finally:
             lockc.execute(text("SELECT RELEASE_LOCK('opi_change_watch')"))
     return sent

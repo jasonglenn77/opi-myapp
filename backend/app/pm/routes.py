@@ -603,7 +603,7 @@ def my_work(pm: Optional[str] = None, user=Depends(require_capability("page.pm_p
         pass
     try:
         from app.closeout.routes import queue as co_queue
-        jobs = [j for j in co_queue(user=user)["jobs"] if has(j.get("pms"))]
+        jobs = [j for j in co_queue(user=user)["jobs"] if has(j.get("pms")) and j.get("bucket") != "paperwork"]
         out.append({"key": "closeout", "label": "Finished, not closed", "href": "#/closeout", "count": len(jobs),
                     "items": [{"id": j["entity_id"], "name": j["name"], "note": ", ".join(f["text"] for f in j["flags"][:2]) or f"{j['done']}/{j['total']} steps"} for j in jobs[:6]]})
     except Exception:

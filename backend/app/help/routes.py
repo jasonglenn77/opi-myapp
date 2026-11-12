@@ -48,7 +48,9 @@ FB_STATUSES = ("new", "in_progress", "answered", "closed")
 
 # Notification kinds a person can switch on/off (label shown on the settings card).
 NOTIFICATION_KINDS = [
-    ("watch.all_projects", "Change alerts for every project, not only mine (owners)"),
+    ("watch.all_projects", "Change alerts for every project, not only mine (on for office staff; switch off to hear only about your projects)"),
+    ("setup.review", "A project went back to Project Setup (dates, change order, crew or contract changed)"),
+    ("setup.note", "Setup notes: no PO yet, estimate not done, first invoice not sent"),
     ("feedback.reply", "Replies to my feedback"),
     ("feedback.new", "New feedback sent (staff)"),
     ("change.dates", "Project dates changed"),

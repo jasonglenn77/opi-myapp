@@ -11,8 +11,13 @@ import { openProjectDrawer } from "../utils/project-drawer.js";
 import { chip, C, day, money0, money2, projectLink } from "../utils/ui.js";
 import { openDocViewer, DOC_ICON } from "../utils/doc-viewer.js";
 import { stepCardHtml, bindStepCards, STATE_ICON } from "../utils/stepcards.js";
+import { modal, closeModal, toast } from "../utils/help.js";
 
-const VIEWS = [["all", "All finished jobs"], ["money", "Money open"], ["bill", "To bill"], ["collect", "To collect"], ["crew", "Crew owed"], ["paper", "Paperwork"], ["review", "Ready to close"]];
+// Tabs: which finished jobs (by when they ended and what's open). The KPI tiles
+// filter further (to bill, to collect, crew owed, forms, ready to close).
+const TABS = [["all", "All not closed"], ["recent", "Ended since Oct 1"], ["open", "Older: open items"], ["paperwork", "Older: paperwork only"], ["closed", "Closed"]];
+const TILES = { bill: "To bill", collect: "To collect", crew: "Crew owed", paper: "Forms & status", review: "Ready to close" };
+const VIEWS = [...TABS, ...Object.entries(TILES)];
 const GROUPS = ["Job", "Money in", "Money out", "Review"];
 // Where to go to fix each step.
 const FIX = {
@@ -25,12 +30,12 @@ export async function closeoutPage(routeFn) {
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem("opi_closeout") || "{}"); } catch (_) {}
   const isPhone = () => window.matchMedia("(max-width: 1023px)").matches;
-  const st = { jobs: [], view: VIEWS.some(([k]) => k === saved.view) ? saved.view : "all", q: "", pm: "", sel: saved.sel || null, open: false, meta: {} };
+  const st = { jobs: [], closedJobs: null, view: VIEWS.some(([k]) => k === saved.view) ? saved.view : "all", q: "", pm: "", sel: saved.sel || null, open: false, meta: {} };
   const remember = () => { try { sessionStorage.setItem("opi_closeout", JSON.stringify({ view: st.view, sel: st.sel })); } catch (_) {} };
 
   setShell({
     title: "Project Closeout",
-    subtitle: "Finished jobs that aren't closed yet: the final invoice, getting paid, paying the crew in full, bills, change orders and the completion paperwork. A job leaves once every step is done.",
+    subtitle: "Every finished job until it's closed out: the final invoice, getting paid, paying the crew in full, bills, change orders, the completion paperwork, then the Review (100% sign-off and margin). A job leaves once it's closed out.",
     bodyHtml: `<div id="coRoot" class="qpage"><div class="card p-6 text-sm text-black/45">Loading finished jobs…</div></div>`,
     routeFn,
   });
@@ -40,21 +45,28 @@ export async function closeoutPage(routeFn) {
   const open = (j, k) => stepOf(j, k).state === "todo";
   const moneyOpen = (j) => j.money.unbilled > 1 || j.money.open_ar > 1 || j.money.crew_owed > 1 || j.money.retainage > 1;
   const TEST = {
-    all: () => true, money: moneyOpen, bill: (j) => open(j, "final_invoice"), collect: (j) => open(j, "paid") || open(j, "retainage"),
+    all: () => true, recent: (j) => j.bucket === "recent", open: (j) => j.bucket === "open", paperwork: (j) => j.bucket === "paperwork",
+    closed: () => true, money: moneyOpen, bill: (j) => open(j, "final_invoice"), collect: (j) => open(j, "paid") || open(j, "retainage"),
     crew: (j) => open(j, "crew_paid"), paper: (j) => open(j, "completion_form") || open(j, "marked_complete") || open(j, "change_orders"),
     review: (j) => j.steps.every((s) => s.key === "margin" || s.state !== "todo"),
   };
+  const pool = () => (st.view === "closed" ? st.closedJobs || [] : st.jobs);
   function visible() {
     const q = st.q.trim().toLowerCase();
-    return st.jobs.filter((j) => TEST[st.view](j)
+    return pool().filter((j) => TEST[st.view](j)
       && (!st.pm || (j.pms || []).includes(st.pm))
       && (!q || `${j.name} ${j.dealer || ""} ${(j.pms || []).join(" ")}`.toLowerCase().includes(q)));
   }
 
+  async function loadClosed() {
+    if (st.closedJobs) return;
+    try { st.closedJobs = (await api("/closeout/queue?closed=1")).jobs; } catch (_) { st.closedJobs = []; }
+  }
   async function load() {
     try {
       const d = await api("/closeout/queue");
       st.jobs = d.jobs; st.meta = d;
+      if (st.view === "closed") await loadClosed();
       if (!st.sel || !st.jobs.some((j) => j.entity_id === st.sel)) st.sel = visible()[0]?.entity_id || null;
       render();
     } catch (e) {
@@ -74,7 +86,7 @@ export async function closeoutPage(routeFn) {
       ${tile("Still to bill", money0(unb), `${n((j) => open(j, "final_invoice"))} jobs: final invoice not sent`, unb > 0, "bill")}
       ${tile("Owed to OPI", money0(ar), `${n((j) => open(j, "paid"))} jobs with unpaid invoices`, false, "collect")}
       ${tile("Owed to crews", money0(crew), `${n((j) => open(j, "crew_paid"))} jobs: crew not paid in full`, false, "crew")}
-      ${tile("Paperwork", n(TEST.paper), "Completion form, status or change orders", false, "paper")}
+      ${tile("Forms & status", n(TEST.paper), "Completion form, status or change orders", false, "paper")}
       ${tile("Ready to close", n(TEST.review), "Everything in; review the margin", false, "review")}
     </div>`;
   }
@@ -101,30 +113,36 @@ export async function closeoutPage(routeFn) {
   function render() {
     remember();
     const pms = [...new Set(st.jobs.flatMap((j) => j.pms || []))].sort();
-    const counts = Object.fromEntries(VIEWS.map(([k]) => [k, st.jobs.filter(TEST[k]).length]));
+    const counts = Object.fromEntries(VIEWS.map(([k]) => [k, k === "closed" ? (st.closedJobs ? st.closedJobs.length : "") : st.jobs.filter(TEST[k]).length]));
+    const shown = visible();
+    const canBulk = st.meta.can_sign && st.view !== "closed" && shown.length > 0;
     root.classList.toggle("su-open", st.open);
     root.innerHTML = `
       ${kpis()}
       <div class="su-bar-row">
-        <div class="tabs" role="tablist">${VIEWS.map(([k, l]) => `<button role="tab" class="tab" data-view="${k}" aria-selected="${st.view === k}">${l} <span class="tab-n">${counts[k]}</span></button>`).join("")}</div>
+        <div class="tabs" role="tablist">${TABS.map(([k, l]) => `<button role="tab" class="tab" data-view="${k}" aria-selected="${st.view === k}">${l} <span class="tab-n">${counts[k]}</span></button>`).join("")}</div>
         <input id="coQ" class="input text-sm su-q" placeholder="Search job, dealer or PM" value="${esc(st.q)}">
         <select id="coPm" class="input text-sm su-pm"><option value="">All PMs</option>${pms.map((p) => `<option${p === st.pm ? " selected" : ""}>${esc(p)}</option>`).join("")}</select>
+        ${TILES[st.view] ? `<button type="button" class="pd-btn" data-view="all" title="Show all jobs again">Showing: ${esc(TILES[st.view])} ✕</button>` : ""}
+        ${canBulk ? `<button type="button" class="pd-btn" id="coBulk" title="Close out every job in this list at once, with one note">Close out these ${shown.length}…</button>` : ""}
       </div>
       <div class="su-grid">
         <div class="card su-list" id="coList">${listHtml()}</div>
         <div id="coDetail" class="q-detail"></div>
       </div>
-      <div class="text-xs text-white/50 mt-3">Jobs that finished more than ${st.meta.old_days || 180} days ago only show while money is still open. ${st.meta.closed_recent ? `${st.meta.closed_recent} job${st.meta.closed_recent === 1 ? "" : "s"} closed in the last 60 days.` : ""}</div>`;
+      <div class="text-xs text-white/50 mt-3">Every finished job stays here until it's closed out, whatever its age. Jobs that ended before ${day(st.meta.cutover || "2026-10-01")} are split into those with money or a change order still open and those with only paperwork gaps. ${st.meta.closed_recent ? `${st.meta.closed_recent} job${st.meta.closed_recent === 1 ? "" : "s"} closed in the last 60 days.` : ""}</div>`;
     bind();
     renderDetail();
   }
 
   function bind() {
-    root.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => {
+    root.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", async () => {
       st.view = b.dataset.view;
+      if (st.view === "closed") await loadClosed();
       if (!visible().some((j) => j.entity_id === st.sel)) st.sel = visible()[0]?.entity_id || null;
       render();
     }));
+    root.querySelector("#coBulk")?.addEventListener("click", bulkClose);
     const q = root.querySelector("#coQ");
     q.addEventListener("input", () => { st.q = q.value; root.querySelector("#coList").innerHTML = listHtml(); bindList(); });
     root.querySelector("#coPm").addEventListener("change", (e) => { st.pm = e.target.value; render(); });
@@ -159,7 +177,11 @@ export async function closeoutPage(routeFn) {
     const acts = [];
     if (s.state === "todo") {
       acts.push(fixLink(j, s.key));
-      acts.push(`<button type="button" class="pd-btn" data-mark="${s.how === "manual" ? "done" : "not_needed"}" data-step="${s.key}">${s.how === "manual" ? "Close out" : "Not needed"}</button>`);
+      if (s.key === "signoff") {
+        if (st.meta.can_sign) acts.push(`<button type="button" class="pd-btn" data-mark="done" data-step="signoff">Sign off</button>`);
+      } else {
+        acts.push(`<button type="button" class="pd-btn" data-mark="${s.how === "manual" ? "done" : "not_needed"}" data-step="${s.key}">${s.how === "manual" ? "Close out" : "Not needed"}</button>`);
+      }
     }
     if (s.mark) acts.push(`<button type="button" class="pd-btn" data-mark="" data-step="${s.key}">Undo</button>`);
     const markTxt = s.mark ? `<div class="text-[11px] text-black/45 mt-0.5">Marked by ${esc(s.mark.by_email || "")} ${s.mark.at ? day(s.mark.at) : ""}${s.mark.note ? `: ${esc(s.mark.note)}` : ""}</div>` : "";
@@ -176,7 +198,7 @@ export async function closeoutPage(routeFn) {
 
   function renderDetail() {
     let box = root.querySelector("#coDetail");
-    const j = st.jobs.find((x) => x.entity_id === st.sel);
+    const j = pool().find((x) => x.entity_id === st.sel);
     if (!box) return;
     const fresh = box.cloneNode(false); box.replaceWith(fresh); box = fresh;   // drop the last job's listeners
     if (!j) { box.innerHTML = `<div class="card p-6 text-sm text-black/50">Pick a job on the left.</div>`; D = null; return; }
@@ -220,15 +242,32 @@ export async function closeoutPage(routeFn) {
       if (!b) return;
       const step = b.dataset.step;
       const status = b.dataset.mark || null;
-      let note = null;
+      let note = null, closeAll = false;
       if (status) {
-        note = prompt(status === "done" ? "Note for the record (optional): e.g. margin reviewed with Luke" : "Why isn't this needed? (kept with the job)");
+        const others = j.steps.filter((x) => x.state === "todo" && x.key !== "margin");
+        if (step === "margin" && others.length) {
+          if (!confirm(`${others.length} step${others.length === 1 ? " is" : "s are"} still open:\n• ${others.map((x) => x.label).join("\n• ")}\n\nClose this job out anyway? ${others.length === 1 ? "It" : "They"} will be marked Reviewed with your note.`)) return;
+          closeAll = true;
+        }
+        note = prompt(step === "signoff" ? "Sign-off note (optional): e.g. numbers reviewed, OK to close"
+          : status === "done" ? (closeAll ? "Why is this job being closed with steps open? (kept with the job)" : "Note for the record (optional): e.g. margin reviewed with Luke")
+          : "Why isn't this needed? (kept with the job)");
         if (note === null) return;
+        if (closeAll && !note.trim()) { alert("Add a short note saying why the open steps are OK."); return; }
       }
       b.disabled = true;
       try {
-        const row = await api(`/closeout/job/${encodeURIComponent(j.entity_id)}/step/${step}`, { method: "POST", body: JSON.stringify({ status, note }) });
+        const row = await api(`/closeout/job/${encodeURIComponent(j.entity_id)}/step/${step}`, { method: "POST", body: JSON.stringify({ status, note, close_all: closeAll }) });
         Object.assign(j, row);
+        if (row.closed && st.view !== "closed") {
+          st.jobs = st.jobs.filter((x) => x.entity_id !== j.entity_id);
+          st.closedJobs = null;
+          toast(`${j.name} closed out.`);
+          st.sel = visible()[0]?.entity_id || null;
+          render();
+          return;
+        }
+        if (!row.closed && st.view === "closed") { st.closedJobs = (st.closedJobs || []).filter((x) => x.entity_id !== j.entity_id); load(); return; }
         refreshHeads(j);
         root.querySelector("#coList").innerHTML = listHtml(); bindList();
       } catch (er) { b.disabled = false; alert(`Couldn't save: ${er?.message || er}`); }
@@ -267,7 +306,7 @@ export async function closeoutPage(routeFn) {
     marked_complete(j, d, body) {
       const x = d.marked_complete || {};
       body.innerHTML = err(x) || `${table(["Schedule line", "Start", "End", ">Overage", "Status"], (x.items || []).map((i, n) => `<tr><td>#${n + 1}</td><td>${day(i.start)}</td><td>${day(i.end)}</td>${r(i.overage_days || 0)}<td>${esc(statusTxt[i.status] || i.status || "")}</td></tr>`), "No schedule lines.")}
-        <div class="text-xs text-black/55 mt-2">${(x.pms || []).length ? `PM: ${esc(x.pms.join(", "))}. ` : ""}Set the status to Completed in the project's Assignment (Open project workspace).</div>`;
+        <div class="text-xs text-black/55 mt-2">${(x.pms || []).length ? `PM: ${esc(x.pms.join(", "))}. ` : ""}The status follows the dates: if the work is done, set the real last day on the project's Assignment (Open project workspace).</div>`;
     },
     completion_form(j, d, body) {
       const x = d.completion_form || {};
@@ -312,7 +351,7 @@ export async function closeoutPage(routeFn) {
       const x = d.signoff || {};
       if (x.error) { body.innerHTML = err(x); return; }
       const p = x.progress;
-      body.innerHTML = `<div class="text-sm">${x.required ? "This job needs a 100% sign-off" : "No sign-off required"}${x.rule ? ` <span class="text-black/50">(Progress Checks asks for one on ${esc(x.rule)})</span>` : ""}.</div>
+      body.innerHTML = `<div class="text-sm">Every job gets a 100% sign-off at close-out, whatever its size. ${st.meta.can_sign ? "Sign off here (Sign off above) or on Progress Checks." : "Someone with sign-off access (owners) signs it off here or on Progress Checks."}</div>
         ${p ? `<div class="mt-2">${facts([["Progress check", esc(p.status || "—")], ["Time used", pc(p.pct_time)], ["Invoiced", pc(p.pct_invoiced)], ["Labor paid", pc(p.pct_labor)], ["Cost spent", pc(p.pct_cost)], p.last_checkpoint != null ? ["Last checkpoint", `${p.last_checkpoint}%${p.last_checkpoint_date ? ` · ${day(p.last_checkpoint_date)}` : ""}`] : null])}</div>` : ""}
         ${(x.signoffs || []).length ? `<div class="mt-2">${table(["Milestone", "Decision", "By", "When", "Note"], x.signoffs.map((s) => `<tr><td>${esc(String(s.milestone))}%</td><td>${esc(s.decision || "")}</td><td>${esc(s.by || "")}</td><td>${day(s.at)}</td><td>${esc(s.note || "")}</td></tr>`), "")}</div>` : ""}`;
     },
@@ -321,7 +360,7 @@ export async function closeoutPage(routeFn) {
       if (x.error) { body.innerHTML = err(x); return; }
       body.innerHTML = `${facts([["Revenue", money0(x.revenue)], ["Cost", money0(x.cost)], ["Profit", money0(x.profit), x.profit < 0 ? "text-rose-700" : ""], ["Margin", pct1(x.margin_pct), x.margin_pct != null && x.margin_pct < 10 ? "text-rose-700" : ""], ["Planned margin", pct1(x.planned_margin_pct)]])}
         <div class="mt-2">${table(["Cost category", ">Estimate", ">Actual", ">Over"], (x.categories || []).map((c) => `<tr${c.over > 0 ? ' class="su-diff"' : ""}><td>${esc(c.category || "")}</td>${r(money0(c.estimate))}${r(money0(c.actual))}${r(c.over > 0 ? money0(c.over) : "", c.over > 0 ? "font-bold text-rose-700" : "")}</tr>`), "No cost categories on record.")}</div>
-        <div class="text-xs text-black/50 mt-2">When the numbers are right, press "Close out" on this step. The job then leaves the list.</div>`;
+        <div class="text-xs text-black/50 mt-2">When the numbers are right, press "Close out" on this step. Any step still open is marked Reviewed with your note, and the job leaves the list (find it under Closed; Undo there reopens it).</div>`;
     },
   };
 
@@ -335,10 +374,40 @@ export async function closeoutPage(routeFn) {
         ${table(["Line", ">%", "Invoice date", ">Amount"], x.schedule_to_bill.map((s) => `<tr><td>${esc(s.label || "")}${s.estimate ? ` <span class="text-black/45">· est ${esc(String(s.estimate))}</span>` : ""}</td>${r(s.pct != null ? `${Math.round(s.pct)}%` : "")}<td>${day(s.invoice_date)}</td>${r(money2(s.amount))}</tr>`), "")}` : ""}`;
   }
 
+  // Close out every job in the current list at once (owners): one note, kept on each job.
+  function bulkClose() {
+    const jobs = visible();
+    if (!jobs.length) return;
+    const label = (TABS.find(([k]) => k === st.view) || [null, TILES[st.view]])[1];
+    const m = modal(`
+      <div class="text-lg font-extrabold">Close out ${jobs.length} job${jobs.length === 1 ? "" : "s"}</div>
+      <div class="text-sm text-black/60 mt-1">${esc(label || "")}${st.q || st.pm ? " (with your search and PM filter)" : ""}. On each job, every step still open is marked <b>Reviewed</b> with this note, the 100% sign-off included, and the job is closed out. Each one is kept in its history with your name.</div>
+      <div class="text-xs text-black/55 mt-2 max-h-40 overflow-y-auto border border-black/10 rounded-lg p-2">${jobs.slice(0, 60).map((j) => `<div class="truncate">${esc(j.name)}${j.end ? ` <span class="text-black/40">· ended ${day(j.end)}</span>` : ""}</div>`).join("")}${jobs.length > 60 ? `<div class="text-black/45">and ${jobs.length - 60} more</div>` : ""}</div>
+      <label class="grid gap-1 mt-3 text-sm"><span class="font-semibold">Note (required)</span>
+        <textarea data-note class="input" rows="2" placeholder="e.g. Finished before the app tracked crew pay and completion forms; reviewed with Luke 11/12"></textarea></label>
+      <div class="flex justify-end gap-2 mt-4">
+        <button type="button" class="pd-btn" data-cancel>Cancel</button>
+        <button type="button" class="btn-primary" data-go>Close out ${jobs.length}</button>
+      </div>`, { wide: true });
+    m.querySelector("[data-cancel]").addEventListener("click", () => closeModal(m));
+    m.querySelector("[data-go]").addEventListener("click", async (e) => {
+      const note = m.querySelector("[data-note]").value.trim();
+      if (!note) { m.querySelector("[data-note]").focus(); return; }
+      e.target.disabled = true; e.target.textContent = "Closing…";
+      try {
+        const r = await api("/closeout/bulk-close", { method: "POST", body: JSON.stringify({ entity_ids: jobs.map((j) => j.entity_id), note }) });
+        closeModal(m);
+        toast(`${r.closed} job${r.closed === 1 ? "" : "s"} closed out.`);
+        st.closedJobs = null; st.sel = null;
+        load();
+      } catch (er) { e.target.disabled = false; e.target.textContent = `Close out ${jobs.length}`; alert(`Couldn't close them: ${er?.message || er}`); }
+    });
+  }
+
   async function reload(eid) {
     try {
       const row = await api(`/closeout/job/${encodeURIComponent(eid)}`);
-      const j = st.jobs.find((x) => x.entity_id === eid);
+      const j = pool().find((x) => x.entity_id === eid);
       if (j) Object.assign(j, row);
       delete cache[eid];
       root.querySelector("#coList").innerHTML = listHtml(); bindList();
