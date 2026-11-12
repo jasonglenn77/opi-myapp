@@ -78,6 +78,13 @@ export async function api(path, opts = {}) {
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+  // Sliding session: the backend hands an active sign-in a renewed token
+  // (auth.py) — keep it where the current one lives, so working in the app
+  // never signs you out (idle 14 days, or 90 days after signing in, does).
+  const renewed = token && res.headers.get("X-Session-Token");
+  if (renewed && getToken() === token) {
+    (localStorage.getItem("token") ? localStorage : sessionStorage).setItem("token", renewed);
+  }
   const ct = res.headers.get("content-type") || "";
   const body = ct.includes("application/json") ? await res.json() : await res.text();
   if (!res.ok) {

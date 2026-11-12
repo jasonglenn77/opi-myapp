@@ -436,9 +436,9 @@ function render(container, entityId, d) {
     // where the installments came from — the Payment Schedule file opens in the viewer
     const cs = a.crew_source || {};
     const srcLine = cs.source && String(cs.source).startsWith("sheet")
-      ? `<div class="px-4 py-1 text-[11.5px] text-black/55 flex items-center gap-1.5 flex-wrap">From the crew Payment Schedule in Google Drive${cs.source_modified ? ` (updated ${escapeHtml(shortDate(cs.source_modified))})` : ""}, read nightly; the sheet wins.
+      ? `<div class="px-4 py-1 text-[11.5px] text-black/55 flex items-center gap-1.5 flex-wrap">First copied from the crew Payment Schedule in Google Drive${cs.source_modified ? ` (file updated ${escapeHtml(shortDate(cs.source_modified))})` : ""}. Edit it here: the sheet is read for reference only and never changes it (Data Review lists where they differ).
           ${cs.source_doc_id ? `<button type="button" data-srcdoc="${cs.source_doc_id}" data-srcname="${escapeHtml(cs.source_file_name || "Payment Schedule")}" class="src-doc-btn" title="Open the file this schedule was read from">${DOC_ICON} ${escapeHtml(cs.source_file_name || "Payment Schedule")}</button>` : ""}</div>`
-      : cs.source ? `<div class="px-4 py-1 text-[11.5px] text-black/45">No Payment Schedule in Drive for this estimate: the estimate's labor split evenly across bi-weekly paydays.</div>` : "";
+      : cs.source ? `<div class="px-4 py-1 text-[11.5px] text-black/45">No crew payment schedule entered for this estimate: the estimate's labor split evenly across bi-weekly paydays.</div>` : "";
     return `<details class="group/ce border-b border-black/[0.06]">
       <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015] flex-wrap">
         <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>

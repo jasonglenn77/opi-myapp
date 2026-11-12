@@ -1,8 +1,9 @@
 """
 Data Review — category "payments": the crew "Payment Schedule" files in Drive
-vs the app (payment_import.py writes the app side every night; this lists what
-it couldn't match or map, and where the sheet, QuickBooks and the Job Schedule
-disagree). Reads only the database: gsync_payment_files (the import's cached
+vs the app. Since 2026-11-12 the files are read for reference only (never
+applied): this lists what couldn't be matched or mapped, where the sheet,
+QuickBooks and the Job Schedule disagree, and (sheet_differs) where a sheet says
+something different from the app's crew payment schedule. Reads only the database: gsync_payment_files (the import's cached
 parse, with the per-file issues of the last run in parsed._issues),
 qbo_customers, and gsync_schedule_days for the Job Schedule check.
 
@@ -157,6 +158,86 @@ def payment_items(conn):
                                  fix="If this file is the current plan, delete or rename the other one (\"… old\"); if it's "
                                      "a separate scope, name it \"Payment Schedule - <scope>\".", link=link, ref=ref))
     out += _no_schedule_items(conn, has_file, today)
+    out += _diff_items(conn, today)
+    return out
+
+
+_FIELD = {"pay_date": "pay date", "amount": "amount", "send_invoice_date": "send-invoice date", "status": "status",
+          "note": "note", "sheet_paid": "paid mark", "paid_source": "paid from", "qbo_txn_id": "QuickBooks payment"}
+
+
+def _val(k, v):
+    if v in (None, "", "None"):
+        return "blank"
+    if k == "amount":
+        try:
+            return _money(float(v))
+        except (TypeError, ValueError):
+            return str(v)
+    if k in ("pay_date", "send_invoice_date") and re.match(r"\d{4}-\d\d-\d\d", str(v)):
+        return _md(str(v)[:10])
+    return str(v)
+
+
+def _diff_items(conn, today):
+    """Reference mode (2026-11-12): the Payment Schedule sheets are read, never
+    applied. One item per project whose sheet says something different from the
+    app's crew payment schedule (saved by payment_import.run(store=True))."""
+    try:
+        rows = conn.execute(text("SELECT entity_id, project, changes, files, checked_at FROM gsync_payment_diffs")).mappings().all()
+    except Exception:
+        conn.rollback()
+        return []
+    names = {str(q): n for q, n in conn.execute(text("SELECT qbo_id, display_name FROM qbo_customers WHERE is_project = 1")).all()}
+    crew_of = {sid: " ".join(x for x in (nm, f"(estimate {est})" if est else None, lab) if x)
+               for sid, nm, est, lab in conn.execute(text("""SELECT s.id, c.name, s.estimate_doc_number, s.source_label
+                   FROM project_payment_schedules s LEFT JOIN work_crews c ON c.id = s.crew_id""")).all()}
+    out = []
+    recent = (today - timedelta(days=90)).isoformat()
+    for r in rows:
+        ch = r["changes"] if isinstance(r["changes"], list) else json.loads(r["changes"] or "[]")
+        files = r["files"] if isinstance(r["files"], list) else json.loads(r["files"] or "[]")
+        if not ch:
+            continue
+        lines, dates = [], []
+        multi = len({c.get("schedule_id") for c in ch if c.get("schedule_id")}) > 1
+        for c in ch:
+            who = crew_of.get(c.get("schedule_id")) if multi else None
+            pre = f"{who}, p" if who else "P"
+            if "changed" in c:
+                parts = [f"{_FIELD.get(k, k)} {_val(k, a)} in the app, {_val(k, b)} on the sheet"
+                         for k, (a, b) in c["changed"].items()]
+                dates += [v for k, ab in c["changed"].items() if k == "pay_date" for v in ab if v]
+                lines.append(f"{pre}ayment #{c['row']}: " + "; ".join(parts))
+            elif "new" in c:
+                n = c["new"]
+                dates.append(n.get("pay_date"))
+                lines.append(f"{pre}ayment #{c['row']} only on the sheet: {_val('pay_date', n.get('pay_date'))} {_val('amount', n.get('amount'))}")
+            elif "deleted" in c:
+                n = c["deleted"]
+                dates.append(n.get("pay_date"))
+                lines.append(f"{pre}ayment #{c['row']} only in the app: {_val('pay_date', n.get('pay_date'))} {_val('amount', n.get('amount'))}")
+            elif c.get("created"):
+                lines.append(f"The sheet {c.get('file') or ''} has a crew schedule the app doesn't".replace("  ", " "))
+            elif c.get("released"):
+                lines.append("The app has a crew schedule from a sheet that's no longer in Drive")
+            elif c.get("covered_by_sheet"):
+                lines.append("The sheet covers a change order's crew labor the app schedules separately")
+        active = any(str(d or "")[:10] >= recent for d in dates) or not dates
+        name = names.get(str(r["entity_id"])) or r["project"] or "Project"
+        f0 = files[0] if files else None
+        ref = {"qbo_id": r["entity_id"]}
+        if f0:
+            ref.update(file_id=f0["id"], sheet_url=_url(f0["id"], f0.get("mime")))
+        n = len(lines)
+        out.append(_item(CAT, "sheet_differs", str(r["entity_id"]), "medium" if active else "low",
+                         f"{name}: the crew Payment Schedule sheet differs from the app ({n} difference{'s' if n != 1 else ''})",
+                         "; ".join(lines[:8]) + (f"; and {n - 8} more" if n > 8 else "") + "."
+                         + (f" Sheet: {', '.join(f['name'] for f in files[:3])}." if files else ""),
+                         fix="The sheet is read for reference only: nothing was changed. If the sheet is right, update the crew "
+                             "payment schedule in the app (the project's Billing & Schedule tab); if the app is right, "
+                             "Ignore this or update the sheet.",
+                         link=f"#/entity/project/{r['entity_id']}", ref=ref))
     return out
 
 
@@ -191,7 +272,7 @@ def _no_schedule_items(conn, has_file, today):
                          f"Crew {', '.join(sorted(J['crews']))} scheduled {_md(first)} – {_md(last)}; no edited "
                          "\"Payment Schedule\" file in the project's Drive folder, so the app has no negotiated crew "
                          "payment plan (it shows the estimate's even split).",
-                         fix="Fill in the Payment Schedule in the project's Drive folder (7 Notes) — the app picks it up "
-                             "on the next refresh.", link=f"#/entity/project/{p['qbo_id']}",
+                         fix="Add the crew payment schedule in the app (the project's Billing & Schedule tab). A Payment "
+                             "Schedule sheet in the project's Drive folder is read for reference only.", link=f"#/entity/project/{p['qbo_id']}",
                          ref={"qbo_id": p["qbo_id"], "job": j}, sheet=[str(first), str(last)]))
     return out

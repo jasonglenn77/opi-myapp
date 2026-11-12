@@ -21,7 +21,7 @@ export const TOURS = {
   app: {
     title: "The OPI app",
     steps: [
-      { title: "Welcome to the OPI app", body: "One place for every job, from the RFQ to the last crew payment.\nIt reads QuickBooks and the Google Drive sheets every night, so its numbers match what the office keeps. The menu (on the left, or More at the bottom of a phone) follows a job's life from top to bottom: sell it, set it up, run it, close it, and get paid." },
+      { title: "Welcome to the OPI app", body: "One place for every job, from the RFQ to the last crew payment.\nEvery night it reads QuickBooks, the B151 (into the Pipeline) and the Job Schedule (into Assignments). Other Drive sheets, like crew payment schedules, PO PDFs and completion forms, are read so you can see them, but they never change the app's schedules or amounts. The menu (on the left, or More at the bottom of a phone) follows a job's life from top to bottom: sell it, set it up, run it, close it, and get paid." },
       { el: navGroup("#/pipeline"), title: "Sales: before a job is won", body: "• Pipeline: the B151. Every RFQ and quote from received to quoting, sent, won or lost.\n• Customers and Contacts: who we quote for, with their projects and history.\n• Customer Portal: a private link a customer opens to see their projects and approve change orders.\nGo here for: \"Where is quote 7766?\" or \"What have we quoted this customer?\"" },
       { el: navGroup("#/setup"), title: "Start projects: from won to ready", body: "• Project Setup: the checklist for every new job (QuickBooks project and estimate, first invoice, PM, crew, dates and schedules).\n• Assignments and Schedules: who is on which job, and when.\n• Crew Operations: crew pay coming up and jobs that still need a crew.\nGo here for: \"What's left to set up?\" or \"Who's free next week?\"" },
       { el: navItem("#/running"), title: "Running Jobs: every job under way", body: "How each job is going: how far along it is against its days, costs against plan, checkpoints and sign-offs, invoices and crew pay, its problems, and the customer and crew updates the PM owes.\nGo here for: \"How is the Amazon job going?\" or \"Which jobs are over budget?\"" },
@@ -44,10 +44,10 @@ export const TOURS = {
   "#/pipeline": {
     title: "Pipeline",
     steps: [
-      { title: "Pipeline: every quote", body: "The B151 in the app: every RFQ and quote, from received to won or lost. Estimators and sales use it to track follow-ups; once a quote is 100% won, it shows up in Project Setup.\nIt's kept in step with the B151 sheet (Refresh from B151) and QuickBooks estimates." },
+      { title: "Pipeline: every quote", body: "The B151 in the app: every RFQ and quote, from received to won or lost. Estimators and sales use it to track follow-ups; once a quote is 100% won, it shows up in Project Setup.\nIt's kept in step with the B151 sheet (every night, or Refresh from B151) and QuickBooks estimates." },
       { el: "#pMetrics", title: "The totals", body: "How much is open, quoted, won and lost for what's shown below." },
       { el: "#pFilters", title: "Stages and filters", body: "Pick a stage (Open, Received, Quoting, Sent, Won, Lost, Declined) or All. \"No customer\" lists quotes not yet tied to a QuickBooks customer.\n+ New adds an RFQ; Refresh from B151 pulls in the sheet's latest rows." },
-      { el: "#pList", title: "The opportunities", body: "One row per RFQ or quote: status, last contact, quote number, estimator and dates. Click a heading to sort or filter. Expand a row for its documents and quote revisions; a won quote links to the project it became." },
+      { el: "#pList", title: "The opportunities", body: "One row per RFQ or quote: status, last contact, quote number, estimator and dates. Click a heading to sort or filter. Expand a row for its documents and quote revisions; a won quote links to the project it became.\nWorkbook ↗ opens the quote's Quoting Metrics sheet in Drive: the B151 row's link, or, when that's empty, the workbook named after the quote number." },
       { title: "Next", body: "• A won job's setup → Project Setup\n• The customer's other quotes and jobs → Customers\n• Win rate and quote totals over time → Overview" },
     ],
   },
@@ -283,13 +283,12 @@ export const TOURS = {
   "#/cashflow": {
     title: "Cash Flow",
     steps: [
-      { title: "Cash Flow forecast", body: "The weeks ahead, built from QuickBooks (open invoices and bills) and the job schedules (invoices to send, crew pay, expenses), starting from the bank balance. It's checked against the office's B250." },
+      { title: "Cash Flow forecast", body: "The weeks ahead, built from QuickBooks (open invoices and bills) and the job schedules (invoices to send, crew pay, expenses), starting from the QuickBooks bank balance." },
       { el: "#cfModeV2", title: "Forecast or actuals", body: "Forecast looks ahead; Actuals shows what really happened, week by week." },
-      { el: "#cfBank, #cfOpening", title: "Starting balance", body: "Where today's cash comes from (the B250's bank balance or QuickBooks bank accounts) and which accounts count." },
+      { el: "#cfBank, #cfOpening", title: "Starting balance", body: "Today's cash: the QuickBooks bank accounts ticked here (or the opening you type at the top)." },
       { el: "#cfKpis", title: "Summary", body: "Opening balance, money in, money out and the ending balance." },
       { el: "#cfAlerts", title: "Needs a date", body: "Won jobs not scheduled, and overdue items whose date has passed. They're listed, not guessed." },
       { el: "#cfGrid", title: "By week", body: "Click any number to see the invoices, bills and schedule rows behind it." },
-      { el: "#cfRecon", title: "Compare with the B250", body: "Side by side with the office's sheet, with each difference traced to its source." },
     ],
   },
   "#/cashflow-plan": {
@@ -324,8 +323,10 @@ export const TOURS = {
   "#/review": {
     title: "Data Review",
     steps: [
-      { title: "Data Review", body: "Every place OPI's Google sheets, QuickBooks and the app disagree, so the numbers stay honest. Each item says what differs and which source is right." },
-      { el: "#rvRoot", title: "Categories", body: "To-do first, then pipeline, schedules, documents, billing, crew payments and cash flow sources." },
+      { title: "Data Review", body: "Every place OPI's Google sheets, QuickBooks and the app disagree, so the numbers stay honest. Each item says what differs and which source is right. Nothing here changes data by itself: you decide." },
+      { el: "#rvRoot", title: "Categories", body: "To-do first, then pipeline, schedules, documents, billing, crew payments and QuickBooks bookkeeping gaps. A tab shows only when it has something in it." },
+      { el: '#rvRoot [data-cat="schedule"]', title: "Job Schedule: phases and overage days", body: "Under Schedules, every phase on Ashley's Job Schedule is checked against the app's dates:\n• Phase dates / overage days differ: the start, quoted end (the green cell) or overage days (orange days worked past it, weekends included) don't match.\n• Phase on the sheet, not in the app: no app line covers those dates.\n• Overage unclear on the sheet: no green cell, two green cells, crews going orange on different days, or days off inside the overage.\nRecent phases are corrected by the nightly import; finished ones wait for you to review." },
+      { el: '#rvRoot [data-cat="payments"]', title: "Crew payment schedules", body: "The crew Payment Schedule sheets in Drive are still read every night, for reference. Where one differs from the app's crew pay schedule it's listed here; the app's schedule is never changed by the sheet." },
       { title: "Decide", body: "Mark an item Fixed or Ignore, with a note. It comes back only if the data changes again. Refresh from Google pulls the sheets now." },
       { title: "Next", body: "Problems across the business (not just data) → Issues." },
     ],

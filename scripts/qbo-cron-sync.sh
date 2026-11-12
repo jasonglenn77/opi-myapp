@@ -25,7 +25,8 @@ docker exec myapp-backend python -c "from app.qbo import service; import json; p
 docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_transactions_sync(triggered_by='cron'), default=str))"
 rc=$?
 # Then Google Drive: re-read the B151 + Job Schedule, mirror the B151 into the
-# Pipeline and link quotes to the freshly synced QBO projects (Data Review page).
+# Pipeline and link quotes to the freshly synced QBO projects (Data Review page);
+# crew Payment Schedule files are read for reference only (never applied).
 docker exec myapp-backend python -m app.gsync.run --cron || echo "[$(ts)] gsync failed (see gsync_runs)"
 # Re-measure the forecast assumptions (expense timing per category, bill-to-
 # payment lag) from the freshly synced bills; shown on the Assumptions page.

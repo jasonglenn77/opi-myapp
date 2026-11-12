@@ -588,7 +588,7 @@ def _optional_items(conn):
     out = []
     for mod, fn in (("app.gsync.review_docs", "docs_items"), ("app.billing.align", "ambiguous_items"),
                     ("app.gsync.review_payments", "payment_items"), ("app.gsync.review_sources", "source_items"),
-                    ("app.gsync.overrides", "items")):
+                    ("app.gsync.overrides", "items"), ("app.gsync.review_overage", "overage_items")):
         try:
             out += getattr(importlib.import_module(mod), fn)(conn)
         except Exception:

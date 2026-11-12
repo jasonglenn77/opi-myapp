@@ -1,5 +1,7 @@
 """
-Data Review — category "sources": where each number on OPI's B250 cash-flow
+Data Review — category "sources". Since 2026-11-11 only the QuickBooks checks
+run (bank_duplicate, undeposited, books_*): the B250 is not read. Originally:
+where each number on OPI's B250 cash-flow
 sheet comes from, and whether QuickBooks (or the crew Payment Schedules) back
 it up. The app's Cash Flow page sources everything it can from QBO and the
 Payment Schedules; where no system of record exists yet it keeps the B250's
@@ -704,19 +706,13 @@ def formula_items(snap, lines):
 
 
 def source_items(conn):
+    """2026-11-11/12: the B250 is no longer read (owner decision), so only the
+    QuickBooks-only checks run: duplicate bank accounts, undeposited payments
+    and bookkeeping gaps. The B250 comparisons stay in this module unused."""
     today = date.today()
-    snap, lines = _snapshot(conn)
     out = []
-    if not snap:
-        out.append(_item(CAT, "b250_missing", "b250", "medium", "OPI's B250 cash-flow sheet isn't loaded",
-                         "Share the \"B250.OP.13 Week Cash Flow Forecast\" workbook with the app's Google account (Viewer) so it's read every night, "
-                         "or upload a copy (.xlsx) above. Until then only the QuickBooks-only checks run.", sheet=None))
-    checks = (("bank", lambda: bank_items(conn, snap or {"tab_name": "—", "week1_end": None}, lines)),
-              ("unsourced", lambda: unsourced_items(conn, snap, lines, today)),
-              ("ar", lambda: ar_items(conn, snap, lines, today)),
-              ("crew", lambda: crew_items(conn, snap, lines, today)),
-              ("books", lambda: books_items(conn, snap, lines, today)),
-              ("formulas", lambda: formula_items(snap, lines) if snap else []))
+    checks = (("bank", lambda: bank_items(conn, {"tab_name": "—", "week1_end": None}, [])),
+              ("books", lambda: books_items(conn, None, [], today)))
     for name, fn in checks:
         try:
             out += fn()

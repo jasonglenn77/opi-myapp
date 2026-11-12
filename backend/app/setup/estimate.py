@@ -101,6 +101,9 @@ _PO_NUM = [
 _TOTAL = r"(?:GRAND\s+)?TOTAL\s*(?:DUE|AMOUNT)?\s*:?\s*\$?\s*([\d,]+\.\d{2})"
 
 
+READ_PO_FILES = True    # read for display only: the PO # / total are shown beside the estimate, never written into the project
+
+
 def parse_po(txt):
     """{po_number, total} from a PO's text, best effort."""
     po = None
@@ -132,6 +135,10 @@ def po_info(conn, doc):
     if row:
         return {"po_number": row["po_number"], "total": float(row["po_total"]) if row["po_total"] is not None else None,
                 "snippet": row["text_snippet"]}
+    # 2026-11-12: Drive documents are read so people can see what they say, but
+    # nothing read here changes the project's schedules or amounts.
+    if not READ_PO_FILES:
+        return {"po_number": None, "total": None, "snippet": None}
     try:
         txt = _pdf_text(doc["s3_key"])
     except Exception as e:  # unreadable PDF: remember that too, so it isn't re-read every time

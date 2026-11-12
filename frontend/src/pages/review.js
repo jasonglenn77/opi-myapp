@@ -4,8 +4,9 @@
 // Nothing here edits data: each item says what differs and where to fix it
 // (the B151, QuickBooks, or the project's Assignment). Staff mark items Fixed or
 // Ignored (with an optional note); an Ignored item comes back if the difference
-// changes. "Refresh from Google" re-reads both sheets (the B151 also updates the
-// Pipeline) — the nightly sync does the same.
+// changes. "Refresh from Google" re-reads the sheets (the B151 updates the
+// Pipeline, the Job Schedule recent Assignments; the crew Payment Schedules are
+// read for reference only) — the nightly sync does the same.
 import { api } from "../api.js";
 import { setShell } from "../shell.js";
 import { escapeHtml } from "../utils/html.js";
@@ -15,14 +16,14 @@ import { openDocViewer } from "../utils/doc-viewer.js";
 const CATS = [
   { key: "todo", label: "To-do", blurb: "100% Won quotes that still need a project in QuickBooks." },
   { key: "pipeline", label: "Pipeline", blurb: "The B151 vs QuickBooks estimates. The Pipeline page follows the B151, so most fixes go in the B151 or QuickBooks." },
-  { key: "schedule", label: "Schedule", blurb: "The Job Schedule sheet vs each project's Assignment (dates, crews, PM, status). Assignments update from the sheet every night (except values someone changed in the app: see App changes not in Drive), so most fixes go in the Job Schedule." },
+  { key: "schedule", label: "Schedule", blurb: "The Job Schedule sheet vs each project's Assignment (dates, crews, PM, status), and every phase's start, quoted end (the green cell) and overage days (orange days worked past it, counted in calendar days). Assignments update from the sheet every night for recent phases (except values someone changed in the app: see App changes not in Drive), so most fixes go in the Job Schedule; finished phases are listed here to review, never changed by themselves." },
   { key: "sheets", label: "B151 vs Job Schedule", blurb: "The two Google sheets against each other: jobs scheduled but not Won on the B151, Won jobs starting soon that aren't scheduled, and B151 dates that don't match the Job Schedule." },
   { key: "documents", label: "Documents", blurb: "Google Drive Customers folders vs the app: folders that couldn't be matched to a project or quote (their files are copied and waiting to be linked), projects with no Drive folder, files removed in Drive (the app keeps its copies), the weekly Drive-vs-app check, and copy errors.", optional: true },
   { key: "old_estimates", label: "Old estimate folders", blurb: "Drive folders whose job # matches only a QuickBooks estimate — mostly 2023–24 jobs that never became a project or Pipeline quote. Their files are copied and kept in the holding area. Grouped by the estimate's year, sorted by customer. Link one if the job did become a project or quote under another number; otherwise Ignore it (the files stay in the holding area).", optional: true },
   { key: "billing", label: "Billing", blurb: "Invoice schedules that couldn't be lined up with the actual QuickBooks invoices automatically.", optional: true },
-  { key: "payments", label: "Crew payments", blurb: "The crew \"Payment Schedule\" files in each project's Drive folder. The app's crew payment schedules update from them every night (the sheet wins, except values someone changed in the app: see App changes not in Drive); these are the files it couldn't match or map, and where a sheet, QuickBooks and the Job Schedule disagree. Most fixes go in the sheet.", optional: true },
-  { key: "app_edits", label: "App changes not in Drive", blurb: "Values someone changed in the app that came from a Google Drive file (crew Payment Schedules, the Job Schedule). The app keeps the change: the nightly import no longer writes over it. Each item says which file, which row and what to change there; it clears itself once the file matches. Or click \"Use Drive's value\" to undo the app change.", optional: true },
-  { key: "sources", label: "Cash flow sources", blurb: "Where each number on OPI's B250 cash-flow sheet comes from. The app's Cash Flow takes bank, invoices and bills from QuickBooks and crew pay from the Payment Schedules; lines with no system of record keep the B250's value and are listed here as \"Unsourced\". Also: B250 rows QuickBooks doesn't back up, and gaps in the QuickBooks books." },
+  { key: "payments", label: "Crew payments", blurb: "The crew \"Payment Schedule\" files in each project's Drive folder. They're read every night for reference only: the app's crew payment schedules are kept in the app and the sheets never change them. Listed here: where a sheet says something different from the app's schedule, files that couldn't be matched to a project, and where a sheet, QuickBooks and the Job Schedule disagree.", optional: true },
+  { key: "app_edits", label: "App changes not in Drive", blurb: "Values someone changed in the app that came from a Google Drive file (the Job Schedule, or crew Payment Schedules from before they became reference-only). The app keeps the change: the nightly import no longer writes over it. Each item says which file, which row and what to change there; it clears itself once the file matches. Or click \"Use Drive's value\" to undo the app change.", optional: true },
+  { key: "sources", label: "QuickBooks books", blurb: "Bookkeeping gaps in QuickBooks that would throw off Cash Flow: duplicate bank accounts, customer payments never deposited, and regular costs (rent, monthly bills, WIP) that stopped being booked. The B250 is no longer read.", optional: true },
 ];
 const TYPES = {
   payment_schedule_edit: "Crew payment changed in the app, not in the Payment Schedule",
@@ -41,6 +42,9 @@ const TYPES = {
   undated: "Scheduled on the sheet, no dates in the app",
   dates: "Dates differ",
   phases: "Return trips / phases missing",
+  phase_dates: "Phase dates / overage days differ",
+  phase_missing: "Phase on the sheet, not in the app",
+  overage_marking: "Overage unclear on the sheet",
   crews: "Crews differ",
   crew_boss_name_needed: "Crew boss name needed",
   pm: "PM differs",
@@ -74,6 +78,7 @@ const TYPES = {
   skipped_superseded: "Older Payment Schedule version skipped",
   skipped_duplicate: "Duplicate Payment Schedule skipped",
   no_payment_schedule: "On the Job Schedule, no crew Payment Schedule",
+  sheet_differs: "Payment Schedule sheet differs from the app",
   b250_missing: "B250 cash-flow sheet not loaded",
   bank_opening: "Opening cash vs QuickBooks bank accounts",
   bank_duplicate: "Duplicate bank account in QuickBooks",
@@ -156,7 +161,7 @@ export async function reviewPage(routeFn) {
     const bits = !r.ok ? "failed"
       : src === "b151" ? `${(s.rows || 0).toLocaleString()} rows`
       : src === "schedule_import" ? `${(s.lines_changed || 0) + (s.lines_new || 0)} lines updated from the sheet`
-      : src === "payment_import" ? `${s.files_ok || 0} sheets, ${s.projects_changed || 0} projects updated`
+      : src === "payment_import" ? `${s.files_ok || 0} sheets read for reference${s.apply ? `, ${s.projects_changed || 0} projects updated` : `, ${s.projects_changed || 0} differ from the app`}`
       : src === "b250" ? (s.not_shared ? "not shared with the app yet" : s.skipped ? "unchanged" : `tab ${s.tab || "?"}`)
       : `${(s.cells || 0).toLocaleString()} day cells`;
     return `<span title="${escapeHtml(r.error || "")}">${label}: read ${ago(r.finished_at || r.started_at)} · ${bits}${r.ok ? "" : " ⚠"}</span>`;
@@ -179,11 +184,10 @@ export async function reviewPage(routeFn) {
         </div>
         <div class="rv-sources">
           ${d.refreshing ? `<span style="font-weight:600;color:#b45309" title="The data changed since these checks last ran; they're being re-run now and this page updates by itself">Checks updating…</span>` : ""}
-          ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")} ${runLine("payment_import", "Crew payments")} ${runLine("b250", "B250 cash flow")}
+          ${runLine("b151", "B151")} ${runLine("job_schedule", "Job Schedule")} ${runLine("schedule_import", "Assignments")} ${runLine("payment_import", "Crew payment sheets")}
           <button type="button" class="rv-btn" data-refresh ${st.busy ? "disabled" : ""}>${st.busy ? "Reading Google… (documents take ~10 min — you can leave this page)" : "Refresh from Google"}</button>
         </div>
       </div>
-      ${st.cat === "sources" ? b250Bar() : ""}
       <div class="rv-blurb">${escapeHtml(cat.blurb)} <span class="rv-legend"><b>Fixed</b> = you corrected it at the source · <b>Ignore</b> = the difference is expected. Neither button changes any data — they just track the review.</span></div>
       <div class="rv-filters">
         <input type="search" class="input py-1.5" data-q placeholder="Search job #, customer…" value="${escapeHtml(st.q)}" style="max-width:260px">

@@ -199,9 +199,12 @@ def get_bank_balance() -> dict:
     total = round(sum(a["balance"] for a in inc), 2)
     # 0085: the opening can start from the bank balance typed on the B250
     # (the bank's own balance) instead of the QuickBooks books.
-    source = get_setting("opening_source", "b250")
-    b250 = b250_opening()
-    use_b250 = source == "b250" and b250 is not None
+    # 2026-11-11 owner decision: the forecast runs on app data only. Opening
+    # cash = the ticked QuickBooks bank accounts (the typed opening on the
+    # Cash Flow page still overrides); the B250 is no longer read.
+    source = "qbo"
+    b250 = None
+    use_b250 = False
     return {
         "available": len(accounts) > 0 or use_b250,
         "balance": b250["balance"] if use_b250 else total,

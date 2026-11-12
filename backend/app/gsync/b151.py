@@ -130,7 +130,21 @@ def _customer_matcher(conn):
     return match
 
 
-def plan(conn, rows):
+def workbooks_by_quote():
+    """Quote # -> link of its quoting-metrics workbook, found by file name
+    ("8077 - 20261111 B155.OP Quoting Metrics RELEASE"). Used only when the B151
+    row has no Link cell. Several files for one quote -> the most recently modified."""
+    from app import gdrive
+    best = {}
+    for f in gdrive.list_files("mimeType = 'application/vnd.google-apps.spreadsheet' "
+                               "and name contains 'Quoting Metrics' and trashed = false"):
+        m = re.match(r"^\s*(\d{3,5})\s*-", f.get("name") or "")
+        if m and (m.group(1) not in best or (f.get("modifiedTime") or "") > (best[m.group(1)].get("modifiedTime") or "")):
+            best[m.group(1)] = f
+    return {q: f"https://docs.google.com/spreadsheets/d/{f['id']}/edit" for q, f in best.items()}
+
+
+def plan(conn, rows, qm_links=None):
     opps = conn.execute(text("""
         SELECT id, quote_number, status, metrics_source, app_estimate_id, qbo_customer_id, decided_at,
                pipeline_status, last_contact_date, follow_up_count, last_comm_type, rfq_received_date,
@@ -152,6 +166,8 @@ def plan(conn, rows):
             continue           # duplicate quote # in the sheet — first row wins (flagged on Data Review)
         seen.add(q)
         tgt = target_fields(r)
+        if not tgt["workbook_url"] and qm_links and qm_links.get(q):
+            tgt["workbook_url"] = qm_links[q]     # no Link cell: the workbook named for this quote
         o = by_q.get(q)
         if o is None:
             match = match or _customer_matcher(conn)

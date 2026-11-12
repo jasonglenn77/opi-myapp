@@ -16,7 +16,7 @@ import secrets
 import hashlib
 
 from . import mailer
-from .auth import create_access_token, get_current_user, require_admin, require_capability
+from .auth import create_access_token, get_current_user, require_admin, require_capability, renewed_token, RENEW_HEADER
 from .permissions import (
     valid_roles, filter_visible, permission_snapshot, ALL_CAPABILITIES,
     get_role_defaults, bump_roles_cache, BUILTIN_ROLE_META, ADMIN_ROLE,
@@ -81,6 +81,19 @@ from app.margins.routes import router as margins_router
 from app.coregister.routes import router as coregister_router
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def _slide_session(request, call_next):
+    """Hand an active staff sign-in a renewed token (see auth.py: sliding sessions)."""
+    response = await call_next(request)
+    if response.status_code < 400 and request.url.path.startswith("/api/"):
+        tok = renewed_token(request.headers.get("authorization", ""))
+        if tok:
+            response.headers[RENEW_HEADER] = tok
+    return response
+
+
 app.include_router(qbo_router)
 app.include_router(project_holds_router)
 app.include_router(projects_router)

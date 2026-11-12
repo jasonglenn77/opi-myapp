@@ -55,8 +55,8 @@ class OpeningSourceRequest(BaseModel):
 def set_opening_source(req: OpeningSourceRequest, user=Depends(require_capability("page.cashflow"))):
     """Where week 1's opening cash comes from: the B250's bank balance or the
     QuickBooks books. Saved for everyone; a typed opening still overrides."""
-    if req.source not in ("b250", "qbo"):
-        raise HTTPException(status_code=400, detail="source must be b250 or qbo")
+    if req.source != "qbo":   # the B250 is no longer a source (2026-11-11)
+        raise HTTPException(status_code=400, detail="Opening cash comes from QuickBooks bank accounts (or the typed opening)")
     actor = user.get("email") if isinstance(user, dict) else getattr(user, "email", None)
     service.set_setting("opening_source", req.source, actor)
     from app.audit import record_audit

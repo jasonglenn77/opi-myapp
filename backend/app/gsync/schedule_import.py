@@ -69,6 +69,28 @@ OVERAGE_FONTS = {"FFF6B26B", "FFFF9900"}
 
 # ── sheet → visits ───────────────────────────────────────────────────────────
 
+START_FILLS = {"FFFFFF00", WIRE_FILL}   # yellow / bright blue = a first day
+END_FILL = "FF00FF00"                   # green = a quoted last day
+
+
+def _phases(work):
+    """_segments (a gap of more than GAP_DAYS = a new visit), then also split
+    where the sheet closes one phase and opens the next with no gap: a green
+    quoted-last-day followed, on the next work day, by a yellow/blue first day.
+    6016 IDL: JR1 alone 6/1-6/21 (green 6/21), then JR1-JR6 from 6/22 (yellow)."""
+    out = []
+    for seg in _segments(work):
+        cur = [seg[0]]
+        for prev, d in zip(seg, seg[1:]):
+            if (any(c.get("desc_fill") in START_FILLS for c in work[d])
+                    and any(c.get("desc_fill") == END_FILL for c in work[prev])):
+                out.append(cur)
+                cur = []
+            cur.append(d)
+        out.append(cur)
+    return out
+
+
 def _equipment(descs):
     """Most common app equipment value over the visit's descriptions."""
     votes = collections.Counter()
@@ -221,8 +243,13 @@ def _match(visits, items, win):
             s, e = rng(it)
             ov = (min(e, v["last"]) - max(s, v["first"])).days + 1
             if ov > 0:
-                scored.append((it["status"] == "canceled", -ov, vi, it["id"]))
-    for _, _, vi, iid in sorted(scored):
+                # best fit, not most days: shared days / combined span, so a
+                # line pairs with the visit it actually covers (a line from the
+                # first phase must not take the long second phase from the
+                # line that starts on it)
+                union = (max(e, v["last"]) - min(s, v["first"])).days + 1
+                scored.append((it["status"] == "canceled", -ov / union, -ov, vi, it["id"]))
+    for *_, vi, iid in sorted(scored):
         if vi not in pairs and iid not in used:
             pairs[vi] = iid
             used.add(iid)
@@ -442,7 +469,7 @@ def plan(conn, today=None):
     changes, skipped, jobs_seen = [], [], 0
     for job in sorted(jobs):
         J = jobs[job]
-        segs = _segments(J["work"])
+        segs = _phases(J["work"])
         if not any(s[-1] >= win for s in segs):
             continue
         jobs_seen += 1

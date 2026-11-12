@@ -1,7 +1,9 @@
 """
 Refresh from Google Drive: download the B151 + Job Schedule, store the parsed
-copies, mirror the B151 into the Pipeline, link quotes to QBO projects, and
-update the Assignments (schedule lines, crews, PMs) from the Job Schedule.
+copies, mirror the B151 into the Pipeline, link quotes to QBO projects, update
+the Assignments (schedule lines, crews, PMs) from the Job Schedule, copy new
+Drive documents in, and read the crew Payment Schedule files for reference
+(never applied). The B250 is not read (see OFF).
 
   python -m app.gsync.run              # refresh + mirror (what the nightly cron runs)
   python -m app.gsync.run --dry-run    # download + parse + show what the mirror would change
@@ -34,6 +36,13 @@ def _finish(run_id, ok, summary=None, error=None, modified=None):
                                  "e": (error or "")[:4000] or None, "m": modified})
 
 
+# Owner decisions 2026-11-11/12: from Google Drive the app (1) copies the
+# documents in (docs_sync), (2) mirrors the B151 into the Pipeline, (3) keeps
+# Ashley's Job Schedule -> Assignments, and (4) reads the crew Payment Schedule
+# files for reference only (never applied). Julie's B250 is not read at all.
+OFF = "Turned off 2026-11-11: the app no longer reads this Drive file."
+
+
 def refresh_b151(who="manual", dry_run=False, actor=None):
     run_id = None if dry_run else _start("b151", who)
     try:
@@ -44,8 +53,12 @@ def refresh_b151(who="manual", dry_run=False, actor=None):
         if prev and len(rows) < prev * 0.98:
             raise RuntimeError(f"B151 download looks incomplete ({len(rows)} rows vs {prev} last time, via {via}) — "
                                "nothing changed; try again or enable the Google Sheets API")
+        try:
+            qm_links = b151.workbooks_by_quote()
+        except Exception:      # best-effort: the sheet's own Link cells still apply
+            qm_links = {}
         with engine.begin() as conn:
-            p = b151.plan(conn, rows)
+            p = b151.plan(conn, rows, qm_links)
             if dry_run:
                 return {"rows": len(rows), **b151.summarize(p), "sample": p["updates"][:15], "new": p["creates"][:15]}
             sheets.store_b151(conn, rows)
@@ -98,7 +111,7 @@ def refresh_schedule(who="manual"):
     run_id = _start("job_schedule", who)
     try:
         meta, data = sheets.fetch_job_schedule()
-        recs = sheets.parse_job_schedule(data, since=date.today() - timedelta(days=120))
+        recs = sheets.parse_job_schedule(data, since=date.today() - timedelta(days=365))   # a year: long jobs keep their real start
         with engine.begin() as conn:
             sheets.store_job_schedule(conn, recs)
         summary = {"cells": len(recs), "from": str(min(r["day"] for r in recs)) if recs else None,
@@ -134,12 +147,14 @@ def refresh_assignments(who="manual"):
 
 
 def refresh_payments(who="manual"):
-    """Drive crew "Payment Schedule" files -> the app's crew payment schedules
-    (payment_import, apply mode; the sheets win). gsync_runs source 'payment_import'."""
+    """Drive crew "Payment Schedule" files -> read and parsed for reference
+    (gsync_payment_files; Data Review "payments" lists where they differ from
+    the app). Since 2026-11-12 never applied: the app's crew payment schedules
+    are edited in the app. gsync_runs source 'payment_import'."""
     from . import payment_import
     run_id = _start("payment_import", who)
     try:
-        summary = payment_import.run(do_apply=True, log=lambda *a: None)
+        summary = payment_import.run(do_apply=False, store=True, log=lambda *a: None)
         _finish(run_id, not summary.get("errors"), summary,
                 error="; ".join(f"{e['project']}: {e['error']}" for e in summary.get("errors", []))[:4000] or None)
         return summary
@@ -151,6 +166,7 @@ def refresh_payments(who="manual"):
 def refresh_b250(who="manual"):
     """B250 cash-flow workbook from Drive -> gsync_b250_* (gsync_runs source 'b250').
     Not shared with the service account yet = a successful run that says so."""
+    return {"off": OFF}
     from . import b250_cash
     run_id = _start("b250", who)
     try:
@@ -188,18 +204,12 @@ def refresh_all(who="manual", actor=None):
             out["drive_docs"] = docs_sync.nightly(who="cron" if who == "cron" else who)
         except Exception as e:
             out["drive_docs"] = {"error": str(e)}
-        # crew Payment Schedule files -> crew payment schedules (sheet wins);
-        # its own Drive listing, so it runs even when the documents step skips
+        # crew Payment Schedule files: read for reference (Data Review), never applied
         try:
             out["payment_import"] = refresh_payments(who)
         except Exception as e:
             out["payment_import"] = {"error": str(e)}
-        # OPI's B250 cash-flow sheet (a copy for Data Review "Cash flow sources";
-        # nothing in the app's forecast reads it). Skips cleanly until it's shared.
-        try:
-            out["b250"] = refresh_b250(who)
-        except Exception as e:
-            out["b250"] = {"error": str(e)}
+        # (the B250 is no longer read: OFF above)
         return out
     finally:
         _lock.release()

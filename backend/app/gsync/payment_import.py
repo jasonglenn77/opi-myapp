@@ -1118,9 +1118,28 @@ def _store(conn, recs, issues_by_file, full_listing):
                      {"now": now})
 
 
+def _store_diffs(proj_changes, ref):
+    """Reference mode: replace the saved sheet-vs-app differences, one row per
+    project (what applying the sheets would change)."""
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM gsync_payment_diffs"))
+        for eid, ch, plan in proj_changes:
+            files = [{"id": d["file"]["file_id"], "name": d["file"]["name"], "mime": d["file"].get("mime_type"),
+                      "modified": d["file"].get("modified"), "schedule": d["key"]} for d in plan["desired"]]
+            conn.execute(text("""INSERT INTO gsync_payment_diffs (entity_id, project, changes, files, checked_at)
+                                 VALUES (:e, :p, :c, :f, NOW())"""),
+                         {"e": eid, "p": (ref.projects.get(eid) or "")[:255],
+                          "c": json.dumps(ch[:300], default=str), "f": json.dumps(files, default=str)})
+
+
 # ── run ──────────────────────────────────────────────────────────────────────
 
-def run(do_apply=False, only_job=None, reread=False, verbose=False, log=print):
+def run(do_apply=False, only_job=None, reread=False, verbose=False, log=print, store=False):
+    """do_apply: write the sheets into the app's crew payment schedules (off since
+    2026-11-12). store (reference mode): keep the parse cache and per-file issues
+    (gsync_payment_files) and save where each sheet differs from the app
+    (gsync_payment_diffs, Data Review "Payment Schedule differs from the app")
+    without changing any schedule."""
     today = date.today()
     with engine.connect() as conn:
         ref = Ref(conn)
@@ -1178,9 +1197,11 @@ def run(do_apply=False, only_job=None, reread=False, verbose=False, log=print):
             errors.append({"project": ref.projects.get(eid), "entity_id": eid, "error": str(e)[:300]})
             if verbose:
                 raise
-    if do_apply:
+    if do_apply or store:
         with engine.begin() as conn:
             _store(conn, recs, issues_by_file, full_listing=not only_job)
+    if store and not do_apply and not only_job and not errors:
+        _store_diffs(proj_changes, ref)
         for eid, ch, plan in proj_changes:
             record_audit(ACTOR, "crew_payment.sheet_import", "project", eid,
                          f"Crew payment schedule updated from Drive — {ref.projects.get(eid)}",

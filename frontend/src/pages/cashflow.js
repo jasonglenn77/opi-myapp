@@ -41,9 +41,7 @@ export async function cashflowPage(routeFn) {
         </label>
         <button id="cfGenerate" class="btn-primary py-2">Generate</button>
         <button id="cfOverhead" class="hidden px-3 py-2 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5">Overhead</button>
-        <button id="cfRecon" type="button" title="Why this forecast differs from OPI's B250 cash-flow sheet, and what needs fixing" class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-black/15 px-3 text-sm font-semibold text-black/70 hover:bg-black/5">
-          <svg viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 4v16M17 4v16M3 8h8M13 16h8" stroke-linecap="round"/></svg>Compare with B250
-        </button>
+        <!-- Compare with B250 removed 2026-11-11: the B250 is no longer read -->
         <button id="cfInfo" type="button" title="How this page works" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/15 text-black/55 hover:bg-black/5">
           <svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -70,7 +68,7 @@ export async function cashflowPage(routeFn) {
 
           <div>
             <div class="font-bold text-ink-900">Opening balance</div>
-            <p class="text-black/60">Chosen under <span class="font-semibold">Opening balance source</span> (saved for everyone): the <span class="font-semibold">bank balance typed on OPI's B250</span> (the default for now), or the <span class="font-semibold">QuickBooks books</span> for the ticked bank accounts. QuickBooks shows the bank's own balance on its screen but doesn't share it with outside apps, and its books are currently higher than the bank, mainly because customer payments were never matched to deposits. Once the books are reconciled, switch to the books. Typing an opening number at the top overrides either, for a scenario.</p>
+            <p class="text-black/60">The QuickBooks balances of the bank accounts ticked under <span class="font-semibold">Opening balance source</span> (saved for everyone). To start from a different figure, type it in <span class="font-semibold">Opening balance</span> at the top; it overrides the QuickBooks figure. Since 11/11 the app no longer reads OPI's B250.</p>
           </div>
 
           <div>
@@ -80,7 +78,7 @@ export async function cashflowPage(routeFn) {
               <li><span class="font-semibold text-ink-900">Scheduled</span> (planned on each project's <span class="font-semibold">Billing &amp; Schedule</span> tab, not yet in QuickBooks):
                 <ul class="ml-5 mt-1 space-y-1" style="list-style:circle">
                   <li>Invoices to send: 35/35/30 for larger estimates, one invoice at completion for change orders and small jobs. Mobilization is dated on the job's start date and the Final on its end date, and both move when the dates change. Cash is expected after the measured days customers take to pay (about 30). See the Assumptions page.</li>
-                  <li>Crew pay: the job's Payment Schedule sheet from Google Drive (updated nightly), or an even split of the estimate's labor when there's no sheet. Paid on the every-other-Friday payroll calendar.</li>
+                  <li>Crew pay: the job's crew payment schedule in the app (Billing &amp; Schedule), or an even split of the estimate's labor when there's none. Paid on the every-other-Friday payroll calendar. The Payment Schedule sheets in Drive are read for reference only.</li>
                   <li>Project expenses: each estimate cost category (rentals, lodging, materials…) spread the way those bills have actually landed on past jobs, and paid after the usual bill-to-payment time. The numbers behind this are on the <a href="#/assumptions" class="text-brand-700 font-semibold hover:underline">Assumptions</a> page.</li>
                 </ul>
                 Each project's plan burns down as QuickBooks invoices, bills and payments arrive, so only what's left shows here. Fix a project's schedule and the forecast follows.</li>
@@ -106,7 +104,7 @@ export async function cashflowPage(routeFn) {
             <ul class="list-disc ml-5 mt-1 space-y-1.5 text-black/60">
               <li><span class="text-[10px] font-bold uppercase tracking-wide text-black/40 border border-black/15 rounded px-1 py-px">auto</span>: from QuickBooks (trailing 12 months), refreshed on every sync.</li>
               <li><span class="text-[10px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-px">edited</span>: a QuickBooks line someone adjusted; <span class="font-semibold">↺</span> goes back to the QuickBooks figure.</li>
-              <li><span class="text-[9px] font-bold uppercase tracking-wide text-rose-700 bg-rose-50 border border-rose-200 rounded px-1 py-px">B250 · no source</span>: copied from OPI's B250 because no system of record has it yet.</li>
+              
               <li><span class="text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-100 border border-indigo-200 rounded px-1 py-px">manual</span>: entered in the app by hand.</li>
             </ul>
             <p class="text-black/60 mt-1.5">Deleted lines stay deleted until restored, and <span class="font-semibold">history</span> shows every change.</p>
@@ -119,7 +117,7 @@ export async function cashflowPage(routeFn) {
 
           <div>
             <div class="font-bold text-ink-900">Where the numbers come from</div>
-            <p class="text-black/60">QuickBooks data synced into the app every night (invoices, bills, payments, deposits, bank and card accounts), plus OPI's Google Drive sheets read the same night (Job Schedule, crew Payment Schedules, B250). Opening this page never calls QuickBooks. To pull the latest, run <span class="font-semibold">Sync transactions now</span> on the QuickBooks page.</p>
+            <p class="text-black/60">QuickBooks data synced into the app every night (invoices, bills, payments, deposits, bank and card accounts), plus the dates and crews from Ashley's Job Schedule, read the same night. Everything else is entered in the app. Opening this page never calls QuickBooks. To pull the latest, run <span class="font-semibold">Sync transactions now</span> on the QuickBooks page.</p>
           </div>
         </div>
       </div>
@@ -612,18 +610,7 @@ export async function cashflowPage(routeFn) {
           <span class="cfx-bank-sync">Last synced ${fmtWhen(b.last_synced, true)}</span>
         </summary>
         <div class="cfx-bank-body">
-          <div class="flex flex-wrap items-center gap-2 mb-3 text-[12.5px]">
-            <span class="font-semibold text-black/70">Start week 1 from:</span>
-            <label class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${b.source === "b250" ? "border-ink-900 bg-black/[0.04]" : "border-black/15"} ${b.b250 ? "cursor-pointer" : "opacity-50"}">
-              <input type="radio" name="cfOpenSrc" value="b250" ${b.source === "b250" ? "checked" : ""} ${b.b250 ? "" : "disabled"}>
-              Bank balance from the B250${b.b250?.through ? `, end of week ${mdY(b.b250.through)}` : ""} <b>${b.b250 ? fmtMoney(b.b250.balance) : "—"}</b>${b.b250 ? ` <span class="text-black/40">tab "${escapeHtml(b.b250.tab || "")}", ${fmtWhen(b.b250.as_of)}</span>` : ""}
-            </label>
-            <label class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${b.source === "qbo" ? "border-ink-900 bg-black/[0.04]" : "border-black/15"} cursor-pointer">
-              <input type="radio" name="cfOpenSrc" value="qbo" ${b.source === "qbo" ? "checked" : ""}>
-              QuickBooks books <b>${fmtMoney(b.books_balance)}</b> <span class="text-black/40">(accounts ticked below)</span>
-            </label>
-          </div>
-          ${b.b250 && Math.abs(b.books_balance - b.b250.balance) > 1 ? `<div class="text-[11.5px] text-black/55 mb-3">The books are <b>${fmtMoney(b.books_balance - b.b250.balance)}</b> ${b.books_balance > b.b250.balance ? "above" : "below"} the bank. QuickBooks doesn't share the bank's own balance with outside apps, so the B250's typed bank balance is used until the books are reconciled (Compare with B250 explains the gap). Typing an opening balance above still overrides either.</div>` : ""}
+          <div class="text-[12.5px] text-black/60 mb-3">Week 1 starts from the QuickBooks bank accounts ticked below. To start from a different figure, type it in Opening balance at the top (it overrides this).</div>
           <div class="overflow-x-auto"><table class="cfx-bank-tbl">
             <thead><tr><th></th><th>QuickBooks bank account</th><th class="text-right">Balance</th><th class="text-right">Balance as of</th></tr></thead>
             <tbody>${rows}</tbody>
@@ -778,7 +765,7 @@ export async function cashflowPage(routeFn) {
     document.getElementById("cfOverhead").classList.toggle("hidden", mode !== "forecast_v2");
     document.getElementById("cfCountPlansWrap").classList.toggle("hidden", mode !== "forecast_v2");
     modeDesc.textContent = mode === "forecast_v2"
-      ? "Forward cash from the opening balance: committed (open invoices and bills) + recurring overhead + the scheduled crew, invoice and expense plans on every project. Compare with B250 explains how it differs from OPI's sheet; ⓘ explains how it's built."
+      ? "Forward cash from the opening balance: committed (open invoices and bills) + recurring overhead + the scheduled crew, invoice and expense plans on every project. ⓘ explains how it's built."
       : "Historical realized cash for the chosen range — actual payments in, bill payments + card/check spend out. Tap ⓘ for details.";
   }
 
@@ -1199,7 +1186,7 @@ export async function cashflowPage(routeFn) {
       <ul class="ml-5 mt-1 space-y-1 text-[13px] text-black/65" style="list-style:disc">${r.b151.differences.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}</ul>`;
   }
 
-  document.getElementById("cfRecon").addEventListener("click", async () => {
+  document.getElementById("cfRecon")?.addEventListener("click", async () => {
     reconModal.classList.remove("hidden"); reconModal.classList.add("flex");
     reconSub.textContent = "";
     reconBody.innerHTML = `<div class="text-black/50">Comparing the B250 with the forecast…</div>`;
