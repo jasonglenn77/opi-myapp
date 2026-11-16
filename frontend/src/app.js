@@ -6,7 +6,8 @@ import { dashboardPage } from "./pages/dashboard.js";
 import { projectsHubPage } from "./pages/projects-hub.js";
 import { projectsPage } from "./pages/projects.js";
 import { schedulePage } from "./pages/schedule.js";
-import { assignmentPage } from "./pages/assignment.js";
+// assignment.js (the old Assignments sheet) is retired 2026-11-16 and no longer routed
+import { assignmentRetiredPage } from "./pages/assignment-retired.js";
 import { usersPage } from "./pages/users.js";
 import { teamsPage } from "./pages/teams.js";
 import { quickBooksPage } from "./pages/quickbooks.js";
@@ -225,7 +226,7 @@ async function route() {
   // Backward-compat redirects for any old bookmarks; remove after a grace period.
   if (hash === "#/dashboard") { location.hash = "#/projects"; return; }
   if (hash === "#/schedule") return schedulePage(route);
-  if (hash === "#/assignment") return assignmentPage(route);
+  if (hash === "#/assignment") return assignmentRetiredPage(route);   // retired: points to Project Setup / All Projects
   if (hash.split("?")[0] === "#/setup") return setupPage(route);   // #/setup?job=<key> opens that job (bell alerts)
   if (hash === "#/closeout") return closeoutPage(route);
   if (hash === "#/issues") return issuesPage(route);

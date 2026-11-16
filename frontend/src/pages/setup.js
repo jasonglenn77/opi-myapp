@@ -81,6 +81,44 @@ export async function setupPage(routeFn) {
   });
   const root = document.getElementById("suRoot");
 
+  // B151 → Pipeline mirror on demand (same as the Pipeline page's button): the
+  // run happens server-side; poll the run log until it lands, then reload.
+  const b151 = { run: null, busy: false };
+  const ago = (iso) => {
+    if (!iso) return "never";
+    const m = Math.round((Date.now() - new Date(String(iso).replace(" ", "T") + "Z").getTime()) / 60000);
+    return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+  };
+  function b151Line() {
+    const r = b151.run;
+    if (!r) return "";
+    return r.ok ? `B151 read ${ago(r.finished_at)}` : `<span class="su-b151-bad" title="${escapeHtml(r.error || "")}">B151 read failed ${ago(r.started_at)}</span>`;
+  }
+  const paintB151 = () => {
+    const t = document.getElementById("suB151Txt"); if (t) t.innerHTML = b151Line();
+    const b = document.getElementById("suB151");
+    if (b) { b.disabled = b151.busy; b.textContent = b151.busy ? "Reading the B151…" : "↻ Refresh from B151"; }
+  };
+  (async () => { try { b151.run = (await api("/review/runs")).b151 || null; } catch (_) {} paintB151(); })();
+  async function refreshB151() {
+    const before = b151.run?.started_at;
+    b151.busy = true; paintB151();
+    try {
+      await api("/review/refresh?source=b151", { method: "POST" });
+      for (let n = 0; n < 72; n++) {            // up to ~6 min
+        await new Promise((r) => setTimeout(r, 5000));
+        if (!document.body.contains(root)) return;
+        const r = (await api("/review/runs")).b151;
+        if (r && r.started_at !== before && r.finished_at) { b151.run = r; break; }
+      }
+      if (b151.run && !b151.run.ok) alert("B151 refresh failed: " + (b151.run.error || "unknown error"));
+      else toast("B151 read. Newly won jobs are on the list.");
+    } catch (e) { alert("B151 refresh failed: " + (e?.message || e)); }
+    b151.busy = false;
+    await load(true);
+    paintB151();
+  }
+
   async function load(keepDetail = false) {
     try {
       const scope = st.view === "all" ? "all" : "todo";
@@ -158,6 +196,7 @@ export async function setupPage(routeFn) {
         <input id="suQ" class="input text-sm su-q" placeholder="Search job, quote # or dealer" value="${escapeHtml(st.q)}">
         ${st.kpi ? `<button type="button" class="su-filter" data-clearkpi>Showing: ${escapeHtml(KPI[st.kpi][0])} <span aria-hidden="true">✕</span></button>` : ""}
         <select id="suPm" class="input text-sm su-pm"><option value="">All PMs</option>${pms.map((p) => `<option${p === st.pm ? " selected" : ""}>${escapeHtml(p)}</option>`).join("")}</select>
+        <span class="su-b151"><button type="button" class="pd-btn" id="suB151" ${b151.busy ? "disabled" : ""} title="Re-read the B151 Rolling Revenue tab from Google Drive now, so a job just marked 100% Won shows up here without waiting for tonight's update. (New QuickBooks projects still arrive with the nightly QuickBooks sync.)">${b151.busy ? "Reading the B151…" : "↻ Refresh from B151"}</button><span class="su-b151-txt" id="suB151Txt">${b151Line()}</span></span>
       </div>
       <div class="su-grid" id="suGrid">
         <div class="card su-list" id="suList">${listHtml()}</div>
@@ -720,8 +759,12 @@ export async function setupPage(routeFn) {
       const f = ev.currentTarget, fd = new FormData(f), patch = {};
       for (const [k, v] of fd.entries()) patch[k] = v || null;
       try {
-        await api(`/invoices/milestone/${f.dataset.msform}`, { method: "PATCH", body: JSON.stringify({ ...patch, via: "project_setup" }) });
-        toast("Saved. Billing & Schedule and Cash Flow follow.");
+        const r = await api(`/invoices/milestone/${f.dataset.msform}`, { method: "PATCH", body: JSON.stringify({ ...patch, via: "project_setup" }) });
+        for (const k of ["invoice_date", "due_date", "expected_paid_date"]) {
+          const inp = f.querySelector(`[name="${k}"]`);
+          if (inp && r && k in r) inp.value = r[k] || "";
+        }
+        toast(r && r.due_from_terms ? `Saved. Due date set from the terms (${r.due_from_terms.replace("due = ", "")}).` : "Saved. Billing & Schedule and Cash Flow follow.");
       } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
     });
   }
@@ -1113,6 +1156,7 @@ export async function setupPage(routeFn) {
     const kp = e.target.closest("[data-kpi]");
     if (kp) { st.kpi = st.kpi === kp.dataset.kpi ? null : kp.dataset.kpi; st.view = "all"; st.open = false; if (!visible().some((j) => j.key === st.sel)) st.sel = visible()[0]?.key || st.sel; render(); return; }
     if (e.target.closest("[data-clearkpi]")) { st.kpi = null; render(true); return; }
+    if (e.target.closest("#suB151")) { if (!b151.busy) refreshB151(); return; }
     const v = e.target.closest("[data-view]");
     if (v && root.contains(v) && !v.closest("#suDetail")) {
       st.view = v.dataset.view; st.kpi = null; st.open = false; remember();

@@ -240,22 +240,58 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
     # keeps following the estimate so the schedule still adds up).
     if "amount" in fields or "pct" in fields:
         sets.append("amount_edited = 1")
-    for k, v in fields.items():
-        sets.append(f"{k} = :{k}")
-        params[k] = (v if v != "" else None)
     with engine.begin() as conn:
         old = conn.execute(text(
             "SELECT * FROM project_invoice_milestones WHERE id = :id"), {"id": mid}).mappings().first()
+        terms_note = _follow_terms(conn, old, fields) if old else None
+        for k, v in fields.items():
+            sets.append(f"{k} = :{k}")
+            params[k] = (v if v != "" else None)
         # The UPDATE bumps updated_at (ON UPDATE CURRENT_TIMESTAMP), which is what
         # invalidates the cash-flow schedule caches on data edits.
         conn.execute(text(f"UPDATE project_invoice_milestones SET {', '.join(sets)} WHERE id = :id"), params)
         ent, pname = _ms_entity(conn, mid=mid)
+        new = conn.execute(text("SELECT invoice_date, due_date, expected_paid_date FROM project_invoice_milestones WHERE id = :id"),
+                           {"id": mid}).mappings().first()
     changes = diff_fields(dict(old) if old else {}, {k: params[k] for k in fields}, list(fields))
     if changes:
         record_audit(user, "billing.milestone_update", "invoice_milestone", mid,
                      (old or {}).get("label"),
-                     {"changes": changes, "entity_id": ent, "project": pname, "via": req_via(req)})
-    return {"ok": True}
+                     {"changes": changes, "entity_id": ent, "project": pname, "via": req_via(req),
+                      **({"due_from_terms": terms_note} if terms_note else {})})
+    out = {"ok": True}
+    if new:
+        out.update({k: (str(new[k]) if new[k] else None) for k in ("invoice_date", "due_date", "expected_paid_date")})
+        if terms_note:
+            out["due_from_terms"] = terms_note
+    return out
+
+
+def _follow_terms(conn, old, fields):
+    """2026-11-16 (Ashley): a new send date moves the due date by the schedule's
+    net terms (due = send date + net days), unless the same edit also set a
+    different due date. The expected-paid date moves by as many days as the send
+    date did, so how long this customer takes to pay is kept. Rows that ARE a
+    QuickBooks invoice follow the invoice. Edits `fields` in place; returns a
+    short note for the audit / response, or None when nothing followed."""
+    if "invoice_date" not in fields or old["qbo_invoice_id"]:
+        return None
+    new_inv, old_inv = _pd(fields.get("invoice_date") or None), _pd(old["invoice_date"])
+    if not new_inv or new_inv == old_inv:
+        return None
+    sent_due = _pd(fields.get("due_date") or None) if "due_date" in fields else None
+    if "due_date" in fields and sent_due != _pd(old["due_date"]):
+        return None                       # the person set a different due date too
+    net = conn.execute(text("""SELECT s.net_days FROM project_invoice_schedules s
+                               WHERE s.id = :s"""), {"s": old["schedule_id"]}).scalar()
+    net = int(net) if net is not None else 30
+    fields["due_date"] = (new_inv + timedelta(days=net)).isoformat()
+    sent_exp = _pd(fields.get("expected_paid_date") or None) if "expected_paid_date" in fields else None
+    old_exp = _pd(old["expected_paid_date"])
+    if old_exp and ("expected_paid_date" not in fields or sent_exp == old_exp):
+        shift = (new_inv - old_inv).days if old_inv else (new_inv + timedelta(days=net) - old_exp).days
+        fields["expected_paid_date"] = (old_exp + timedelta(days=shift)).isoformat()
+    return f"due = send date + net-{net}"
 
 
 @router.post("/schedule/{sid}/milestone")

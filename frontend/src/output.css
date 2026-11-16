@@ -897,6 +897,10 @@ option {
   cursor: default;
 }
 
+#sidebar .nav-item.nav-retired {
+  opacity: .45;
+}
+
 #sidebar .nav-icon {
   width: 20px;
   height: 20px;
@@ -11269,6 +11273,23 @@ details[open] > summary > .cfx-chev {
   max-width:180px;
 }
 
+.su-b151 {
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  margin-left:auto;
+}
+
+.su-b151-txt {
+  font-size:11px;
+  color:rgba(255,255,255,.6);
+  white-space:nowrap;
+}
+
+.su-b151-bad {
+  color:#fca5a5;
+}
+
 .su-back {
   display:none;
 }
@@ -12871,6 +12892,56 @@ body.hp-explaining, body.hp-explaining * {
 @media (max-width:640px) {
   .su-cthread {
     padding-left:12px;
+  }
+}
+
+/* Retired Assignments page (2026-11-16): greyed nav item + the "moved" notice */
+
+.nav-retired {
+  opacity: .45;
+}
+
+.nav-retired-tag {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border: 1px solid rgba(255,255,255,.35);
+  border-radius: 999px;
+  padding: 0 5px;
+  margin-left: 4px;
+}
+
+.ar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 10px;
+}
+
+.ar-row:hover {
+  background: rgba(0,0,0,.025);
+}
+
+.ar-go {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: #3f6b50;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .ar-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .ar-go {
+    margin-left: 0;
   }
 }
 

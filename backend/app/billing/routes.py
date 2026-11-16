@@ -321,11 +321,12 @@ def _estimates_for_billing(conn, entity_id):
         SELECT t.qbo_id, t.doc_number, t.txn_date, t.total_amt AS value,
                ROUND(SUM(CASE WHEN sl.item_name LIKE 'Contract Labor%'
                               THEN COALESCE(sl.cost_amount, sl.amount) ELSE 0 END), 2) AS labor,
-               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) AS txn_status
+               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) AS txn_status,
+               JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.AcceptedDate')) AS accepted_date
         FROM qbo_transactions t
         LEFT JOIN qbo_sales_transaction_lines sl ON sl.transaction_id = t.id
         WHERE t.entity_type='Estimate' AND t.customer_qbo_id = :e
-        GROUP BY t.qbo_id, t.doc_number, t.txn_date, t.total_amt, txn_status
+        GROUP BY t.qbo_id, t.doc_number, t.txn_date, t.total_amt, txn_status, accepted_date
         ORDER BY t.txn_date, t.doc_number
     """), {"e": entity_id}).mappings().all()
     hdrs = {str(r["estimate_qbo_id"]): r for r in conn.execute(text(
@@ -337,6 +338,7 @@ def _estimates_for_billing(conn, entity_id):
         out.append({
             "qbo_id": str(r["qbo_id"]), "doc_number": r["doc_number"],
             "txn_date": str(r["txn_date"]) if r["txn_date"] else None,
+            "accepted_date": (str(r["accepted_date"])[:10] if r["accepted_date"] and r["accepted_date"] != "null" else None),
             "value": float(r["value"] or 0), "labor": float(r["labor"] or 0),
             "status": _EST_STATUS.get(r["txn_status"], (r["txn_status"] or "").lower()),
             "crew_id": (h["crew_id"] if h else None),
@@ -729,6 +731,7 @@ def _compose_estimates(conn, entity_id):
             sum_state = "pending_align"
         accepted.append({
             "qbo_id": e["qbo_id"], "doc": e["doc_number"], "value": e["value"],
+            "txn_date": e["txn_date"], "accepted_date": e["accepted_date"],
             "labor": e["labor"], "confirmed": e["confirmed"], "crew_id": e["crew_id"],
             "schedule_id": sid, "milestones": milestones,
             "invoice_subtotal": round(sum(m["amount"] for m in milestones), 2),

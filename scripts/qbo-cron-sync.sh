@@ -24,6 +24,11 @@ fi
 docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_customers_sync(triggered_by='cron'), default=str))"
 docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.run_transactions_sync(triggered_by='cron'), default=str))"
 rc=$?
+# Estimates deleted in QuickBooks that the incremental sync missed (CDC only
+# reaches back ~30 days): drop them so Billing / Setup / the forecast don't show
+# an estimate QuickBooks no longer has (2026-11-16, Adidas #7115). Bills and
+# Invoices keep their admin-run audit (POST /api/qbo/reconcile-deletions).
+docker exec myapp-backend python -c "from app.qbo import service; import json; print(json.dumps(service.reconcile_deleted_transactions(entities=('Estimate',)), default=str))" || echo "[$(ts)] estimate deletion audit failed"
 # Then Google Drive: re-read the B151 + Job Schedule, mirror the B151 into the
 # Pipeline and link quotes to the freshly synced QBO projects (Data Review page);
 # crew Payment Schedule files are read for reference only (never applied).

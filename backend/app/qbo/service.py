@@ -814,11 +814,15 @@ def sync_deletions_via_cdc(realm_id: str, access_token: str, since: datetime) ->
     return removed
 
 
-def reconcile_deleted_transactions(entities=("Bill", "Invoice")) -> dict:
+def reconcile_deleted_transactions(entities=("Bill", "Invoice", "Estimate")) -> dict:
     """Full audit for the forecast-critical entities: fetch every Id currently in
     QBO and delete any locally-stored transaction whose Id is gone (deleted in QBO
     but missed — e.g. before CDC handling existed, or outside its window). Fixes
     existing staleness like a paid-via-expense bill that QBO A/P no longer carries.
+    Estimates added 2026-11-16 (a project estimate deleted in QBO kept showing as
+    accepted on Billing, e.g. Adidas #7115) and run nightly by qbo-cron-sync.sh.
+    Safety: an entity is skipped (nothing deleted) when QBO returns no Ids or more
+    than 5% of the local rows would go, since that means a bad response, not deletions.
     """
     realm_id, access_token = get_valid_access_token()
     result = {}
@@ -840,8 +844,13 @@ def reconcile_deleted_transactions(entities=("Bill", "Invoice")) -> dict:
                 "SELECT qbo_id FROM qbo_transactions WHERE realm_id = :r AND entity_type = :e"),
                 {"r": realm_id, "e": entity}).scalars().all()]
         gone = [q for q in local if q not in existing]
+        if gone and (not existing or len(gone) > max(25, 0.05 * len(local))):
+            result[entity] = {"qbo_count": len(existing), "local_count": len(local), "removed": 0,
+                              "skipped": f"{len(gone)} would go: looks like a bad response, nothing deleted"}
+            continue
         removed = _delete_local_transactions(realm_id, entity, gone) if gone else 0
-        result[entity] = {"qbo_count": len(existing), "local_count": len(local), "removed": removed}
+        result[entity] = {"qbo_count": len(existing), "local_count": len(local), "removed": removed,
+                          "removed_ids": gone[:50]}
     return result
 
 

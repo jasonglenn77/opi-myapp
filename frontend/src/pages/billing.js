@@ -226,7 +226,7 @@ function render(container, entityId, d) {
   const banner = est.needs_review > 0 ? `
     <div class="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center gap-3">
       <span class="w-6 h-6 rounded-md bg-amber-500 text-white flex items-center justify-center font-extrabold shrink-0">!</span>
-      <div class="text-[13px] text-amber-900"><b>${est.needs_review} estimate${est.needs_review > 1 ? "s" : ""} need${est.needs_review > 1 ? "" : "s"} review</b> — newly converted; confirm ${est.needs_review > 1 ? "their" : "its"} invoice schedule &amp; crew assignment (${reviewList.map((a) => "#" + escapeHtml(a.doc)).join(", ")}).</div>
+      <div class="text-[13px] text-amber-900"><b>${est.needs_review} estimate${est.needs_review > 1 ? "s" : ""} need${est.needs_review > 1 ? "" : "s"} review</b> (${reviewList.map((a) => "#" + escapeHtml(a.doc)).join(", ")}): accepted in QuickBooks after the job was set up, usually a change order. Check ${est.needs_review > 1 ? "their" : "its"} invoice schedule and crew below, then press Confirm on the estimate, or mark <b>Invoice schedule reviewed</b> on Project Setup.</div>
     </div>` : "";
   const completePrompt = p.appears_complete ? `
     <div class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 flex items-center gap-3">
@@ -303,7 +303,9 @@ function render(container, entityId, d) {
       <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
         <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-sm font-bold text-ink-900">Estimate <span class="text-blue-700">#${escapeHtml(a.doc || "—")}</span></span>
+        <span class="text-[11.5px] text-black/50 tabular-nums" title="${escapeHtml(`Estimate dated ${shortDate(a.txn_date)}${a.accepted_date ? `; marked accepted in QuickBooks on ${shortDate(a.accepted_date)}` : "; QuickBooks has no accepted date on it"}`)}">${a.accepted_date ? `Accepted ${shortDate(a.accepted_date)}` : "Accepted (no date in QuickBooks)"}</span>
         ${statusPill}
+        ${nr ? `<button type="button" data-confirm-est data-eq="${escapeHtml(a.qbo_id)}" class="text-[11px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-2.5 py-0.5" title="You've checked this estimate's invoice schedule and crew. Marking Invoice schedule reviewed on Project Setup confirms every estimate on the job too.">Confirm</button>` : ""}
         <span class="ml-auto flex items-center gap-2.5 text-[11.5px] tabular-nums flex-wrap justify-end">
           ${a.paid > 0.5 ? `<span class="text-emerald-700 font-semibold">${money(a.paid)} paid</span>` : ""}
           ${a.sent_ar > 0.5 ? `<span class="text-ink-900 font-semibold">${money(a.sent_ar)} sent · A/R</span>` : ""}
@@ -757,6 +759,8 @@ function render(container, entityId, d) {
     }
     const confirmEst = e.target.closest("[data-confirm-est]");
     if (confirmEst) {
+      e.preventDefault();
+      e.stopPropagation();
       const eq = confirmEst.getAttribute("data-eq");
       post(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/confirm`, "Confirming…", confirmEst);
       return;

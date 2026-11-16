@@ -494,11 +494,30 @@ def mark_step(key: str, step: str, req: StepMark, user=Depends(require_capabilit
                           "u": user.get("id"), "e": user.get("email")})
         if req.status and o["project_qbo_id"]:
             RV.resolve(conn, o["project_qbo_id"], step, user.get("email"), req.note)
+            if step == "invoice_schedule":
+                _confirm_estimates(conn, o["project_qbo_id"], user)
         o2, d2 = _one(conn, key)
         row = _row(o2, d2, date.today())
     record_audit(user, "setup.step", "project", o["project_qbo_id"] or f"opp:{o['id']}", o["project_name"] or o["title"],
                  {"step": step, "status": req.status, "note": req.note, "entity_id": o["project_qbo_id"]})
     return row
+
+
+def _confirm_estimates(conn, eid, user):
+    """Invoice schedule reviewed on Project Setup = every estimate on the job
+    has been checked, so clear Billing's 'Needs review' on them (2026-11-16:
+    Project Setup is where the office works; Billing's Confirm does one).
+    Creates the billing header first for an estimate Billing hasn't seen yet."""
+    try:
+        from app.billing import routes as BR
+        with conn.begin_nested():
+            BR._ensure_estimate_billing(conn, str(eid), BR._default_crew_for_project(
+                conn, str(eid), BR._project_meta(conn, str(eid)) or {}))
+    except Exception:
+        pass
+    return conn.execute(text("""UPDATE project_estimate_billing SET confirmed = 1, confirmed_at = NOW(),
+                                 confirmed_by_user_id = :u WHERE entity_id = :e AND confirmed = 0"""),
+                        {"u": user.get("id"), "e": str(eid)}).rowcount
 
 
 # ── Re-review, notes, date changes, first invoice, hints (2026-11-12) ────────
@@ -530,6 +549,8 @@ def review_done(key: str, step: str, req: ReviewIn, user=Depends(require_capabil
             if left:
                 raise HTTPException(status_code=400, detail=f"Answer the {left} date change{'s' if left != 1 else ''} first (why it moved, change order?)")
         RV.resolve(conn, o["project_qbo_id"], step, user.get("email"), req.note)
+        if step == "invoice_schedule":
+            _confirm_estimates(conn, o["project_qbo_id"], user)
         o2, d2 = _one(conn, key)
         row = _row(o2, d2, date.today())
     record_audit(user, "setup.review", "project", o["project_qbo_id"], o["project_name"] or o["title"],

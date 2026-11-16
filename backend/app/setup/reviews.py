@@ -278,6 +278,17 @@ def _from_audit(conn, start, live_eids):
     return last, reasons
 
 
+def _newest_estimates(conn, eid, k):
+    """The k most recently created estimates on a project, as 'Estimate #7996
+    ($7,640, Accepted)' — so the why-box names the change order."""
+    rows = conn.execute(text("""
+        SELECT doc_number, total_amt, JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.TxnStatus')) AS st
+        FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id = :e
+        ORDER BY JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.MetaData.CreateTime')) DESC, id DESC LIMIT :k"""),
+        {"e": str(eid), "k": int(max(1, min(k, 5)))}).mappings().all()
+    return [f"Estimate #{r['doc_number'] or '?'} (${float(r['total_amt'] or 0):,.0f}, {r['st'] or 'status unknown'})" for r in rows]
+
+
 def _from_estimates(conn, live_eids):
     """A new QuickBooks estimate on a live project = a change order; the same
     count with a different total = the contract value changed."""
@@ -297,7 +308,9 @@ def _from_estimates(conn, live_eids):
         if e in seen:
             n0, t0 = seen[e]
             if n > n0 and n0 > 0:
-                why = f"New estimate in QuickBooks ({n0} → {n} estimates, total ${t0:,.0f} → ${tot:,.0f})"
+                new = _newest_estimates(conn, e, n - n0)
+                what = ", ".join(new) if new else "New estimate"
+                why = f"{what} in QuickBooks ({n0} → {n} estimates, total ${t0:,.0f} → ${tot:,.0f})"
                 add(conn, e, "change_order", why, by="QuickBooks")
                 reasons[e].append(why)
             elif n == n0 and abs(tot - t0) > 1 and n0 > 0:

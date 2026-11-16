@@ -88,6 +88,7 @@ export const TOURS = {
       { title: "Project Setup: from won to ready, and back when things change", body: "Every new job (100% won) until it's set up: QuickBooks, the PM, crew and dates, and the three schedules. A project that's already set up comes back here when something changes: its dates move, a change order comes in, the crew or the contract value changes. Only the steps that change affects reopen." },
       { el: "#suRoot .su-kpis", title: "What needs attention", body: "Back for re-review, not in QuickBooks yet, first invoices to send, jobs starting within 14 days with gaps, crew offers waiting, and schedules to review. Click a tile to show only those jobs; click it again (or the ✕ chip) to clear it." },
       { el: "#suRoot .su-bar-row .tabs", title: "To do and All active", body: "• To do: new jobs still being set up, plus every project a change sent back.\n• Back for re-review: only those.\n• Urgent: jobs with a red or amber flag.\n• All active: every live project (Setup, Ready, In progress), to edit anything in place." },
+      { el: "#suB151", title: "Refresh from B151", body: "Re-reads the B151 now (it also updates every night), so a job just marked 100% Won shows up here right away. It also links won quotes to their QuickBooks projects. New QuickBooks projects arrive with the nightly QuickBooks sync." },
       { el: "#suList", title: "The list", body: "Pick a job. The chips show its status (worked out from the job: Setup, Ready, In progress), what's next and what's wrong (red first)." },
       { el: "#suDetail [data-head], #suDetail section", title: "The job at a glance", body: "Its status, Open workspace, Open in Pipeline (the pipeline record in a side panel, without leaving), the alerts, and every step in three columns. Click a step to jump to it." },
       { el: "#suDetail .su-why", title: "Why it came back", body: "When a change sends a set-up project back, this box says what changed (dates moved, a change order, a new crew, a new contract value), who changed it and when, and which steps it reopened. Click a step to open it. Date changes still waiting for a reason are listed here too." },
@@ -101,11 +102,7 @@ export const TOURS = {
   "#/assignment": {
     title: "Assignments",
     steps: [
-      { title: "Assignments", body: "Every project's PM, crew, dates and job details in one sheet, like the old Job Schedule. Use it to assign or change many jobs quickly; changes save as you go and are kept in each job's history. A date change sends a set-up job back to Project Setup for re-review." },
-      { el: "#assignCardHeader", title: "Search and filters", body: "Search by job, and use each column's filter to narrow (status, PM, crew, dates)." },
-      { el: "#assignThead", title: "Columns", body: "Status, PM, work crew, start and end, wire guidance, travel days, overage, equipment, notes, and whether the project is in QuickBooks. Click a heading to sort. The status follows the dates (not started, in progress, finished); put a job on hold from its Assignment." },
-      { el: "#assignTableScroll", title: "Edit in place", body: "Change a cell and it saves. A project can have more than one line (extra crews or phases)." },
-      { title: "Next", body: "• One job's setup step by step → Project Setup\n• Who's busy when → Schedules" },
+      { title: "Assignments has moved", body: "This page is retired. Set up and update jobs on Project Setup (To do for new and changed jobs, All active for any live job), finish them on Project Closeout, and look up a project's history on All Projects (its Assignment tab)." },
     ],
   },
   "#/schedule": {
