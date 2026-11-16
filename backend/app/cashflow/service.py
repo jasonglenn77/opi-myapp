@@ -219,6 +219,34 @@ def get_bank_balance() -> dict:
     }
 
 
+def get_opening_cash() -> dict:
+    """Week 1's opening cash (owner decision 2026-11-15): the balance a person
+    types on Cash Flow, saved for everyone with the date it's as of. Not read
+    from QuickBooks bank accounts (not accurate) or the B250 (can be out of
+    date). Newest entry wins; earlier ones are kept as the history."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""SELECT amount, as_of, note, by_email, at FROM cashflow_opening_cash
+                                        ORDER BY id DESC LIMIT 6""")).mappings().all()
+    except Exception:
+        rows = []
+    hist = [{"amount": round(float(r["amount"]), 2), "as_of": r["as_of"].isoformat(), "note": r["note"],
+             "by": r["by_email"], "at": r["at"].isoformat() if r["at"] else None} for r in rows]
+    cur = hist[0] if hist else None
+    return {"set": cur is not None, "balance": cur["amount"] if cur else 0.0, "source": "typed",
+            "as_of": cur["as_of"] if cur else None, "by": cur["by"] if cur else None,
+            "at": cur["at"] if cur else None, "note": cur["note"] if cur else None, "history": hist[1:]}
+
+
+def set_opening_cash(amount: float, as_of: date, note: str | None, user: dict) -> dict:
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO cashflow_opening_cash (amount, as_of, note, by_user_id, by_email)
+                             VALUES (:a, :d, :n, :u, :m)"""),
+                     {"a": round(float(amount), 2), "d": as_of, "n": (note or "").strip() or None,
+                      "u": user.get("id"), "m": user.get("email")})
+    return get_opening_cash()
+
+
 def get_setting(key, default=None):
     try:
         with engine.connect() as conn:
@@ -615,7 +643,9 @@ def generate_forecast_v2(start_date: date | None = None,
     first_start = week_ends[0] - timedelta(days=6)
     win_end = week_ends[-1]
 
-    bank = get_bank_balance()
+    # Opening cash = the typed balance (get_opening_cash); a what-if figure in
+    # the request still overrides it for that one view.
+    bank = get_opening_cash()
     if opening_balance is None:
         opening_balance = bank.get("balance", 0.0)
 

@@ -105,7 +105,7 @@ export async function closeoutPage(routeFn) {
           <span class="text-[11px] font-bold tabular-nums text-black/55">${j.done}/${j.total}</span>
         </div>
         <div class="su-bar" aria-hidden="true"><span style="width:${pct}%"></span></div>
-        ${j.flags.length ? `<div class="flex flex-wrap gap-1 mt-1.5">${j.flags.map((f) => chip(f.text, C[f.tone])).join("")}</div>` : ""}
+        ${j.flags.length || j.forecast === "included" ? `<div class="flex flex-wrap gap-1 mt-1.5">${j.forecast === "included" ? chip("In cash forecast", C.info) : ""}${j.flags.map((f) => chip(f.text, C[f.tone])).join("")}</div>` : ""}
       </button>`;
     }).join("");
   }
@@ -221,6 +221,7 @@ export async function closeoutPage(routeFn) {
           <span data-flags class="contents">${j.flags.map((f) => chip(f.text, C[f.tone])).join(" ")}</span>
         </div>
         <div class="co-money mt-3" data-money>${moneyTiles(j.money)}</div>
+        <div class="co-fc mt-3" data-fc><span class="text-xs text-black/40">Cash forecast…</span></div>
         <div class="su-stages co-stages mt-3">${GROUPS.map((g) => `<div class="su-stage" data-group="${g}">
           <div class="flex items-center justify-between"><div class="text-[11px] uppercase tracking-wide font-bold text-black/50">${g}</div><div class="text-[11px] font-bold tabular-nums text-black/45" data-n>${groupCount(j, g)}</div></div>
           <div class="grid gap-1 mt-1.5" data-links>${j.steps.filter((s) => s.group === g).map(stepLink).join("")}</div></div>`).join("")}</div>
@@ -274,6 +275,67 @@ export async function closeoutPage(routeFn) {
     });
     const next = j.steps.find((s) => s.state === "todo");
     if (next) D.cards.open(next.key, { scroll: false });
+    loadForecast(j, box.querySelector("[data-fc]"));
+  }
+
+  // ── Cash forecast (backend projects/books.py): a job that ended on/after Oct 1
+  // counts until it's closed out; an older one only when someone includes it.
+  async function loadForecast(j, el) {
+    if (!el) return;
+    let f;
+    try { f = await api(`/closeout/job/${encodeURIComponent(j.entity_id)}/forecast`); }
+    catch (e) { el.innerHTML = `<span class="text-xs text-rose-700">Couldn't load the cash forecast: ${esc(e?.message || e)}</span>`; return; }
+    if (!el.isConnected) return;
+    const p = f.plans || { in: {}, out: {} };
+    // "$X to bill and $Y to pay", leaving out the zero side
+    const pair = (i, o) => [i > 0.5 ? `${money0(i)} to bill` : "", o > 0.5 ? `${money0(o)} to pay` : ""].filter(Boolean).join(" and ");
+    const parts = [
+      pair(p.in.weeks || 0, p.out.weeks || 0) && `${pair(p.in.weeks || 0, p.out.weeks || 0)} in the next ${p.weeks || 13} weeks`,
+      pair(p.in.past_due || 0, p.out.past_due || 0) && `${pair(p.in.past_due || 0, p.out.past_due || 0)} with dates already past (listed under Overdue on Cash Flow, counted once re-dated)`,
+      pair(p.in.later || 0, p.out.later || 0) && `${pair(p.in.later || 0, p.out.later || 0)} after that`,
+    ].filter(Boolean);
+    const wk = parts.join("; ");
+    const pd = "", later = "";
+    const none = parts.length === 0 && !(p.backlog_in > 0.5);
+    const s = f.state || {};
+    const cut = f.cutover ? new Date(f.cutover + "T00:00:00").toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "Oct 1, 2026";
+    let tone = C.quiet, title = "", body = "", btn = "";
+    if (s.why === "closed_out") {
+      title = "Not in the cash forecast"; body = "Closed out: its books are closed.";
+    } else if (s.why === "open_until_closed_out" || s.why === "not_finished") {
+      tone = C.info; title = "In the cash forecast until it's closed out";
+      body = none ? "Nothing planned is left to bill or pay." : `Its plans add ${wk}${pd}${later}.`;
+    } else if (s.why === "included") {
+      tone = C.info; title = "Included in the cash forecast";
+      const inc = s.included || {};
+      body = `${none ? "Nothing planned is left to bill or pay." : `Its plans add ${wk}${pd}${later}.`} Included by ${esc(inc.by_email || "someone")}${inc.at ? ` on ${day(inc.at)}` : ""}${inc.note ? `: “${esc(inc.note)}”` : ""}.`;
+      btn = `<button type="button" class="pd-btn" data-fc-set="0">Take it out of the forecast</button>`;
+    } else {
+      title = `Not in the cash forecast (ended before ${cut})`;
+      body = none ? "Its plans have nothing left to bill or pay."
+        : `If included, its plans would add ${wk}${pd}${later}. Older plans are often stale (crew paid outside what the app matched), so include it only if money really is still to come or go.`;
+      btn = `<button type="button" class="pd-btn" data-fc-set="1">Include in the cash forecast…</button>`;
+    }
+    el.innerHTML = `<div class="flex flex-wrap items-start gap-2 rounded-lg border border-black/10 px-3 py-2">
+        <div class="min-w-0 flex-1"><div class="text-xs font-bold">${chip("Cash forecast", tone)} ${esc(title)}</div>
+          <div class="text-[11.5px] text-black/60 mt-1">${body} Open QuickBooks invoices and bills count either way.</div></div>${btn}</div>`;
+    el.querySelector("[data-fc-set]")?.addEventListener("click", async (ev) => {
+      const include = ev.currentTarget.dataset.fcSet === "1";
+      let note = null;
+      if (include) {
+        note = prompt(`Include ${j.name} in the cash forecast until it's closed out?\n\nWhy is money still to come or go? (kept with the job)`);
+        if (note === null) return;
+        if (!note.trim()) { alert("Say why (for example: final invoice still to send)."); return; }
+      } else if (!confirm("Take this job's plans out of the cash forecast?")) return;
+      ev.currentTarget.disabled = true;
+      try {
+        await api(`/closeout/job/${encodeURIComponent(j.entity_id)}/forecast`, { method: "POST", body: JSON.stringify({ include, note }) });
+        j.forecast = include ? "included" : "off";
+        toast(include ? "Included in the cash forecast." : "Taken out of the cash forecast.");
+        root.querySelector("#coList").innerHTML = listHtml(); bindList();
+        loadForecast(j, el);
+      } catch (e) { ev.currentTarget.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
+    });
   }
 
   // after a mark or a reload: ticks, counts, money and card heads, open cards kept

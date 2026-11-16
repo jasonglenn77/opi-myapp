@@ -177,7 +177,8 @@ def build(weeks=13, biweekly=True, anchor=None, min_prob=40):
          note="Their cost (value minus OH&P) x win probability, spread over the job.")
 
     return {"as_of": today.isoformat(), "week_ends": f["week_ends"], "opening": f["opening_balance"], "bank": {
-                "balance": f["bank"].get("balance"), "source": f["bank"].get("source"), "last_synced": str(f["bank"].get("last_synced") or "")},
+                "balance": f["bank"].get("balance"), "source": f["bank"].get("source"), "set": f["bank"].get("set"),
+                "as_of": f["bank"].get("as_of"), "by": f["bank"].get("by")},
             "lines": lines, "pipeline_by_status": by_bucket,
             "assumptions": {"terms": "35% at order, 35% at start, 30% at completion", "pay_lag_days": PAY_LAG_DAYS,
                             "order_lead_days": ORDER_LEAD_DAYS, "start_lag_weeks": START_LAG_WEEKS,

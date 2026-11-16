@@ -1862,11 +1862,14 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
         _ensure_expense_installments(conn, entity_id, ctx)
 
         # Status = the project's final assignment-row status (same as the hub).
-        # Books close ONLY when the office marks the project completed — not when
-        # invoices happen to be paid.
+        # Books (2026-11-15, projects/books.py): closed when the job is closed out
+        # on Project Closeout; a job that ended before Oct 1 2026 is closed
+        # unless someone included it in the cash forecast.
         op_status = _canonical_status(conn, entity_id)
         has_dates = bool(ctx.get("start_date") and ctx.get("job_end"))
-        books_closed = op_status == "completed"
+        from app.projects import books as BK
+        books = BK.state(conn, entity_id, op_status)
+        books_closed = books["closed"]
 
         crew_vendor_ids = _all_crew_vendor_ids(conn, entity_id)
         inv = _compose_invoices(conn, entity_id, books_closed)
@@ -1925,7 +1928,7 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
             "customer_name": meta.get("customer_name"),
             "start_date": ctx.get("start_date"), "end_date": ctx.get("end_date"),
             "contract_value": ctx.get("contract_value"),
-            "has_dates": has_dates, "books_closed": books_closed,
+            "has_dates": has_dates, "books_closed": books_closed, "books": books,
             "operational_status": op_status,
             "appears_complete": appears_complete,
             "drift": drift,

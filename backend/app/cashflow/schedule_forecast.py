@@ -18,7 +18,7 @@ Placement rules:
 """
 from datetime import date, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.db import engine
 
@@ -29,7 +29,7 @@ WEEK_END_WEEKDAY = 4  # Friday
 # schedule-row timestamps, so a logic change alone wouldn't invalidate it. A
 # mismatch wipes project_cash_cache + marks the singleton cache stale (no
 # manual clear needed on deploy).
-LOGIC_VERSION = "2026-11-02.overage-end-v1"
+LOGIC_VERSION = "2026-11-15.books-open-until-closed-out"
 _PAID_STATUSES = ("paid", "realized", "complete", "completed")
 
 
@@ -47,23 +47,19 @@ def _next_weekday(d: date, weekday: int) -> date:
 
 
 def _candidate_project_ids(conn):
-    """Projects that can contribute forward cash: is_project=1 with at least one
-    assignment row not completed/canceled. Completed projects' remaining cash is
-    caught by the committed QBO layers, so we skip them to keep the pass cheap."""
-    rows = conn.execute(text("""
-        SELECT DISTINCT c.qbo_id
-        FROM qbo_customers c
-        JOIN projects p ON p.qbo_customer_id = c.id
-        JOIN project_schedule_items si ON si.project_id = p.id
-        WHERE c.is_project = 1
-          AND si.status NOT IN ('completed', 'canceled')
-    """)).scalars().all()
-    return [str(r) for r in rows]
+    """Projects that can contribute forward cash (projects/books.py, 2026-11-15):
+    any assignment row not completed/canceled; or finished on/after Oct 1 2026
+    and not closed out yet; or an older finished job someone included. Their
+    open QBO invoices/bills are counted by the committed layers either way."""
+    from app.projects import books as BK
+    return BK.forecast_candidates(conn)
 
 
-def _project_events(conn, entity_id):
+def _project_events(conn, entity_id, force_open=False):
     """The scheduled-tier forward cash events for one project, reusing the exact
-    per-project compose pipeline (so the numbers match the Billing tab)."""
+    per-project compose pipeline (so the numbers match the Billing tab).
+    force_open: compute as if the books were open (Closeout's "what including
+    this older job would add" preview; run it in a rolled-back transaction)."""
     import app.billing.routes as B
 
     ctx = B._project_ctx(conn, entity_id)
@@ -80,7 +76,8 @@ def _project_events(conn, entity_id):
     B._ensure_expense_installments(conn, entity_id, ctx)
 
     op_status = B._canonical_status(conn, entity_id)
-    books_closed = op_status == "completed"
+    from app.projects import books as BK
+    books_closed = False if force_open else BK.books_closed(conn, entity_id, op_status)   # 2026-11-15 rule
     if books_closed:
         return None  # trust actuals; nothing scheduled remains
     has_dates = bool(ctx.get("start_date") and ctx.get("job_end"))
@@ -326,15 +323,13 @@ def refresh_stale():
                 VALUES (:e, :p, :v, NOW())
                 ON DUPLICATE KEY UPDATE payload=VALUES(payload), source_version=VALUES(source_version), computed_at=NOW()
             """), {"e": eid, "p": _pj.dumps(ev or {"empty": True}, default=str), "v": pv})
-    # forget projects that are no longer candidates (completed/canceled)
+    # forget projects that are no longer candidates (books closed / canceled)
+    keep = set(cands)
     with engine.begin() as conn:
-        conn.execute(text("""
-            DELETE FROM project_cash_cache WHERE entity_id NOT IN (
-              SELECT DISTINCT c.qbo_id FROM qbo_customers c
-              JOIN projects p ON p.qbo_customer_id = c.id
-              JOIN project_schedule_items si ON si.project_id = p.id
-              WHERE c.is_project = 1 AND si.status NOT IN ('completed', 'canceled'))
-        """))
+        gone = [e for e in conn.execute(text("SELECT entity_id FROM project_cash_cache")).scalars().all() if str(e) not in keep]
+        for i in range(0, len(gone), 500):
+            conn.execute(text("DELETE FROM project_cash_cache WHERE entity_id IN :g")
+                         .bindparams(bindparam("g", expanding=True)), {"g": gone[i:i + 500]})
     return len(stale)
 
 
@@ -617,3 +612,29 @@ def get_events(max_age_seconds: int = 1800):
             "computing": computing, "stale": stale, "has_data": payload is not None,
             "edited_since": edited_since}
     return payload, meta
+
+
+def preview_books_open(entity_id, weeks=13):
+    """What a project's plans would add to the forecast if its books were open:
+    {in|out: {past_due, weeks, later}, backlog_in, backlog_out}. Read-only (the
+    ensure-passes run inside a transaction that is rolled back)."""
+    today = date.today()
+    start = _next_weekday(today, WEEK_END_WEEKDAY)          # week 1 ends the coming Friday
+    first_start, last = start - timedelta(days=6), start + timedelta(days=7 * (weeks - 1))
+    with engine.connect() as conn:
+        t = conn.begin()
+        try:
+            ev = _project_events(conn, entity_id, force_open=True)
+        finally:
+            t.rollback()
+    out = {"in": {"past_due": 0.0, "weeks": 0.0, "later": 0.0}, "out": {"past_due": 0.0, "weeks": 0.0, "later": 0.0},
+           "backlog_in": 0.0, "backlog_out": 0.0, "weeks": weeks, "items": 0}
+    if not ev:
+        return out
+    for e in ev["events"]:
+        d = date.fromisoformat(e["date"][:10])
+        k = "past_due" if d < first_start else "weeks" if d <= last else "later"
+        out[e["dir"]][k] = round(out[e["dir"]][k] + e["amt"], 2)
+        out["items"] += 1
+    out["backlog_in"], out["backlog_out"] = ev["backlog_in"], ev["backlog_out"]
+    return out

@@ -37,7 +37,8 @@ from app.db import engine
 
 router = APIRouter(prefix="/api/closeout", tags=["closeout"])
 CAP = "page.assignment"
-CUTOVER = date(2026, 10, 1)   # jobs ending from here on are the current closeout work
+from app.projects import books as BK
+CUTOVER = BK.CUTOVER          # jobs ending from here on are the current closeout work (books open until closed out)
 TOL = 1.0               # dollars
 
 # (key, group, label, auto|manual)
@@ -73,7 +74,8 @@ def _projects(conn, ids=None):
     where = "qc.qbo_id IN :ids" if ids else "1=1"
     sql = f"""
         SELECT qc.qbo_id AS e, qc.id AS cid, qc.display_name AS name, qc.parent_qbo_id,
-               MIN(psi.start_date) AS start, MAX(psi.end_date) AS end,
+               MIN(psi.start_date) AS start,
+               MAX(CASE WHEN psi.status <> 'canceled' THEN DATE_ADD(psi.end_date, INTERVAL COALESCE(psi.overage_days, 0) DAY) END) AS end,
                (SELECT psi2.status FROM project_schedule_items psi2 WHERE psi2.project_id = p.id
                 ORDER BY psi2.start_date IS NULL, psi2.start_date DESC, psi2.sort_order DESC, psi2.id DESC LIMIT 1) AS status
         FROM qbo_customers qc
@@ -102,10 +104,15 @@ def _gather(conn, ids=None):
     d = {"p": P, "est": {}, "pend_est": defaultdict(int), "inv": defaultdict(lambda: [0.0, 0.0]), "ret": defaultdict(float),
          "crew_sched": defaultdict(float), "crew_paid": defaultdict(float), "crew_left": defaultdict(float),
          "exp_open": defaultdict(lambda: [0, 0.0]), "cos": defaultdict(int), "signoff": {}, "forms": {},
-         "pms": defaultdict(list), "marks": defaultdict(dict), "cost": {}, "dealer": {}}
+         "pms": defaultdict(list), "marks": defaultdict(dict), "cost": {}, "dealer": {}, "included": {}}
     if not E:
         return d
     p = {"ids": E}
+    try:   # older jobs someone included in the cash forecast (projects/books.py)
+        d["included"] = {str(r[0]): {"note": r[1], "by": r[2], "at": str(r[3])} for r in conn.execute(_q(
+            "SELECT entity_id, note, by_email, at FROM project_books_open WHERE include = 1 AND entity_id IN :ids", "ids"), p).all()}
+    except Exception:
+        pass
 
     # Contract: latest version of each accepted estimate.
     for r in conn.execute(_q("""
@@ -299,6 +306,10 @@ def _row(e, d, today):
     c = d["cost"].get(e) or {}
     st_of = {s["key"]: s["state"] for s in steps}
     closed = st_of.get("margin") == "done"
+    # The cash forecast (projects/books.py): open until closed out for jobs that
+    # ended on/after CUTOVER; older ones only when someone included them.
+    inc = d["included"].get(e)
+    forecast = "closed" if closed else "open" if (end and end >= CUTOVER) else "included" if inc else "off"
     if end and end >= CUTOVER:
         bucket = "recent"
     elif (money["unbilled"] > TOL or money["open_ar"] > TOL or money["retainage"] > TOL or money["crew_owed"] > TOL
@@ -308,7 +319,7 @@ def _row(e, d, today):
         bucket = "paperwork"
     return {
         "entity_id": e, "name": P["name"], "dealer": d["dealer"].get(e), "pms": d["pms"][e],
-        "closed": closed, "bucket": bucket,
+        "closed": closed, "bucket": bucket, "forecast": forecast, "included": inc,
         "start": str(P["start"]) if P["start"] else None, "end": str(end) if end else None,
         "days_since_end": (today - end).days if end else None,
         "status": P["status"], "steps": steps, "done": done, "total": len(steps), "money": money, "flags": flags,
@@ -401,6 +412,8 @@ def mark_step(entity_id: str, step: str, req: StepMark, user=Depends(require_cap
     row = _row(entity_id, d, date.today())
     record_audit(user, "closeout.step", "project", entity_id, row["name"],
                  {"step": step, "status": req.status, "note": req.note, "reviewed": reviewed})
+    if step == "margin":
+        BK.refresh_forecast_for(entity_id)   # closing out (or undoing it) closes / reopens the books
     return row
 
 
@@ -436,7 +449,48 @@ def bulk_close(req: BulkClose, user=Depends(require_capability(CAP))):
             closed.append((e, row["name"], reviewed))
     for e, name, reviewed in closed:
         record_audit(user, "closeout.bulk_close", "project", e, name, {"note": note, "reviewed": reviewed})
+        BK.refresh_forecast_for(e)
     return {"ok": True, "closed": len(closed), "skipped": len(skipped)}
+
+
+# ── Cash forecast: older jobs come in only by choice (projects/books.py) ────────
+@router.get("/job/{entity_id}/forecast")
+def job_forecast(entity_id: str, user=Depends(require_capability(CAP))):
+    """Whether the job's plans count in the cash forecast, and what they add
+    (or would add, for an older job not included)."""
+    from app.cashflow.schedule_forecast import preview_books_open
+    with engine.connect() as conn:
+        st = BK.state(conn, entity_id)
+    return {"state": st, "cutover": str(CUTOVER), "plans": preview_books_open(entity_id)}
+
+
+class ForecastChoice(BaseModel):
+    include: bool
+    note: Optional[str] = None
+
+
+@router.post("/job/{entity_id}/forecast")
+def set_job_forecast(entity_id: str, req: ForecastChoice, user=Depends(require_capability(CAP))):
+    """Include an older finished job (ended before CUTOVER) in the cash
+    forecast until it's closed out, or take it back out."""
+    note = (req.note or "").strip()
+    if req.include and not note:
+        raise HTTPException(400, "Say why its plans still count (for example: final invoice still to send).")
+    with engine.begin() as conn:
+        d = _gather(conn, [entity_id])
+        if entity_id not in d["p"]:
+            raise HTTPException(404, "Not a finished project")
+        name = d["p"][entity_id]["name"]
+        conn.execute(text("""
+            INSERT INTO project_books_open (entity_id, include, note, by_user_id, by_email)
+            VALUES (:e, :i, :n, :u, :m)
+            ON DUPLICATE KEY UPDATE include = VALUES(include), note = VALUES(note), by_user_id = VALUES(by_user_id),
+                                    by_email = VALUES(by_email), at = CURRENT_TIMESTAMP"""),
+                     {"e": entity_id, "i": 1 if req.include else 0, "n": note or None, "u": user.get("id"), "m": user.get("email")})
+    record_audit(user, "closeout.forecast_include" if req.include else "closeout.forecast_exclude", "project", entity_id, name,
+                 {"note": note, "entity_id": entity_id})
+    BK.refresh_forecast_for(entity_id)
+    return job_forecast(entity_id, user)
 
 
 # ── Step detail: what's behind each step, for the expandable step cards ─────────

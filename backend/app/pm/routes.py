@@ -294,7 +294,8 @@ def pm_project_overview(qbo_id: str, user=Depends(require_capability(PAGE_PM_POR
         _ensure_expense_installments(conn, qbo_id, ctx)
 
         op_status = _canonical_status(conn, qbo_id)
-        books_closed = op_status == "completed"
+        from app.projects import books as BK
+        books_closed = BK.books_closed(conn, qbo_id, op_status)
         crew_vendor_ids = _all_crew_vendor_ids(conn, qbo_id)
         inv = _compose_invoices(conn, qbo_id, books_closed)
         crew = _compose_crew(conn, qbo_id, meta, crew_vendor_ids, books_closed)
@@ -402,7 +403,8 @@ def pm_project_financials(qbo_id: str, user=Depends(require_capability(PAGE_PM_P
         _ensure_expense_installments(conn, qbo_id, ctx)
 
         op_status = _canonical_status(conn, qbo_id)
-        books_closed = op_status == "completed"
+        from app.projects import books as BK
+        books_closed = BK.books_closed(conn, qbo_id, op_status)
         crew_vendor_ids = _all_crew_vendor_ids(conn, qbo_id)
         inv = _compose_invoices(conn, qbo_id, books_closed)
         crew = _compose_crew(conn, qbo_id, meta, crew_vendor_ids, books_closed)

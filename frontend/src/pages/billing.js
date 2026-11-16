@@ -538,7 +538,7 @@ function render(container, entityId, d) {
             <span>Contract <b class="tabular-nums text-ink-900">${money(est.contract_total)}</b></span>
             <span>Dates <b class="tabular-nums text-ink-900">${shortDate(p.start_date)} → ${shortDate(p.end_date)}</b></span>
             <span>Status <span class="inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-full border ${stCls}">${stLabel}</span></span>
-            ${p.books_closed ? `<span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-black/60 bg-black/[0.06] border border-black/15 px-2 py-0.5 rounded-full">🔒 Books closed</span>` : ""}
+            ${p.books_closed ? `<span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-black/60 bg-black/[0.06] border border-black/15 px-2 py-0.5 rounded-full" title="${p.books && p.books.why === "ended_before_cutover" ? "Ended before Oct 1 2026: its plans aren't in the cash forecast. Include it on Project Closeout if money is still to come or go." : "Closed out on Project Closeout"}">🔒 Books closed</span>` : p.books && p.books.finished ? `<span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-sky-800 bg-sky-50 border border-sky-200 px-2 py-0.5 rounded-full" title="Finished: its plans stay in the cash forecast until it's closed out on Project Closeout">Finished · books open until closed out</span>` : ""}
           </div>
         </div>
         <div class="ml-auto flex items-center gap-3 text-[11.5px] text-black/45">

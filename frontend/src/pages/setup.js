@@ -183,7 +183,13 @@ export async function setupPage(routeFn) {
   const SCHED_STEPS = ["invoice_schedule", "crew_schedule", "expense_schedule"];
   let D = null;   // the open job's detail state: { j, cards, editor, billing }
 
+  // 2026-11-15: every step has a comment thread (opens under the step's head).
+  const cmtBtn = (s) => `<button type="button" class="su-cmt-btn" data-cmt="${s.key}" title="Comments on this step">Comment${s.comments ? ` (${s.comments})` : ""}</button>`;
   function headParts(j, s) {
+    const p = headParts0(j, s);
+    return { ...p, actions: p.actions + cmtBtn(s) };
+  }
+  function headParts0(j, s) {
     const btns = [];
     if (s.state === "review") {
       const blocked = s.key === "dates" && j.unanswered_dates > 0;
@@ -242,6 +248,8 @@ export async function setupPage(routeFn) {
           <div class="grid gap-1 mt-1.5" data-links>${j.steps.filter((s) => s.stage === sg).map(stepLink).join("")}</div></div>`).join("")}</div>
         <div class="text-[11px] text-black/45 mt-2">Click a step to open it below.</div>
       </section>
+      <div data-why>${whyHtml(j)}</div>
+      <section class="card p-4" data-pcomments>${projectCommentsShell(j)}</section>
       ${STAGES.map((sg) => `<section class="card p-4 su-sec" id="su-${sg}">
         <div class="flex flex-wrap items-center gap-2"><h3 class="su-h flex-1">${sg} <span class="text-xs font-bold text-black/40 tabular-nums" data-n>${stageCount(j, sg)}</span></h3>
           <button type="button" class="su-linkbtn" data-openall="${sg}">Open all</button></div>
@@ -272,6 +280,7 @@ export async function setupPage(routeFn) {
       }
     });
     wireMarks(j, box);
+    wireComments(j, box);
     // open the first step still to do (without jumping the page there)
     const next = j.steps.find((s) => s.state === "review") || j.steps.find((s) => s.state === "todo" || s.state === "waiting");
     if (next) D.cards.open(next.key, { scroll: false });
@@ -294,6 +303,10 @@ export async function setupPage(routeFn) {
         }
         for (const s of row.steps) D.cards.setHead(s.key, headParts(row, s));
         wireMarks(row, box);
+        const why = box.querySelector("[data-why]");
+        if (why) why.innerHTML = whyHtml(row);
+        const pn = box.querySelector("[data-pcomments] [data-pcount]");
+        if (pn) pn.textContent = row.comments ? `(${row.comments})` : "";
         const fl = box.querySelector("[data-flags]");
         if (fl) {
           fl.querySelectorAll(".inline-flex").forEach((c) => c.remove());
@@ -330,6 +343,118 @@ export async function setupPage(routeFn) {
           await reloadJob(j.key);
         } catch (e) { b.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
       });
+    });
+  }
+
+  // ── Why it came back (open re-reviews, grouped by the change) ───────────
+  const KIND_LABEL = { dates: "Dates moved", change_order: "Change order", crew: "Crew changed", contract: "Contract value changed" };
+  const shortWho = (t) => String(t || "").replace(/([\w.+-]+)@[\w.-]+/g, "$1");
+  function whyHtml(j) {
+    const by = new Map();   // change text -> { kind, at, by, steps: [] }
+    for (const s of j.steps || []) {
+      const rv = s.review;
+      if (!rv) continue;
+      for (const piece of String(rv.reason || "").split(" · ").map((x) => x.trim()).filter(Boolean)) {
+        if (!by.has(piece)) by.set(piece, { kind: rv.kind, at: rv.at, by: rv.by, steps: [] });
+        const g = by.get(piece);
+        if (!g.steps.some((x) => x.key === s.key)) g.steps.push(s);
+        if (rv.at && (!g.at || rv.at < g.at)) g.at = rv.at;
+      }
+    }
+    const n = j.unanswered_dates || 0;
+    if (!by.size && !n) return "";
+    const items = [...by.entries()].map(([txt, g]) => {
+      const hasWho = /\(.*\)\s*$/.test(txt);
+      const md = g.at ? `${Number(String(g.at).slice(5, 7))}/${Number(String(g.at).slice(8, 10))}` : "";
+      const who = hasWho ? "" : ` <span class="text-black/55">(${escapeHtml(shortWho(g.by || "the app"))}${md ? `, ${md}` : ""})</span>`;
+      return `<li class="su-why-item">
+        <div class="text-sm"><b>${escapeHtml(KIND_LABEL[g.kind] || "Changed")}:</b> ${escapeHtml(shortWho(txt))}${who}</div>
+        <div class="flex flex-wrap items-center gap-1.5 mt-1"><span class="text-[11px] text-black/55">Reopened:</span>${g.steps.map((s) =>
+          `<button type="button" class="su-why-step" data-jump="${s.key}">${escapeHtml(s.label)}</button>`).join("")}</div>
+      </li>`;
+    }).join("");
+    return `<section class="card p-4 su-why" aria-label="Why it came back">
+      <h3 class="su-h">Why it came back</h3>
+      <div class="text-xs text-black/55 mt-0.5">A change after setup reopened these steps. Check each one, then press Reviewed on it.</div>
+      ${items ? `<ul class="grid gap-2 mt-2">${items}</ul>` : ""}
+      ${n ? `<div class="su-why-ask mt-2"><b>${n} date change${n === 1 ? "" : "s"}</b> still need${n === 1 ? "s" : ""} a reason (why it moved, change order?). <button type="button" class="su-linkbtn" data-jump="dates">Answer in Dates</button></div>` : ""}
+    </section>`;
+  }
+
+  // ── Comments: the project's thread and one per step ─────────────────────
+  const cmtWhen = (at) => { const d = new Date(String(at).replace(" ", "T")); return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+  const cmtList = (rows, labels, showStep) => rows.length
+    ? rows.map((c) => `<li class="su-cmt-item">
+        <div class="text-[11px] text-black/55"><b class="text-ink-900">${escapeHtml(shortWho(c.by || "someone"))}</b> · ${escapeHtml(cmtWhen(c.at))}${showStep && c.step_key ? ` · on <i>${escapeHtml(labels[c.step_key] || c.step_key)}</i>` : ""}</div>
+        <div class="text-sm whitespace-pre-line mt-0.5">${escapeHtml(c.body)}</div></li>`).join("")
+    : `<li class="text-xs text-black/50">No comments yet.</li>`;
+  const cmtForm = (ph) => `<form class="grid gap-1.5" data-cform>
+      <textarea class="input text-sm" rows="2" maxlength="5000" placeholder="${escapeHtml(ph)}" data-cbody required></textarea>
+      <div class="flex flex-wrap items-center gap-3">
+        <label class="inline-flex items-center gap-1.5 text-xs text-black/70"><input type="checkbox" data-cnotify> Alert the office</label>
+        <button type="submit" class="pd-btn ml-auto">Post comment</button>
+      </div></form>`;
+  function projectCommentsShell(j) {
+    return `<div class="flex items-center gap-2"><h3 class="su-h flex-1">Comments <span class="text-xs font-bold text-black/45" data-pcount>${j.comments ? `(${j.comments})` : ""}</span></h3>
+        <label class="inline-flex items-center gap-1.5 text-xs text-black/60"><input type="checkbox" data-pall> Include step comments</label></div>
+      <div class="text-xs text-black/55 mt-0.5">Notes for everyone working the job. Kept with who wrote it and when.</div>
+      <div class="mt-2">${cmtForm("Comment on the project…")}</div>
+      <ul class="su-cmt-list mt-2" data-clist><li class="text-xs text-black/50">Loading…</li></ul>`;
+  }
+  async function loadThread(j, host, step, all = false) {
+    const list = host.querySelector("[data-clist]");
+    try {
+      const q = step ? `?step=${encodeURIComponent(step)}` : (all ? "?all=1" : "");
+      const r = await api(`/setup/job/${encodeURIComponent(j.key)}/comments${q}`);
+      st.meta.step_labels = r.labels || st.meta.step_labels || {};
+      list.innerHTML = cmtList(r.comments || [], st.meta.step_labels, all);
+    } catch (e) { list.innerHTML = `<li class="text-xs text-rose-700">Couldn't load the comments: ${escapeHtml(e?.message || String(e))}</li>`; }
+  }
+  function wireThread(j, host, step) {
+    const form = host.querySelector("[data-cform]");
+    form?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const ta = form.querySelector("[data-cbody]");
+      const body = ta.value.trim();
+      if (!body) return;
+      const btn = form.querySelector("button[type=submit]");
+      btn.disabled = true;
+      try {
+        const nt = form.querySelector("[data-cnotify]").checked;
+        await api(`/setup/job/${encodeURIComponent(j.key)}/comments`, { method: "POST",
+          body: JSON.stringify({ step_key: step || null, body, notify: nt }) });
+        ta.value = ""; form.querySelector("[data-cnotify]").checked = false;
+        toast(nt ? "Comment posted. The office was alerted." : "Comment posted");
+        const all = !step && host.querySelector("[data-pall]")?.checked;
+        await loadThread(j, host, step, all);
+        await reloadJob(j.key);
+      } catch (err) { alert(`Couldn't post: ${err?.message || err}`); }
+      finally { btn.disabled = false; }
+    });
+  }
+  function wireComments(j, box) {
+    const pc = box.querySelector("[data-pcomments]");
+    if (pc) {
+      wireThread(j, pc, null);
+      loadThread(j, pc, null);
+      pc.querySelector("[data-pall]")?.addEventListener("change", (e) => loadThread(j, pc, null, e.target.checked));
+    }
+    box.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-cmt]");
+      if (!b) return;
+      e.preventDefault(); e.stopPropagation();
+      const card = b.closest(".sc");
+      const key = b.dataset.cmt;
+      let th = card.querySelector(":scope > [data-cthread]");
+      if (th) { th.remove(); return; }
+      th = document.createElement("div");
+      th.className = "su-cthread";
+      th.dataset.cthread = key;
+      th.innerHTML = `${cmtForm(`Comment on “${(j.steps.find((s) => s.key === key) || {}).label || key}”…`)}<ul class="su-cmt-list mt-2" data-clist><li class="text-xs text-black/50">Loading…</li></ul>`;
+      card.querySelector(".sc-head").after(th);
+      wireThread(j, th, key);
+      loadThread(j, th, key);
+      th.querySelector("[data-cbody]")?.focus();
     });
   }
 

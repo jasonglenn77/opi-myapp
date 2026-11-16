@@ -28,6 +28,33 @@ def update_categories(req: CategorySettingsRequest, _user=Depends(require_capabi
     return service.set_excluded_categories(req.excluded)
 
 
+@router.get("/opening-cash")
+def opening_cash(_user=Depends(require_capability("page.cashflow"))):
+    """Week 1's opening cash: the balance typed on Cash Flow (2026-11-15)."""
+    return service.get_opening_cash()
+
+
+class OpeningCashRequest(BaseModel):
+    amount: float
+    as_of: Optional[str] = None     # YYYY-MM-DD, default today
+    note: Optional[str] = None
+
+
+@router.put("/opening-cash")
+def set_opening_cash(req: OpeningCashRequest, user=Depends(require_capability("page.cashflow"))):
+    """Save the opening cash for everyone (kept as a history)."""
+    try:
+        d = datetime.strptime(req.as_of, "%Y-%m-%d").date() if req.as_of else date.today()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="as_of must be YYYY-MM-DD")
+    u = user if isinstance(user, dict) else {"id": getattr(user, "id", None), "email": getattr(user, "email", None)}
+    out = service.set_opening_cash(req.amount, d, req.note, u)
+    from app.audit import record_audit
+    record_audit(user, "cashflow.opening_cash", "cashflow_setting", "opening_cash", "Opening cash",
+                 {"amount": round(float(req.amount), 2), "as_of": d.isoformat(), "note": req.note})
+    return out
+
+
 @router.get("/opening-balance")
 def opening_balance(_user=Depends(require_capability("page.cashflow"))):
     """Opening cash = the QBO Bank accounts chosen on Cash Flow (default: all
@@ -120,7 +147,7 @@ def forecast_v2(
     background: BackgroundTasks,
     start_date: Optional[str] = Query(None, description="Week-1 ending date YYYY-MM-DD (defaults to the coming Friday)"),
     weeks: int = Query(26, ge=1, le=520, description="Horizon in weeks (unbounded — user extends as far as they want)"),
-    opening_balance: Optional[float] = Query(None, description="Override the opening balance (defaults to the live QBO bank balance)"),
+    opening_balance: Optional[float] = Query(None, description="What-if opening balance (defaults to the typed opening cash)"),
     count_overdue_plans: bool = Query(False, description="Count overdue schedule items (dates passed, never invoiced/paid/spent) in week 1"),
     _user=Depends(require_capability("page.cashflow")),
 ):

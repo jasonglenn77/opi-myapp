@@ -80,9 +80,9 @@ export async function cashPlanPage(routeFn) {
     const row = (l) => `<tr class="${l.layer !== "forecast" ? "cpn-layer" : ""}"><th scope="row" title="${esc(l.note || "")}">${esc(l.label)}${l.layer !== "forecast" ? ` <span class="cpn-tag">${l.layer === "won" ? "assumed" : "weighted"}</span>` : ""}</th>${l.weekly.map((v) => `<td>${v ? k$(v) : "·"}</td>`).join("")}<td class="cpn-tot">${k$(l.total)}</td></tr>`;
     const totRow = (label, arr, cls = "") => `<tr class="cpn-sum ${cls}"><th scope="row">${label}</th>${arr.map((v) => `<td>${k$(v)}</td>`).join("")}<td class="cpn-tot">${k$(arr.reduce((a, v) => a + v, 0))}</td></tr>`;
     root.innerHTML = `
-      <div class="cpn-print-head"><div class="text-xl font-extrabold">OnPoint Installers · Cash Plan</div><div class="text-sm">As of ${day(d.as_of)} · ${n} weeks · opening ${money0(d.opening)} (${esc(d.bank.source || "")})</div></div>
+      <div class="cpn-print-head"><div class="text-xl font-extrabold">OnPoint Installers · Cash Plan</div><div class="text-sm">As of ${day(d.as_of)} · ${n} weeks · opening ${money0(d.opening)}${d.bank.as_of ? ` as of ${day(d.bank.as_of)}` : ""}</div></div>
       <div class="su-kpis" id="cpnKpis">
-        ${tile("Cash today", money0(d.opening), `Bank, ${esc(d.bank.source === "b250" ? "from the B250" : "QuickBooks")}`)}
+        ${tile("Cash today", money0(d.opening), d.bank.set ? `Bank balance typed on Cash Flow${d.bank.as_of ? `, as of ${day(d.bank.as_of)}` : ""}` : "Not typed yet: enter it on Cash Flow", !d.bank.set)}
         ${tile("Lowest point", money0(c.bal[c.lo]), `Week ending ${day(d.week_ends[c.lo])}`, c.bal[c.lo] < 0)}
         ${tile(`In ${n} weeks`, money0(end), `${end >= d.opening ? "+" : ""}${money0(end - d.opening)} vs today`, end < 0)}
         ${tile("Money in", money0(c.tin.reduce((a, v) => a + v, 0)), "Lines switched on below")}

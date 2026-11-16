@@ -30,6 +30,11 @@ import { openHoldDialog, resumeHold, holdTitle } from "../utils/hold.js";
 // CR4: schedule-item ids whose history sub-lines are expanded — module-level
 // so the open state survives the panel's frequent remounts after saves.
 const _openHist = new Set();
+// 2026-11-15: projects whose undated lines the user chose to show (they're
+// hidden when the project has dated lines: usually the placeholder line made
+// with the project, which the Job Schedule import keeps as a spare).
+const _showUndated = new Set();
+const _justAdded = new Set();   // lines added in this session: never hidden
 
 const STATUS_OPTIONS = [
   { value: "needs_attention", label: "Needs attention" },
@@ -45,8 +50,12 @@ const EQUIP_OPTIONS = ["", "Equip", "No Equip", "Electric"];
 
 const pmName = (pm) => (`${pm.first_name || ""} ${pm.last_name || ""}`.trim() || pm.email || `PM ${pm.id}`);
 
-const STATUS_LABEL = { needs_attention: "Not started", pending: "Not started", not_started: "Not started", in_progress: "In progress",
+const STATUS_LABEL = { needs_attention: "No dates yet", pending: "No dates yet", not_started: "Not started", in_progress: "In progress",
   on_hold: "On hold", completed: "Finished", canceled: "Canceled" };
+const isUndated = (it) => !it.start_date && !it.end_date;
+// An undated line hasn't started anything: say so instead of "Not started".
+const statusLabelOf = (it) => (isUndated(it) && it.status !== "canceled" && it.status !== "on_hold"
+  ? "No dates yet" : (STATUS_LABEL[it.status] || "Not started"));
 const fmtHd = (v) => { if (!v) return "—"; const [y, m, d] = String(v).slice(0, 10).split("-"); return `${Number(m)}/${Number(d)}/${y.slice(2)}`; };
 const lastDay = (it) => {
   if (!it.end_date) return null;
@@ -128,14 +137,15 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
   const field = (label, inner, cls = "") => `
     <div class="ap-f ${cls}"><span class="ap-l">${label}</span>${inner}</div>`;
 
+  let visibleHasMain = true;
   const lineHtml = (it, i) => {
     const cachedH = cachedHistory(it.id);
     const histCount = cachedH ? historyCountOf(cachedH) : it.history_count;
     return `
     <div class="ap-line" data-sid="${it.id}">
       <div class="ap-deck">
-        <span class="ap-idx">#${i + 1}${it.is_extra_row ? `<span class="text-[10px] text-black/30"> (extra)</span>` : ""}</span>
-        ${field("Status", `<span class="ap-status-ro" title="Worked out from the dates: not started, in progress, finished. Put on hold with the hold bar.">${escapeHtml(STATUS_LABEL[it.status] || "Not started")}</span>`)}
+        <span class="ap-idx">#${i + 1}${it.is_extra_row && visibleHasMain ? `<span class="text-[10px] text-black/30"> (extra)</span>` : ""}</span>
+        ${field("Status", `<span class="ap-status-ro" title="Worked out from the dates: not started, in progress, finished. Put on hold with the hold bar.">${escapeHtml(statusLabelOf(it))}</span>`)}
         ${has("dates") ? field("Start", `<input data-f="start_date" type="date" value="${escapeHtml(it.start_date ? String(it.start_date).slice(0, 10) : "")}" class="input text-xs py-1.5"/>`) : field("Dates", `<span class="ap-ro">${fmtHd(it.start_date)} to ${fmtHd(lastDay(it))}</span>`)}
         ${has("dates") ? field("Quoted end", `<input data-f="end_date" type="date" value="${escapeHtml(it.end_date ? String(it.end_date).slice(0, 10) : "")}" class="input text-xs py-1.5" title="The end the price was built on (the green cell on the Job Schedule)"/>`) : ""}
         ${has("dates") ? field("Overage days", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16" title="Calendar days worked past the quoted end (orange on the Job Schedule)"/>`) : ""}
@@ -162,8 +172,18 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
     </div>`;
   };
 
-  const bodyLines = items.length
-    ? items.map(lineHtml).join("")
+  // Undated lines are hidden while the project has dated ones (shown on request).
+  const pkey = String(qboCustomerId);
+  const anyDated = items.some((it) => !isUndated(it));
+  const hiddenLines = anyDated ? items.filter((it) => isUndated(it) && it.status !== "canceled" && !_justAdded.has(String(it.id))) : [];
+  const showHidden = _showUndated.has(pkey);
+  const visible = showHidden ? items : items.filter((it) => !hiddenLines.includes(it));
+  visibleHasMain = visible.some((it) => !it.is_extra_row);   // "(extra)" only means something next to the main line
+  const hiddenNote = !hiddenLines.length ? "" : `<div class="text-[11px] text-black/45 pt-1">${showHidden
+    ? `Showing ${hiddenLines.length} line${hiddenLines.length === 1 ? "" : "s"} with no dates · <button type="button" class="underline decoration-dotted hover:text-ink-900" data-undated="hide">hide</button>`
+    : `${hiddenLines.length} line${hiddenLines.length === 1 ? "" : "s"} with no dates hidden · <button type="button" class="underline decoration-dotted hover:text-ink-900" data-undated="show">show</button>`}</div>`;
+  const bodyLines = visible.length
+    ? visible.map(lineHtml).join("")
     : `<div class="py-4 text-center text-sm text-black/40">No schedule items yet — add one below.</div>`;
 
   const allCanceled = items.length > 0 && items.every((x) => x.status === "canceled");
@@ -188,9 +208,10 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       ${cancelBtn}
       <div class="flex items-start gap-3 flex-wrap mb-3">
         <div class="text-xs text-black/50 flex-1" style="min-width:220px;">${escapeHtml(opts.intro || "Assign the PM(s), crew(s), dates, and schedule detail for each set of dates. A project can have more than one (extra crews / phases). Changes save automatically.")}</div>
-        <span data-ccx-slot></span>
+        ${has("crew") ? `<span data-ccx-slot></span>` : ""}
       </div>
       <div data-rows>${bodyLines}</div>
+      ${hiddenNote}
       ${has("dates") ? `<div class="pt-3">
         <button data-add class="text-xs font-semibold text-emerald-700 hover:underline">+ Add another set of dates</button>
       </div>` : ""}
@@ -201,7 +222,12 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
 
   // CR5 B3: crew-consistency chip in the header area. The panel remounts after
   // every save, so the chip re-fetches and tracks crew changes automatically.
-  mountConsistencyChip(container, bundle.qbo && bundle.qbo.qbo_id);
+  // 2026-11-15: crew only (Project Setup shows it on the Crew card, not PM).
+  if (has("crew")) mountConsistencyChip(container, bundle.qbo && bundle.qbo.qbo_id);
+  container.querySelector("[data-undated]")?.addEventListener("click", (e) => {
+    if (e.currentTarget.dataset.undated === "show") _showUndated.add(pkey); else _showUndated.delete(pkey);
+    remount();
+  });
 
   // CR4: refresh one line's history panel + badge from the cache.
   function refreshHistRow(sid) {
@@ -490,7 +516,8 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
 
   container.querySelector("[data-add]")?.addEventListener("click", async () => {
     try {
-      await api("/assignment/save", { method: "POST", body: JSON.stringify({ qbo_customer_id: Number(qboCustomerId), status: "not_started", project_manager_ids: [], work_crew_ids: [] }) });
+      const r = await api("/assignment/save", { method: "POST", body: JSON.stringify({ qbo_customer_id: Number(qboCustomerId), status: "not_started", project_manager_ids: [], work_crew_ids: [] }) });
+      if (r && r.schedule_item_id) _justAdded.add(String(r.schedule_item_id));   // keep the new (undated) line in view
       if (onChange) onChange();
       remount();
     } catch (e) { alert("Could not add schedule item: " + (e?.message || e)); }

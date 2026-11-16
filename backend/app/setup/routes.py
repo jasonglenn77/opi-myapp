@@ -230,6 +230,13 @@ def _gather(conn, opp_ids=None, extra_eids=None):
         d["notes"].setdefault(r["subject"], {})[r["step_key"]] = {
             "reason_code": r["reason_code"], "note": r["note"], "by": r["by_email"], "at": str(r["at"]),
             "expected_date": str(r["expected_date"]) if r["expected_date"] else None}
+    d["comments"] = {}
+    try:
+        for subj, sk, n in conn.execute(_q("""SELECT subject, COALESCE(step_key, ''), COUNT(*) FROM project_comments
+                                              WHERE subject IN :s GROUP BY subject, step_key""", "s"), {"s": subjects}).all():
+            d["comments"].setdefault(subj, {})[sk] = int(n)
+    except Exception:
+        pass     # table not migrated yet
     real = [e for e in eids if e != "-"]
     d["reviews"] = RV.open_reviews(conn, real)
     d["unanswered"] = {str(e): int(n) for e, n in conn.execute(_q("""SELECT entity_id, COUNT(*) FROM schedule_date_changes
@@ -250,6 +257,7 @@ def _steps(o, d, today):
 
     reviews = d.get("reviews", {}).get(str(eid), {}) if eid else {}
     notes = {**d.get("notes", {}).get(f"opp:{o['id']}", {}), **d.get("notes", {}).get(o["key"], {})}
+    ccount = _comment_counts(o, d)
 
     def add(key, state, detail="", **extra):
         m = marks.get(key)
@@ -263,7 +271,7 @@ def _steps(o, d, today):
         stage, label, how = next((s[1], s[2], s[3]) for s in STEPS if s[0] == key)
         out.append({"key": key, "stage": stage, "label": label, "how": how, "state": state, "detail": detail,
                     "mark": ({"status": m["status"], "by": m["by_email"], "at": str(m["at"]), "note": m["note"]} if m else None),
-                    "review": rv, "note": notes.get(key), **extra})
+                    "review": rv, "note": notes.get(key), "comments": ccount.get(key, 0), **extra})
 
     po_n = d["po_docs"].get(("opportunity", str(o["id"])), 0) + (d["po_docs"].get(("project", eid), 0) if eid else 0)
     add("po", "done" if po_n else "todo", f"{po_n} file(s) in 5 Purchase Orders" if po_n else "No PO in the job's Drive folder yet")
@@ -341,6 +349,19 @@ def _flags(o, steps, item, today):
     return [{"tone": t, "text": x} for t, x in fl]
 
 
+def _comment_subjects(o):
+    """A job's comments may sit on the project, the won quote, or an add-on quote."""
+    return [o["key"]] + [f"opp:{i}" for i in [o["id"], *o.get("other_opportunities", [])] if i]
+
+
+def _comment_counts(o, d):
+    out = {}
+    for subj in dict.fromkeys(_comment_subjects(o)):
+        for k, n in d.get("comments", {}).get(subj, {}).items():
+            out[k] = out.get(k, 0) + n
+    return out
+
+
 def _row(o, d, today):
     steps, item, pms, crews = _steps(o, d, today)
     done = sum(1 for s in steps if s["state"] in ("done", "not_needed"))
@@ -363,6 +384,7 @@ def _row(o, d, today):
         "steps": steps, "done": done, "total": len(steps), "stage": stage, "flags": _flags(o, steps, item, today),
         "life": life, "needs_review": n_review, "unanswered_dates": d.get("unanswered", {}).get(str(o["project_qbo_id"]), 0),
         "no_pipeline": bool(o.get("no_pipeline")),
+        "comments": _comment_counts(o, d).get("", 0),
     }
 
 
@@ -691,3 +713,63 @@ def detail_hints(key: str, user=Depends(require_capability(CAP))):
                     seen.add(sig)
                     out[kind].append({"word": w, "source": src, "text": ("…" if a else "") + ctx + ("…" if b < len(t) else "")})
     return {k: v[:6] for k, v in out.items()}
+
+
+# ── Comments on the project and on each step (2026-11-15) ────────────────────
+class CommentIn(BaseModel):
+    step_key: Optional[str] = None    # None = on the project itself
+    body: str
+    notify: bool = False
+
+
+def _comments(conn, o, step=None, all_steps=False):
+    subj = list(dict.fromkeys(_comment_subjects(o)))
+    where = "" if all_steps else ("AND step_key = :k" if step else "AND step_key IS NULL")
+    rows = conn.execute(text(f"""SELECT id, step_key, body, by_email, created_at FROM project_comments
+                                 WHERE subject IN :s {where} ORDER BY created_at DESC, id DESC LIMIT 300""")
+                        .bindparams(bindparam("s", expanding=True)), {"s": subj, "k": step}).mappings().all()
+    return [{"id": r["id"], "step_key": r["step_key"], "body": r["body"], "by": r["by_email"],
+             "at": str(r["created_at"])} for r in rows]
+
+
+@router.get("/job/{key}/comments")
+def list_comments(key: str, step: Optional[str] = None, all: int = 0, user=Depends(require_capability(CAP))):
+    """The project's comments (step omitted), one step's (step=po), or every
+    comment on the job (all=1)."""
+    if step and step not in STEP_KEYS:
+        raise HTTPException(status_code=400, detail="Unknown step")
+    with engine.connect() as conn:
+        o, _ = _one(conn, key)
+        return {"comments": _comments(conn, o, step, bool(all)),
+                "labels": {k: l for k, _s, l, _h in STEPS}}
+
+
+@router.post("/job/{key}/comments")
+def add_comment(key: str, req: CommentIn, user=Depends(require_capability(CAP))):
+    body = (req.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Write a comment first")
+    if req.step_key and req.step_key not in STEP_KEYS:
+        raise HTTPException(status_code=400, detail="Unknown step")
+    with engine.begin() as conn:
+        o, _ = _one(conn, key)
+        conn.execute(text("""INSERT INTO project_comments (subject, step_key, body, by_user_id, by_email)
+                             VALUES (:s, :k, :b, :u, :e)"""),
+                     {"s": o["key"], "k": req.step_key or None, "b": body[:5000], "u": user.get("id"), "e": user.get("email")})
+        out = _comments(conn, o, req.step_key)
+    name = o["project_name"] or o["title"]
+    where = next((l for k, _s, l, _h in STEPS if k == req.step_key), None) if req.step_key else None
+    if req.notify:
+        try:
+            from app.help.notify import notify
+            from app.help.watch import office_users
+            notify([u for u in office_users() if u != user.get("id")], "setup.note",
+                   f"Comment on {name}" + (f" ({where})" if where else ""),
+                   body=f"{body[:600]}\nBy {user.get('email')}", link=f"#/setup?job={o['key']}",
+                   subject=o["project_qbo_id"] or o["key"],
+                   dedupe_key=f"setup.comment:{o['key']}:{datetime.utcnow():%Y%m%d%H%M%S%f}")
+        except Exception:
+            pass
+    record_audit(user, "setup.comment", "project", o["project_qbo_id"] or o["key"], name,
+                 {"step": req.step_key, "body": body[:500], "notify": req.notify, "entity_id": o["project_qbo_id"]})
+    return {"comments": out}

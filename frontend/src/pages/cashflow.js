@@ -15,8 +15,12 @@ export async function cashflowPage(routeFn) {
           <button id="cfModeActuals" class="px-3 py-1.5 rounded-xl text-sm font-bold border border-black/15">Actuals</button>
         </div>
         <div>
-          <div class="label mb-0.5">Opening cash balance</div>
-          <input id="cfOpening" type="number" step="1000" class="input py-1.5" style="width:150px" placeholder="0" />
+          <div class="label mb-0.5">Opening cash (bank balance)</div>
+          <div class="flex items-center gap-1.5">
+            <input id="cfOpening" type="number" step="1000" class="input py-1.5" style="width:140px" placeholder="Type it" title="Today's bank balance, typed by you (not read from QuickBooks or the B250)" />
+            <input id="cfOpenAsOf" type="date" class="input py-1.5" style="width:140px" title="The date this balance is as of" />
+            <button id="cfOpenSave" type="button" class="px-3 py-1.5 rounded-xl text-sm font-semibold border border-black/15 hover:bg-black/5 disabled:opacity-40" disabled title="Save this opening cash for everyone">Save</button>
+          </div>
         </div>
         <div>
           <div class="label mb-0.5">Start week ending</div>
@@ -68,7 +72,7 @@ export async function cashflowPage(routeFn) {
 
           <div>
             <div class="font-bold text-ink-900">Opening balance</div>
-            <p class="text-black/60">The QuickBooks balances of the bank accounts ticked under <span class="font-semibold">Opening balance source</span> (saved for everyone). To start from a different figure, type it in <span class="font-semibold">Opening balance</span> at the top; it overrides the QuickBooks figure. Since 11/11 the app no longer reads OPI's B250.</p>
+            <p class="text-black/60">The bank balance someone types in <span class="font-semibold">Opening cash</span> at the top, with the date it's as of, then <span class="font-semibold">Save</span> (saved for everyone, and the earlier entries are kept). It isn't read from the QuickBooks bank accounts or the B250. Type a different figure without saving to try a what-if; only this view changes.</p>
           </div>
 
           <div>
@@ -163,7 +167,6 @@ export async function cashflowPage(routeFn) {
       </div>
     </div>
 
-    <div id="cfBank" class="mb-4"></div>
 
     <div id="cfKpis" class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4"></div>
 
@@ -571,74 +574,10 @@ export async function cashflowPage(routeFn) {
 
   // (old Forecast/Actuals renderers removed — both views now use renderForecastV2)
 
-  // ── Opening balance source: QBO Bank accounts, include/exclude (persisted) ──
-  const bankEl = document.getElementById("cfBank");
+  // ── Opening cash: the balance a person types (2026-11-15) ──
   const countPlansEl = document.getElementById("cfCountPlans");
   countPlansEl.addEventListener("change", () => load());
-  const fmtWhen = (iso, utc = false) => {
-    if (!iso) return "—";
-    const d = new Date(utc && !/Z|[+-]\d\d:?\d\d$/.test(iso) ? iso + "Z" : iso);
-    return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], { month: "numeric", day: "numeric", year: "2-digit", hour: "numeric", minute: "2-digit" });
-  };
   const mdY = (iso) => { if (!iso) return "—"; const [y, m, dd] = String(iso).slice(0, 10).split("-"); return `${+m}/${+dd}/${y.slice(2)}`; };
-  let bankOpen = null;  // remember the panel's open state across re-renders
-  function renderBank(b) {
-    if (!b || !b.available) {
-      bankEl.innerHTML = `<div class="card px-4 py-3 text-[12px] text-black/50">Opening balance: sync the QuickBooks chart of accounts to see your bank accounts.</div>`;
-      return;
-    }
-    const dups = b.duplicate_warnings || [];
-    if (bankOpen === null) bankOpen = dups.length > 0;
-    const dupBadge = dups.map(w => `<span class="cfx-dup" title="${escapeHtml(w.accounts.join(" and "))} share bank number ${escapeHtml(w.key)} — ${w.included.length > 1 ? "BOTH are counted; untick the one that isn't real cash" : "only one is counted"}">⚠ ${w.accounts.length} accounts share ${escapeHtml(w.key)}${w.included.length > 1 ? " · both counted" : ""}</span>`).join(" ");
-    const rows = (b.accounts || []).map(a => `
-      <tr class="${a.included ? "" : "cfx-bank-off"}">
-        <td class="cfx-bank-chk"><input type="checkbox" data-bank="${escapeHtml(a.qbo_id)}" ${a.included ? "checked" : ""} aria-label="Include ${escapeHtml(a.name)}"></td>
-        <td><div class="font-semibold text-ink-900">${escapeHtml(a.name)} ${a.duplicate_of ? `<span class="cfx-dup cfx-dup-sm" title="Same bank number as ${escapeHtml(a.duplicate_of.join(", "))}">⚠ same #</span>` : ""}${a.active ? "" : ` <span class="text-[10px] text-black/40">(inactive in QBO)</span>`}</div>
-            <div class="text-[10.5px] text-black/45">${escapeHtml(a.sub_type || "Bank")}${a.created_in_qbo ? ` · created in QBO ${mdY(a.created_in_qbo)}` : ""}${a.chosen ? "" : " · default"}</div></td>
-        <td class="text-right tabular-nums font-semibold">${fmtMoney(a.balance)}</td>
-        <td class="text-right text-black/55 whitespace-nowrap">${fmtWhen(a.balance_as_of)}</td>
-      </tr>`).join("");
-    bankEl.innerHTML = `
-      <details class="card p-0 overflow-hidden cfx-bank" ${bankOpen ? "open" : ""}>
-        <summary class="cfx-bank-sum">
-          <svg class="cfx-chev" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
-          <span class="text-sm font-bold text-ink-900">Opening balance source</span>
-          <span class="text-[12px] text-black/55">${b.source === "b250"
-            ? `Bank balance from the B250${b.b250?.through ? `, end of week ${mdY(b.b250.through)}` : ""} · <b class="text-ink-900">${fmtMoney(b.balance)}</b> <span class="text-black/40">(QuickBooks books ${fmtMoney(b.books_balance)})</span>`
-            : `${b.included_count} of ${(b.accounts || []).length} QuickBooks bank accounts (books) · <b class="text-ink-900">${fmtMoney(b.balance)}</b>`}</span>
-          ${dupBadge}
-          <span class="cfx-bank-sync">Last synced ${fmtWhen(b.last_synced, true)}</span>
-        </summary>
-        <div class="cfx-bank-body">
-          <div class="text-[12.5px] text-black/60 mb-3">Week 1 starts from the QuickBooks bank accounts ticked below. To start from a different figure, type it in Opening balance at the top (it overrides this).</div>
-          <div class="overflow-x-auto"><table class="cfx-bank-tbl">
-            <thead><tr><th></th><th>QuickBooks bank account</th><th class="text-right">Balance</th><th class="text-right">Balance as of</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table></div>
-          <div class="text-[11px] text-black/45 mt-2">Opening cash = the ticked accounts (QuickBooks balances, pulled nightly with transactions). Your choice is saved for everyone. “Balance as of” = when QuickBooks last changed the account.</div>
-        </div>
-      </details>`;
-    bankEl.querySelector("details").addEventListener("toggle", (e) => { bankOpen = e.target.open; });
-    bankEl.querySelectorAll('input[name="cfOpenSrc"]').forEach((r) => r.addEventListener("change", async () => {
-      try {
-        const nb = await api("/cashflow/opening-source", { method: "PUT", body: JSON.stringify({ source: r.value }) });
-        openingEl.value = Math.round(nb.balance);
-        balSource.textContent = "";
-        renderBank(nb);
-        load();
-      } catch (err) { alert("Save failed: " + (err?.message || "error")); }
-    }));
-    bankEl.querySelectorAll("[data-bank]").forEach(cb => cb.addEventListener("change", async () => {
-      cb.disabled = true;
-      try {
-        const nb = await api("/cashflow/bank-accounts", { method: "PUT", body: JSON.stringify({ included: { [cb.getAttribute("data-bank")]: cb.checked } }) });
-        openingEl.value = Math.round(nb.balance);
-        balSource.textContent = "";
-        renderBank(nb);
-        load();
-      } catch (err) { cb.disabled = false; cb.checked = !cb.checked; alert("Save failed: " + (err?.message || "error")); }
-    }));
-  }
 
   // ── Alerts above the grid: Won — not scheduled + Overdue follow-up ──
   const alertsEl = document.getElementById("cfAlerts");
@@ -1197,20 +1136,44 @@ export async function cashflowPage(routeFn) {
   // (The old "Categories" exclusion modal was removed — the Overhead editor and
   //  the editable Recurring cash-outflow rows cover that need now.)
 
-  // Auto-fill the opening balance from QuickBooks bank accounts (if synced).
+  // Opening cash = the balance someone typed and saved (not QuickBooks, not
+  // the B250). An unsaved figure is a what-if for this view only.
   const balSource = document.getElementById("cfBalSource");
-  try {
-    const ob = await api("/cashflow/opening-balance");
-    if (ob.available) {
-      if (!openingEl.value) openingEl.value = Math.round(ob.balance);
-      balSource.textContent = ob.source === "b250"
-        ? "Auto-filled from the bank balance on the B250 (see Opening balance source). Edit to override."
-        : `Auto-filled from ${ob.included_count} QuickBooks bank account${ob.included_count === 1 ? "" : "s"} (see Opening balance source). Edit to override.`;
-      renderBank(ob);
+  const asOfEl = document.getElementById("cfOpenAsOf");
+  const saveOpenEl = document.getElementById("cfOpenSave");
+  let savedOpen = null;
+  const todayIso = () => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; };
+  function openStatus() {
+    const v = parseFloat(openingEl.value);
+    const dirty = !Number.isNaN(v) && (!savedOpen || !savedOpen.set || Math.round(v) !== Math.round(savedOpen.balance) || (asOfEl.value && asOfEl.value !== savedOpen.as_of));
+    saveOpenEl.disabled = !dirty;
+    if (!savedOpen || !savedOpen.set) {
+      balSource.innerHTML = `<span style="color:#b91c1c;font-weight:600">No opening cash saved yet: type today's bank balance and press Save.</span>${Number.isNaN(v) ? " Until then the forecast starts from $0." : ""}`;
+    } else if (dirty) {
+      balSource.innerHTML = `<span style="color:#b45309;font-weight:600">Not saved: this view uses ${fmtMoney(v)}.</span> The saved opening is ${fmtMoney(savedOpen.balance)} as of ${mdY(savedOpen.as_of)}. Save to use it for everyone.`;
     } else {
-      balSource.textContent = "Sync the chart of accounts to auto-fill from your bank balance.";
+      balSource.textContent = `Opening cash ${fmtMoney(savedOpen.balance)} as of ${mdY(savedOpen.as_of)}, typed by ${savedOpen.by || "someone"}${savedOpen.at ? ` on ${new Date(/Z|[+-]\d\d:?\d\d$/.test(savedOpen.at) ? savedOpen.at : savedOpen.at + "Z").toLocaleDateString([], { month: "numeric", day: "numeric", year: "2-digit" })}` : ""} (saved for everyone).`;
     }
-  } catch (e) { /* leave manual */ }
+  }
+  openingEl.addEventListener("input", openStatus);
+  asOfEl.addEventListener("input", openStatus);
+  saveOpenEl.addEventListener("click", async () => {
+    const v = parseFloat(openingEl.value);
+    if (Number.isNaN(v)) { alert("Type the bank balance first."); return; }
+    saveOpenEl.disabled = true;
+    try {
+      savedOpen = await api("/cashflow/opening-cash", { method: "PUT", body: JSON.stringify({ amount: v, as_of: asOfEl.value || todayIso() }) });
+      asOfEl.value = savedOpen.as_of || "";
+      openStatus();
+      load();
+    } catch (err) { saveOpenEl.disabled = false; alert("Couldn't save: " + (err?.message || err)); }
+  });
+  try {
+    savedOpen = await api("/cashflow/opening-cash");
+    if (savedOpen.set && !openingEl.value) openingEl.value = Math.round(savedOpen.balance);
+    asOfEl.value = savedOpen.set ? savedOpen.as_of : todayIso();
+  } catch (e) { savedOpen = null; }
+  openStatus();
 
   applyModeUi();
   load();

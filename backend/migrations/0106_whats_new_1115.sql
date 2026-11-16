@@ -1,0 +1,12 @@
+-- What's new for the 2026-11-15 release (opening cash, books open until
+-- closed out, Project Setup fixes), published when the migration runs (the
+-- deploy). Staff can edit or unpublish them on Help, Feedback & notes.
+INSERT INTO release_notes (title, body, page, tour_key, capability, published_at, created_by)
+SELECT * FROM (
+  SELECT 'Opening cash: type today''s bank balance' AS title, 'The cash forecast now starts from the bank balance someone types on Cash Flow, with the date it''s as of. Press Save and it''s the starting point for everyone (earlier entries are kept). It''s no longer read from the QuickBooks bank accounts or the B250. Typing a figure without saving is a what-if for your view only.' AS body, '#/cashflow' AS page, '#/cashflow' AS tour_key, 'page.cashflow' AS capability, NOW() - INTERVAL 0 SECOND AS published_at, 'release-1115' AS created_by
+  UNION ALL SELECT 'Finished jobs stay in the cash forecast until closed out', 'A job that ended on or after Oct 1 keeps its final invoice and crew pay in the cash forecast until it''s closed out on Project Closeout. Jobs that ended earlier stay out unless you open one on Closeout and choose Include in the cash forecast (with a note). Open QuickBooks invoices and bills count either way.', '#/closeout', '#/closeout', 'page.assignment', NOW() - INTERVAL 1 SECOND, 'release-1115'
+  UNION ALL SELECT 'Project Setup: why a job came back', 'When a change sends a project back to Project Setup, a box at the top of the job now lists each change, who made it and when, and the steps it reopened. Click a step to open it. It also says how many date changes still need a reason.', '#/setup', '#/setup', 'page.assignment', NOW() - INTERVAL 2 SECOND, 'release-1115'
+  UNION ALL SELECT 'Comments on Project Setup', 'Each job on Project Setup has a comment thread, and every step has its own Comment link. Tick Alert the office to send a bell alert with your comment.', '#/setup', '#/setup', 'page.assignment', NOW() - INTERVAL 3 SECOND, 'release-1115'
+  UNION ALL SELECT 'Tidier Assignment cards', 'On Project Setup, the crew check (assigned vs offered vs paid in QuickBooks) shows only on the Crew card, and an empty set of dates is hidden when the job has dated ones (Show brings it back).', '#/setup', NULL, 'page.assignment', NOW() - INTERVAL 4 SECOND, 'release-1115'
+) d
+WHERE NOT EXISTS (SELECT 1 FROM release_notes WHERE created_by = 'release-1115');
