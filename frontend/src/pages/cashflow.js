@@ -763,8 +763,8 @@ export async function cashflowPage(routeFn) {
       const keepY = window.scrollY;
       renderKpis(d);
       render(d);
-      if (mode === "forecast_v2") { schedulePoll(d.cache); renderAlerts(d); if (d.bank) renderBank(d.bank); }
-      else { alertsEl.innerHTML = ""; bankEl.innerHTML = ""; }
+      if (mode === "forecast_v2") { schedulePoll(d.cache); renderAlerts(d); }
+      else { alertsEl.innerHTML = ""; }
       if (silent) window.scrollTo(0, keepY);
     } catch (e) {
       kpis.innerHTML = "";

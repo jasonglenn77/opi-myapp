@@ -70,7 +70,7 @@ export async function setupPage(routeFn) {
   const want = new URLSearchParams((location.hash.split("?")[1] || "")).get("job");
   const st = { kpi: null, jobs: [], view: VIEWS.some(([k]) => k === saved.view) ? saved.view : "todo", q: "", pm: "",
     sel: want || saved.sel || null, open: !!want, cache: {}, scope: null, meta: {} };
-  if (want && st.view === "all") st.view = "todo";
+  if (want) st.view = "todo";
   const remember = () => { try { sessionStorage.setItem("opi_setup", JSON.stringify({ view: st.view, sel: st.sel })); } catch (_) {} };
 
   setShell({
@@ -125,8 +125,9 @@ export async function setupPage(routeFn) {
       const d = await api(`/setup/queue?scope=${scope}`);
       st.jobs = d.jobs; st.scope = scope; st.meta = d;
       if (want && !st.jobs.some((j) => j.key === want) && scope === "todo") { st.view = "all"; return load(keepDetail); }
-      if (!st.sel || !st.jobs.some((j) => j.key === st.sel)) st.sel = visible()[0]?.key || st.jobs[0]?.key || null;
-      render(keepDetail);
+      const before = st.sel;
+      fitSel();
+      render(keepDetail && st.sel === before);
     } catch (e) {
       root.innerHTML = `<div class="card p-6 text-sm text-red-700">Couldn't load won jobs: ${escapeHtml(e?.message || String(e))}</div>`;
     }
@@ -146,6 +147,17 @@ export async function setupPage(routeFn) {
       if (q && !`${j.project_name || ""} ${j.title || ""} ${j.quote_number || ""} ${j.dealer || ""} ${j.customer || ""}`.toLowerCase().includes(q)) return false;
       return true;
     });
+  }
+
+  // 2026-11-16: the open job follows the list. Switching tab / tile / PM keeps
+  // the open job when it's in the new list, else opens the list's first job
+  // (none: an empty-tab note). Typing a search doesn't switch it.
+  function fitSel() {
+    const rows = visible();
+    if (st.sel && rows.some((j) => j.key === st.sel)) return false;
+    st.sel = rows[0]?.key || null;
+    remember();
+    return true;
   }
 
   function kpis() {
@@ -259,7 +271,11 @@ export async function setupPage(routeFn) {
     if (!box) return;
     // a fresh element per job, so listeners from the last job don't pile up
     const fresh = box.cloneNode(false); box.replaceWith(fresh); box = fresh;
-    if (!j) { box.innerHTML = `<div class="card p-6 text-sm text-black/50">Pick a job on the left.</div>`; D = null; return; }
+    if (!j) {
+      const label = st.kpi && KPI[st.kpi] ? KPI[st.kpi][0] : (VIEWS.find(([k]) => k === st.view) || [])[1];
+      box.innerHTML = `<div class="card p-6 text-sm text-black/50">${visible().length ? "Pick a job on the left." : `No jobs ${label ? `in ${escapeHtml(label)}` : "here"} right now.`}</div>`;
+      D = null; return;
+    }
     D = { j, editor: null, billing: null };
     const intro = {
       QuickBooks: "",
@@ -1154,13 +1170,13 @@ export async function setupPage(routeFn) {
   // ── Events ──────────────────────────────────────────────────────────────
   root.addEventListener("click", (e) => {
     const kp = e.target.closest("[data-kpi]");
-    if (kp) { st.kpi = st.kpi === kp.dataset.kpi ? null : kp.dataset.kpi; st.view = "all"; st.open = false; if (!visible().some((j) => j.key === st.sel)) st.sel = visible()[0]?.key || st.sel; render(); return; }
-    if (e.target.closest("[data-clearkpi]")) { st.kpi = null; render(true); return; }
+    if (kp) { st.kpi = st.kpi === kp.dataset.kpi ? null : kp.dataset.kpi; st.view = "all"; st.open = false; fitSel(); render(); return; }
+    if (e.target.closest("[data-clearkpi]")) { st.kpi = null; render(!fitSel()); return; }
     if (e.target.closest("#suB151")) { if (!b151.busy) refreshB151(); return; }
     const v = e.target.closest("[data-view]");
     if (v && root.contains(v) && !v.closest("#suDetail")) {
       st.view = v.dataset.view; st.kpi = null; st.open = false; remember();
-      if ((st.view === "all") !== (st.scope === "all")) { root.querySelector("#suList").innerHTML = `<div class="p-4 text-sm text-black/45">Loading…</div>`; load(); } else render();
+      if ((st.view === "all") !== (st.scope === "all")) { root.querySelector("#suList").innerHTML = `<div class="p-4 text-sm text-black/45">Loading…</div>`; load(); } else { fitSel(); render(); }
       return;
     }
     const job = e.target.closest(".su-job");
@@ -1177,7 +1193,7 @@ export async function setupPage(routeFn) {
     if (e.target.id === "suQ") { st.q = e.target.value; refreshList(); }
   });
   root.addEventListener("change", (e) => {
-    if (e.target.id === "suPm") { st.pm = e.target.value; refreshList(); }
+    if (e.target.id === "suPm") { st.pm = e.target.value; if (fitSel()) renderDetail(); refreshList(); }
   });
 
   load();
