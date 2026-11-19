@@ -201,7 +201,7 @@ def _gather(conn, opp_ids=None, extra_eids=None):
                        SUM(JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')) AS acc
                 FROM project_phases ph
                 LEFT JOIN project_estimate_phase ep ON ep.phase_id = ph.id
-                LEFT JOIN qbo_transactions t ON t.entity_type = 'Estimate' AND t.qbo_id = ep.estimate_qbo_id
+                LEFT JOIN qbo_transactions t ON t.customer_qbo_id = ep.entity_id AND t.entity_type = 'Estimate' AND t.qbo_id = ep.estimate_qbo_id
                 LEFT JOIN project_schedule_items psi ON psi.package_id = ph.id AND psi.status <> 'canceled'
                 WHERE ph.entity_id IN :e GROUP BY ph.entity_id, ph.id, ph.seq, ph.name ORDER BY ph.entity_id, ph.seq, ph.id""", "e"),
                     {"e": real_e}).mappings().all():
@@ -210,7 +210,7 @@ def _gather(conn, opp_ids=None, extra_eids=None):
                     d["pk_missing"].setdefault(str(r["entity_id"]), []).append(r["name"] or f"Package {n}")
             for r in conn.execute(_q("""
                 SELECT DISTINCT ep.entity_id, t.doc_number FROM project_estimate_phase ep
-                JOIN qbo_transactions t ON t.entity_type = 'Estimate' AND t.qbo_id = ep.estimate_qbo_id
+                JOIN qbo_transactions t ON t.customer_qbo_id = ep.entity_id AND t.entity_type = 'Estimate' AND t.qbo_id = ep.estimate_qbo_id
                 WHERE ep.entity_id IN :e AND ep.confirmed = 0
                   AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')""", "e"),
                     {"e": real_e}).all():
