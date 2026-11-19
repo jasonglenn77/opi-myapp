@@ -22,10 +22,12 @@ from collections import defaultdict
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.auth import require_capability
+from app.audit import record_audit
 from app.db import engine
 
 router = APIRouter(prefix="/api/pay-dates", tags=["pay-dates"])
@@ -195,4 +197,35 @@ def pay_dates(start: Optional[str] = None, end: Optional[str] = None, user=Depen
         "in_14": tot(lambda i: i["type"] == "invoice" and i["date"] and today.isoformat() <= i["date"] <= soon.isoformat()),
         "out_14": tot(lambda i: i["type"] in ("crew", "expense") and i["date"] and today.isoformat() <= i["date"] <= soon.isoformat()),
     }
+    try:     # 0112: the office's reason note per line
+        with engine.connect() as conn:
+            rs = {(r[0], int(r[1])): (r[2], r[3]) for r in conn.execute(text(
+                "SELECT item_type, item_id, note, by_email FROM paydate_reasons")).all()}
+        for it in items:
+            r = rs.get((it["type"], int(it["id"])))
+            if r:
+                it["reason"], it["reason_by"] = r
+    except Exception:
+        pass
     return {"today": today.isoformat(), "start": s.isoformat(), "end": e.isoformat(), "items": items, "summary": summary}
+
+
+class ReasonIn(BaseModel):
+    note: Optional[str] = None
+
+
+@router.post("/{item_type}/{item_id}/reason")
+def set_reason(item_type: str, item_id: int, req: ReasonIn, user=Depends(require_capability(CAP))):
+    """Why a line is where it is (blank clears it). Kept with who wrote it."""
+    if item_type not in ("invoice", "crew", "expense"):
+        raise HTTPException(400, "Unknown line type")
+    note = (req.note or "").strip()[:500]
+    with engine.begin() as conn:
+        if note:
+            conn.execute(text("""INSERT INTO paydate_reasons (item_type, item_id, note, by_email) VALUES (:t, :i, :n, :u)
+                                 ON DUPLICATE KEY UPDATE note = VALUES(note), by_email = VALUES(by_email)"""),
+                         {"t": item_type, "i": item_id, "n": note, "u": user.get("email")})
+        else:
+            conn.execute(text("DELETE FROM paydate_reasons WHERE item_type = :t AND item_id = :i"), {"t": item_type, "i": item_id})
+    record_audit(user, "paydates.reason", item_type, str(item_id), None, {"note": note or None})
+    return {"ok": True, "note": note or None}

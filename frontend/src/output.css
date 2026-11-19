@@ -13270,6 +13270,36 @@ body.hp-explaining, body.hp-explaining * {
   margin-left: auto;
 }
 
+/* Invoice & Pay Dates: a reason note per line (0112) */
+
+.pd-reason {
+  display: block;
+  width: 100%;
+  max-width: 32rem;
+  margin-top: .25rem;
+  font-size: .75rem;
+  padding: .2rem .45rem;
+  border: 1px solid rgba(0,0,0,.12);
+  border-radius: .4rem;
+  background: #fff;
+  color: #111;
+}
+
+.pd-reason:-moz-placeholder-shown {
+  border-style: dashed;
+  color: rgba(0,0,0,.5);
+}
+
+.pd-reason:placeholder-shown {
+  border-style: dashed;
+  color: rgba(0,0,0,.5);
+}
+
+.pd-reason:focus {
+  outline: 2px solid #2f6b4f33;
+  border-color: #2f6b4f;
+}
+
 .after\:absolute::after {
   content: var(--tw-content);
   position: absolute;

@@ -121,6 +121,7 @@ export async function payDatesPage(routeFn) {
               <div class="flex flex-wrap items-center gap-1.5">${chip(...TYPE[i.type])}${chip(...(STATE[i.state] || STATE.upcoming))}<span class="text-sm font-semibold text-ink-900">${esc(i.what)}</span><span class="text-xs text-black/55">${esc(i.label || "")}</span></div>
               <a class="text-xs font-semibold text-black/70 hover:underline truncate block" href="${projectLink(i.entity_id, "billing")}">${esc(i.job)}</a>
               <div class="text-[11px] text-black/45">${esc([i.pm, i.crew, i.ref ? `Est. ${i.ref}` : null, i.due && i.type === "invoice" ? `due ${day(i.due)}` : null].filter(Boolean).join(" · "))}</div>
+              <input type="text" class="pd-reason" maxlength="500" value="${esc(i.reason || "")}" placeholder="Reason…" aria-label="Reason" title="${esc(i.reason_by ? `Reason by ${i.reason_by}` : "Why this line is where it is. Saves when you leave the box.")}">
             </div>
             <div class="pd-amt tabular-nums ${i.type === "invoice" ? "text-emerald-700" : "text-ink-900"}">${i.type === "invoice" ? "+" : "−"}${money0(i.amount)}</div>
           </div>`).join("")}
@@ -143,6 +144,16 @@ export async function payDatesPage(routeFn) {
     bindRows();
   }
   function bindRows() {
+    root.querySelectorAll(".pd-reason").forEach((inp) => inp.addEventListener("change", async () => {
+      const row = inp.closest(".pd-row");
+      const { type, id } = row.dataset;
+      const item = st.data.items.find((i) => i.type === type && String(i.id) === id);
+      try {
+        const r = await api(`/pay-dates/${type}/${id}/reason`, { method: "POST", body: JSON.stringify({ note: inp.value }) });
+        if (item) item.reason = r.note || "";
+        toast(r.note ? "Reason saved." : "Reason cleared.");
+      } catch (e) { toast(`Couldn't save the reason: ${(e?.message || "").slice(0, 120)}`); }
+    }));
     root.querySelectorAll(".pd-in").forEach((inp) => inp.addEventListener("change", async () => {
       const row = inp.closest(".pd-row");
       const { type, id } = row.dataset;
