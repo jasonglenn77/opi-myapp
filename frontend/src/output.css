@@ -12945,6 +12945,150 @@ body.hp-explaining, body.hp-explaining * {
   }
 }
 
+/* Setup header: project comments, collapsed (2026-11-18) */
+
+.su-hcmt {
+  border-top: 1px solid rgba(0,0,0,.08);
+  padding-top: .6rem;
+}
+
+.su-hcmt > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  font-size: .8rem;
+}
+
+.su-hcmt > summary::-webkit-details-marker {
+  display: none;
+}
+
+.su-hcmt > summary::before {
+  content: "›";
+  display: inline-block;
+  font-weight: 800;
+  color: rgba(0,0,0,.45);
+  transition: transform .15s;
+}
+
+.su-hcmt[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.su-hcmt-t {
+  font-weight: 700;
+  color: rgba(0,0,0,.7);
+}
+
+.su-hcmt-add {
+  margin-left: auto;
+  font-size: .75rem;
+  font-weight: 700;
+  color: #2f6b4f;
+}
+
+.su-hcmt[open] .su-hcmt-add {
+  display: none;
+}
+
+/* Setup: estimates on the project, one line each (2026-11-18) */
+
+.su-est {
+  border: 1px solid rgba(0,0,0,.1);
+  border-radius: .6rem;
+  background: #fff;
+}
+
+.su-est > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .45rem;
+  padding: .5rem .7rem;
+  font-size: .85rem;
+}
+
+.su-est > summary::-webkit-details-marker {
+  display: none;
+}
+
+.su-est > summary::before {
+  content: "›";
+  font-weight: 800;
+  color: rgba(0,0,0,.45);
+  transition: transform .15s;
+}
+
+.su-est[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.su-est-no {
+  font-weight: 800;
+}
+
+.su-est-off {
+  opacity: .6;
+}
+
+.su-est-body {
+  border-top: 1px solid rgba(0,0,0,.08);
+  padding: .6rem .8rem .75rem;
+}
+
+.su-est-terms {
+  display: grid;
+  gap: .3rem;
+  font-size: .8rem;
+}
+
+.su-est-terms span {
+  display: inline-block;
+  min-width: 7.5rem;
+  font-size: .68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  color: rgba(0,0,0,.45);
+}
+
+.su-est-tot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.su-est-tot > div {
+  border: 1px solid rgba(0,0,0,.1);
+  border-radius: .6rem;
+  padding: .45rem .7rem;
+  min-width: 9rem;
+  display: grid;
+}
+
+.su-est-tot span {
+  font-size: .65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  color: rgba(0,0,0,.45);
+}
+
+.su-est-tot b {
+  font-variant-numeric: tabular-nums;
+  font-size: 1rem;
+}
+
+.su-est-tot em {
+  font-style: normal;
+  font-size: .7rem;
+  color: rgba(0,0,0,.5);
+}
+
 .after\:absolute::after {
   content: var(--tw-content);
   position: absolute;

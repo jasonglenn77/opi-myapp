@@ -33,6 +33,7 @@ from app.auth import require_capability
 from app.db import engine
 from . import estimate as EST
 from . import reviews as RV
+from . import first_invoices as FI
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
 CAP = "page.assignment"
@@ -166,15 +167,25 @@ def _gather(conn, opp_ids=None, extra_eids=None):
         JOIN work_crews c ON c.id = COALESCE(wc.company_id, wc.work_crew_id)
         WHERE p.qbo_customer_id IN :iids""", "iids"), {"iids": iids}).mappings():
         d["assigned_crews"].setdefault(r["cid"], set()).add(r["name"])
+    # Latest version of each estimate: the contract = accepted ones (2026-11-18),
+    # pending change orders counted apart, rejected ones left out.
     d["estimates"] = {r["e"]: dict(r) for r in conn.execute(_q("""
-        SELECT customer_qbo_id AS e, COUNT(*) AS n, MIN(txn_date) AS first_date, SUM(total_amt) AS total
-        FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id IN :eids GROUP BY customer_qbo_id""", "eids"),
+        WITH latest AS (
+          SELECT customer_qbo_id AS e, txn_date, total_amt, JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.TxnStatus')) AS st,
+                 ROW_NUMBER() OVER (PARTITION BY customer_qbo_id, COALESCE(doc_number, qbo_id) ORDER BY id DESC) AS rn
+          FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id IN :eids)
+        SELECT e, COUNT(*) AS n, MIN(txn_date) AS first_date,
+               SUM(CASE WHEN st IN ('Accepted', 'Converted', 'Closed') THEN total_amt ELSE 0 END) AS total,
+               SUM(st = 'Pending') AS pending_n, SUM(CASE WHEN st = 'Pending' THEN total_amt ELSE 0 END) AS pending_total
+        FROM latest WHERE rn = 1 GROUP BY e""", "eids"),
         {"eids": eids}).mappings()}
     d["invoices"] = {r["e"]: dict(r) for r in conn.execute(_q("""
         SELECT customer_qbo_id AS e, COUNT(*) AS n, MIN(txn_date) AS first_date,
                SUBSTRING_INDEX(GROUP_CONCAT(total_amt ORDER BY txn_date, id), ',', 1) AS first_amount
         FROM qbo_transactions WHERE entity_type = 'Invoice' AND customer_qbo_id IN :eids GROUP BY customer_qbo_id""", "eids"),
         {"eids": eids}).mappings()}
+    # first invoice per accepted estimate (first_invoices.py, 2026-11-18)
+    d["first_inv"] = FI.by_project(conn, [e for e in eids if e and e != "-"])
     d["po_docs"] = {}
     for r in conn.execute(_q("""
         SELECT entity_type, entity_id, COUNT(*) AS n FROM documents
@@ -278,10 +289,17 @@ def _steps(o, d, today):
     add("qbo_project", "done" if eid else "todo", o["project_name"] or "Not linked to a QuickBooks project yet")
     est = d["estimates"].get(eid) if eid else None
     add("qbo_estimate", "done" if est else ("todo" if eid else "locked"),
-        f"{est['n']} estimate(s), first {est['first_date']}" if est else ("" if eid else "After the project exists"))
+        (f"{est['n']} estimate{'s' if est['n'] != 1 else ''}, contract ${float(est['total'] or 0):,.0f}"
+         + (f", {int(est['pending_n'])} pending (${float(est['pending_total'] or 0):,.0f})" if est["pending_n"] else ""))
+        if est else ("" if eid else "After the project exists"))
     inv = d["invoices"].get(eid) if eid else None
-    add("first_invoice", "done" if inv else ("todo" if eid else "locked"),
-        f"Invoiced {inv['first_date']} (${float(inv['first_amount'] or 0):,.0f})" if inv else "")
+    fi_rows = d.get("first_inv", {}).get(str(eid), []) if eid else []
+    if fi_rows:      # per accepted estimate: each one that needs a first invoice has one
+        fi_done, fi_txt = FI.step_state(fi_rows)
+        add("first_invoice", "done" if fi_done else "todo", fi_txt)
+    else:
+        add("first_invoice", "done" if inv else ("todo" if eid else "locked"),
+            f"Invoiced {inv['first_date']} (${float(inv['first_amount'] or 0):,.0f})" if inv else "")
     pms = d["pms"].get(cid, []) if cid else []
     add("pm", "done" if pms else ("todo" if eid else "locked"), ", ".join(pms))
     crews = sorted(d["assigned_crews"].get(cid, set())) if cid else []
@@ -385,7 +403,18 @@ def _row(o, d, today):
         "life": life, "needs_review": n_review, "unanswered_dates": d.get("unanswered", {}).get(str(o["project_qbo_id"]), 0),
         "no_pipeline": bool(o.get("no_pipeline")),
         "comments": _comment_counts(o, d).get("", 0),
+        **_contract(o, d),
     }
+
+
+def _contract(o, d):
+    """The project's contract (every accepted estimate, latest version) and the
+    pending change orders, for the header. None before the project exists."""
+    est = d["estimates"].get(o["project_qbo_id"]) if o["project_qbo_id"] else None
+    if not est:
+        return {"contract": None, "pending_total": 0.0, "pending_n": 0, "estimates_n": 0}
+    return {"contract": round(float(est["total"] or 0), 2), "pending_total": round(float(est["pending_total"] or 0), 2),
+            "pending_n": int(est["pending_n"] or 0), "estimates_n": int(est["n"] or 0)}
 
 
 def _visible(r, today):
@@ -455,6 +484,20 @@ def job(key: str, user=Depends(require_capability(CAP))):
     with engine.connect() as conn:
         o, d = _one(conn, key)
         return _row(o, d, date.today())
+
+
+@router.get("/job/{key}/estimates")
+def job_estimates(key: str, user=Depends(require_capability(CAP))):
+    """Every estimate on the project, one line each, with its PO comparison
+    (estimates_list.py). Empty before the project is in QuickBooks."""
+    from . import estimates_list as EL
+    with engine.begin() as conn:     # begin: a PO read is cached on first use
+        o, d = _one(conn, key)
+        eid = o["project_qbo_id"]
+        if not eid:
+            return {"estimates": [], "po_files": [], "accepted_total": 0, "accepted_n": 0, "pending_total": 0, "pending_n": 0, "other_n": 0}
+        opp_ids = [r[0] for r in conn.execute(text("SELECT id FROM opportunities WHERE project_qbo_id = :e"), {"e": eid}).all()]
+        return EL.overview(conn, eid, opp_ids or [o["id"]], d.get("reviews", {}).get(str(eid), {}))
 
 
 @router.get("/job/{key}/estimate-draft")
@@ -659,8 +702,8 @@ def first_invoice(key: str, user=Depends(require_capability(CAP))):
                       COLUMNS (value JSON PATH '$')) lt WHERE JSON_UNQUOTE(JSON_EXTRACT(lt.value, '$.TxnType')) = 'Estimate' LIMIT 1) AS est_id
             FROM qbo_transactions t WHERE t.entity_type = 'Invoice' AND t.customer_qbo_id = :e
             ORDER BY t.txn_date, t.id LIMIT 1"""), {"e": e}).mappings().first()
-        contract = float(conn.execute(text("""SELECT COALESCE(SUM(total_amt), 0) FROM qbo_transactions
-            WHERE entity_type = 'Estimate' AND customer_qbo_id = :e"""), {"e": e}).scalar() or 0)
+        per_est = FI.by_project(conn, [e], detail=True).get(str(e), [])
+        contract = sum(x["total"] for x in per_est)
         est_no = None
         if inv and inv["est_id"]:
             est_no = conn.execute(text("SELECT doc_number FROM qbo_transactions WHERE entity_type = 'Estimate' AND qbo_id = :q LIMIT 1"),
@@ -672,7 +715,7 @@ def first_invoice(key: str, user=Depends(require_capability(CAP))):
             WHERE s.entity_id = :e ORDER BY (m.qbo_invoice_id = :q) DESC, m.invoice_date IS NULL, m.invoice_date, m.seq LIMIT 1"""),
             {"e": e, "q": inv["qbo_id"] if inv else "-"}).mappings().first()
     iso = lambda v: str(v) if v else None  # noqa: E731
-    out = {"contract": round(contract, 2), "invoice": None, "milestone": None}
+    out = {"contract": round(contract, 2), "invoice": None, "milestone": None, "estimates": per_est}
     if inv:
         amt, bal = float(inv["total_amt"] or 0), float(inv["balance_amt"] or 0)
         out["invoice"] = {"qbo_id": inv["qbo_id"], "doc_number": inv["doc_number"], "date": iso(inv["txn_date"]),
@@ -687,6 +730,36 @@ def first_invoice(key: str, user=Depends(require_capability(CAP))):
                             "is_invoice": bool(ms["qbo_invoice_id"]), "terms": ms["terms_note"], "net_days": ms["net_days"],
                             "estimate": ms["estimate_doc_number"]}
     return out
+
+
+class FirstInvoiceNeed(BaseModel):
+    need: Optional[str] = None      # needed | not_needed | None (back to the app's default)
+    note: Optional[str] = None
+
+
+@router.post("/job/{key}/first-invoice/{estimate_qbo_id}/need")
+def set_first_invoice_need(key: str, estimate_qbo_id: str, req: FirstInvoiceNeed, user=Depends(require_capability(CAP))):
+    """Does this estimate need a first invoice? Set it, or clear back to the default."""
+    if req.need not in (None, "needed", "not_needed"):
+        raise HTTPException(400, "need must be needed, not_needed or empty")
+    with engine.begin() as conn:
+        o, _ = _one(conn, key)
+        e = o["project_qbo_id"]
+        if not e:
+            raise HTTPException(400, "The project isn't in QuickBooks yet")
+        if req.need is None:
+            conn.execute(text("DELETE FROM project_estimate_first_invoice WHERE entity_id = :e AND estimate_qbo_id = :q"),
+                         {"e": e, "q": estimate_qbo_id})
+        else:
+            conn.execute(text("""INSERT INTO project_estimate_first_invoice (entity_id, estimate_qbo_id, need, note, by_email)
+                                 VALUES (:e, :q, :n, :t, :u) ON DUPLICATE KEY UPDATE need = VALUES(need), note = VALUES(note),
+                                 by_email = VALUES(by_email)"""),
+                         {"e": e, "q": estimate_qbo_id, "n": req.need, "t": (req.note or "").strip()[:500] or None, "u": user.get("email")})
+        o2, d2 = _one(conn, key)
+        row = _row(o2, d2, date.today())
+    record_audit(user, "setup.first_invoice_need", "project", e, o["project_name"] or o["title"],
+                 {"estimate_qbo_id": estimate_qbo_id, "need": req.need, "note": req.note})
+    return row
 
 
 HINT_WORDS = {

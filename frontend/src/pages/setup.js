@@ -290,7 +290,7 @@ export async function setupPage(routeFn) {
             <div class="text-lg font-extrabold leading-tight">${escapeHtml(j.project_name || j.title)}</div>
             <div class="text-xs text-black/55 mt-0.5">${escapeHtml([j.title !== j.project_name ? j.title : null, j.dealer ? `Dealer: ${j.dealer}` : null, `Quote #${j.quote_number}`, j.won ? `Won ${day(j.won)}` : null, j.pipeline_status].filter(Boolean).join(" · "))}</div>
           </div>
-          <div class="text-right"><div class="text-[10px] uppercase tracking-wide font-bold text-black/45">Order value</div><div class="font-extrabold tabular-nums">${money0(j.value)}</div></div>
+          ${headMoney(j)}
         </div>
         <div class="flex flex-wrap gap-2 mt-3 items-center" data-flags>
           ${j.life ? chip(`Status: ${j.life.label}`, LIFE[j.life.status] || C.quiet, "Worked out from the job: set up, started, ended, closed out") : ""}
@@ -302,9 +302,12 @@ export async function setupPage(routeFn) {
           <div class="flex items-center justify-between"><a href="#" class="text-[11px] uppercase tracking-wide font-bold text-black/50 hover:underline" data-jumpsec="${sg}">${sg}</a><div class="text-[11px] font-bold tabular-nums text-black/45" data-n>${stageCount(j, sg)}</div></div>
           <div class="grid gap-1 mt-1.5" data-links>${j.steps.filter((s) => s.stage === sg).map(stepLink).join("")}</div></div>`).join("")}</div>
         <div class="text-[11px] text-black/45 mt-2">Click a step to open it below.</div>
+        <details class="su-hcmt mt-3" data-pcomments>
+          <summary><span class="su-hcmt-t">Comments <span data-pcount>${j.comments ? `(${j.comments})` : ""}</span></span><span class="su-hcmt-add">Add comment</span></summary>
+          <div class="mt-2">${projectCommentsShell(j)}</div>
+        </details>
       </section>
       <div data-why>${whyHtml(j)}</div>
-      <section class="card p-4" data-pcomments>${projectCommentsShell(j)}</section>
       ${STAGES.map((sg) => `<section class="card p-4 su-sec" id="su-${sg}">
         <div class="flex flex-wrap items-center gap-2"><h3 class="su-h flex-1">${sg} <span class="text-xs font-bold text-black/40 tabular-nums" data-n>${stageCount(j, sg)}</span></h3>
           <button type="button" class="su-linkbtn" data-openall="${sg}">Open all</button></div>
@@ -449,10 +452,24 @@ export async function setupPage(routeFn) {
         <label class="inline-flex items-center gap-1.5 text-xs text-black/70"><input type="checkbox" data-cnotify> Alert the office</label>
         <button type="submit" class="pd-btn ml-auto">Post comment</button>
       </div></form>`;
+  // 2026-11-18: the project's contract is every accepted estimate (latest version),
+  // with this quote's amount and the pending change orders under it.
+  function headMoney(j) {
+    const tip = "Every accepted estimate on the project in QuickBooks (latest version of each). Rejected ones are left out.";
+    if (j.contract == null) {
+      return `<div class="text-right"><div class="text-[10px] uppercase tracking-wide font-bold text-black/45">Order value</div><div class="font-extrabold tabular-nums">${money0(j.value)}</div>
+        <div class="text-[11px] text-black/45">Contract once the project is in QuickBooks</div></div>`;
+    }
+    const sub = [j.value && Math.abs(j.value - j.contract) > 0.5 ? `This quote ${money0(j.value)}` : null,
+      j.pending_n ? `${j.pending_n} pending ${j.pending_n === 1 ? "estimate" : "estimates"} ${money0(j.pending_total)}` : null].filter(Boolean);
+    return `<div class="text-right" title="${escapeHtml(tip)}"><div class="text-[10px] uppercase tracking-wide font-bold text-black/45">Contract${j.estimates_n > 1 ? ` · ${j.estimates_n} estimates` : ""}</div>
+      <div class="text-lg font-extrabold tabular-nums leading-tight">${money0(j.contract)}</div>
+      ${sub.map((x) => `<div class="text-[11px] text-black/50 tabular-nums">${escapeHtml(x)}</div>`).join("")}</div>`;
+  }
+
   function projectCommentsShell(j) {
-    return `<div class="flex items-center gap-2"><h3 class="su-h flex-1">Comments <span class="text-xs font-bold text-black/45" data-pcount>${j.comments ? `(${j.comments})` : ""}</span></h3>
+    return `<div class="flex flex-wrap items-center gap-2"><div class="text-xs text-black/55 flex-1">Notes for everyone working the job. Kept with who wrote it and when.</div>
         <label class="inline-flex items-center gap-1.5 text-xs text-black/60"><input type="checkbox" data-pall> Include step comments</label></div>
-      <div class="text-xs text-black/55 mt-0.5">Notes for everyone working the job. Kept with who wrote it and when.</div>
       <div class="mt-2">${cmtForm("Comment on the project…")}</div>
       <ul class="su-cmt-list mt-2" data-clist><li class="text-xs text-black/50">Loading…</li></ul>`;
   }
@@ -491,7 +508,8 @@ export async function setupPage(routeFn) {
     const pc = box.querySelector("[data-pcomments]");
     if (pc) {
       wireThread(j, pc, null);
-      loadThread(j, pc, null);
+      let loaded = false;
+      pc.addEventListener("toggle", () => { if (pc.open && !loaded) { loaded = true; loadThread(j, pc, null); } });
       pc.querySelector("[data-pall]")?.addEventListener("change", (e) => loadThread(j, pc, null, e.target.checked));
     }
     box.addEventListener("click", (e) => {
@@ -671,32 +689,56 @@ export async function setupPage(routeFn) {
   // The app's draft of the first estimate (copy-ready). Once the project has its
   // estimate in QuickBooks, the card shows that estimate next to the draft instead,
   // with the office's checks, and the draft folds away under "The app's draft".
+  // 2026-11-18: every estimate on the project, one line each (original first,
+  // then change orders), expandable to how it ties to its PO. Before the project
+  // has an estimate, the app's copy-ready draft of the first one shows instead.
+  const EST_ST = { Accepted: C.good, Converted: C.good, Closed: C.good, Pending: C.warn, Rejected: C.quiet };
+  function estimatesHtml(x) {
+    const tie = (e) => e.ties === true ? chip("Ties to PO", C.good) : e.ties === false ? chip("PO differs", C.bad)
+      : e.po_number ? chip("PO not on file", C.warn) : chip("No PO", C.quiet);
+    const ico = (ok) => ok === true ? ICON.done : ok === false ? ICON.review || ICON.todo : ICON.todo;
+    const rows = x.estimates.map((e) => {
+      const off = !["Accepted", "Converted", "Closed", "Pending"].includes(e.status);
+      return `<details class="su-est${off ? " su-est-off" : ""}">
+        <summary>
+          <span class="su-est-no">#${escapeHtml(e.doc_number || "")}</span>
+          ${chip(e.original ? "Original" : "Change order", e.original ? C.info : C.quiet)}
+          <span class="text-xs text-black/55">${day(e.date)}</span>
+          ${chip(e.status || "?", EST_ST[e.status] || C.quiet)}
+          ${e.reopened ? chip("Re-review", C.bad, "This estimate sent the job back for re-review") : ""}
+          <span class="ml-auto flex items-center gap-2">${off ? "" : tie(e)}<b class="tabular-nums">${money2(e.total)}</b></span>
+        </summary>
+        <div class="su-est-body">
+          <div class="text-xs text-black/55">${[e.accepted_date ? `Accepted ${day(e.accepted_date)}` : null, e.created ? `Created ${day(e.created)}` : null,
+            e.po_number ? `PO # on the estimate: ${escapeHtml(e.po_number)}` : "No PO number on the estimate"].filter(Boolean).join(" · ")}</div>
+          <div class="grid gap-1 mt-2">${e.checks.map((c) => `<div class="flex items-start gap-2 text-sm">${ico(c.ok)}<span>${escapeHtml(c.text)}</span></div>`).join("")}</div>
+          <div class="su-est-terms mt-2">
+            <div><span>Estimate terms</span>${escapeHtml(e.terms?.text || "Not on the estimate")}</div>
+            <div><span>PO terms</span>${e.po ? escapeHtml(e.po.terms?.text || "Not found on the PO") : "No PO on file"}</div>
+          </div>
+          ${e.po ? `<button type="button" class="pd-btn mt-2" data-doc="${e.po.document_id}" data-fn="${escapeHtml(e.po.filename)}">${DOC_ICON || ""} Open the PO</button>` : ""}
+        </div>
+      </details>`;
+    }).join("");
+    return `<div class="su-est-tot">
+        <div><span>Contract (accepted)</span><b>${money2(x.accepted_total)}</b><em>${x.accepted_n} estimate${x.accepted_n === 1 ? "" : "s"}</em></div>
+        ${x.pending_n ? `<div><span>Pending</span><b>${money2(x.pending_total)}</b><em>${x.pending_n} not accepted yet</em></div>` : ""}
+        ${x.other_n ? `<div><span>Rejected / other</span><b>${x.other_n}</b><em>not counted</em></div>` : ""}
+      </div>
+      <div class="grid gap-1.5 mt-3">${rows}</div>
+      <div class="text-[11px] text-black/45 mt-2">Amounts are QuickBooks' bottom line, so discounts and deducts count. Open a line to see how it ties to its PO.</div>`;
+  }
+
   async function bodyEstimate(j, body) {
-    const d = await getDraft(j);
-    const act = d.actual?.estimate;
-    if (act) {
-      const cmp = d.compare || { groups: [], checks: [] };
-      const diff = (a, b) => a != null && b != null && Math.abs(a - b) > 0.5;
-      body.innerHTML = `
-        <div class="text-sm">In QuickBooks: estimate <b>#${escapeHtml(act.doc_number || "")}</b> on the project, ${escapeHtml(act.status || "")}, <b>${money2(act.total)}</b>, dated ${day(act.date)}${d.actual.estimates_on_project > 1 ? ` <span class="text-black/50">(${d.actual.estimates_on_project} estimates on the project; this is the first)</span>` : ""}.</div>
-        <div class="grid gap-1 mt-2">${cmp.checks.map((c) => `<div class="flex items-start gap-2 text-sm">${c.ok ? ICON.done : ICON.todo}<span>${escapeHtml(c.text)}</span></div>`).join("")}</div>
-        ${cmp.groups.length ? `<details class="mt-3"${cmp.groups.some((g) => g.lines.some((l) => diff(l.draft, l.actual) || l.draft == null || l.actual == null)) ? " open" : ""}>
-          <summary class="text-xs font-semibold text-black/60 cursor-pointer">Line by line: QuickBooks next to the app's draft</summary>
-          <div class="overflow-x-auto mt-2"><table class="w-full text-xs su-table">
-            <thead><tr><th class="text-left">Group / line</th><th class="text-right">In QuickBooks</th><th class="text-right">App's draft</th><th class="text-right">Difference</th></tr></thead>
-            <tbody>${cmp.groups.map((g) => `
-              <tr class="su-grp"><td>${escapeHtml(g.name)}</td><td class="text-right tabular-nums">${g.actual != null ? money2(g.actual) : "—"}</td><td class="text-right tabular-nums">${g.draft != null ? money2(g.draft) : "—"}</td><td class="text-right tabular-nums">${g.actual != null && g.draft != null && diff(g.actual, g.draft) ? money2(g.actual - g.draft) : ""}</td></tr>
-              ${g.lines.map((l) => `<tr${diff(l.draft, l.actual) || l.draft == null || l.actual == null ? ' class="su-diff"' : ""}><td class="pl-4">${escapeHtml(l.item || "")}</td>
-                <td class="text-right tabular-nums">${l.actual != null ? money2(l.actual) : "not on it"}</td><td class="text-right tabular-nums text-black/55">${l.draft != null ? money2(l.draft) : "—"}</td>
-                <td class="text-right tabular-nums">${l.actual != null && l.draft != null && diff(l.actual, l.draft) ? money2(l.actual - l.draft) : ""}</td></tr>`).join("")}`).join("")}
-            </tbody></table></div>
-          <div class="text-[11px] text-black/45 mt-1">Small differences inside a group are usually how the office rounded the OH&amp;P spread; the group totals are what matter.</div>
-        </details>` : ""}
-        ${act.po_line ? `<details class="mt-2"><summary class="text-xs font-semibold text-black/60 cursor-pointer">PO line on the estimate</summary><pre class="su-snippet">${escapeHtml(act.po_line)}</pre></details>` : ""}
-        <details class="mt-2"><summary class="text-xs font-semibold text-black/60 cursor-pointer">The app's draft (copy-ready)</summary><div data-draft class="mt-2"></div></details>`;
-      draftHtml(j, d, body.querySelector("[data-draft]"));
-      return;
+    if (j.project_qbo_id) {
+      const x = await api(`/setup/job/${encodeURIComponent(j.key)}/estimates`);
+      if ((x.estimates || []).length) {
+        body.innerHTML = estimatesHtml(x);
+        wireDocs(body);
+        return;
+      }
     }
+    const d = await getDraft(j);
     const isAdmin = (getMe()?.user?.role || getMe()?.role) === "admin";
     body.innerHTML = `<div class="flex flex-wrap items-center gap-2"><div class="text-xs text-black/55 flex-1">Not in QuickBooks yet. The app drafted it from the estimator's estimate and the PO: copy it in, then this step ticks itself after the next sync (or press Sync now).</div>
         ${isAdmin && j.project_qbo_id ? `<button class="pd-btn" data-qbosync title="Pull the latest estimates and invoices from QuickBooks now">Sync now</button>` : ""}</div>
@@ -742,37 +784,75 @@ export async function setupPage(routeFn) {
     wireCopy(el);
   }
 
+  // 2026-11-18: one line per accepted estimate: its first invoice from QuickBooks
+  // (number, amount, sent, due, expected, terms, status; expected editable while
+  // unpaid), or, if none yet, whether one is needed (the app's default from the
+  // billing rule, or the office's choice) and the planned first row.
   async function bodyFirstInvoice(j, body) {
-    const [d, fi] = await Promise.all([getDraft(j).catch(() => ({})), j.project_qbo_id ? api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice`).catch(() => ({})) : Promise.resolve({})]);
-    const inv = fi.invoice, ms = fi.milestone, plan = d.first_invoice || {};
+    if (!j.project_qbo_id) {
+      body.innerHTML = `<div class="text-sm text-black/55">Opens once the project is in QuickBooks.</div>${noteForm(j, "first_invoice", "First invoice not sent yet?")}`;
+      wireNoteForm(j, body);
+      return;
+    }
+    const fi = await api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice`);
+    const ests = fi.estimates || [];
     const dateIn = (name, v, label, hint) => `<label class="text-xs grid gap-1"><span class="text-black/55" title="${escapeHtml(hint || "")}">${label}</span><input type="date" name="${name}" value="${escapeHtml(v || "")}" class="input text-sm"></label>`;
-    body.innerHTML = inv ? `
-      <div class="su-facts">
-        <div><span>Invoice</span><b>#${escapeHtml(inv.doc_number || "")}${inv.estimate ? ` <span class="text-black/45 font-normal">· estimate #${escapeHtml(inv.estimate)}</span>` : ""}</b></div>
-        <div><span>Sent</span><b>${day(inv.date)}</b></div>
-        <div><span>Amount</span><b>${money2(inv.amount)}${inv.pct != null ? ` (${inv.pct}% of ${money0(fi.contract)})` : ""}</b></div>
-        <div><span>Terms</span><b>${escapeHtml(inv.terms || ms?.terms || "—")}</b></div>
-        <div><span>Due</span><b>${day(inv.due)}</b></div>
-        <div><span>Status</span><b class="${inv.balance > 0.01 ? "" : "text-emerald-700"}">${escapeHtml(inv.status)}${inv.balance > 0.01 && inv.balance < inv.amount ? ` · ${money2(inv.balance)} open` : ""}</b></div>
-      </div>
-      ${ms ? `<form class="su-sub mt-3 flex flex-wrap gap-2 items-end" data-msform="${ms.id}">
-          ${dateIn("expected_paid_date", ms.expected_paid_date, "Expected pay date", "When the money is expected to land. Blank = the due date.")}
-          <button type="submit" class="btn-primary text-sm">Save</button>
-          <span class="text-xs text-black/50" style="flex:1;min-width:200px">Updates the invoice's row on Billing &amp; Schedule, and Cash Flow follows.</span></form>` : ""}`
-      : `
-      <div class="text-sm">${ms ? `Planned: <b>${escapeHtml(ms.label || "First invoice")}</b> ${money2(ms.amount)}${ms.pct != null ? ` (${ms.pct}%)` : ""}${ms.terms ? ` · terms ${escapeHtml(ms.terms)}` : ""}`
-        : plan.amount ? `Send the first invoice: <b>${plan.percent}% = ${money2(plan.amount)}</b> ${copyBtn(plan.amount.toFixed(2))}` : "No percentage payment terms on the quote: check the PO for how to invoice."}</div>
-      ${ms ? `<form class="su-sub mt-2 flex flex-wrap gap-2 items-end" data-msform="${ms.id}">
-          ${dateIn("invoice_date", ms.invoice_date, "Send date")}${dateIn("due_date", ms.due_date, "Due date")}${dateIn("expected_paid_date", ms.expected_paid_date, "Expected received", "Blank = the due date")}
-          <button type="submit" class="btn-primary text-sm">Save dates</button>
-          <span class="text-xs text-black/50" style="flex:1;min-width:200px">The first row of the invoice schedule: Billing &amp; Schedule and Cash Flow follow.</span></form>` : ""}
-      ${d.terms ? `<div class="text-xs text-black/55 mt-2"><span class="font-semibold text-black/70">Payment terms on the quote:</span> ${escapeHtml(d.terms.replace(/\s+/g, " ").slice(0, 260))}</div>` : ""}
-      ${noteForm(j, "first_invoice", "First invoice not sent yet?")}`;
-    wireCopy(body);
+    const stCls = (s) => s === "Paid" ? C.good : s === "Partly paid" ? C.info : C.warn;
+    const rows = ests.map((e) => {
+      const head = `<td><b>#${escapeHtml(e.doc_number || "")}</b> ${chip(e.change_order ? "Change order" : "Original", e.change_order ? C.quiet : C.info)}<div class="text-[11px] text-black/50 tabular-nums">${money0(e.total)}</div></td>`;
+      if (e.invoice) {
+        const i = e.invoice, open = i.balance > 0.01;
+        return `<tr>${head}
+          <td class="font-semibold">#${escapeHtml(i.doc_number || "")}</td>
+          <td class="text-right tabular-nums">${money2(i.amount)}${i.pct != null ? `<div class="text-[11px] text-black/45">${i.pct}%</div>` : ""}</td>
+          <td>${day(i.date)}</td><td>${day(i.due)}</td>
+          <td>${open ? `<input type="date" class="input text-xs py-1" data-invexp="${escapeHtml(i.qbo_id)}" value="${escapeHtml(i.expected || "")}" title="When the money is expected to land (blank = the due date). Cash Flow follows.">${i.expected_set ? "" : `<div class="text-[10px] text-black/40">due date</div>`}` : `<span class="text-black/45">—</span>`}</td>
+          <td>${escapeHtml(i.terms || "—")}</td>
+          <td>${chip(i.status, stCls(i.status))}${i.balance > 0.01 && i.balance < i.amount - 0.01 ? `<div class="text-[11px] text-black/50">${money2(i.balance)} open</div>` : ""}</td></tr>`;
+      }
+      const sel = `<select class="input text-xs py-1" data-need="${escapeHtml(e.qbo_id)}" title="${escapeHtml(e.default_reason)}">
+          <option value="needed"${e.need === "needed" ? " selected" : ""}>Needs a first invoice${!e.need_set && e.need === "needed" ? " (default)" : ""}</option>
+          <option value="not_needed"${e.need === "not_needed" ? " selected" : ""}>No first invoice needed${!e.need_set && e.need === "not_needed" ? " (default)" : ""}</option>
+        </select>${e.need_set ? ` <button type="button" class="su-linkbtn" data-needreset="${escapeHtml(e.qbo_id)}" title="Back to the app's default: ${escapeHtml(e.default_reason)}">reset</button>` : ""}`;
+      const p = e.planned;
+      return `<tr class="${e.need === "needed" ? "su-diff" : ""}">${head}
+        <td colspan="7"><div class="flex flex-wrap items-center gap-2">${chip(e.need === "needed" ? "Not sent yet" : "Not needed", e.need === "needed" ? C.warn : C.quiet)} ${sel}
+          <span class="text-[11px] text-black/50">${e.need_set ? `Set by ${escapeHtml(shortWho(e.need_by || ""))}` : escapeHtml(e.default_reason)}</span></div>
+          ${e.need === "needed" && p ? `<form class="flex flex-wrap gap-2 items-end mt-2" data-msform="${p.id}">
+            <div class="text-xs"><div class="text-black/55">Planned</div><b class="tabular-nums">${money2(p.amount)}</b>${p.pct != null ? ` <span class="text-black/45">(${p.pct}%)</span>` : ""}</div>
+            ${dateIn("invoice_date", p.invoice_date, "Send date")}${dateIn("due_date", p.due_date, "Due date")}${dateIn("expected_paid_date", p.expected_paid_date, "Expected", "Blank = the due date")}
+            <button type="submit" class="pd-btn">Save dates</button></form>` : ""}</td></tr>`;
+    }).join("");
+    body.innerHTML = ests.length ? `
+      <div class="overflow-x-auto"><table class="w-full text-xs su-table">
+        <thead><tr><th class="text-left">Estimate</th><th class="text-left">Invoice</th><th class="text-right">Amount</th><th class="text-left">Sent</th><th class="text-left">Due</th><th class="text-left">Expected</th><th class="text-left">Terms</th><th class="text-left">Status</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="text-[11px] text-black/45 mt-1">Each accepted estimate's first invoice in QuickBooks. Change orders and small estimates are billed once, at completion, so they need no first invoice unless you say so. Expected dates feed Billing &amp; Schedule and Cash Flow.</div>
+      ${noteForm(j, "first_invoice", "First invoice not sent yet?")}`
+      : `<div class="text-sm text-black/55">No accepted estimate on the project yet.</div>${noteForm(j, "first_invoice", "First invoice not sent yet?")}`;
     wireNoteForm(j, body);
-    body.querySelector("[data-msform]")?.addEventListener("submit", async (ev) => {
+    const after = async (msg) => { toast(msg); await reloadJob(j.key); };
+    body.querySelectorAll("[data-invexp]").forEach((inp) => inp.addEventListener("change", async () => {
+      try {
+        await api(`/invoices/qbo-invoice/${encodeURIComponent(inp.dataset.invexp)}/expected`, { method: "PATCH", body: JSON.stringify({ expected_paid_date: inp.value || null, via: "project_setup" }) });
+        toast(inp.value ? "Expected date saved. Cash Flow follows." : "Expected date cleared: back to the due date.");
+      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+    }));
+    body.querySelectorAll("[data-need]").forEach((sel) => sel.addEventListener("change", async () => {
+      try {
+        await api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice/${encodeURIComponent(sel.dataset.need)}/need`, { method: "POST", body: JSON.stringify({ need: sel.value }) });
+        await after(sel.value === "needed" ? "Marked: needs a first invoice." : "Marked: no first invoice needed.");
+      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+    }));
+    body.querySelectorAll("[data-needreset]").forEach((b) => b.addEventListener("click", async () => {
+      try {
+        await api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice/${encodeURIComponent(b.dataset.needreset)}/need`, { method: "POST", body: JSON.stringify({ need: null }) });
+        await after("Back to the app's default.");
+      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+    }));
+    body.querySelectorAll("[data-msform]").forEach((f) => f.addEventListener("submit", async (ev) => {
       ev.preventDefault();
-      const f = ev.currentTarget, fd = new FormData(f), patch = {};
+      const fd = new FormData(f), patch = {};
       for (const [k, v] of fd.entries()) patch[k] = v || null;
       try {
         const r = await api(`/invoices/milestone/${f.dataset.msform}`, { method: "PATCH", body: JSON.stringify({ ...patch, via: "project_setup" }) });
@@ -782,7 +862,7 @@ export async function setupPage(routeFn) {
         }
         toast(r && r.due_from_terms ? `Saved. Due date set from the terms (${r.due_from_terms.replace("due = ", "")}).` : "Saved. Billing & Schedule and Cash Flow follow.");
       } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
-    });
+    }));
   }
 
   // ── Pipeline record in a side drawer ────────────────────────────────────
