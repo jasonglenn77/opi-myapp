@@ -49,13 +49,13 @@ STEPS = [
     ("final_invoice", "Money in", "Final invoice sent (nothing left to bill)", "auto"),
     ("paid", "Money in", "Paid in full (retainage aside)", "auto"),
     ("retainage", "Money in", "Retainage collected", "auto"),
-    ("crew_paid", "Money out", "Crew paid in full", "auto"),
-    ("expenses", "Money out", "Bills on the job paid", "auto"),
+    ("crew_paid", "Money out", "Contract labor: estimate vs paid", "auto"),
+    ("expenses", "Money out", "Expenses: estimate vs spent", "auto"),
     ("signoff", "Review", "100% sign-off", "auto"),
     ("margin", "Review", "Closed out: final margin reviewed", "manual"),
 ]
 STEP_KEYS = {s[0] for s in STEPS}
-MARKS = {"done", "not_needed", "reviewed"}
+MARKS = {"done", "not_needed", "reviewed", "noted"}   # noted = reviewed, not ready yet (stays open)
 MONEY_STEPS = ("final_invoice", "paid", "retainage", "crew_paid", "expenses", "change_orders")
 
 
@@ -140,8 +140,16 @@ def _gather(conn, ids=None):
         else:
             d["inv"][e][1] += _f(r[2])
 
-    # Crew pay: the Contractor Payments page's own numbers (saved build: schedules
-    # vs QuickBooks bills, with its matching rules), so both pages agree.
+    # 2026-11-18 (owner): a finished job is judged against its ESTIMATES. Budget per
+    # cost category from the accepted estimates, burned down by the bills and card
+    # charges on the job (any vendor). Same figures as Financials / job cost.
+    from app.jobcost import service as JCS
+    d["budget"] = JCS.budget_by_category(conn, E)
+    d["actual"] = JCS.actual_by_category(conn, E)
+
+    # The crew's deal (Payment Schedule) is shown for reference only: the Contractor
+    # Payments numbers where it has the job, else the job's schedules (a Drive
+    # schedule already covered by an app one isn't counted twice).
     snap = None
     try:
         from app import snapshots
@@ -149,30 +157,26 @@ def _gather(conn, ids=None):
         snap = got[0] if got else None
     except Exception:
         snap = None
+    in_snap = set()
     if snap:
         want = set(E)
         for r in snap.get("rows", []):
             e = str(r.get("entity_id"))
             if e in want:
+                in_snap.add(e)
                 d["crew_sched"][e] += _f(r.get("schedule"))
                 d["crew_paid"][e] += _f(r.get("paid"))
                 d["crew_left"][e] += max(0.0, _f(r.get("remaining")))
-    else:
+    rest = [e for e in E if e not in in_snap]
+    if rest:
         for r in conn.execute(_q("""
             SELECT s.entity_id, SUM(i.amount) FROM project_payment_schedules s
             JOIN project_payment_installments i ON i.schedule_id = s.id
-            WHERE s.entity_id IN :ids GROUP BY s.entity_id""", "ids"), p).all():
-            d["crew_sched"][str(r[0])] = _f(r[1])
-        for r in conn.execute(_q("""
-            SELECT l.line_customer_qbo_id, SUM(l.amount)
-            FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
-            WHERE t.entity_type IN ('Bill', 'Purchase') AND l.line_customer_qbo_id IN :ids
-              AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')),
-                           SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1))
-                  LIKE 'Contract Labor%%'
-            GROUP BY l.line_customer_qbo_id""", "ids"), p).all():
-            d["crew_paid"][str(r[0])] = _f(r[1])
-        for e in E:
+            WHERE s.entity_id IN :ids AND COALESCE(s.source, 'app') <> 'sheet_covered'
+            GROUP BY s.entity_id""", "ids"), {"ids": rest}).all():
+            e = str(r[0])
+            d["crew_sched"][e] = _f(r[1])
+            d["crew_paid"][e] = d["actual"][e].get("Crew labor", 0.0)
             d["crew_left"][e] = max(0.0, d["crew_sched"][e] - d["crew_paid"][e])
 
     # Unpaid bills charged to the job (latest version of each bill).
@@ -243,7 +247,15 @@ def _steps(e, d):
     invoiced, open_ar = d["inv"][e]
     ret = d["ret"][e]
     unbilled = round(contract - invoiced, 2)
-    sched, paid, owed = d["crew_sched"][e], d["crew_paid"][e], d["crew_left"][e]
+    sched, owed = d["crew_sched"][e], d["crew_left"][e]          # the crew's deal (reference)
+    bud, act = d["budget"].get(e, {}), d["actual"].get(e, {})
+    lab_bud, lab_paid = bud.get("Crew labor", 0.0), act.get("Crew labor", 0.0)
+    lab_left = round(lab_bud - lab_paid, 2)
+    exp_cats = sorted((set(bud) | set(act)) - {"Crew labor"})
+    exp_bud = sum(bud.get(c, 0.0) for c in exp_cats)
+    exp_spent = sum(act.get(c, 0.0) for c in exp_cats)
+    exp_left = max(0.0, exp_bud - exp_spent)
+    tol_lab = max(TOL, lab_bud * 0.005)
     tol_bill = max(50.0, contract * 0.005)   # OPI rounds invoices; a few dollars off is not a final invoice
     n_exp, exp_amt = d["exp_open"][e]
     co_n = d["cos"][e] + d["pend_est"][e]
@@ -260,10 +272,8 @@ def _steps(e, d):
                           (f"Invoiced ${invoiced:,.0f} of ${contract:,.0f}" if unbilled <= tol_bill else f"${unbilled:,.0f} still to bill (invoiced ${invoiced:,.0f} of ${contract:,.0f})")),
         "paid": (invoiced > 0 and open_ar <= TOL, "Nothing invoiced yet" if invoiced <= 0 else ("All invoices paid" if open_ar <= TOL else f"${open_ar:,.0f} still owed by the customer")),
         "retainage": (ret <= TOL, "No retainage held" if ret <= TOL else f"${ret:,.0f} retainage held"),
-        "crew_paid": (sched > 0 and owed <= TOL,
-                      (f"No crew-pay schedule on this job (QuickBooks shows ${paid:,.0f} paid)" if paid > 0 else "No crew-pay schedule on this job") if sched <= 0 else
-                      (f"Paid ${paid:,.0f} of ${sched:,.0f} scheduled" if owed <= TOL else f"${owed:,.0f} still owed (paid ${paid:,.0f} of ${sched:,.0f}, as on Contractor Payments)")),
-        "expenses": (n_exp == 0, "No unpaid bills on this job in QuickBooks" if n_exp == 0 else f"{n_exp} unpaid bill{'s' if n_exp != 1 else ''} on this job (${exp_amt:,.0f} of job lines)"),
+        "crew_paid": _labor_check(lab_bud, lab_paid, lab_left, tol_lab, sched, owed),
+        "expenses": _expense_check(exp_bud, exp_spent, exp_left, n_exp, exp_amt),
         "signoff": (bool(so and so["decision"] == "approved"),
                     f"Approved by {so['signed_by']}" if so and so["decision"] == "approved" else
                     ("On hold on Progress Checks" if so else "Not signed off yet: sign off here or on Progress Checks (every job, any size)")),
@@ -275,7 +285,7 @@ def _steps(e, d):
         mark = d["marks"][e].get(key)
         state = "done" if ok else "todo"
         if not ok and mark:
-            state = mark["status"]
+            state = "todo" if mark["status"] == "noted" else mark["status"]
         if key == "margin":
             c = d["cost"].get(e) or {}
             pct = c.get("actual_profit_pct")
@@ -284,9 +294,41 @@ def _steps(e, d):
         out.append({"key": key, "group": group, "label": label, "how": how, "state": state, "why": why,
                     "mark": {k: (str(v) if k == "at" else v) for k, v in mark.items()} if mark else None})
     money = {"contract": round(contract, 2), "invoiced": round(invoiced, 2), "unbilled": max(0, unbilled) if unbilled > tol_bill else 0,
-             "open_ar": round(open_ar, 2), "retainage": round(ret, 2), "crew_scheduled": round(sched, 2),
-             "crew_paid": round(paid, 2), "crew_owed": round(owed, 2), "bills_open": round(exp_amt, 2)}
+             "open_ar": round(open_ar, 2), "retainage": round(ret, 2),
+             "labor_budget": round(lab_bud, 2), "labor_paid": round(lab_paid, 2), "labor_left": lab_left,
+             "exp_budget": round(exp_bud, 2), "exp_spent": round(exp_spent, 2), "exp_left": round(exp_left, 2),
+             "crew_deal": round(sched, 2), "crew_deal_owed": round(owed, 2), "bills_open": round(exp_amt, 2)}
     return out, money
+
+
+def _labor_check(bud, paid, left, tol, deal, deal_owed):
+    """Contract labor on the estimates, burned down by Contract Labor bills."""
+    if bud <= TOL and paid <= TOL:
+        return True, "No contract labor on the estimates or in QuickBooks"
+    if bud <= TOL:
+        return False, f"${paid:,.0f} paid to crews, but the accepted estimates have no contract labor line"
+    ref = ""
+    if deal > TOL:
+        ref = f" Crew's Payment Schedule: ${deal:,.0f}" + (f", ${deal_owed:,.0f} of it unpaid." if deal_owed > TOL else ", paid in full.")
+    if left <= tol:
+        over = f" (${-left:,.0f} over the estimate)" if left < -tol else ""
+        return True, f"Paid ${paid:,.0f} of ${bud:,.0f} on the estimates{over}.{ref}"
+    return False, (f"${left:,.0f} of the estimates' ${bud:,.0f} contract labor not paid (paid ${paid:,.0f}).{ref}"
+                   " Review it: close it if the crew is paid in full.")
+
+
+def _expense_check(bud, spent, left, n_unpaid, unpaid_amt):
+    """Expense items on the estimates (rentals, lodging, travel...) vs what was spent."""
+    unpaid = f" {n_unpaid} unpaid bill{'s' if n_unpaid != 1 else ''} (${unpaid_amt:,.0f})." if n_unpaid else ""
+    if bud <= TOL and spent <= TOL:
+        return (n_unpaid == 0), "No expense items on the estimates or in QuickBooks." + unpaid
+    if bud <= TOL:
+        return (n_unpaid == 0), f"Spent ${spent:,.0f}; the estimates had no expense items." + (unpaid or " Every bill paid.")
+    if left <= TOL and n_unpaid == 0:
+        return True, f"Spent ${spent:,.0f} of ${bud:,.0f} on the estimates; every bill paid."
+    head = (f"${left:,.0f} of the estimates' ${bud:,.0f} expense items not spent (spent ${spent:,.0f})." if left > TOL
+            else f"Spent ${spent:,.0f} of ${bud:,.0f}.")
+    return False, head + unpaid + " Review it: close it once nothing more is coming."
 
 
 def _row(e, d, today):
@@ -299,8 +341,8 @@ def _row(e, d, today):
         flags.append({"text": f"${money['unbilled']:,.0f} to bill", "tone": "bad"})
     if money["open_ar"] > TOL:
         flags.append({"text": f"${money['open_ar']:,.0f} owed to us", "tone": "warn"})
-    if money["crew_owed"] > TOL:
-        flags.append({"text": f"Crew owed ${money['crew_owed']:,.0f}", "tone": "warn"})
+    if money["labor_left"] > TOL and any(s["key"] == "crew_paid" and s["state"] == "todo" for s in steps):
+        flags.append({"text": f"Labor ${money['labor_left']:,.0f} under estimate", "tone": "info"})
     if not d["forms"].get(e):
         flags.append({"text": "No completion form", "tone": "info"})
     c = d["cost"].get(e) or {}
@@ -312,7 +354,7 @@ def _row(e, d, today):
     forecast = "closed" if closed else "open" if (end and end >= CUTOVER) else "included" if inc else "off"
     if end and end >= CUTOVER:
         bucket = "recent"
-    elif (money["unbilled"] > TOL or money["open_ar"] > TOL or money["retainage"] > TOL or money["crew_owed"] > TOL
+    elif (money["unbilled"] > TOL or money["open_ar"] > TOL or money["retainage"] > TOL or money["crew_deal_owed"] > TOL
           or money["bills_open"] > TOL or st_of.get("change_orders") == "todo") and any(st_of.get(k) == "todo" for k in MONEY_STEPS):
         bucket = "open"
     else:
@@ -394,7 +436,7 @@ def mark_step(entity_id: str, step: str, req: StepMark, user=Depends(require_cap
     if step not in STEP_KEYS:
         raise HTTPException(400, "Unknown step")
     if req.status is not None and req.status not in MARKS:
-        raise HTTPException(400, "status must be done, not_needed or reviewed")
+        raise HTTPException(400, "status must be done, not_needed, reviewed or noted")
     if step == "signoff" and req.status is not None and not has_capability(user, FINANCIAL_SIGNOFF):
         raise HTTPException(403, "The 100% sign-off needs someone with sign-off access (owners).")
     reviewed = []
@@ -601,25 +643,52 @@ def _det_money_in(conn, e, money):
 
 
 def _det_crew(conn, e, money):
+    """Contract labor: the estimates' budget, what was paid (per crew, from the
+    QuickBooks bills), and the crew's Payment Schedule for reference."""
     from app import snapshots
     from app.crewpay import service as CP
+    co, by_vendor = CP._crews(conn)
+    lines = sorted(CP._paid_lines(conn, e), key=lambda x: str(x["d"]))
+    pays, paid_by = [], defaultdict(float)
+    for l in lines:
+        crew = (by_vendor.get(str(l["vendor"] or "")) or {}).get("name") or l["vendor_name"] or "Unknown payee"
+        paid_by[crew] += _f(l["a"])
+        pays.append({"date": _d(l["d"]), "type": "Card/check" if l["type"] == "Purchase" else "Bill", "doc": l["doc"],
+                     "crew": crew, "description": l["descr"], "amount": round(_f(l["a"]), 2)})
+    deal = defaultdict(lambda: {"scheduled": 0.0, "owed": 0.0})
     got = snapshots.get("crewpay")
+    rows = [r for r in (got[0].get("rows", []) if got else []) if str(r.get("entity_id")) == e]
+    if rows:
+        for r in rows:
+            deal[r.get("crew") or "Crew"]["scheduled"] += _f(r.get("schedule"))
+            deal[r.get("crew") or "Crew"]["owed"] += max(0.0, _f(r.get("remaining")))
+    else:
+        for r in conn.execute(text("""
+            SELECT s.crew_id, SUM(i.amount) FROM project_payment_schedules s
+            JOIN project_payment_installments i ON i.schedule_id = s.id
+            WHERE s.entity_id = :e AND COALESCE(s.source, 'app') <> 'sheet_covered'
+            GROUP BY s.crew_id"""), {"e": e}).all():
+            name = (co.get(r[0]) or {}).get("name") or "Crew (not set)"
+            deal[name]["scheduled"] += _f(r[1])
     crews = []
-    for r in (got[0].get("rows", []) if got else []):
-        if str(r.get("entity_id")) == e:
-            crews.append({"crew": r.get("crew"), "scheduled": round(_f(r.get("schedule")), 2), "paid": round(_f(r.get("paid")), 2),
-                          "owed": round(max(0.0, _f(r.get("remaining"))), 2), "last_paid": r.get("last_paid"),
-                          "next_date": r.get("next_date"), "next_amount": round(_f(r.get("next_amount")), 2)})
-    _, by_vendor = CP._crews(conn)
-    pays = [{"date": _d(l["d"]), "type": "Card/check" if l["type"] == "Purchase" else "Bill", "doc": l["doc"],
-             "crew": (by_vendor.get(str(l["vendor"] or "")) or {}).get("name") or l["vendor_name"],
-             "description": l["descr"], "amount": round(_f(l["a"]), 2)}
-            for l in sorted(CP._paid_lines(conn, e), key=lambda x: str(x["d"]))]
-    return {"scheduled": money["crew_scheduled"], "paid": money["crew_paid"], "owed": money["crew_owed"],
-            "snapshot_age_seconds": got[2] if got else None, "crews": crews, "payments": pays}
+    for name in sorted(set(paid_by) | set(deal)):
+        crews.append({"crew": name, "paid": round(paid_by.get(name, 0.0), 2),
+                      "deal": round(deal[name]["scheduled"], 2) if name in deal else None,
+                      "deal_owed": round(deal[name]["owed"], 2) if name in deal and rows else None})
+    return {"budget": money["labor_budget"], "paid": money["labor_paid"], "left": money["labor_left"],
+            "deal": money["crew_deal"], "crews": crews, "payments": pays}
 
 
 def _det_bills(conn, e):
+    """Expenses: each cost category on the estimates next to what was spent, then
+    the bills on the job that are still unpaid."""
+    from app.jobcost import service as JCS
+    bud = JCS.budget_by_category(conn, [e]).get(e, {})
+    act = JCS.actual_by_category(conn, [e]).get(e, {})
+    order = [c for c in JCS.CATEGORIES if c != "Crew labor"]
+    cats = [{"category": c, "estimate": round(bud.get(c, 0.0), 2), "spent": round(act.get(c, 0.0), 2),
+             "left": round(bud.get(c, 0.0) - act.get(c, 0.0), 2)}
+            for c in order if abs(bud.get(c, 0.0)) > 0.005 or abs(act.get(c, 0.0)) > 0.005]
     rows = conn.execute(text("""
         WITH latest AS (
           SELECT t.id, t.qbo_id, t.doc_number, t.txn_date, t.total_amt, t.balance_amt, t.raw_json,
@@ -638,7 +707,7 @@ def _det_bills(conn, e):
     bills = [{"qbo_id": str(r["qbo_id"]), "vendor": r["vendor"], "doc_number": r["doc_number"], "date": _d(r["txn_date"]),
               "due_date": r["due"], "total": round(_f(r["total_amt"]), 2), "balance": round(_f(r["balance_amt"]), 2),
               "job_amount": round(_f(r["job_amount"]), 2), "past_due": bool(r["due"] and r["due"] < today)} for r in rows]
-    return {"bills": bills, "job_amount": round(sum(b["job_amount"] for b in bills), 2)}
+    return {"categories": cats, "bills": bills, "job_amount": round(sum(b["job_amount"] for b in bills), 2)}
 
 
 def _det_signoff(conn, e, d, money):

@@ -19,6 +19,8 @@ const TABS = [["all", "All not closed"], ["recent", "Ended since Oct 1"], ["open
 const TILES = { bill: "To bill", collect: "To collect", crew: "Crew owed", paper: "Forms & status", review: "Ready to close" };
 const VIEWS = [...TABS, ...Object.entries(TILES)];
 const GROUPS = ["Job", "Money in", "Money out", "Review"];
+// Money steps a reviewer can close even when the money is short (books closed), or note as not ready.
+const REVIEW_STEPS = ["final_invoice", "paid", "retainage", "crew_paid", "expenses"];
 // Where to go to fix each step.
 const FIX = {
   marked_complete: ["Open project", "workspace"], completion_form: ["Documents", "documents"], change_orders: ["Change orders", "changeorders"],
@@ -43,7 +45,7 @@ export async function closeoutPage(routeFn) {
 
   const stepOf = (j, k) => j.steps.find((s) => s.key === k) || {};
   const open = (j, k) => stepOf(j, k).state === "todo";
-  const moneyOpen = (j) => j.money.unbilled > 1 || j.money.open_ar > 1 || j.money.crew_owed > 1 || j.money.retainage > 1;
+  const moneyOpen = (j) => j.money.unbilled > 1 || j.money.open_ar > 1 || j.money.crew_deal_owed > 1 || j.money.retainage > 1 || j.money.bills_open > 1;
   const TEST = {
     all: () => true, recent: (j) => j.bucket === "recent", open: (j) => j.bucket === "open", paperwork: (j) => j.bucket === "paperwork",
     closed: () => true, money: moneyOpen, bill: (j) => open(j, "final_invoice"), collect: (j) => open(j, "paid") || open(j, "retainage"),
@@ -81,11 +83,12 @@ export async function closeoutPage(routeFn) {
         <div class="text-[10px] uppercase tracking-wide font-bold text-black/45">${label}</div>
         <div class="text-2xl font-extrabold tabular-nums ${bad ? "text-rose-700" : ""}">${value}</div>
         <div class="text-xs text-black/50">${caption}</div></button>`;
-    const unb = sum((j) => j.money.unbilled), ar = sum((j) => j.money.open_ar), crew = sum((j) => j.money.crew_owed);
+    const unb = sum((j) => j.money.unbilled), ar = sum((j) => j.money.open_ar);
+    const crew = sum((j) => (open(j, "crew_paid") ? Math.max(0, j.money.labor_left) : 0));
     return `<div class="su-kpis">
       ${tile("Still to bill", money0(unb), `${n((j) => open(j, "final_invoice"))} jobs: final invoice not sent`, unb > 0, "bill")}
       ${tile("Owed to OPI", money0(ar), `${n((j) => open(j, "paid"))} jobs with unpaid invoices`, false, "collect")}
-      ${tile("Owed to crews", money0(crew), `${n((j) => open(j, "crew_paid"))} jobs: crew not paid in full`, false, "crew")}
+      ${tile("Contract labor to review", money0(crew), `${n((j) => open(j, "crew_paid"))} jobs: paid less than the estimates`, false, "crew")}
       ${tile("Forms & status", n(TEST.paper), "Completion form, status or change orders", false, "paper")}
       ${tile("Ready to close", n(TEST.review), "Everything in; review the margin", false, "review")}
     </div>`;
@@ -179,12 +182,15 @@ export async function closeoutPage(routeFn) {
       acts.push(fixLink(j, s.key));
       if (s.key === "signoff") {
         if (st.meta.can_sign) acts.push(`<button type="button" class="pd-btn" data-mark="done" data-step="signoff">Sign off</button>`);
+      } else if (REVIEW_STEPS.includes(s.key)) {
+        acts.push(`<button type="button" class="pd-btn" data-mark="reviewed" data-step="${s.key}" title="Reviewed: close this area, even if the money is short (books closed)">Close (reviewed)</button>`);
+        acts.push(`<button type="button" class="pd-btn" data-mark="noted" data-step="${s.key}" title="Reviewed, but not ready to close: leave a note; the step stays open">Not ready…</button>`);
       } else {
         acts.push(`<button type="button" class="pd-btn" data-mark="${s.how === "manual" ? "done" : "not_needed"}" data-step="${s.key}">${s.how === "manual" ? "Close out" : "Not needed"}</button>`);
       }
     }
     if (s.mark) acts.push(`<button type="button" class="pd-btn" data-mark="" data-step="${s.key}">Undo</button>`);
-    const markTxt = s.mark ? `<div class="text-[11px] text-black/45 mt-0.5">Marked by ${esc(s.mark.by_email || "")} ${s.mark.at ? day(s.mark.at) : ""}${s.mark.note ? `: ${esc(s.mark.note)}` : ""}</div>` : "";
+    const markTxt = s.mark ? `<div class="text-[11px] ${s.mark.status === "noted" ? "text-amber-700" : "text-black/45"} mt-0.5">${s.mark.status === "noted" ? "Not ready yet, noted" : s.mark.status === "reviewed" ? "Closed as reviewed" : "Marked"} by ${esc(s.mark.by_email || "")} ${s.mark.at ? day(s.mark.at) : ""}${s.mark.note ? `: ${esc(s.mark.note)}` : ""}</div>` : "";
     return { key: s.key, state: s.state, label: s.label, detail: s.why, actions: acts.join(""), extra: markTxt };
   }
   const groupCount = (j, g) => { const ss = j.steps.filter((s) => s.group === g); return `${ss.filter((s) => s.state !== "todo").length}/${ss.length}`; };
@@ -193,7 +199,8 @@ export async function closeoutPage(routeFn) {
     const tile = (k, v, bad) => `<div><div class="k">${k}</div><div class="v${bad ? " bad" : ""}">${v}</div></div>`;
     return `${tile("Contract", money0(m.contract))}${tile("Invoiced", money0(m.invoiced))}${tile("Still to bill", money0(m.unbilled), m.unbilled > 1)}
       ${tile("Owed to OPI", money0(m.open_ar), m.open_ar > 1)}${m.retainage > 1 ? tile("Retainage held", money0(m.retainage)) : ""}
-      ${tile("Crew scheduled", money0(m.crew_scheduled))}${tile("Crew paid", money0(m.crew_paid))}${tile("Owed to crew", money0(m.crew_owed), m.crew_owed > 1)}`;
+      ${tile("Labor on estimates", money0(m.labor_budget))}${tile("Labor paid", money0(m.labor_paid))}${tile(m.labor_left < -1 ? "Labor over" : "Labor left", money0(Math.abs(m.labor_left)), m.labor_left > 1)}
+      ${tile("Expenses on estimates", money0(m.exp_budget))}${tile("Expenses spent", money0(m.exp_spent))}${m.bills_open > 1 ? tile("Unpaid bills", money0(m.bills_open), true) : ""}`;
   };
 
   function renderDetail() {
@@ -252,8 +259,11 @@ export async function closeoutPage(routeFn) {
         }
         note = prompt(step === "signoff" ? "Sign-off note (optional): e.g. numbers reviewed, OK to close"
           : status === "done" ? (closeAll ? "Why is this job being closed with steps open? (kept with the job)" : "Note for the record (optional): e.g. margin reviewed with Luke")
+          : status === "reviewed" ? "Note for the record (optional): e.g. books closed, crew paid in full per Luke"
+          : status === "noted" ? "What's still open? (kept with the job; the step stays open)"
           : "Why isn't this needed? (kept with the job)");
         if (note === null) return;
+        if (status === "noted" && !note.trim()) { alert("Say what's still open."); return; }
         if (closeAll && !note.trim()) { alert("Add a short note saying why the open steps are OK."); return; }
       }
       b.disabled = true;
@@ -399,15 +409,23 @@ export async function closeoutPage(routeFn) {
     crew_paid(j, d, body) {
       const x = d.crew_paid || {};
       if (x.error) { body.innerHTML = err(x); return; }
-      body.innerHTML = `${facts([["Scheduled", money0(x.scheduled)], ["Paid", money0(x.paid)], ["Still owed", money0(x.owed), x.owed > 1 ? "text-rose-700" : "text-emerald-700"]])}
-        <div class="mt-2">${table(["Crew", ">Scheduled", ">Paid", ">Owed", "Last paid", "Next"], (x.crews || []).map((c) => `<tr><td class="font-semibold">${esc(c.crew || "")}</td>${r(money0(c.scheduled))}${r(money0(c.paid))}${r(money0(c.owed), c.owed > 1 ? "font-bold text-rose-700" : "")}<td>${day(c.last_paid)}</td><td>${c.next_date ? `${day(c.next_date)} · ${money0(c.next_amount)}` : ""}</td></tr>`), "No crew pay on record.")}</div>
+      const left = x.left || 0;
+      body.innerHTML = `${facts([["Contract labor on the estimates", money0(x.budget)], ["Paid (QuickBooks)", money0(x.paid)],
+          [left < -1 ? "Over the estimate" : "Left on the estimate", money0(Math.abs(left)), left > 1 ? "text-amber-700" : "text-emerald-700"]])}
+        <div class="mt-2">${table(["Crew", ">Paid", ">Payment Schedule (reference)"], (x.crews || []).map((c) => `<tr><td class="font-semibold">${esc(c.crew || "")}</td>${r(money0(c.paid))}<td class="text-right tabular-nums text-black/55">${c.deal != null ? `${money0(c.deal)}${c.deal_owed > 1 ? ` · ${money0(c.deal_owed)} unpaid` : ""}` : "none"}</td></tr>`), "No contract labor paid on this job.")}</div>
         ${(x.payments || []).length ? `<details class="mt-2"><summary class="text-xs font-semibold text-black/60 cursor-pointer">${x.payments.length} payment${x.payments.length === 1 ? "" : "s"} to crews</summary><div class="mt-2">${table(["Date", "Type", "Crew", "Description", ">Amount"], x.payments.map((p) => `<tr><td>${day(p.date)}</td><td>${esc(p.type || "")}</td><td>${esc(p.crew || "")}</td><td class="text-black/55">${esc((p.description || "").slice(0, 80))}</td>${r(money0(p.amount))}</tr>`), "")}</div></details>` : ""}
-        <div class="text-xs text-black/50 mt-2">Same numbers as Contractor Payments.</div>`;
+        <div class="text-xs text-black/50 mt-2">"Left on the estimate" is the estimate not used up, not money owed: crew deals are often below the estimate's labor line. When the crew is paid in full, press Close (reviewed).</div>`;
     },
     expenses(j, d, body) {
       const x = d.expenses || {};
       if (x.error) { body.innerHTML = err(x); return; }
-      body.innerHTML = table(["Vendor", "Bill", "Date", "Due", ">On this job", ">Open"], (x.bills || []).map((b) => `<tr><td class="font-semibold">${esc(b.vendor || "")}</td><td>${esc(b.doc_number || "")}</td><td>${day(b.date)}</td><td>${day(b.due_date)} ${b.past_due ? chip("Past due", C.bad) : ""}</td>${r(money2(b.job_amount))}${r(money2(b.balance))}</tr>`), "No unpaid bills on this job.");
+      const cats = x.categories || [];
+      const tot = (k) => cats.reduce((a, c) => a + (c[k] || 0), 0);
+      body.innerHTML = `${table(["Expense item", ">On the estimates", ">Spent", ">Left"], cats.map((c) => `<tr><td class="font-semibold">${esc(c.category)}</td>${r(money0(c.estimate))}${r(money0(c.spent))}${r(c.left < -1 ? `${money0(-c.left)} over` : money0(c.left), c.left > 1 ? "text-amber-700" : c.left < -1 ? "text-rose-700" : "")}</tr>`)
+          .concat(cats.length > 1 ? [`<tr class="font-bold"><td>Total</td>${r(money0(tot("estimate")))}${r(money0(tot("spent")))}${r(money0(tot("estimate") - tot("spent")))}</tr>`] : []), "No expense items on the estimates or in QuickBooks.")}
+        <div class="text-[10px] uppercase tracking-wide font-bold text-black/45 mt-3 mb-1">Unpaid bills on this job</div>
+        ${table(["Vendor", "Bill", "Date", "Due", ">On this job", ">Open"], (x.bills || []).map((b) => `<tr><td class="font-semibold">${esc(b.vendor || "")}</td><td>${esc(b.doc_number || "")}</td><td>${day(b.date)}</td><td>${day(b.due_date)} ${b.past_due ? chip("Past due", C.bad) : ""}</td>${r(money2(b.job_amount))}${r(money2(b.balance))}</tr>`), "None: every bill on the job is paid.")}
+        <div class="text-xs text-black/50 mt-2">Spent = bills and card charges on the job in QuickBooks. When nothing more is coming, press Close (reviewed), even if it's under the estimate.</div>`;
     },
     signoff(j, d, body) {
       const x = d.signoff || {};

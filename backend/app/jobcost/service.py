@@ -27,7 +27,7 @@ import time
 from collections import defaultdict
 from datetime import date, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.db import engine
 
@@ -52,6 +52,63 @@ def category_of(item):
     if cat is None:
         return None
     return "Other rentals" if cat == "Rentals" else cat
+
+
+def budget_by_category(conn, ids=None):
+    """Estimate cost budget per project per category: accepted/converted estimates
+    (latest version of each), contract labor at its line amount, other items at
+    their cost. ids: limit to these project qbo_ids."""
+    flt = "AND t.customer_qbo_id IN :ids" if ids is not None else ""
+    q = text(f"""
+        WITH latest AS (
+          SELECT t.id, t.customer_qbo_id, ROW_NUMBER() OVER (
+                   PARTITION BY t.customer_qbo_id, COALESCE(t.doc_number, CONCAT('__nd__', t.qbo_id))
+                   ORDER BY t.id DESC) AS rn
+          FROM qbo_transactions t
+          JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id AND qc.is_project = 1
+          WHERE t.entity_type = 'Estimate' AND (t.total_amt IS NULL OR t.total_amt > 0) {flt}
+            AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed'))
+        SELECT latest.customer_qbo_id AS e, l.item_name AS item,
+               SUM(CASE WHEN l.item_name LIKE 'Contract Labor%' THEN COALESCE(l.cost_amount, l.amount)
+                        ELSE COALESCE(l.cost_amount, 0) END) AS v
+        FROM latest JOIN qbo_sales_transaction_lines l
+             ON l.transaction_id = latest.id AND l.line_level = 'child'
+        WHERE latest.rn = 1
+        GROUP BY latest.customer_qbo_id, l.item_name""")
+    out = defaultdict(lambda: defaultdict(float))
+    if ids is not None:
+        if not ids:
+            return out
+        q = q.bindparams(bindparam("ids", expanding=True))
+    for r in conn.execute(q, {"ids": list(ids)} if ids is not None else {}).all():
+        cat = category_of(r[1])
+        if cat and r[2]:
+            out[str(r[0])][cat] += float(r[2])
+    return out
+
+
+def actual_by_category(conn, ids=None):
+    """Bills + card/check purchases charged to each project, per category."""
+    flt = "AND l.line_customer_qbo_id IN :ids" if ids is not None else ""
+    q = text(f"""
+        SELECT l.line_customer_qbo_id AS e,
+               COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')),
+                 SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1)) AS item,
+               SUM(l.amount) AS v
+        FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
+        JOIN qbo_customers qc ON qc.qbo_id = l.line_customer_qbo_id AND qc.is_project = 1
+        WHERE t.entity_type IN ('Bill', 'Purchase') {flt}
+        GROUP BY l.line_customer_qbo_id, item""")
+    out = defaultdict(lambda: defaultdict(float))
+    if ids is not None:
+        if not ids:
+            return out
+        q = q.bindparams(bindparam("ids", expanding=True))
+    for r in conn.execute(q, {"ids": list(ids)} if ids is not None else {}).all():
+        cat = category_of(r[1])
+        if cat and r[2]:
+            out[str(r[0])][cat] += float(r[2])
+    return out
 
 
 _cache = {"at": 0.0, "data": None}
@@ -81,27 +138,7 @@ def _load():
             projects[str(r["qbo_id"])] = {"name": r["display_name"], "start": r["s"], "end": r["e"],
                                           "status": r["status"], "pm": r["pm"] or None}
 
-        est = defaultdict(lambda: defaultdict(float))
-        for r in conn.execute(text("""
-            WITH latest AS (
-              SELECT t.id, t.customer_qbo_id, ROW_NUMBER() OVER (
-                       PARTITION BY t.customer_qbo_id, COALESCE(t.doc_number, CONCAT('__nd__', t.qbo_id))
-                       ORDER BY t.id DESC) AS rn
-              FROM qbo_transactions t
-              JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id AND qc.is_project = 1
-              WHERE t.entity_type = 'Estimate' AND (t.total_amt IS NULL OR t.total_amt > 0)
-                AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed'))
-            SELECT latest.customer_qbo_id AS e, l.item_name AS item,
-                   SUM(CASE WHEN l.item_name LIKE 'Contract Labor%' THEN COALESCE(l.cost_amount, l.amount)
-                            ELSE COALESCE(l.cost_amount, 0) END) AS v
-            FROM latest JOIN qbo_sales_transaction_lines l
-                 ON l.transaction_id = latest.id AND l.line_level = 'child'
-            WHERE latest.rn = 1
-            GROUP BY latest.customer_qbo_id, l.item_name
-        """)).all():
-            cat = category_of(r[1])
-            if cat and r[2]:
-                est[str(r[0])][cat] += float(r[2])
+        est = budget_by_category(conn)
 
         pend = defaultdict(lambda: defaultdict(float))
         for r in conn.execute(text("""
@@ -145,20 +182,7 @@ def _load():
             if sign > 0:
                 billed[str(r[0])][1] += float(r[3] or 0)
 
-        act = defaultdict(lambda: defaultdict(float))
-        for r in conn.execute(text("""
-            SELECT l.line_customer_qbo_id AS e,
-                   COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.ItemBasedExpenseLineDetail.ItemRef.name')),
-                     SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(l.raw_json, '$.AccountBasedExpenseLineDetail.AccountRef.name')), ':', 1)) AS item,
-                   SUM(l.amount) AS v
-            FROM qbo_transaction_lines l JOIN qbo_transactions t ON t.id = l.transaction_id
-            JOIN qbo_customers qc ON qc.qbo_id = l.line_customer_qbo_id AND qc.is_project = 1
-            WHERE t.entity_type IN ('Bill', 'Purchase')
-            GROUP BY l.line_customer_qbo_id, item
-        """)).all():
-            cat = category_of(r[1])
-            if cat and r[2]:
-                act[str(r[0])][cat] += float(r[2])
+        act = actual_by_category(conn)
 
     today = date.today()
     fin_cut = today - timedelta(days=FINISHED_AFTER_DAYS)
