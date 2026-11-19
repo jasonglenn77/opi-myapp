@@ -136,7 +136,7 @@ def refresh_assignments(who="manual"):
                               "fields": sorted(c["changes"])} for c in p["changes"][:40]]
         _finish(run_id, not summary.get("errors"), summary,
                 error="; ".join(f"{e['job']}: {e['error']}" for e in summary.get("errors", []))[:4000] or None)
-        if p["changes"]:
+        if p["changes"] and not summary.get("reference_only"):
             record_audit({"email": f"gsync:{who}"}, "schedule.job_schedule_import", "project_schedule_item", None,
                          "Assignments updated from the Job Schedule",
                          {k: v for k, v in summary.items() if k != "sample"})

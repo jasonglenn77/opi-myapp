@@ -932,7 +932,7 @@ export async function setupPage(routeFn) {
         <div class="text-xs text-black/55 mt-0.5">Each PM's running and upcoming jobs and how many overlap this one. Click a PM for their jobs on a timeline.</div>
         <div data-pms class="text-xs text-black/45 mt-2">Loading…</div></div>${partSlot("Assign the PM(s)")}`;
     loadPmWorkload(j, body.querySelector("[data-pms]"));
-    mountPart(j, body.querySelector("[data-part]"), ["pm"], "Pick one or more PMs for each set of dates (click the PM box). Saves as you go.");
+    mountPart(j, body.querySelector("[data-part]"), ["pm"], "Pick the PM for each estimate, or set one PM for all of them. A PM can be set before there are dates. Saves as you go.");
   }
   async function bodyCrew(j, body) {
     body.innerHTML = `
@@ -943,21 +943,21 @@ export async function setupPage(routeFn) {
       ${partSlot("Assign the crew to each set of dates")}`;
     if (j.start) loadAvailability(j, body.querySelector("[data-avail]"));
     if (j.project_qbo_id) loadOffers(j, body.querySelector("[data-offers]"));
-    mountPart(j, body.querySelector("[data-part]"), ["crew"], "Pick the crew (company, lead, slot) for each set of dates, and any days off. Saves as you go.");
+    mountPart(j, body.querySelector("[data-part]"), ["crew"], "Pick the crew for each estimate once its package has dates (sorted by who's free). The crew boss and slot go on each date range. Saves as you go.");
   }
   async function bodyDates(j, body) {
     body.innerHTML = `<div class="text-xs text-black/55">${j.target_start ? `The quote targeted ${day(j.target_start)} to ${day(j.target_end)}${j.labor_days ? ` (${j.labor_days} labor days${j.travel_days ? `, ${j.travel_days} travel` : ""})` : ""}. ` : ""}Quoted end = the end the price was built on (green on the Job Schedule). Overage days = calendar days worked past it (orange). Moving a date sends the job back here and asks why.</div>
       <div data-dchanges class="mt-2"></div>
       ${partSlot("Start, end and overage for each set of dates")}`;
     if (j.project_qbo_id) loadDateChanges(j, body.querySelector("[data-dchanges]"));
-    mountPart(j, body.querySelector("[data-part]"), ["dates"], "Change a date and it saves; the change is kept in the history with why it moved. Put the job on hold with the bar above.");
+    mountPart(j, body.querySelector("[data-part]"), ["dates"], "Each package has its own dates; a change order with its own dates gets its own package. Overage days are only for running past the scheduled end without a change order. Changes save, with why they moved.");
   }
   async function bodyDetails(j, body) {
     body.innerHTML = `<div class="text-xs text-black/55">Wire guidance, travel days and equipment, then press "Mark checked". Hints below come from the PO and the estimate.</div>
       <div data-hints class="mt-2 text-xs text-black/45">${j.project_qbo_id || j.opportunity_id ? "Looking for hints…" : ""}</div>
       ${partSlot("Job details")}`;
     loadHints(j, body.querySelector("[data-hints]"));
-    mountPart(j, body.querySelector("[data-part]"), ["details"], "Wire guidance, travel days and equipment for each set of dates.");
+    mountPart(j, body.querySelector("[data-part]"), ["details"], "Wire guidance, travel days and equipment for each package (shared by its estimates).");
   }
   async function bodySchedule(j, body, key) {
     const only = { invoice_schedule: "invoice", crew_schedule: "crew", expense_schedule: "expense" }[key];
@@ -1151,7 +1151,7 @@ export async function setupPage(routeFn) {
 
   const remountEditor = (j) => {
     const slot = document.querySelector('#suDetail .sc[data-sc="crew"] [data-part]');
-    if (slot) mountPart(j, slot, ["crew"], "Pick the crew (company, lead, slot) for each set of dates, and any days off. Saves as you go.");
+    if (slot) mountPart(j, slot, ["crew"], "Pick the crew for each estimate once its package has dates (sorted by who's free). The crew boss and slot go on each date range. Saves as you go.");
   };
   async function loadOffers(j, el) {
     let d;

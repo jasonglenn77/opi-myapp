@@ -184,6 +184,39 @@ def _gather(conn, opp_ids=None, extra_eids=None):
                SUBSTRING_INDEX(GROUP_CONCAT(total_amt ORDER BY txn_date, id), ',', 1) AS first_amount
         FROM qbo_transactions WHERE entity_type = 'Invoice' AND customer_qbo_id IN :eids GROUP BY customer_qbo_id""", "eids"),
         {"eids": eids}).mappings()}
+    # work packages (2026-11-18): make sure each job's estimates and lines are in
+    # one; which packages with an accepted estimate have no dates; new estimates
+    # not placed yet
+    real_e = [e for e in eids if e and e != "-"]
+    d["pk_missing"], d["pk_new"] = {}, {}
+    if real_e:
+        from app.packages import service as PKS
+        try:
+            with engine.begin() as c2:
+                PKS.ensure_all(c2, real_e)
+            seen = {}
+            for r in conn.execute(_q("""
+                SELECT ph.entity_id, ph.id, ph.seq, ph.name,
+                       MAX(psi.start_date IS NOT NULL AND psi.end_date IS NOT NULL) AS dated,
+                       SUM(JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')) AS acc
+                FROM project_phases ph
+                LEFT JOIN project_estimate_phase ep ON ep.phase_id = ph.id
+                LEFT JOIN qbo_transactions t ON t.entity_type = 'Estimate' AND t.qbo_id = ep.estimate_qbo_id
+                LEFT JOIN project_schedule_items psi ON psi.package_id = ph.id AND psi.status <> 'canceled'
+                WHERE ph.entity_id IN :e GROUP BY ph.entity_id, ph.id, ph.seq, ph.name ORDER BY ph.entity_id, ph.seq, ph.id""", "e"),
+                    {"e": real_e}).mappings().all():
+                n = seen[r["entity_id"]] = seen.get(r["entity_id"], 0) + 1
+                if r["acc"] and not r["dated"]:
+                    d["pk_missing"].setdefault(str(r["entity_id"]), []).append(r["name"] or f"Package {n}")
+            for r in conn.execute(_q("""
+                SELECT DISTINCT ep.entity_id, t.doc_number FROM project_estimate_phase ep
+                JOIN qbo_transactions t ON t.entity_type = 'Estimate' AND t.qbo_id = ep.estimate_qbo_id
+                WHERE ep.entity_id IN :e AND ep.confirmed = 0
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')""", "e"),
+                    {"e": real_e}).all():
+                d["pk_new"].setdefault(str(r[0]), []).append(r[1])
+        except Exception:
+            pass
     # first invoice per accepted estimate (first_invoices.py, 2026-11-18)
     d["first_inv"] = FI.by_project(conn, [e for e in eids if e and e != "-"])
     d["po_docs"] = {}
@@ -314,9 +347,17 @@ def _steps(o, d, today):
     else:
         cs, cd = ("todo" if eid else "locked"), ""
     add("crew", cs, cd)
-    add("dates", "done" if has_dates else ("todo" if eid else "locked"),
-        f"{item['start_date']} to {item['end_date']}" + (f" (+{item['overage_days']} overage)" if item.get("overage_days") else "")
-        if has_dates else "")
+    # 2026-11-18: dates are per package; every package with an accepted estimate needs them
+    missing = d.get("pk_missing", {}).get(str(eid), []) if eid else []
+    new_est = d.get("pk_new", {}).get(str(eid), []) if eid else []
+    dtxt = (f"{item['start_date']} to {item['end_date']}" + (f" (+{item['overage_days']} overage)" if item.get("overage_days") else "")
+            if has_dates else "")
+    if missing:
+        dtxt = (dtxt + " · " if dtxt else "") + f"No dates yet: {', '.join(missing)}"
+    if new_est:
+        dtxt = (dtxt + " · " if dtxt else "") + (f"New estimate{'s' if len(new_est) > 1 else ''} {', '.join('#' + str(n) for n in new_est)}: "
+                                                 "keep in its package or give it its own")
+    add("dates", "done" if has_dates and not missing and not new_est else ("todo" if eid else "locked"), dtxt)
     det = []
     if item:
         det = [("Wire guidance" if item.get("wire_guidance") else "No wire guidance"), f"{item.get('travel_days') or 0} travel days",

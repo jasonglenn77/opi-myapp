@@ -117,7 +117,8 @@ def get_assignment_bundle(qbo_customer_id: int):
                     notes,
                     non_working,
                     is_extra_row,
-                    sort_order
+                    sort_order,
+                    package_id
                 FROM project_schedule_items
                 WHERE project_id = :pid
                 ORDER BY sort_order, start_date, id

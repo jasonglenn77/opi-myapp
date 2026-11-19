@@ -84,6 +84,12 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
     container.innerHTML = `<div class="p-4 text-sm text-red-600">Failed to load assignment: ${escapeHtml(e?.message || String(e))}</div>`;
     return;
   }
+  // 2026-11-18: assignments per estimate, in work packages (app/packages). The
+  // lines below are each package's date ranges; PM and crew are picked per
+  // estimate; overage is the project's. Falls back to the plain line list.
+  let pk = null;
+  try { pk = bundle.qbo && bundle.qbo.qbo_id ? await api(`/packages/${encodeURIComponent(bundle.qbo.qbo_id)}`) : null; } catch (_) { pk = null; }
+  const pkMode = !!(pk && (pk.packages || []).length);
   const pms = bundle.project_managers || [];
   const items = (bundle.schedule_items || []).map((it) => ({ ...it }));   // local, mutable
   // Shared crew-editor context (companies + flat crews incl. parents).
@@ -148,10 +154,10 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
         ${field("Status", `<span class="ap-status-ro" title="Worked out from the dates: not started, in progress, finished. Put on hold with the hold bar.">${escapeHtml(statusLabelOf(it))}</span>`)}
         ${has("dates") ? field("Start", `<input data-f="start_date" type="date" value="${escapeHtml(it.start_date ? String(it.start_date).slice(0, 10) : "")}" class="input text-xs py-1.5"/>`) : field("Dates", `<span class="ap-ro">${fmtHd(it.start_date)} to ${fmtHd(lastDay(it))}</span>`)}
         ${has("dates") ? field("Quoted end", `<input data-f="end_date" type="date" value="${escapeHtml(it.end_date ? String(it.end_date).slice(0, 10) : "")}" class="input text-xs py-1.5" title="The end the price was built on (the green cell on the Job Schedule)"/>`) : ""}
-        ${has("dates") ? field("Overage days", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16" title="Calendar days worked past the quoted end (orange on the Job Schedule)"/>`) : ""}
-        ${has("dates") ? field("Last day", `<span class="ap-ro" title="Quoted end + overage days">${fmtHd(lastDay(it))}</span>`) : ""}
-        ${has("pm") ? field("Project manager", `<button data-assign="pm" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 min-w-[9rem]">${pmSummary(it.active_project_managers)}</button>`, "ap-grow") : ""}
-        ${has("crew") ? field("Crew (company · lead · slot)", `<button data-crew-edit="${it.id}" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 whitespace-normal" style="min-width:11rem;">${crewSummary(it.active_work_crews)}</button>`, "ap-grow2") : ""}
+        ${has("dates") && !pkMode ? field("Overage days", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16" title="Calendar days worked past the quoted end (orange on the Job Schedule)"/>`) : ""}
+        ${has("dates") && !pkMode ? field("Last day", `<span class="ap-ro" title="Quoted end + overage days">${fmtHd(lastDay(it))}</span>`) : ""}
+        ${has("pm") && !pkMode ? field("Project manager", `<button data-assign="pm" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 min-w-[9rem]">${pmSummary(it.active_project_managers)}</button>`, "ap-grow") : ""}
+        ${has("crew") ? field(pkMode ? "Crew on site (boss · slot)" : "Crew (company · lead · slot)", `<button data-crew-edit="${it.id}" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 whitespace-normal" style="min-width:11rem;">${crewSummary(it.active_work_crews)}</button>`, "ap-grow2") : ""}
       </div>
       <div class="ap-deck">
         ${has("details") ? field("Wire", `<label class="inline-flex items-center" style="height:30px;"><input data-f="wire_guidance" type="checkbox" class="h-4 w-4 cursor-pointer" ${it.wire_guidance ? "checked" : ""}/></label>`) : ""}
@@ -168,6 +174,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
           </div>
         </div>
       </div>
+      ${pkMode && has("dates") ? jsNote((pk.job_schedule || []).find((x) => String(x.schedule_item_id) === String(it.id))) : ""}
       ${_openHist.has(String(it.id)) ? `<div data-hist-row="${it.id}" class="pt-1">${historyPanelHtml(it.id)}</div>` : ""}
     </div>`;
   };
@@ -202,17 +209,132 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
         <button type="button" class="hold-btn" data-hold-put>Put on hold</button>
       </div>`;
 
+  // ── package mode helpers ───────────────────────────────────────────────────
+  const OFFER = { sent: ["Offer sent", "ap-chip-info"], accepted: ["Offer accepted", "ap-chip-good"], declined: ["Declined", "ap-chip-bad"],
+    withdrawn: ["Withdrawn", "ap-chip-quiet"], draft: ["Offer draft", "ap-chip-quiet"] };
+  const money0 = (n) => `$${Math.round(Number(n) || 0).toLocaleString()}`;
+  const chipH = (t, cls, title = "") => `<span class="ap-chip ${cls}"${title ? ` title="${escapeHtml(title)}"` : ""}>${escapeHtml(t)}</span>`;
+  const estById = (q) => (pk?.estimates || []).find((e) => e.qbo_id === String(q));
+  // 2026-11-18: the Job Schedule sheet is reference-only: what it says differs
+  // from the app is shown here, with "Use these" to take the sheet's values.
+  const JS_LABEL = { start_date: "Start", end_date: "End", overage_days: "Overage days", travel_days: "Travel days",
+    wire_guidance: "Wire", equipment_type: "Equipment", crews: "Crews", pms: "PMs", non_working: "Days off", status: "Status" };
+  const jsVal = (k, v) => {
+    if (v == null || v === "") return "—";
+    if (k === "start_date" || k === "end_date") return fmtHd(v);
+    if (k === "pms") return (v || []).map((id) => { const x = pms.find((m) => String(m.id) === String(id)); return x ? pmName(x) : `#${id}`; }).join(", ") || "—";
+    if (k === "crews") return (v || []).join(", ") || "—";
+    if (k === "wire_guidance") return Number(v) ? "Yes" : "No";
+    if (k === "non_working") return v && typeof v === "object" ? `${(v.dates || []).length} day(s)${v.weekends_off ? ", weekends off" : ""}` : String(v);
+    return String(v);
+  };
+  function jsNote(x) {
+    if (!x) return "";
+    const parts = Object.entries(x.changes || {}).filter(([k]) => k !== "status")
+      .map(([k, [a, b]]) => `${JS_LABEL[k] || k}: <b>${escapeHtml(jsVal(k, b))}</b> <span class="text-black/40">(app: ${escapeHtml(jsVal(k, a))})</span>`);
+    if (!parts.length) return "";
+    return `<div class="ap-js"><span class="ap-js-t">Job Schedule says</span> ${parts.join(" · ")}
+      <button type="button" class="pd-btn" data-js-use="${x.id}" title="Take the Job Schedule's values for this date range">Use these</button></div>`;
+  }
+  function jsNewVisits() {
+    const xs = (pk.job_schedule || []).filter((x) => !x.schedule_item_id);
+    return xs.map((x) => `<div class="ap-js"><span class="ap-js-t">Job Schedule has a visit the app doesn't</span> ${fmtHd(x.visit[0])} to ${fmtHd(x.visit[1])} (job ${escapeHtml(x.job || "")})
+      <button type="button" class="pd-btn" data-js-use="${x.id}" title="Add it as a date range (in the first package; move its estimates after)">Add it</button></div>`).join("");
+  }
+
+  function projectStrip() {
+    const t = pk.timeline || {};
+    const brk = (t.breaks || []).map((b) => `${fmtHd(b.from)}–${fmtHd(b.to)}`).join(", ");
+    if (!has("dates")) {
+      return has("pm") ? `<div class="ap-proj"><div class="ap-proj-pm" style="margin-left:0"><span class="ap-l">PM for every estimate</span>
+        <span class="flex gap-1"><select data-pk-pmall class="input text-xs py-1.5"><option value="">Pick a PM…</option>${pms.map((x) => `<option value="${x.id}">${escapeHtml(pmName(x))}</option>`).join("")}</select>
+        <button type="button" class="pd-btn" data-pk-pmall-go>Set for all</button></span></div></div>` : "";
+    }
+    return `<div class="ap-proj">
+      <div><span class="ap-l">Project</span><b>${t.start ? `${fmtHd(t.start)} to ${fmtHd(t.end)}` : "No dates yet"}</b>
+        <em>${t.start ? `scheduled end, from ${pk.packages.length} package${pk.packages.length === 1 ? "" : "s"}` : "set each package's dates below"}</em></div>
+      ${has("dates") ? `<div><span class="ap-l">Overage days</span><input data-pk-overage type="number" min="0" step="1" value="${t.overage_days || 0}" class="input text-xs py-1.5 w-20" ${t.start ? "" : "disabled"}
+          title="Only for running past the scheduled end without a change order. A change order with its own dates extends the timeline instead."/>
+        <em>past the scheduled end, no change order</em></div>` : ""}
+      ${t.start ? `<div><span class="ap-l">Expected finish</span><b>${fmtHd(t.finish)}</b><em>${t.overage_days ? `${fmtHd(t.end)} + ${t.overage_days} day${t.overage_days === 1 ? "" : "s"}` : "same as the scheduled end"}</em></div>` : ""}
+      ${brk ? `<div><span class="ap-l">Breaks</span><b>${escapeHtml(brk)}</b><em>no work between date ranges</em></div>` : ""}
+      ${has("pm") ? `<div class="ap-proj-pm"><span class="ap-l">PM for every estimate</span>
+        <span class="flex gap-1"><select data-pk-pmall class="input text-xs py-1.5"><option value="">Pick a PM…</option>${pms.map((x) => `<option value="${x.id}">${escapeHtml(pmName(x))}</option>`).join("")}</select>
+        <button type="button" class="pd-btn" data-pk-pmall-go>Set for all</button></span></div>` : ""}
+    </div>
+    ${t.overage_elsewhere ? `<div class="ap-warn">Earlier date ranges also carry ${t.overage_elsewhere} overage day${t.overage_elsewhere === 1 ? "" : "s"} (from before packages). If those days were a change order's, give the change order its own dates instead.</div>` : ""}`;
+  }
+  function crewOptions(p, sel) {
+    const a = avail[p.id];
+    const free = {};
+    for (const c of (a?.companies || [])) free[String(c.id)] = c;
+    const list = (bundle.companies || []).slice().sort((x, y) => (Number(free[String(y.id)]?.min_free_weekdays) || 0) - (Number(free[String(x.id)]?.min_free_weekdays) || 0) || String(x.name).localeCompare(String(y.name)));
+    return `<option value="">${p.has_dates ? "Pick a crew…" : "Set dates first"}</option>` + list.map((c) => {
+      const f = free[String(c.id)];
+      const tag = f ? ` · ${f.min_free_weekdays} free` : "";
+      return `<option value="${c.id}" ${String(sel) === String(c.id) ? "selected" : ""}>${escapeHtml(c.name)}${tag}</option>`;
+    }).join("");
+  }
+  function estRow(e, p) {
+    const off = !e.accepted;
+    const oc = e.offer ? OFFER[e.offer.status] || [e.offer.status, "ap-chip-quiet"] : null;
+    const moveSel = `<select class="input text-xs py-1.5" data-pk-move="${e.qbo_id}" title="Estimates in one package share dates. Pick another package, or give it its own.">
+        ${pk.packages.map((x) => `<option value="${x.id}" ${x.id === e.package_id ? "selected" : ""}>${escapeHtml(x.name)}</option>`).join("")}
+        <option value="new">New package (own dates)</option></select>`;
+    return `<tr class="${off ? "ap-est-off" : ""}">
+      <td><b>#${escapeHtml(e.doc_number || "")}</b> ${chipH(e.change_order ? "Change order" : "Original", e.change_order ? "ap-chip-quiet" : "ap-chip-info")}
+        ${off ? chipH(e.status || "Not accepted", "ap-chip-quiet") : ""}${!e.placed && e.accepted ? chipH("New: check its package", "ap-chip-warn", "Arrived after the project was set up: keep it here or move it") : ""}
+        <div class="text-[11px] text-black/50 tabular-nums">${money0(e.total)}${e.accepted_date ? ` · accepted ${fmtHd(e.accepted_date)}` : ""}</div></td>
+      ${has("pm") ? `<td><select class="input text-xs py-1.5" data-pk-pm="${e.qbo_id}"><option value="">— PM</option>${pms.map((x) => `<option value="${x.id}" ${String(e.pm_id) === String(x.id) ? "selected" : ""}>${escapeHtml(pmName(x))}</option>`).join("")}</select></td>` : ""}
+      ${has("crew") ? `<td><select class="input text-xs py-1.5" data-pk-crew="${e.qbo_id}" ${p.has_dates && e.accepted ? "" : "disabled"} title="${p.has_dates ? "Crews sorted by how many are free on these dates (weekdays)" : "A crew is picked for dates: set this package's dates first"}">${crewOptions(p, e.crew_company_id || e.crew_id)}</select>
+        ${oc ? `<div class="mt-0.5">${chipH(oc[0], oc[1], e.offer.sent_at ? `Sent ${e.offer.sent_at}` : "")}</div>` : e.crew_id ? `<div class="mt-0.5">${chipH("Offer not sent", "ap-chip-warn", "Send it from the crew roll-up under Schedules, once the pay schedule is confirmed")}</div>` : ""}</td>` : ""}
+      ${has("dates") ? `<td>${moveSel}${!e.placed && e.accepted ? ` <button type="button" class="su-linkbtn" data-pk-keep="${e.qbo_id}" data-pkid="${e.package_id}">Keep here</button>` : ""}</td>` : ""}
+    </tr>`;
+  }
+  function packagesHtml() {
+    const lineIdx = new Map(items.map((it, i) => [String(it.id), i]));
+    return pk.packages.map((p) => {
+      const all = (pk.estimates || []).filter((e) => e.package_id === p.id);
+      const live = (e) => e.accepted || e.status === "Pending";
+      const mine = all.filter(live), dropped = all.filter((e) => !live(e));
+      let lines = items.filter((it) => it.package_id === p.id);
+      const dated = lines.some((it) => !isUndated(it));
+      const hidden = dated ? lines.filter((it) => isUndated(it) && it.status !== "canceled" && !_justAdded.has(String(it.id))) : [];
+      if (!_showUndated.has(pkey)) lines = lines.filter((it) => !hidden.includes(it));
+      const head = `${p.start ? `${fmtHd(p.start)} to ${fmtHd(p.end)}` : "No dates yet"}${p.breaks.length ? ` · ${p.breaks.length} break${p.breaks.length === 1 ? "" : "s"}` : ""} · ${mine.filter((e) => e.accepted).length} accepted · ${money0(p.accepted_total)}`;
+      return `<section class="ap-pk" data-pk="${p.id}">
+        <div class="ap-pk-head"><button type="button" class="ap-pk-name" data-pk-rename="${p.id}" title="Rename this package">${escapeHtml(p.name)}</button><span class="ap-pk-sum">${head}</span></div>
+        ${mine.length && (has("pm") || has("crew") || has("dates")) ? `<div class="overflow-x-auto"><table class="ap-pk-est"><thead><tr><th>Estimate</th>${has("pm") ? "<th>PM</th>" : ""}${has("crew") ? "<th>Crew</th>" : ""}${has("dates") ? "<th>Package</th>" : ""}</tr></thead>
+          <tbody>${mine.map((e) => estRow(e, p)).join("")}</tbody></table></div>` : mine.length ? "" : `<div class="text-xs text-black/45 py-1">No estimates in this package.</div>`}
+        ${dropped.length ? `<div class="text-[11px] text-black/45 pb-1">Not counted: ${dropped.map((e) => `#${escapeHtml(e.doc_number || "")} (${escapeHtml((e.status || "").toLowerCase() || "not accepted")})`).join(", ")}</div>` : ""}
+        ${has("dates") || has("details") || has("crew") ? `<div class="ap-pk-lines">${lines.map((it) => lineHtml(it, lineIdx.get(String(it.id)))).join("") || `<div class="text-xs text-black/45 py-2">No date range yet.</div>`}
+          ${hidden.length && !_showUndated.has(pkey) ? `<div class="text-[11px] text-black/45 pt-1">${hidden.length} line${hidden.length === 1 ? "" : "s"} with no dates hidden · <button type="button" class="underline decoration-dotted" data-undated="show">show</button></div>` : ""}</div>` : ""}
+        ${has("dates") ? `<button type="button" class="text-xs font-semibold text-emerald-700 hover:underline mt-1" data-pk-addline="${p.id}">+ Add a date range to ${escapeHtml(p.name)} (a break in the work)</button>` : ""}
+      </section>`;
+    }).join("");
+  }
+
+  let avail = {};
+  if (pkMode && has("crew")) {
+    await Promise.all(pk.packages.filter((p) => p.has_dates).map(async (p) => {
+      try { avail[p.id] = await api(`/offers/crew-availability?start=${p.start}&end=${p.end}`); } catch (_) { /* picker shows names only */ }
+    }));
+  }
   container.innerHTML = `
     <div class="p-4 sm:p-5 text-ink-900">
       ${holdBar}
       ${cancelBtn}
       <div class="flex items-start gap-3 flex-wrap mb-3">
-        <div class="text-xs text-black/50 flex-1" style="min-width:220px;">${escapeHtml(opts.intro || "Assign the PM(s), crew(s), dates, and schedule detail for each set of dates. A project can have more than one (extra crews / phases). Changes save automatically.")}</div>
+        <div class="text-xs text-black/50 flex-1" style="min-width:220px;">${escapeHtml(opts.intro || (pkMode
+          ? "Each package is one or more estimates that share dates. Pick the PM and crew per estimate; set each package's dates and details. Changes save automatically."
+          : "Assign the PM(s), crew(s), dates, and schedule detail for each set of dates. A project can have more than one (extra crews / phases). Changes save automatically."))}</div>
         ${has("crew") ? `<span data-ccx-slot></span>` : ""}
       </div>
-      <div data-rows>${bodyLines}</div>
-      ${hiddenNote}
-      ${has("dates") ? `<div class="pt-3">
+      ${pkMode && (has("dates") || has("pm")) ? projectStrip() : ""}
+      ${pkMode && has("dates") ? jsNewVisits() : ""}
+      <div data-rows>${pkMode ? packagesHtml() : bodyLines}</div>
+      ${pkMode ? "" : hiddenNote}
+      ${has("dates") && !pkMode ? `<div class="pt-3">
         <button data-add class="text-xs font-semibold text-emerald-700 hover:underline">+ Add another set of dates</button>
       </div>` : ""}
     </div>`;
@@ -487,6 +609,46 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       catch (err) { alert("Delete failed: " + (err?.message || err)); }
     }
   });
+
+  // 2026-11-18: package actions
+  if (pkMode) {
+    const eid = encodeURIComponent(bundle.qbo.qbo_id);
+    const post = async (path, body, method = "POST") => {
+      try { await api(`/packages/${eid}${path}`, { method, body: JSON.stringify(body || {}) }); if (onChange) onChange(); remount(); }
+      catch (err) { alert(`Couldn't save: ${err?.message || err}`); remount(); }
+    };
+    container.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t.matches("[data-pk-pm]")) post("/pm", { pm_id: t.value ? Number(t.value) : null, estimates: [t.dataset.pkPm] });
+      else if (t.matches("[data-pk-crew]")) post(`/estimate/${encodeURIComponent(t.dataset.pkCrew)}/crew`, { crew_id: t.value ? Number(t.value) : null });
+      else if (t.matches("[data-pk-move]")) post(`/estimate/${encodeURIComponent(t.dataset.pkMove)}/package`, { package_id: t.value === "new" ? "new" : Number(t.value) });
+      else if (t.matches("[data-pk-overage]")) post("/overage", { days: Number(t.value) || 0 });
+    });
+    container.addEventListener("click", async (e) => {
+      const js = e.target.closest("[data-js-use]");
+      if (js) { post(`/job-schedule/${js.dataset.jsUse}/apply`, {}); return; }
+      const b = e.target.closest("[data-pk-addline],[data-pk-rename],[data-pk-keep],[data-pk-pmall-go]");
+      if (!b) return;
+      if (b.dataset.pkAddline) {
+        try {
+          const r = await api(`/packages/${eid}/package/${b.dataset.pkAddline}/line`, { method: "POST", body: "{}" });
+          if (r && r.added_line) _justAdded.add(String(r.added_line));
+          if (onChange) onChange();
+          remount();
+        } catch (err) { alert(`Couldn't add: ${err?.message || err}`); }
+      } else if (b.dataset.pkRename) {
+        const cur = pk.packages.find((x) => String(x.id) === b.dataset.pkRename);
+        const name = prompt("Package name (blank = Package n)", cur?.custom_name ? cur.name : "");
+        if (name !== null) post(`/package/${b.dataset.pkRename}`, { name }, "PATCH");
+      } else if (b.dataset.pkKeep) {
+        post(`/estimate/${encodeURIComponent(b.dataset.pkKeep)}/package`, { package_id: Number(b.dataset.pkid) });
+      } else if (b.matches("[data-pk-pmall-go]")) {
+        const v = container.querySelector("[data-pk-pmall]")?.value;
+        if (!v) { alert("Pick a PM first."); return; }
+        post("/pm", { pm_id: Number(v), estimates: null });
+      }
+    });
+  }
 
   // 0078: hold actions — after any change the panel remounts (dates moved).
   const afterHold = () => { if (onChange) onChange({ hold: true }); remount(); };

@@ -111,13 +111,13 @@ export async function mountChangeOrdersPanel(container, entityId) {
     </div>`;
   }
 
-  const phaseName = (p) => p.name || `Phase ${p.seq}`;
+  const phaseName = (p) => p.name || `Package ${p.seq}`;
 
   function phaseSelect(eid, currentPid) {
     const phases = data.phases || [];
     return `<select data-move="${escapeHtml(String(eid))}" class="input text-[11px] py-0.5 pl-1.5 pr-5 w-auto">
       ${phases.map((p) => `<option value="${p.id}" ${p.id === currentPid ? "selected" : ""}>${escapeHtml(phaseName(p))}</option>`).join("")}
-      <option value="__new">＋ New phase…</option></select>`;
+      <option value="__new">＋ New package…</option></select>`;
   }
 
   // one estimate row (+ its lazily-loaded line-items detail row).
@@ -143,7 +143,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
         <td class="py-1.5 pr-2 text-right tabular-nums font-semibold">${money(i.amount)}</td>
         <td class="py-1.5 pr-2 text-right tabular-nums text-black/60">${i.contract_labor ? money(i.contract_labor) : "—"}</td>
         <td class="py-1.5 pr-2">${statusPill(i.status)}</td>
-        ${opts.inPhase ? `<td class="py-1.5 pr-2 whitespace-nowrap">${phaseSelect(i.qbo_estimate_id, asg ? asg.phase_id : null)}${unconfirmed ? `<button data-confirm="${escapeHtml(String(i.qbo_estimate_id))}" data-phase="${asg.phase_id}" class="ml-1 text-[10px] font-bold text-amber-700 hover:underline" title="Confirm this phase">⚑ confirm</button>` : ""}</td>` : ""}
+        ${opts.inPhase ? `<td class="py-1.5 pr-2 whitespace-nowrap">${phaseSelect(i.qbo_estimate_id, asg ? asg.phase_id : null)}${unconfirmed ? `<button data-confirm="${escapeHtml(String(i.qbo_estimate_id))}" data-phase="${asg.phase_id}" class="ml-1 text-[10px] font-bold text-amber-700 hover:underline" title="Confirm this package">⚑ confirm</button>` : ""}</td>` : ""}
         <td class="py-1.5 text-right whitespace-nowrap">${i.source === "draft"
           ? (i.app_estimate_id
             ? `${openQuote}<button data-edit="${idx}" class="text-xs text-blue-600 font-semibold hover:underline">Edit</button><button data-del="${i.co_id}" class="text-xs text-black/35 hover:text-red-600 hover:underline ml-2">Delete</button>`
@@ -160,7 +160,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
         <th class="py-2 pr-2 font-bold">Type</th><th class="py-2 pr-2 font-bold">Estimate</th>
         <th class="py-2 pr-2 font-bold">Scope / reason</th><th class="py-2 pr-2 font-bold text-right">Amount</th>
         <th class="py-2 pr-2 font-bold text-right">Labor</th><th class="py-2 pr-2 font-bold">Status</th>
-        ${opts.inPhase ? `<th class="py-2 pr-2 font-bold">Phase</th>` : ""}
+        ${opts.inPhase ? `<th class="py-2 pr-2 font-bold">Package</th>` : ""}
         <th class="py-2 font-bold text-right"></th></tr></thead>
       <tbody>${items.map((i) => rowHtml(i, data.items.indexOf(i), opts)).join("")}</tbody></table></div>`;
   }
@@ -180,12 +180,12 @@ export async function mountChangeOrdersPanel(container, entityId) {
       const sub = rows.reduce((s, i) => s + i.amount, 0);
       return `<div class="rounded-xl border border-violet-200 bg-violet-50/40 p-3 mb-3">
         <div class="flex items-center gap-2 mb-2 flex-wrap">
-          <span class="inline-flex rounded-full bg-violet-600 text-white px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide">Phase ${p.seq}</span>
+          <span class="inline-flex rounded-full bg-violet-600 text-white px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide">Package ${p.seq}</span>
           <input data-phase-name="${p.id}" value="${escapeHtml(p.name || "")}" placeholder="name (optional)" class="bg-transparent border border-transparent hover:border-black/15 focus:border-violet-400 rounded px-1.5 py-0.5 text-[12px] font-semibold w-40">
           <span class="text-[11px] text-violet-700/70 tabular-nums ml-auto">${rows.length} estimate${rows.length === 1 ? "" : "s"} · ${money(sub)}</span>
-          ${phases.length > 1 ? `<button data-phase-del="${p.id}" class="text-[11px] text-black/30 hover:text-red-600" title="Delete phase (estimates fall back to Phase 1)">✕</button>` : ""}
+          ${phases.length > 1 ? `<button data-phase-del="${p.id}" class="text-[11px] text-black/30 hover:text-red-600" title="Delete package (estimates fall back to Package 1)">✕</button>` : ""}
         </div>
-        ${rows.length ? rowsTable(rows, { inPhase: true }) : `<div class="text-[12px] text-black/40 py-2 px-1">No estimates in this phase.</div>`}
+        ${rows.length ? rowsTable(rows, { inPhase: true }) : `<div class="text-[12px] text-black/40 py-2 px-1">No estimates in this package.</div>`}
       </div>`;
     }).join("");
 
@@ -193,7 +193,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
       <div class="rounded-xl border border-black/10 bg-black/[0.015] p-3 mb-3">
         <div class="text-[11px] font-bold uppercase tracking-wide text-black/45 mb-2">Not scheduled — pending / declined / drafts</div>
         ${rowsTable(other)}
-        <div class="text-[10px] text-black/40 mt-2">Only <b>accepted</b> estimates are grouped into phases &amp; drive schedules. These are tracked here until accepted.</div>
+        <div class="text-[10px] text-black/40 mt-2">Only <b>accepted</b> estimates are grouped into packages &amp; drive schedules. These are tracked here until accepted.</div>
       </div>` : "";
 
     return phaseCards + otherCard;
@@ -205,13 +205,13 @@ export async function mountChangeOrdersPanel(container, entityId) {
       <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
         <div class="text-[11px] font-bold uppercase tracking-wide text-black/40">Contract value &amp; change orders</div>
         <div class="flex gap-2">
-          <button id="phaseAdd" class="rounded-lg border border-violet-300 text-violet-700 px-3 py-1.5 text-xs font-semibold hover:bg-violet-50">+ New phase</button>
+          <button id="phaseAdd" class="rounded-lg border border-violet-300 text-violet-700 px-3 py-1.5 text-xs font-semibold hover:bg-violet-50">+ New package</button>
           <button id="coAdd" class="btn-primary text-xs px-3 py-1.5">+ Add change order</button>
         </div>
       </div>
       ${rollupHtml(data.rollup)}
       ${phasesHtml()}
-      <div class="text-[11px] text-black/40 mt-3">Estimates group into <b>work phases</b>. New accepted estimates are auto-suggested into Phase 1 (⚑ = confirm or move). Only accepted estimates drive schedules; the roll-up above is the revised contract.</div>
+      <div class="text-[11px] text-black/40 mt-3">Estimates group into <b>work packages</b>. New accepted estimates are auto-suggested into Package 1 (⚑ = confirm or move). Only accepted estimates drive schedules; the roll-up above is the revised contract.</div>
     </div>`;
     wire();
   }
@@ -224,7 +224,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
     document.getElementById("coAdd").addEventListener("click", () => openAddCOModal());
     document.getElementById("phaseAdd")?.addEventListener("click", async () => {
       try { await api(`/phases/project/${encodeURIComponent(entityId)}`, { method: "POST" }); reloadData(); }
-      catch (e) { alert(e?.message || "Could not add phase"); }
+      catch (e) { alert(e?.message || "Could not add package"); }
     });
     // move an estimate to a phase (or create a new one and move it there)
     container.querySelectorAll("[data-move]").forEach(sel => sel.addEventListener("change", async () => {
@@ -250,7 +250,7 @@ export async function mountChangeOrdersPanel(container, entityId) {
       catch (e) { alert(e?.message || "Rename failed"); }
     }));
     container.querySelectorAll("[data-phase-del]").forEach(btn => btn.addEventListener("click", async () => {
-      if (!confirm("Delete this phase? Its estimates fall back to Phase 1.")) return;
+      if (!confirm("Delete this package? Its estimates fall back to Package 1.")) return;
       try { await api(`/phases/${btn.getAttribute("data-phase-del")}`, { method: "DELETE" }); reloadData(); }
       catch (e) { alert(e?.message || "Delete failed"); }
     }));

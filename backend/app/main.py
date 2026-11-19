@@ -55,6 +55,7 @@ from app.opportunities.routes import router as opportunities_router
 from app.change_orders.routes import router as change_orders_router
 from app.billing.routes import router as billing_router
 from app.phases.routes import router as phases_router
+from app.packages.routes import router as packages_router
 from app.pm.routes import router as pm_router
 from app.crewauth.routes import router as crewauth_router
 from app.forms.routes import router as forms_router
@@ -115,6 +116,7 @@ app.include_router(opportunities_router)
 app.include_router(change_orders_router)
 app.include_router(billing_router)
 app.include_router(phases_router)
+app.include_router(packages_router)
 app.include_router(pm_router)
 app.include_router(crewauth_router)
 app.include_router(forms_router)

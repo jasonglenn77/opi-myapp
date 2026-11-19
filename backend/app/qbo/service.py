@@ -848,9 +848,20 @@ def reconcile_deleted_transactions(entities=("Bill", "Invoice", "Estimate")) -> 
             result[entity] = {"qbo_count": len(existing), "local_count": len(local), "removed": 0,
                               "skipped": f"{len(gone)} would go: looks like a bad response, nothing deleted"}
             continue
+        touched = []
+        if gone:      # projects whose cached cash forecast held the removed rows
+            from sqlalchemy import bindparam as _bp
+            with engine.connect() as _c:
+                touched = sorted({str(r[0]) for r in _c.execute(text(
+                    "SELECT DISTINCT customer_qbo_id FROM qbo_transactions WHERE entity_type = :t AND qbo_id IN :ids"
+                ).bindparams(_bp("ids", expanding=True)), {"t": entity, "ids": [str(g) for g in gone]}).all() if r[0]})
         removed = _delete_local_transactions(realm_id, entity, gone) if gone else 0
+        if removed and touched:     # 2026-11-19: the forecast cache doesn't notice deletions by itself
+            from app.projects.books import refresh_forecast_for
+            for e in touched:
+                refresh_forecast_for(e)
         result[entity] = {"qbo_count": len(existing), "local_count": len(local), "removed": removed,
-                          "removed_ids": gone[:50]}
+                          "removed_ids": gone[:50], "projects_refreshed": touched[:50]}
     return result
 
 

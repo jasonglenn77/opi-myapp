@@ -62,6 +62,10 @@ from .review import PM_FILL, _kind, _norm_slot as _slot, _segments
 WINDOW_DAYS = 60
 GAP_DAYS = 7          # review._segments: a gap of more than 7 days starts a new visit
 SYSTEM_EMAIL = "job-schedule@system.onpointinstallers.com"
+# 2026-11-18 (owner): the Job Schedule is REFERENCE-ONLY. The nightly run works
+# out what the sheet would change and keeps it (store_proposals) for the
+# Assignment's "Job Schedule says ... / Use these"; it writes nothing itself.
+WRITES_APP = False
 
 WIRE_FILL = "FF00FFFF"
 OVERAGE_FONTS = {"FFF6B26B", "FFFF9900"}
@@ -587,6 +591,40 @@ def apply(p):
     return {"created": done["created"], "updated": done["updated"], "errors": errors}
 
 
+def store_proposals(p):
+    """Keep the sheet's would-be changes (not status-only ones: the status follows
+    the dates) for the Assignment to show. Replaced on every run."""
+    import json
+    rows = []
+    for c in p.get("changes") or []:
+        if set(c["changes"]) <= {"status"}:
+            continue
+        rows.append({"cid": c["qbo_customer_id"], "sid": c["schedule_item_id"], "job": str(c.get("job") or "")[:40],
+                     "f": c["visit"][0], "l": c["visit"][1], "ch": json.dumps(c["changes"], default=str),
+                     "pl": json.dumps(c, default=str)})
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM gsync_schedule_proposals"))
+        for r in rows:
+            conn.execute(text("""INSERT INTO gsync_schedule_proposals (qbo_customer_id, schedule_item_id, job, visit_first, visit_last, changes, payload)
+                                 VALUES (:cid, :sid, :job, :f, :l, :ch, :pl)"""), r)
+    return len(rows)
+
+
+def apply_one(proposal_id, actor_user_id):
+    """Use the sheet's values for one line (or add its visit as a new line)."""
+    import json
+    from app.projects.service import save_schedule_item
+    with engine.connect() as conn:
+        r = conn.execute(text("SELECT payload FROM gsync_schedule_proposals WHERE id = :i"), {"i": proposal_id}).scalar()
+    if not r:
+        raise ValueError("That Job Schedule suggestion is gone (the sheet changed since). Reload.")
+    c = json.loads(r) if isinstance(r, str) else r
+    out = save_schedule_item(_request(c), actor_user_id)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM gsync_schedule_proposals WHERE id = :i"), {"i": proposal_id})
+    return out
+
+
 def summarize(p):
     fields = collections.Counter(f for c in p["changes"] for f in c["changes"])
     return {"jobs": p.get("jobs", 0), "lines_changed": sum(1 for c in p["changes"] if c["schedule_item_id"]),
@@ -601,7 +639,10 @@ def run(do_apply=False):
     if p.get("error"):
         return {"error": p["error"]}, p
     s = summarize(p)
-    if do_apply and p["changes"]:
+    if do_apply and not WRITES_APP:
+        s["proposals"] = store_proposals(p)
+        s["reference_only"] = True
+    elif do_apply and p["changes"]:
         s.update(apply(p))
     elif do_apply:
         _write_checks(p.get("override_checks"))
