@@ -16,7 +16,7 @@ import secrets
 import hashlib
 
 from . import mailer
-from .auth import create_access_token, get_current_user, require_admin, require_capability, renewed_token, RENEW_HEADER
+from .auth import create_access_token, get_current_user, require_admin, require_any_capability, require_capability, renewed_token, RENEW_HEADER
 from .permissions import (
     valid_roles, filter_visible, permission_snapshot, ALL_CAPABILITIES,
     get_role_defaults, bump_roles_cache, BUILTIN_ROLE_META, ADMIN_ROLE,
@@ -1194,7 +1194,7 @@ def disable_user(user_id: int, _admin=Depends(require_admin)):
 # -----------------------------
 
 @app.get("/api/project-managers")
-def list_project_managers(_admin=Depends(require_admin)):
+def list_project_managers(_admin=Depends(require_any_capability("page.teams", "page.users", "page.schedule", "page.assignment", "teams.manage"))):
     from .db import engine
     with engine.connect() as conn:
         rows = conn.execute(text("""
@@ -1206,7 +1206,7 @@ def list_project_managers(_admin=Depends(require_admin)):
 
 
 @app.post("/api/project-managers")
-def create_project_manager(req: ProjectManagerCreateRequest, _admin=Depends(require_admin)):
+def create_project_manager(req: ProjectManagerCreateRequest, _admin=Depends(require_capability("teams.manage"))):
     from .db import engine
 
     first_name = (req.first_name or "").strip() or None
@@ -1235,7 +1235,7 @@ def create_project_manager(req: ProjectManagerCreateRequest, _admin=Depends(requ
 
 
 @app.put("/api/project-managers/{pm_id}")
-def update_project_manager(pm_id: int, req: ProjectManagerUpdateRequest, _admin=Depends(require_admin)):
+def update_project_manager(pm_id: int, req: ProjectManagerUpdateRequest, _admin=Depends(require_capability("teams.manage"))):
     from .db import engine
 
     updates = []
@@ -1286,7 +1286,7 @@ def update_project_manager(pm_id: int, req: ProjectManagerUpdateRequest, _admin=
 
 
 @app.delete("/api/project-managers/{pm_id}")
-def disable_project_manager(pm_id: int, _admin=Depends(require_admin)):
+def disable_project_manager(pm_id: int, _admin=Depends(require_capability("teams.manage"))):
     from .db import engine
     with engine.begin() as conn:
         result = conn.execute(text("""
@@ -1306,7 +1306,7 @@ def disable_project_manager(pm_id: int, _admin=Depends(require_admin)):
 # -----------------------------
 
 @app.get("/api/work-crews")
-def list_work_crews(_admin=Depends(require_admin)):
+def list_work_crews(_admin=Depends(require_any_capability("page.teams", "page.users", "page.schedule", "page.assignment", "teams.manage"))):
     """CR5 A1 — capacity is auto-by-default: crew_capacity NULL means the
     company's capacity tracks its live ACTIVE lead count; a value is an
     explicit override. Every row ships raw (crew_capacity) + the live
@@ -1337,7 +1337,7 @@ def list_work_crews(_admin=Depends(require_admin)):
 
 
 @app.post("/api/work-crews")
-def create_work_crew(req: WorkCrewCreateRequest, admin=Depends(require_admin)):
+def create_work_crew(req: WorkCrewCreateRequest, admin=Depends(require_capability("teams.manage"))):
     from .db import engine
 
     name = (req.name or "").strip()
@@ -1387,7 +1387,7 @@ def create_work_crew(req: WorkCrewCreateRequest, admin=Depends(require_admin)):
 
 
 @app.put("/api/work-crews/{crew_id}")
-def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, admin=Depends(require_admin)):
+def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, admin=Depends(require_capability("teams.manage"))):
     from .db import engine
 
     updates = []
@@ -1502,7 +1502,7 @@ def update_work_crew(crew_id: int, req: WorkCrewUpdateRequest, admin=Depends(req
 
 
 @app.delete("/api/work-crews/{crew_id}")
-def disable_work_crew(crew_id: int, admin=Depends(require_admin)):
+def disable_work_crew(crew_id: int, admin=Depends(require_capability("teams.manage"))):
     """
     Disable a crew. Safer: block if it has active sub crews.
     """

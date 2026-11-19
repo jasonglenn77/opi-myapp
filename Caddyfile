@@ -14,9 +14,9 @@ app.onpointinstallers.com {
     # revalidates via ETag, so unchanged files return a tiny 304 and a deploy is
     # picked up immediately. Explicit header beats Caddy's heuristic freshness,
     # which could otherwise serve a stale app shell after a deploy.
-    @assets path *.js *.css *.svg
+    # The app shell is requested as "/" (not only "/index.html"), so both get it.
+    @assets path / /index.html *.js *.css *.svg *.json
     header @assets Cache-Control "no-cache"
-    header /index.html Cache-Control "no-cache"
 
     root * /usr/share/caddy
     file_server

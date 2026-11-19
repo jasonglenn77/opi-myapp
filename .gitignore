@@ -49,3 +49,6 @@ references/
 *sheets-key*.json
 gcp-*.json
 formula_dump/
+
+# written by deploy.sh (the deployed commit, for the new-version check)
+frontend/src/version.json

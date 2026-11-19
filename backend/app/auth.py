@@ -111,6 +111,15 @@ def require_admin(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
+def require_any_capability(*capabilities: str):
+    """Dependency factory: 403 unless the current user has at least one of them."""
+    def _dep(user=Depends(get_current_user)):
+        have = user.get("capabilities") or set()
+        if not any(c in have for c in capabilities):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+    return _dep
+
 def require_capability(capability: str):
     """Dependency factory: 403 unless the current user has `capability`."""
     def _dep(user=Depends(get_current_user)):

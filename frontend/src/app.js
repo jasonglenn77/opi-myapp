@@ -115,7 +115,70 @@ function trackPreviousRoute(hash) {
   _currentHash = hash;
 }
 
+// New version after a deploy: deploy.sh writes /version.json (the commit). A tab
+// that was open during a deploy notices on its next navigation (or when it comes
+// back into view), loads the new code once, and nobody needs a hard refresh.
+let _bootVersion = null, _newVersion = false, _verCheckedAt = 0;
+async function fetchVersion() {
+  try {
+    const r = await fetch("/version.json", { cache: "no-store" });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && j.v) || null;
+  } catch (_) { return null; }
+}
+fetchVersion().then((v) => { _bootVersion = v; });
+function showUpdateBar() {
+  if (document.getElementById("appUpdateBar")) return;
+  const bar = document.createElement("div");
+  bar.id = "appUpdateBar";
+  bar.setAttribute("role", "status");
+  bar.style.cssText = "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;background:#111827;color:#fff;border-radius:999px;padding:8px 10px 8px 16px;font-size:13px;display:flex;gap:10px;align-items:center;box-shadow:0 6px 24px rgba(0,0,0,.35)";
+  bar.innerHTML = `<span>The app was updated.</span><button type="button" style="background:#fff;color:#111827;border-radius:999px;padding:4px 12px;font-weight:600">Reload</button>`;
+  bar.querySelector("button").addEventListener("click", () => location.reload());
+  document.body.appendChild(bar);
+}
+async function checkForNewVersion(force = false) {
+  if (_newVersion) return true;
+  if (!_bootVersion) { _bootVersion = await fetchVersion(); return false; }
+  const now = Date.now();
+  if (!force && now - _verCheckedAt < 60000) return false;
+  _verCheckedAt = now;
+  const v = await fetchVersion();
+  if (v && v !== _bootVersion) { _newVersion = true; showUpdateBar(); }
+  return _newVersion;
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForNewVersion(true); });
+setInterval(() => { if (!document.hidden) checkForNewVersion(true); }, 5 * 60 * 1000);
+
+// A page that fails to load (an API refused it, a server error) says so in place,
+// instead of leaving the previous page on screen under the new address
+// (2026-11-19 feedback: Teams "navigated to Projects" when its calls were refused).
 async function route() {
+  const hash = location.hash || "#/projects";
+  // A deploy happened since this tab loaded: open the page on the new code.
+  if (_newVersion) { location.reload(); return; }
+  checkForNewVersion();
+  try {
+    return await routePage();
+  } catch (err) {
+    if ((location.hash || "#/projects") !== hash) return;   // the user already moved on
+    console.error("Page failed to load:", err);
+    const msg = String((err && err.message) || err || "Unknown error")
+      .replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const denied = err && err.status === 403;
+    setShell({
+      title: denied ? "No access" : "This page didn't load",
+      subtitle: "",
+      bodyHtml: `<div class="card p-6 space-y-2">
+        <p>${denied ? "Your account doesn't have access to part of this page. Ask an administrator to check your permissions." : "Something went wrong loading this page. Try again, or send feedback with the help button if it keeps happening."}</p>
+        <p class="text-xs text-black/50">${msg}</p></div>`,
+      routeFn: route,
+    });
+  }
+}
+
+async function routePage() {
   const hash = location.hash || "#/projects";
   trackPreviousRoute(hash);
 
