@@ -165,7 +165,12 @@ export async function mountBillingPanel(container, entityId, opts = {}) {
   render(container, entityId, d);
 }
 
+// 2026-11-18: sections someone opened stay open when the panel re-draws after a
+// save (adding / removing a row used to fold everything up).
+const _sumKey = (sm) => sm.textContent.replace(/\$[\d,.]+|\d[\d,.]*/g, "").replace(/\s+/g, " ").trim().slice(0, 40);
+
 function render(container, entityId, d) {
+  const _wasOpen = new Set([...container.querySelectorAll("details[open] > summary")].map(_sumKey));
   const p = d.project, k = d.kpis;
   const est = d.estimates || { accepted: [], pending: [], needs_review: 0, contract_total: 0, collected: 0, open_ar: 0, invoiced_qbo: 0 };
   const roll = d.crew_rollups || { rollups: [], total_labor: 0, total_paid: 0 };
@@ -429,6 +434,8 @@ function render(container, entityId, d) {
     // handler (a stopPropagation in the summary was swallowing them).
     const assignRow = complete
       ? `<div class="px-4 py-1.5 text-[11.5px] text-black/55">Crew assigned: <b class="text-ink-900">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "—"))}</b> · books closed <span class="text-black/40">(actual payments may differ — see rollup + Other crews above)</span></div>`
+      : container.dataset.blOnly
+        ? `<div class="px-4 py-1.5 text-[11.5px] text-black/55">Crew: <b class="text-ink-900">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "not picked yet"))}</b> <span class="text-black/40">(picked per estimate under Assignment)</span></div>`
       : split
         ? `<div class="px-4 py-1.5 flex items-center gap-1.5 text-[11.5px] flex-wrap"><span class="text-black/55">Crew</span>
             <span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">${escapeHtml(splitLabel(split))}</span>
@@ -455,6 +462,13 @@ function render(container, entityId, d) {
       ${assignRow}
       ${srcLine}
       <div class="overflow-x-auto px-2 pb-2"><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-4">Pay date (auto bi-weekly)</th><th class="py-1 text-right">Amount</th><th></th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
+      ${(a.crew_installments || []).length ? (() => {
+        const tot = (a.crew_installments || []).reduce((x, i) => x + (Number(i.amount) || 0), 0), off = tot - (Number(a.labor) || 0);
+        return `<div class="px-4 pb-1 text-[11.5px] tabular-nums ${Math.abs(off) > 1 ? "text-rose-700 font-semibold" : "text-black/50"}">Total ${money(tot)} of ${money(a.labor)} contract labor${Math.abs(off) > 1 ? ` (${off > 0 ? "over" : "short"} by ${money(Math.abs(off))})` : ". Adding or removing a payment re-balances the open rows."}</div>`;
+      })() : ""}
+      ${!complete && a.crew_schedule_id && a.crew_dates_confirmed === false ? `<div class="mx-4 mb-2 flex items-center gap-2 flex-wrap text-[11.5px] rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-2.5 py-1.5">
+          <b>Check and confirm the payment dates.</b> The first payment is the second payday after the PO (the estimate's accepted date), then every other Friday.
+          <button type="button" class="ml-auto pd-btn" data-confirm-dates="${a.crew_schedule_id}">Dates are right</button></div>` : ""}
       ${splitTotals}
       ${!complete && a.crew_schedule_id ? addBtn("installment", a.crew_schedule_id, "Add payment") : ""}
     </details>`;
@@ -478,7 +492,7 @@ function render(container, entityId, d) {
     const over = c.variance > 0.5;
     const weekly = (c.weekly || []).map((w) => `
       <tr class="border-b border-black/5">
-        <td class="py-1 pl-6 pr-2"><span class="flex items-center gap-2">${DOT[w.tier]}${expenseComplete ? `<span class="tabular-nums text-black/60">${shortDate(w.week_of)}</span>` : eInput("expinst", w.id, "week_of", w.week_of, "date")}</span></td>
+        <td class="py-1 pl-6 pr-2"><span class="flex items-center gap-2">${w.estimate_doc && (c.by_estimate || []).length > 1 ? `<span class="text-[10px] font-bold text-black/40">#${escapeHtml(w.estimate_doc)}</span>` : ""}${DOT[w.tier]}${expenseComplete ? `<span class="tabular-nums text-black/60">${shortDate(w.week_of)}</span>` : eInput("expinst", w.id, "week_of", w.week_of, "date")}</span></td>
         <td class="py-1 px-2">${expenseComplete ? `<span class="tabular-nums text-black/60">${w.expected_paid_date ? shortDate(w.expected_paid_date) : "—"}</span>` : eInput("expinst", w.id, "expected_paid_date", w.expected_paid_date, "date")}</td>
         <td class="py-1 px-2 text-right">${expenseComplete ? `<span class="tabular-nums font-semibold">${money(w.amount)}</span>` : eInput("expinst", w.id, "amount", Math.round(w.amount), "number", "ml-auto")}</td>
         <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${editedChip(w.edited)}${basisChip(w)}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
@@ -498,6 +512,7 @@ function render(container, entityId, d) {
       </summary>
       <div class="bg-black/[0.012]">
         ${c.timing_note ? `<div class="px-6 pt-2 pb-1 text-[11.5px] text-sky-900">${escapeHtml(c.timing_note)}</div>` : ""}
+        ${(c.by_estimate || []).length ? `<div class="px-6 pt-2 pb-1 text-[11.5px] text-black/60 flex flex-wrap gap-x-3 gap-y-1"><span class="font-bold text-black/45 uppercase text-[10px] tracking-wide">Planned per estimate</span>${c.by_estimate.map((b) => `<span class="tabular-nums">${b.doc ? `#${escapeHtml(b.doc)}` : "Whole project"} <b class="text-ink-900">${money(b.planned)}</b></span>`).join("")}</div>` : ""}
         <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left" title="When the vendor's bill is expected (an estimate unless a person edited it)">Expected bill date</th><th class="py-1.5 px-2 text-left" title="When the cash is expected to leave the bank. The Cash Flow forecast uses this date (blank = the bill date)">Expected paid</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="4" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
         ${expenseComplete ? "" : addBtn("expinst", c.category, "Add expense payment")}
         ${actuals}
@@ -556,12 +571,20 @@ function render(container, entityId, d) {
 
       <!-- project roll-up -->
       <div data-bl-sec="summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
+        ${container.dataset.blOnly === "invoice" ? `
+        ${kpi("Invoice total", est.contract_total)}
+        ${kpi("Paid", est.collected, "text-emerald-700")}
+        ${kpi("Sent, A/R", Math.max(0, est.invoiced_qbo - est.collected), "", retHeld > 0.5 ? `<span class="bl-ret-txt font-semibold">incl. ${money(retHeld)} retainage</span>` : "")}
+        ${kpi("To bill", Math.max(0, est.contract_total - est.invoiced_qbo))}
+        <div class="bg-white px-3 py-2.5 lg:col-span-2"><div class="text-[10px] uppercase tracking-wide font-bold text-black/45">Project schedule</div>
+          <div class="text-[15px] font-extrabold tabular-nums text-ink-900">${shortDate(p.start_date)} → ${shortDate(p.end_date)}</div>
+          <div class="text-[11px] text-black/45">Each estimate's invoices follow its package's dates</div></div>` : `
         ${kpi("Contract", est.contract_total)}
         ${kpi("Collected", est.collected, "text-emerald-700")}
         ${kpi("Open A/R", est.open_ar, "", retHeld > 0.5 ? `<span class="bl-ret-txt font-semibold">incl. ${money(retHeld)} retainage</span>` : "")}
         ${kpi("Crew paid", crewPaid, "text-black/60")}
         ${kpi("Crew left", crewLeft, "text-black/60")}
-        ${kpi("Expenses", exp.estimate_total, "text-black/60")}
+        ${kpi("Expenses", exp.estimate_total, "text-black/60")}`}
       </div>
       <div class="card p-4 sm:p-5" data-bl-sec="cash">
         <div class="text-sm font-bold text-ink-900 mb-3">Cash summary — paid vs. expected</div>
@@ -619,6 +642,7 @@ function render(container, entityId, d) {
 
       <div data-bl-sec="contrib">${contribHtml}</div>
     </div>`;
+  if (_wasOpen.size) container.querySelectorAll("details > summary").forEach((sm) => { if (_wasOpen.has(_sumKey(sm))) sm.parentElement.open = true; });
   const only = container.dataset.blOnly;
   if (only) {
     container.querySelectorAll("[data-bl-sec]").forEach((el) => {
@@ -826,6 +850,13 @@ function render(container, entityId, d) {
       if (!confirm("Withdraw this crew offer?")) return;
       try { await api(`/offers/${oWithdraw.getAttribute("data-offer-withdraw")}/withdraw`, { method: "POST" }); await reload(); }
       catch (err) { alert("Withdraw failed: " + (err?.message || "error")); }
+      return;
+    }
+    const cd = e.target.closest("[data-confirm-dates]");
+    if (cd) {
+      cd.disabled = true;
+      try { await api(`/payments/schedule/${cd.getAttribute("data-confirm-dates")}/confirm-dates`, { method: "POST" }); await reload(); }
+      catch (err) { cd.disabled = false; alert("Couldn't confirm: " + (err?.message || "error")); }
       return;
     }
     const add = e.target.closest("[data-add]");

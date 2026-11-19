@@ -215,9 +215,7 @@ def _ensure_invoice_schedule(conn, entity_id, ctx):
 
 
 def _ensure_crew_schedules(conn, entity_id, ctx, meta):
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
-    if not start or not end or end < start:
-        return  # no timeline -> can't place bi-weekly installments
+    win = _est_windows(conn, entity_id, ctx)
     default_crew = _default_crew_for_project(conn, entity_id, meta)
     # crew per estimate comes from the estimate's billing header (rollup key); the
     # per-estimate schedules are grouped by crew in the rollup view.
@@ -230,13 +228,16 @@ def _ensure_crew_schedules(conn, entity_id, ctx, meta):
             {"e": entity_id, "eq": e["qbo_id"]}).scalar()
         if exists:
             continue
+        start, end = win(e["qbo_id"])
+        if not start or not end or end < start:
+            continue  # no dates for this estimate yet -> nothing to place
         lead = 7
-        rows = _even_split(float(e["labor"] or 0), start, end, lead)
+        rows = _crew_plan(float(e["labor"] or 0), start, end, _pd(e.get("accepted_date")) or _pd(e.get("txn_date")), lead)
         sid = conn.execute(text("""
             INSERT INTO project_payment_schedules
               (entity_id, estimate_qbo_id, estimate_doc_number, crew_id, contract_labor,
-               start_date, end_date, invoice_lead_days)
-            VALUES (:e,:eq,:dn,:c,:cl,:s,:en,:l)
+               start_date, end_date, invoice_lead_days, dates_confirmed)
+            VALUES (:e,:eq,:dn,:c,:cl,:s,:en,:l,0)
         """), {"e": entity_id, "eq": e["qbo_id"], "dn": e["doc_number"], "c": crew_id,
                "cl": e["labor"], "s": start, "en": end, "l": lead}).lastrowid
         for r in rows:
@@ -279,15 +280,24 @@ def _ensure_expense_installments(conn, entity_id, ctx):
     an even spread across the project weeks. The office can then edit
     amounts/dates, add or delete rows."""
     from app.assumptions.calibrate import expense_timing, profile_split, lodging_billing, lodging_split
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
-    if not start or not end or end < start:
-        return
-    for cat, est in (_estimate_costs_by_category(conn, entity_id) or {}).items():
-        if float(est or 0) <= 0:
+    from app.expenses.routes import _estimate_costs_by_estimate
+    # 2026-11-18: planned per estimate (its package's dates), rolled up by item.
+    # A category planned before this for the whole project (estimate NULL) is
+    # left as it is.
+    win = _est_windows(conn, entity_id, ctx)
+    legacy = {r[0] for r in conn.execute(text(
+        "SELECT DISTINCT category FROM project_expense_installments WHERE entity_id=:e AND estimate_qbo_id IS NULL"),
+        {"e": entity_id}).all()}
+    plan = [(q, cat, est) for q, cats in (_estimate_costs_by_estimate(conn, entity_id) or {}).items() for cat, est in cats.items()]
+    for q, cat, est in plan:
+        if float(est or 0) <= 0 or cat in legacy:
+            continue
+        start, end = win(q)
+        if not start or not end or end < start:
             continue
         if conn.execute(text(
-            "SELECT COUNT(*) FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
-            {"e": entity_id, "c": cat}).scalar():
+            "SELECT COUNT(*) FROM project_expense_installments WHERE entity_id=:e AND category=:c AND estimate_qbo_id=:q"),
+            {"e": entity_id, "c": cat, "q": q}).scalar():
             continue
         rows, basis = [], None
         if cat == "Lodging":   # 0086: on Hotel Engine's monthly billing calendar
@@ -299,10 +309,10 @@ def _ensure_expense_installments(conn, entity_id, ctx):
         for r in rows:
             conn.execute(text("""
                 INSERT INTO project_expense_installments
-                  (entity_id, category, seq, week_of, expected_paid_date, amount, basis)
-                VALUES (:e, :c, :s, :w, :p, :a, :b)
+                  (entity_id, category, seq, week_of, expected_paid_date, amount, basis, estimate_qbo_id)
+                VALUES (:e, :c, :s, :w, :p, :a, :b, :q)
             """), {"e": entity_id, "c": cat, "s": r["seq"], "w": r["week_of"],
-                   "p": r.get("expected_paid_date"), "a": r["amount"], "b": basis})
+                   "p": r.get("expected_paid_date"), "a": r["amount"], "b": basis, "q": q})
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +530,51 @@ def _company_labor_paid(conn, entity_id):
     return {int(r["company_id"]): float(r["amt"] or 0) for r in rows}
 
 
+PAYDAY_ANCHOR = date(2026, 1, 2)     # OPI pays crews every other Friday from this one
+
+
+def _payday_after(d):
+    """The first payday strictly after d (every other Friday from PAYDAY_ANCHOR)."""
+    k = (d - PAYDAY_ANCHOR).days // 14 + 1
+    return PAYDAY_ANCHOR + timedelta(days=14 * k)
+
+
+def _crew_plan(labor, start, end, po_date, lead_days=7):
+    """2026-11-18 owner feedback: the first crew payment is the SECOND pay period
+    after the PO came in (no PO date: the first payday after the start), then
+    every other Friday through the first payday on/after the end. Even split;
+    the last row carries the rounding. The office confirms the dates."""
+    first = _payday_after(po_date) + timedelta(days=14) if po_date else _payday_after(start)
+    last = _payday_after(end - timedelta(days=1))
+    if last < first:
+        last = first
+    days = [first + timedelta(days=14 * i) for i in range((last - first).days // 14 + 1)]
+    n = len(days)
+    base = round(float(labor) / n, 2)
+    out = []
+    for i, pay in enumerate(days, 1):
+        amt = base if i < n else round(float(labor) - base * (n - 1), 2)
+        out.append({"seq": i, "pay_date": pay, "amount": amt, "send_invoice_date": pay - timedelta(days=lead_days),
+                    "status": "pending", "note": "Final" if i == n else f"PMT {i}"})
+    return out
+
+
+def _est_windows(conn, entity_id, ctx):
+    """(start, last day) for an estimate: its work package's dates (packages
+    service), else the project's. 2026-11-18: schedules follow each estimate."""
+    try:
+        from app.packages import service as PKS
+        dd = PKS.dates_by_estimate(conn, [entity_id])
+    except Exception:
+        dd = {}
+    ps, pe = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
+
+    def win(q):
+        w = dd.get((str(entity_id), str(q)))
+        return (_pd(w["start"]), _pd(w["finish"])) if w else (ps, pe)
+    return win
+
+
 def _ensure_invoice_schedules(conn, entity_id, ctx):
     """One invoice schedule per accepted estimate (create-if-missing), seeded
     from the project's saved default terms (built-in 35/35/30 net-30 when none
@@ -530,7 +585,7 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
     from app.billing.invoice_dates import plan_dates, single_invoice, change_order_ids
     from app.assumptions.calibrate import invoice_timing, invoice_kind
     it = invoice_timing(conn)
-    start, end = _pd(ctx.get("start_date")), _pd(ctx.get("job_end"))
+    win = _est_windows(conn, entity_id, ctx)
     t = _project_terms(conn, entity_id)
     net_days = t["net_days"]
     cos = None
@@ -544,6 +599,7 @@ def _ensure_invoice_schedules(conn, entity_id, ctx):
             continue
         cos = change_order_ids(conn, entity_id) if cos is None else cos
         is_co = str(e["qbo_id"]) in cos
+        start, end = win(e["qbo_id"])
         percents = t["percents"] if t["custom"] or not single_invoice(e["value"], is_co, it) else [100.0]
         lines = _terms_lines(percents)
         terms = f"{' / '.join(_fmt_pct(p) + '%' for p in percents)}, net-{net_days}"
@@ -739,6 +795,7 @@ def _compose_estimates(conn, entity_id):
             "paid": h_paid, "sent_ar": h_sent_ar, "to_bill": h_tobill,
             "retainage_held": h_ret, "schedule_off": off, "schedule_sum_state": sum_state,
             "crew_schedule_id": (cs["id"] if cs else None),
+            "crew_dates_confirmed": (bool(cs.get("dates_confirmed", 1)) if cs else True),
             "crew_installments": cinsts,
             "crew_source": ({k: cs.get(k) for k in ("source", "source_file_name", "source_modified", "source_doc_id")}
                             if cs else None),
@@ -1411,8 +1468,9 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
     # only the still-scheduled rows count toward the cash-flow forecast.
     inst_by_cat = {}
     for r in conn.execute(text("""
-        SELECT id, category, seq, week_of, expected_paid_date, amount, edited, basis
-        FROM project_expense_installments WHERE entity_id=:e ORDER BY category, seq, id
+        SELECT id, category, seq, week_of, expected_paid_date, amount, edited, basis, estimate_qbo_id
+        FROM project_expense_installments WHERE entity_id=:e
+        ORDER BY category, estimate_qbo_id IS NOT NULL, CASE WHEN estimate_qbo_id IS NULL THEN seq ELSE 0 END, week_of, seq, id
     """), {"e": entity_id}).mappings().all():
         inst_by_cat.setdefault(r["category"], []).append(r)
 
@@ -1438,9 +1496,23 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
                         # 0079: when the cash actually goes out (blank = week_of)
                         "expected_paid_date": str(r["expected_paid_date"]) if r["expected_paid_date"] else None,
                         "amount": amt, "tier": tier, "edited": bool(r["edited"]),
-                        "basis": r["basis"],
+                        "basis": r["basis"], "estimate_qbo_id": r["estimate_qbo_id"],
+                        "estimate_doc": est_doc.get(str(r["estimate_qbo_id"])) if r["estimate_qbo_id"] else None,
                         "paid": round(covered, 2), "status_label": label})
         return out
+
+    # 2026-11-18: what each estimate plans per item (rows made before this belong
+    # to the whole project)
+    est_doc = {str(x["qbo_id"]): x["doc_number"] for x in _estimates_for_billing(conn, entity_id)}
+
+    def _by_est(cat):
+        tot = {}
+        for r in inst_by_cat.get(cat, []):
+            k = str(r["estimate_qbo_id"]) if r["estimate_qbo_id"] else ""
+            tot[k] = tot.get(k, 0.0) + float(r["amount"] or 0)
+        if list(tot) == [""]:
+            return []
+        return [{"estimate_qbo_id": k or None, "doc": est_doc.get(k) if k else None, "planned": round(v, 2)} for k, v in tot.items()]
     # 0086: say how the lodging dates were estimated (Hotel Engine's measured calendar)
     from app.assumptions.calibrate import lodging_billing
     lb = lodging_billing(conn) if "Lodging" in inst_by_cat else None
@@ -1458,6 +1530,7 @@ def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):
          "variance": round(cat_act.get(c, 0.0) - cat_est.get(c, 0.0), 2),
          "remaining": round(max(0.0, cat_est.get(c, 0.0) - cat_act.get(c, 0.0)), 2),
          "weekly": _cat_weekly(c, cat_act.get(c, 0.0)),
+         "by_estimate": _by_est(c),
          "actuals": cat_acts.get(c, [])}
         for c in sorted(set(cat_est) | set(cat_act))
     ]

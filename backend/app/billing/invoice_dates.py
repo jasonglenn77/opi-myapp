@@ -134,8 +134,13 @@ def redate_project(conn, entity_id, it=None, audit=True):
         return []
     converted = resplit_untouched(conn, entity_id, it)
     start, end = _ctx(conn, entity_id)
+    try:      # 2026-11-18: an estimate's invoices follow its work package's dates
+        from app.packages import service as PKS
+        windows = PKS.dates_by_estimate(conn, [entity_id])
+    except Exception:
+        windows = {}
     rows = conn.execute(text("""
-        SELECT m.id, m.label, m.invoice_date, m.due_date, m.expected_paid_date, s.net_days,
+        SELECT m.id, m.label, m.invoice_date, m.due_date, m.expected_paid_date, s.net_days, s.estimate_qbo_id,
                (SELECT e.txn_date FROM qbo_transactions e WHERE e.entity_type = 'Estimate' AND e.qbo_id = s.estimate_qbo_id LIMIT 1) AS est_date
         FROM project_invoice_milestones m JOIN project_invoice_schedules s ON s.id = m.schedule_id
         WHERE s.entity_id = :e AND m.qbo_invoice_id IS NULL AND COALESCE(m.date_basis, 'auto_history') = 'auto_history'
@@ -143,7 +148,9 @@ def redate_project(conn, entity_id, it=None, audit=True):
     changes = []
     for r in rows:
         kind = CAL.invoice_kind(r["label"])
-        p = plan_dates(kind, start, end, r["net_days"], it, r["est_date"]) if kind else None
+        w = windows.get((str(entity_id), str(r["estimate_qbo_id"])))
+        s0, e0 = (_d(w["start"]), _d(w["finish"])) if w else (start, end)
+        p = plan_dates(kind, s0, e0, r["net_days"], it, r["est_date"]) if kind else None
         if not p:
             continue
         old = (_d(r["invoice_date"]), _d(r["due_date"]), _d(r["expected_paid_date"]))

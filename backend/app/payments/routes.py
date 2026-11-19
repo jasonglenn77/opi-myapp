@@ -177,7 +177,7 @@ def _load_schedules(conn, entity_id):
     """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
     scheds = conn.execute(text("""
         SELECT s.id, s.estimate_qbo_id, s.estimate_doc_number, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
-               s.source, s.source_file_name, s.source_modified,
+               s.source, s.source_file_name, s.source_modified, s.dates_confirmed,
                -- the app's copy of the Drive file the schedule was read from (documents viewer)
                (SELECT d.id FROM documents d WHERE d.source_drive_id = s.source_file_id
                  ORDER BY d.entity_id = s.entity_id DESC, d.id DESC LIMIT 1) AS source_doc_id,
@@ -383,6 +383,7 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
         sets.append("send_invoice_date=:inv"); params["inv"] = _parse_d(body.send_invoice_date)
     if body.amount is not None:
         sets.append("amount=:amt"); params["amt"] = body.amount
+        sets.append("amount_edited=1")
     if body.status is not None:
         if body.status not in ("pending", "paid"):
             raise HTTPException(status_code=400, detail="bad status")
@@ -396,6 +397,10 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
         old = _sheet_row(conn, inst_id)
         before = _inst_row(conn, inst_id)
         conn.execute(text(f"UPDATE project_payment_installments SET {', '.join(sets)} WHERE id=:id"), params)
+        if body.amount is not None:     # the other open rows absorb the change (2026-11-18)
+            sid_of = conn.execute(text("SELECT schedule_id FROM project_payment_installments WHERE id=:id"), {"id": inst_id}).scalar()
+            if sid_of:
+                _rebalance(conn, sid_of)
         after = _inst_row(conn, inst_id)
         if old:   # 0088: a change to a value read from the Drive Payment Schedule is kept + listed on Data Review
             new = {"pay_date": params.get("pd"), "send_invoice_date": params.get("inv"), "amount": params.get("amt")}
@@ -426,6 +431,59 @@ def _ov_ctx(r, seq=None):
             "sheet_ref": f"payment #{seq}" if seq else None}
 
 
+def _rebalance(conn, sid):
+    """2026-11-18 owner feedback: a crew schedule's rows always add up to its
+    contract labor. Paid rows and rows whose amount someone typed stay as they
+    are; the other rows are scaled together to what's left, keeping their shape
+    (a new empty row starts at their average; the last row takes the cents).
+    With no such row, the last unpaid row takes the difference."""
+    sch = conn.execute(text("SELECT contract_labor FROM project_payment_schedules WHERE id=:sid"), {"sid": sid}).first()
+    if not sch or sch[0] is None:
+        return None
+    total = round(float(sch[0]), 2)
+    rows = conn.execute(text("""SELECT id, amount, status, amount_edited FROM project_payment_installments
+                                WHERE schedule_id=:sid ORDER BY seq, id"""), {"sid": sid}).mappings().all()
+    if not rows:
+        return None
+    fixed = [r for r in rows if r["status"] != "pending" or r["amount_edited"]]
+    flex = [r for r in rows if r not in fixed]
+    left = round(total - sum(float(r["amount"] or 0) for r in fixed), 2)
+    if flex:
+        # keep the schedule's shape: a new (empty) row starts at the average of the
+        # open rows, then the open rows are scaled together to what's left
+        amts = [float(r["amount"] or 0) for r in flex]
+        nz = [a for a in amts if abs(a) > 0.004]
+        avg = (sum(nz) / len(nz)) if nz else (left / len(flex))
+        amts = [a if abs(a) > 0.004 else avg for a in amts]
+        cur = sum(amts)
+        new = [round(a * left / cur, 2) for a in amts] if abs(cur) > 0.004 else [round(left / len(flex), 2)] * len(flex)
+        new[-1] = round(left - sum(new[:-1]), 2)
+        for r, amt in zip(flex, new):
+            if abs(float(r["amount"] or 0) - amt) > 0.004:
+                conn.execute(text("UPDATE project_payment_installments SET amount=:a WHERE id=:id"), {"a": amt, "id": r["id"]})
+    else:
+        pend = [r for r in rows if r["status"] == "pending"]
+        if pend and abs(left) > 0.004:
+            r = pend[-1]
+            conn.execute(text("UPDATE project_payment_installments SET amount=:a WHERE id=:id"),
+                         {"a": round(float(r["amount"] or 0) + left, 2), "id": r["id"]})
+    return total
+
+
+@router.post("/schedule/{sid}/confirm-dates")
+def confirm_dates(sid: int, user=Depends(get_current_user)):
+    """The office checked a new schedule's payment dates (first payment = the
+    second payday after the PO)."""
+    _require(user)
+    with engine.begin() as conn:
+        n = conn.execute(text("UPDATE project_payment_schedules SET dates_confirmed=1, dates_confirmed_by=:u WHERE id=:sid"),
+                         {"u": user.get("email"), "sid": sid}).rowcount
+    if not n:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    record_audit(user, "crew_payment.dates_confirmed", "payment_schedule", str(sid), None, {"schedule_id": sid})
+    return {"ok": True}
+
+
 @router.post("/schedule/{sid}/installment")
 def add_installment(sid: int, body: InstallmentBody, user=Depends(get_current_user)):
     _require(user)
@@ -446,6 +504,7 @@ def add_installment(sid: int, body: InstallmentBody, user=Depends(get_current_us
                       "new payment (date and amount to be set)" if not body.pay_date else f"{body.pay_date} ${float(body.amount or 0):,.0f}",
                       None, user_email=user.get("email"), entity_id=s["entity_id"], file_id=s["source_file_id"],
                       file_name=s["source_file_name"], sheet_ref=None)
+        _rebalance(conn, sid)
         added = _inst_row(conn, new_id)
     _audit_inst(user, "crew_payment.add", new_id, None, added)
     return {"ok": True}
@@ -457,7 +516,10 @@ def delete_installment(inst_id: int, user=Depends(get_current_user)):
     with engine.begin() as conn:
         old = _sheet_row(conn, inst_id)
         before = _inst_row(conn, inst_id)
+        sid_of = conn.execute(text("SELECT schedule_id FROM project_payment_installments WHERE id=:id"), {"id": inst_id}).scalar()
         conn.execute(text("DELETE FROM project_payment_installments WHERE id=:id"), {"id": inst_id})
+        if sid_of:
+            _rebalance(conn, sid_of)
         if old:   # 0088: the import would put a Drive row back; remember it was removed in the app
             OV.record(conn, OV.PAYMENT, "project_payment_schedules", old["schedule_id"], f"deleted:{old['seq']}", None,
                       f"{old['pay_date']} ${float(old['amount'] or 0):,.0f}", user_email=user.get("email"), **_ov_ctx(old))

@@ -104,6 +104,38 @@ def _estimate_costs_by_category(conn, entity_id):
     return by_cat
 
 
+def _estimate_costs_by_estimate(conn, entity_id):
+    """{estimate qbo_id: {category: cost}}: the same costs as above, per accepted
+    estimate (2026-11-18: expenses are planned per estimate, rolled up by item)."""
+    rows = conn.execute(text("""
+        WITH latest AS (
+          SELECT t.*, ROW_NUMBER() OVER (
+                   PARTITION BY t.customer_qbo_id, t.entity_type,
+                                COALESCE(t.doc_number, CONCAT('__nd__', t.qbo_id))
+                   ORDER BY t.id DESC) AS rn
+          FROM qbo_transactions t
+          JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id
+               AND qc.is_project = 1 AND qc.qbo_id = :e
+          WHERE t.entity_type = 'Estimate'
+            AND (t.total_amt IS NULL OR t.total_amt > 0)
+            AND JSON_UNQUOTE(JSON_EXTRACT(t.raw_json, '$.TxnStatus')) IN ('Accepted', 'Converted', 'Closed')
+        )
+        SELECT qt.qbo_id AS q, COALESCE(qstl.item_name, 'Other') AS item, SUM(COALESCE(qstl.cost_amount, 0)) AS cost
+        FROM latest qt
+        JOIN qbo_sales_transaction_lines qstl ON qstl.transaction_id = qt.id AND qstl.line_level = 'child'
+        WHERE qt.rn = 1
+        GROUP BY qt.qbo_id, COALESCE(qstl.item_name, 'Other')
+    """), {"e": entity_id}).mappings().all()
+    out = {}
+    for r in rows:
+        cat = _expense_category(r["item"])
+        amt = float(r["cost"] or 0)
+        if cat and amt > 0:
+            d = out.setdefault(str(r["q"]), {})
+            d[cat] = round(d.get(cat, 0) + amt, 2)
+    return out
+
+
 def _items(conn, entity_id):
     rows = conn.execute(text("""
         SELECT id, category, description, amount, expense_date, status, note, sort_order

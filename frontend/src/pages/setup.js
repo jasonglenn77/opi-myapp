@@ -280,7 +280,7 @@ export async function setupPage(routeFn) {
     const intro = {
       QuickBooks: "",
       Assignment: j.project_qbo_id ? "" : "Opens once the project is in QuickBooks and the nightly sync brings it in. The PM, crew and dates are saved on the project.",
-      Schedules: "Built by the app from the estimates and the job's dates: invoices on the payment terms, crew pay from the estimates' contract labor on payroll Fridays, and expenses by category on the usual timing (Assumptions page). Open each one, check it and confirm it.",
+      Schedules: "Built by the app per estimate, from its package's dates: invoices on the payment terms; crew pay from the estimate's contract labor, first paid the second payday after the PO, then every other Friday (adding or removing a payment re-balances the rest); expenses per item on the usual timing (Assumptions page). Open each one, check it and confirm it.",
     };
     box.innerHTML = `
       <button type="button" class="su-back" data-back>← All jobs</button>
