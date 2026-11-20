@@ -54,6 +54,12 @@ def ensure_all(conn, eids=None, backfill=False):
             return
     p = {"eids": eids} if eids is not None else {}
     names = ("eids",) if eids is not None else ()
+    # 2026-11-19: read first, write only when something is missing. Every page
+    # that shows packages calls this; Project Setup opens four of them at once,
+    # and four writers on the same project deadlocked (500s, and a card that
+    # failed fell back to the old line layout).
+    if not backfill and not _missing(conn, eids, names, p):
+        return
     conn.execute(_x(f"""
         INSERT INTO project_phases (entity_id, seq)
         SELECT DISTINCT qc.qbo_id, 1 FROM projects pr JOIN qbo_customers qc ON qc.id = pr.qbo_customer_id
@@ -87,6 +93,28 @@ def ensure_all(conn, eids=None, backfill=False):
         WHERE ep.pm_id IS NULL {_flt('ep.entity_id', eids)}""", *names), p)
     if backfill:
         conn.execute(_x(f"UPDATE project_estimate_phase SET confirmed = 1 WHERE confirmed = 0 {_flt('entity_id', eids)}", *names), p)
+
+
+def _missing(conn, eids, names, p):
+    """Is anything for ensure_all to do? (read-only)"""
+    return bool(conn.execute(_x(f"""
+        SELECT
+          EXISTS (SELECT 1 FROM projects pr JOIN qbo_customers qc ON qc.id = pr.qbo_customer_id
+                  WHERE qc.is_project = 1 {_flt('qc.qbo_id', eids)}
+                    AND NOT EXISTS (SELECT 1 FROM project_phases ph WHERE ph.entity_id = qc.qbo_id))
+          OR EXISTS (SELECT 1 FROM qbo_transactions t
+                     WHERE t.entity_type = 'Estimate' AND t.customer_qbo_id IS NOT NULL {_flt('t.customer_qbo_id', eids)}
+                       AND EXISTS (SELECT 1 FROM project_phases ph WHERE ph.entity_id = t.customer_qbo_id)
+                       AND NOT EXISTS (SELECT 1 FROM project_estimate_phase ep
+                                       WHERE ep.entity_id = t.customer_qbo_id AND ep.estimate_qbo_id = t.qbo_id))
+          OR EXISTS (SELECT 1 FROM project_schedule_items psi JOIN projects pr ON pr.id = psi.project_id
+                     JOIN qbo_customers qc ON qc.id = pr.qbo_customer_id
+                     WHERE psi.package_id IS NULL {_flt('qc.qbo_id', eids)})
+          OR EXISTS (SELECT 1 FROM project_estimate_phase ep
+                     JOIN project_schedule_items psi ON psi.package_id = ep.phase_id
+                     JOIN project_schedule_item_project_managers spm
+                          ON spm.schedule_item_id = psi.id AND spm.unassigned_at IS NULL
+                     WHERE ep.pm_id IS NULL {_flt('ep.entity_id', eids)})""", *names), p).scalar())
 
 
 def run_ensure(backfill=False):
@@ -128,13 +156,16 @@ def estimates(conn, eid):
         cos = IDT.change_order_ids(conn, eid)
     except Exception:
         cos = {str(r["qbo_id"]) for r in rows[1:]}
-    offers = {}
-    for r in conn.execute(text("""SELECT crew_id, status, sent_at, responded_at FROM work_offers
-                                  WHERE entity_id = :e ORDER BY id"""), {"e": eid}).mappings().all():
-        offers[r["crew_id"]] = dict(r)          # latest per crew
+    offers, by_est = {}, {}
+    for r in conn.execute(text("""SELECT crew_id, status, sent_at, responded_at, estimate_qbo_id FROM work_offers
+                                  WHERE entity_id = :e AND status <> 'withdrawn' ORDER BY id"""), {"e": eid}).mappings().all():
+        if r["estimate_qbo_id"]:
+            by_est[str(r["estimate_qbo_id"])] = dict(r)   # 2026-11-19: offers per estimate
+        else:
+            offers[r["crew_id"]] = dict(r)          # older project-wide offers: latest per crew
     out = []
     for r in rows:
-        off = offers.get(r["crew_id"]) or offers.get(r["crew_company_id"])
+        off = by_est.get(str(r["qbo_id"])) or offers.get(r["crew_id"]) or offers.get(r["crew_company_id"])
         out.append({"qbo_id": str(r["qbo_id"]), "doc_number": r["doc_number"], "date": _iso(r["txn_date"]),
                     "total": round(float(r["total_amt"] or 0), 2), "status": r["status"] or "",
                     "accepted": (r["status"] or "") in ACCEPTED, "accepted_date": _iso(r["accepted_date"]),

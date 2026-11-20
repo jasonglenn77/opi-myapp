@@ -478,10 +478,12 @@ def _open_ar_v2(beyond_cap):
     needs: sent (txn_date), due, expected-paid (override > aligned milestone)."""
     from app.billing.retainage import is_retainage, release_dates
     from app.billing.routes import invoice_expected_dates
+    # 2026-11-19 (speed): pick the latest version of each invoice WITHOUT the
+    # QuickBooks JSON (it was copying ~3,400 invoices' JSON to keep the open
+    # few dozen), then read the JSON for the open ones only. Same rows.
     sql = text("""
         WITH latest AS (
-            SELECT qt.id, qt.qbo_id, qt.customer_qbo_id, qt.doc_number, qt.txn_date, qt.due_date,
-                   qt.balance_amt, qt.total_amt, qt.raw_json,
+            SELECT qt.id, qt.balance_amt,
                    ROW_NUMBER() OVER (
                        PARTITION BY qt.customer_qbo_id, COALESCE(qt.doc_number, qt.qbo_id)
                        ORDER BY qt.id DESC) AS rn
@@ -490,9 +492,10 @@ def _open_ar_v2(beyond_cap):
         )
         SELECT COALESCE(qc.display_name, 'Unknown') AS name,
                qc.qbo_id AS link_id, qc.is_project AS is_project,
-               l.qbo_id, l.doc_number, l.txn_date, l.due_date, l.balance_amt AS amount, l.total_amt, l.raw_json
+               t.qbo_id, t.doc_number, t.txn_date, t.due_date, t.balance_amt AS amount, t.total_amt, t.raw_json
         FROM latest l
-        LEFT JOIN qbo_customers qc ON qc.qbo_id = l.customer_qbo_id
+        JOIN qbo_transactions t ON t.id = l.id
+        LEFT JOIN qbo_customers qc ON qc.qbo_id = t.customer_qbo_id
         WHERE l.rn = 1 AND l.balance_amt > 0
     """)
     with engine.connect() as conn:

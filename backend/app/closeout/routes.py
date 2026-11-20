@@ -34,6 +34,7 @@ from app.auth import require_capability
 from app.permissions import FINANCIAL_SIGNOFF, has_capability
 from app.billing import retainage as RET
 from app.db import engine
+from app import snapshots
 
 router = APIRouter(prefix="/api/closeout", tags=["closeout"])
 CAP = "page.assignment"
@@ -68,8 +69,9 @@ def _f(v):
     return float(v or 0)
 
 
-def _projects(conn, ids=None):
-    """Finished (or ids-given) projects with dates, status and PMs."""
+def _projects(conn, ids=None, finished_only=None):
+    """Finished (or ids-given) projects with dates, status and PMs.
+    finished_only: apply the finished/not-canceled filter even with ids."""
     today = date.today()
     where = "qc.qbo_id IN :ids" if ids else "1=1"
     sql = f"""
@@ -88,7 +90,7 @@ def _projects(conn, ids=None):
     out = {}
     for r in rows:
         st = r["status"]
-        if ids is None:
+        if ids is None or finished_only:
             if st == "canceled":
                 continue
             finished = st == "completed" or (r["end"] and r["end"] < today)
@@ -98,8 +100,8 @@ def _projects(conn, ids=None):
     return out
 
 
-def _gather(conn, ids=None):
-    P = _projects(conn, ids)
+def _gather(conn, ids=None, finished_only=None):
+    P = _projects(conn, ids, finished_only)
     E = sorted(P)
     d = {"p": P, "est": {}, "pend_est": defaultdict(int), "inv": defaultdict(lambda: [0.0, 0.0]), "ret": defaultdict(float),
          "crew_sched": defaultdict(float), "crew_paid": defaultdict(float), "crew_left": defaultdict(float),
@@ -375,13 +377,95 @@ def _visible(r, today):
     return not r["closed"]
 
 
+# 2026-11-19 (owner: "Closeout takes a long time to load"): the list of every
+# finished job (~600) took 15-20s to build on prod. It's kept as a page snapshot
+# (app/snapshots.py): served at once, rebuilt in the background when QuickBooks
+# or Drive data changed. Jobs changed in the app since the snapshot (closeout
+# steps, forecast choice, dates, crew pay, expense or invoice schedules) are
+# recomputed live, so an edit shows straight away.
+SNAP_KEY = "closeout_queue"
+
+
+def _build_all():
+    with engine.connect() as conn:
+        built = str(conn.execute(text("SELECT NOW()")).scalar())
+        d = _gather(conn)
+    today = date.today()
+    return {"built": built, "today": str(today), "rows": [_row(e, d, today) for e in d["p"]]}
+
+
+def _data_sig():
+    """Changes the app doesn't make itself (QuickBooks sync, Drive documents,
+    crew forms, Contractor Payments snapshot) and the day."""
+    with engine.connect() as conn:
+        r = conn.execute(text("""SELECT CONCAT_WS('|', CURDATE(),
+            (SELECT MAX(id) FROM qbo_sync_runs WHERE finished_at IS NOT NULL),
+            (SELECT MAX(id) FROM documents), (SELECT COUNT(*) FROM documents WHERE drive_removed_at IS NOT NULL),
+            (SELECT MAX(id) FROM form_submissions),
+            (SELECT MAX(signed_at) FROM progress_signoffs),
+            (SELECT MAX(updated_at) FROM project_change_orders),
+            (SELECT MAX(computed_at) FROM page_snapshots WHERE skey IN ('crewpay', 'jobcost')))""")).scalar()
+    return r or ""
+
+
+def _changed_since(conn, built):
+    """Projects edited in the app after the snapshot was built."""
+    rows = conn.execute(text("""
+        SELECT entity_id FROM project_closeout_steps WHERE at > :b
+        UNION SELECT entity_id FROM project_books_open WHERE at > :b
+        UNION SELECT qc.qbo_id FROM project_schedule_items psi JOIN projects p ON p.id = psi.project_id
+              JOIN qbo_customers qc ON qc.id = p.qbo_customer_id WHERE psi.updated_at > :b
+        UNION SELECT s.entity_id FROM project_payment_schedules s WHERE s.updated_at > :b
+        UNION SELECT s.entity_id FROM project_payment_installments i JOIN project_payment_schedules s ON s.id = i.schedule_id
+              WHERE i.updated_at > :b
+        UNION SELECT entity_id FROM project_expense_installments WHERE updated_at > :b
+        UNION SELECT s.entity_id FROM project_invoice_milestones m JOIN project_invoice_schedules s ON s.id = m.schedule_id
+              WHERE m.updated_at > :b"""), {"b": built}).scalars().all()
+    return sorted({str(r) for r in rows if r})
+
+
+def _all_rows():
+    snap, meta = snapshots.serve(SNAP_KEY, _build_all, _data_sig, max_age=3600)
+    rows = {r["entity_id"]: r for r in snap.get("rows", [])}
+    today = date.today()
+    with engine.connect() as conn:
+        dirty = _changed_since(conn, snap.get("built") or "1970-01-01")
+        if dirty:
+            d = _gather(conn, dirty, finished_only=True)
+            for e in dirty:
+                rows.pop(e, None)
+            for e in d["p"]:
+                rows[e] = _row(e, d, today)
+    return list(rows.values()), meta
+
+
+def _patch_snapshot(entity_ids):
+    """Put these jobs' fresh rows into the saved list straight away (a step undo
+    deletes its row, which _changed_since can't see)."""
+    got = snapshots.get(SNAP_KEY)
+    if not got:
+        return
+    payload, sig, _age = got
+    ids = {str(e) for e in entity_ids}
+    today = date.today()
+    with engine.connect() as conn:
+        d = _gather(conn, sorted(ids), finished_only=True)
+    rows = [r for r in payload.get("rows", []) if r["entity_id"] not in ids]
+    rows += [_row(e, d, today) for e in d["p"]]
+    payload["rows"] = rows
+    snapshots.put(SNAP_KEY, payload, sig)
+
+
+def refresh_snapshot():
+    """Nightly warm-up (snapshots.warm) and after deploys."""
+    return snapshots.rebuild(SNAP_KEY, _build_all, _data_sig)
+
+
 @router.get("/queue")
 def queue(closed: int = 0, user=Depends(require_capability(CAP))):
     """Jobs not closed out yet; closed=1: the ones that are (newest end first)."""
     today = date.today()
-    with engine.connect() as conn:
-        d = _gather(conn)
-    rows = [_row(e, d, today) for e in d["p"]]
+    rows, _meta = _all_rows()
     if closed:
         done = sorted((r for r in rows if r["closed"]), key=lambda r: r["end"] or "", reverse=True)
         return {"jobs": done, "cutover": str(CUTOVER), "can_sign": has_capability(user, FINANCIAL_SIGNOFF)}
@@ -456,6 +540,7 @@ def mark_step(entity_id: str, step: str, req: StepMark, user=Depends(require_cap
                  {"step": step, "status": req.status, "note": req.note, "reviewed": reviewed})
     if step == "margin":
         BK.refresh_forecast_for(entity_id)   # closing out (or undoing it) closes / reopens the books
+    _patch_snapshot([entity_id])
     return row
 
 
@@ -492,6 +577,8 @@ def bulk_close(req: BulkClose, user=Depends(require_capability(CAP))):
     for e, name, reviewed in closed:
         record_audit(user, "closeout.bulk_close", "project", e, name, {"note": note, "reviewed": reviewed})
         BK.refresh_forecast_for(e)
+    if closed:
+        _patch_snapshot([e for e, _n, _r in closed])
     return {"ok": True, "closed": len(closed), "skipped": len(skipped)}
 
 
@@ -532,6 +619,7 @@ def set_job_forecast(entity_id: str, req: ForecastChoice, user=Depends(require_c
     record_audit(user, "closeout.forecast_include" if req.include else "closeout.forecast_exclude", "project", entity_id, name,
                  {"note": note, "entity_id": entity_id})
     BK.refresh_forecast_for(entity_id)
+    _patch_snapshot([entity_id])
     return job_forecast(entity_id, user)
 
 
