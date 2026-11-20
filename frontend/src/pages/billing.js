@@ -50,6 +50,8 @@ const MONTHS = ["January", "February", "March", "April", "May", "June", "July", 
 const stayMonth = (billDate) => { const d = new Date(`${billDate}T00:00:00`); d.setMonth(d.getMonth() - 1); return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`; };
 const basisChip = (w) => (w.edited || !w.basis || w.basis === "manual") ? "" : w.basis === "auto_lodging" && w.week_of
   ? `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Estimated: ${stayMonth(w.week_of)} stays, billed on Hotel Engine's monthly statement and paid a few days later. Dates come from Hotel Engine's billing history (click for the numbers). The real statement replaces this when it posts.">est. · Hotel Engine · ${stayMonth(w.week_of).split(" ")[0].slice(0, 3)} stays</a>`
+  : w.basis === "auto_month_end"
+  ? `<span class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Billed at the end of the month: the estimate is split evenly over the month-ends the work runs">month-end</span>`
   : w.basis === "auto_profile"
   ? `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-1 py-0.5" title="Placed by this category's timing profile measured from QuickBooks history; paid date = bill week + the measured bill-to-payment lag. Click to see the numbers.">auto · history</a>`
   : `<a href="#/assumptions" class="ml-1.5 inline-flex items-center text-[10px] font-bold text-slate-600 bg-slate-50 rounded px-1 py-0.5" style="border:1px solid #e2e8f0" title="Estimate spread evenly across the project weeks (no timing profile for this category). Click to see the rules.">auto · even</a>`;
@@ -82,12 +84,66 @@ const assignToast = (r) => {
   setTimeout(() => t.remove(), 4000);
 };
 
+// 2026-11-19 (owner): no pop-ups while editing. Problems show in a small note
+// in the corner for a few seconds; the page stays where it is.
+export function panelNote(_container, msg) {
+  let n = document.getElementById("blNote");
+  if (!n) {
+    n = document.createElement("div");
+    n.id = "blNote"; n.className = "bl-note"; n.setAttribute("role", "status");
+    document.body.appendChild(n);
+  }
+  n.textContent = msg; n.hidden = false;
+  clearTimeout(n._t); n._t = setTimeout(() => { n.hidden = true; }, 7000);
+}
+// Every scrollable box around the panel (the page, Project Setup's detail
+// column, the Cash Flow drawer) keeps its place when the panel re-draws.
+const scrollState = (el) => {
+  const out = [[document.scrollingElement || document.documentElement, window.scrollY]];
+  for (let p = el && el.parentElement; p; p = p.parentElement) {
+    const cs = getComputedStyle(p);
+    if (/(auto|scroll)/.test(cs.overflowY) && p.scrollHeight > p.clientHeight) out.push([p, p.scrollTop]);
+  }
+  return () => { for (const [p, t] of out) { if (p === document.scrollingElement || p === document.documentElement) window.scrollTo(0, t); else p.scrollTop = t; } };
+};
+
+const addDaysIso = (iso, n) => { const t = new Date(`${String(iso).slice(0, 10)}T00:00:00`); t.setDate(t.getDate() + n); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`; };
+const OFFER_CHIP = { accepted: ["Offer accepted", "bl-oc-ok"], sent: ["Offer sent", "bl-oc-sent"], declined: ["Declined", "bl-oc-bad"] };
+const offerChip = (o, a, short) => {
+  if (o && OFFER_CHIP[o.status]) { const [t, c] = OFFER_CHIP[o.status]; return `<span class="bl-oc ${c}">${short ? t.replace("Offer ", "") : t}</span>`; }
+  if (a && !a.crew_id) return `<span class="bl-oc bl-oc-quiet">${short ? "no crew" : "No crew yet"}</span>`;
+  return `<span class="bl-oc bl-oc-warn">${short ? "not sent" : "Offer not sent"}</span>`;
+};
+
 // ── inline-edit cells (patch on change; kind → PATCH endpoint) ───────────────
 const EDIT_BASE = "bg-transparent border border-transparent hover:border-black/20 focus:border-blue-500 focus:bg-white rounded px-1.5 py-1 text-[12.5px] outline-none";
+// 2026-11-19 (owner): dates read mm/dd/yy (type one, or pick it from the small
+// calendar button) and amounts read 12,345.67, so the tables fit without a
+// sideways scrollbar.
+const mdy = (iso) => { if (!iso) return ""; const [y, m, d] = String(iso).slice(0, 10).split("-"); return `${m}/${d}/${y.slice(2)}`; };
+export function parseDateInput(s) {
+  s = String(s || "").trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  let y, mo, d;
+  if (m) { [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]; }
+  else {
+    m = s.match(/^(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?$/);
+    if (!m) throw new Error(`"${s}" is not a date (mm/dd/yy)`);
+    mo = Number(m[1]); d = Number(m[2]);
+    y = m[3] ? Number(m[3]) : new Date().getFullYear();
+    if (y < 100) y += 2000;
+  }
+  const t = new Date(y, mo - 1, d);
+  if (t.getFullYear() !== y || t.getMonth() !== mo - 1 || t.getDate() !== d) throw new Error(`"${s}" is not a date (mm/dd/yy)`);
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+const fmtNum = (v) => { if (v === "" || v == null || !isFinite(Number(v))) return ""; const n = Number(v); return n.toLocaleString("en-US", { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 }); };
+export const parseNumInput = (s) => { const t = String(s ?? "").replace(/[$,\s]/g, ""); if (t === "") return null; const n = Number(t); if (!isFinite(n)) throw new Error(`"${s}" is not an amount`); return n; };
 const eInput = (kind, id, field, value, type = "text", extra = "") => {
   const v = value == null ? "" : String(value);
-  if (type === "date") return `<input data-edit="${kind}" data-id="${id}" data-field="${field}" type="date" value="${escapeHtml(v ? v.slice(0, 10) : "")}" class="${EDIT_BASE} w-[8.2rem] tabular-nums ${extra}">`;
-  if (type === "number") return `<input data-edit="${kind}" data-id="${id}" data-field="${field}" type="number" step="1" value="${escapeHtml(v)}" class="${EDIT_BASE} w-[6.5rem] text-right tabular-nums font-semibold ${extra}">`;
+  if (type === "date") return `<span class="bl-dt"><input data-edit="${kind}" data-id="${id}" data-field="${field}" data-date type="text" inputmode="numeric" placeholder="mm/dd/yy" value="${escapeHtml(mdy(v))}" class="${EDIT_BASE} w-[5.6rem] pr-5 tabular-nums ${extra}"><button type="button" class="bl-dt-btn" data-dtpick tabindex="-1" title="Pick a date" aria-label="Pick a date"><svg viewBox="0 0 20 20" width="12" height="12" fill="currentColor"><path d="M6 2v2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H8V2H6zm-2 6h12v8H4V8z"/></svg></button><input type="date" class="bl-dt-hidden" tabindex="-1" aria-hidden="true"></span>`;
+  if (type === "number") return `<input data-edit="${kind}" data-id="${id}" data-field="${field}" data-num type="text" inputmode="decimal" value="${escapeHtml(fmtNum(v))}" class="${EDIT_BASE} w-[6.2rem] text-right tabular-nums font-semibold ${extra}">`;
   return `<input data-edit="${kind}" data-id="${id}" data-field="${field}" type="text" value="${escapeHtml(v)}" class="${EDIT_BASE} w-full ${extra}">`;
 };
 const eSelect = (kind, id, field, value, opts) =>
@@ -264,14 +320,22 @@ function render(container, entityId, d) {
   // input handler recompute the other field before the autosave persists both).
   // Expected paid = when the cash realistically lands; blank falls back to the
   // due date (the cash-flow forecast uses expected ?? due ?? invoice).
-  const milestoneRow = (m, estVal) => `
+  // A row that IS a QuickBooks invoice has one expected-paid date: the
+  // invoice's (edited here or under "Actual invoices"; Cash Flow follows).
+  const msExpected = (m, acts) => {
+    if (!m.qbo_invoice_id) return eInput("milestone", m.id, "expected_paid_date", m.expected_paid_date, "date");
+    const x = (acts || []).find((a) => String(a.qbo_id) === String(m.qbo_invoice_id));
+    if (!x || x.balance <= 0.01 || x.status === "Retainage") return `<span class="tabular-nums text-black/40 px-1.5">${x && x.balance <= 0.01 ? "paid" : "—"}</span>`;
+    return eInput("qboinv", x.qbo_id, "expected_paid_date", x.expected_paid_date || x.due_date, "date");
+  };
+  const milestoneRow = (m, estVal, acts) => `
     <tr class="border-b border-black/5" data-ms-row data-estval="${estVal || 0}">
-      <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[m.tier]}${eInput("milestone", m.id, "label", m.label || "Milestone", "text", "font-semibold min-w-[8rem]")}</span></td>
+      <td class="py-1 pl-4 pr-3"><span class="flex items-center gap-2">${DOT[m.tier]}${eInput("milestone", m.id, "label", m.label || "Milestone", "text", "font-semibold min-w-[7rem]")}</span></td>
       <td class="py-1 px-2"><span class="flex items-center gap-0.5"><input data-edit="milestone" data-id="${m.id}" data-field="pct" type="number" step="0.1" min="0" value="${m.pct ? Math.round(m.pct * 10) / 10 : ""}" class="${EDIT_BASE} ms-pct-w text-right tabular-nums"><span class="text-black/40 text-[11px]">%</span></span></td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "invoice_date", m.invoice_date, "date")}${dateBasisChip(m)}</td>
       <td class="py-1 px-2">${eInput("milestone", m.id, "due_date", m.due_date, "date")}</td>
-      <td class="py-1 px-2">${eInput("milestone", m.id, "expected_paid_date", m.expected_paid_date, "date")}</td>
-      <td class="py-1 px-2 text-right"><input data-edit="milestone" data-id="${m.id}" data-field="amount" type="number" step="0.01" value="${m.amount != null ? Math.round(m.amount * 100) / 100 : ""}" class="${EDIT_BASE} w-[6.5rem] text-right tabular-nums font-semibold ml-auto"></td>
+      <td class="py-1 px-2">${msExpected(m, acts)}</td>
+      <td class="py-1 px-2 text-right"><input data-edit="milestone" data-id="${m.id}" data-field="amount" data-num type="text" inputmode="decimal" value="${m.amount != null ? escapeHtml(fmtNum(Math.round(m.amount * 100) / 100)) : ""}" class="${EDIT_BASE} w-[6.2rem] text-right tabular-nums font-semibold ml-auto"></td>
       <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap"><span${m.tier === "retainage" ? ` title="QuickBooks invoice #${escapeHtml(m.qbo_invoice_doc || "")} is paid except ${money(m.retainage_held)} the customer is holding back (retainage) — expected at release, not overdue"` : qboTitle(m)}>${pill(m.tier === "retainage" ? `Retainage · ${money(m.retainage_held)}` : m.status_label)}</span>${m.date_basis === "manual" ? "" : editedChip(m.edited)}${delBtn("milestone", m.id)}</td>
     </tr>`;
   const invEstimateCard = (a) => {
@@ -279,7 +343,7 @@ function render(container, entityId, d) {
     const statusPill = nr
       ? `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">● Needs review</span>`
       : `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Confirmed</span>`;
-    const rows = a.milestones.map((m) => milestoneRow(m, a.value)).join("");
+    const rows = a.milestones.map((m) => milestoneRow(m, a.value, a.invoice_actuals)).join("");
     // Σ reconciliation footer: milestone total vs the estimate's value.
     const msTotal = a.milestones.reduce((s, m) => s + (m.amount || 0), 0);
     const msPct = a.value ? Math.round((msTotal / a.value) * 1000) / 10 : 0;
@@ -301,8 +365,8 @@ function render(container, entityId, d) {
     const acts = a.invoice_actuals || [];
     const actTotal = acts.reduce((s, x) => s + (x.amount || 0), 0);
     const actuals = acts.length ? actualsBlock("Actual invoices in QuickBooks", acts.length,
-      `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Sent</th><th class="font-bold">Due</th><th class="font-bold" title="When the cash is expected — the Cash Flow forecast uses this (blank = due date). Saved in the app only.">Expected paid</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
-       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1 tabular-nums">${x.balance > 0.01 && x.status !== "Retainage" ? `${eInput("qboinv", x.qbo_id, "expected_paid_date", x.expected_override || "", "date")}${!x.expected_override && x.expected_paid_date ? `<div class="text-[10px] text-black/40" title="From the planned milestone's expected paid date">milestone: ${shortDate(x.expected_paid_date)}</div>` : ""}` : `<span class="text-black/30">—</span>`}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : x.status === "Retainage" ? `Retainage held · ${money(x.balance)}` : x.status === "Partial" ? `Partial · ${money(x.balance)} A/R` : "Sent · A/R")}</td></tr>`).join("")}</tbody>
+      `<table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="pb-1 font-bold">Invoice #</th><th class="font-bold">Sent</th><th class="font-bold">Due</th><th class="font-bold bl-th-in0" title="When the cash is expected. Same date as the invoice's row in the schedule above; the Cash Flow forecast uses it (blank = the due date). Saved in the app only.">Expected paid</th><th class="text-right font-bold">Amount</th><th class="text-right font-bold">Status</th></tr></thead>
+       <tbody>${acts.map((x) => `<tr class="border-t border-black/[0.05]"><td class="py-1.5 tabular-nums font-semibold">${escapeHtml(x.doc_number || "—")}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.txn_date)}</td><td class="py-1.5 tabular-nums text-black/60">${shortDate(x.due_date)}</td><td class="py-1 tabular-nums">${x.balance > 0.01 && x.status !== "Retainage" ? `${eInput("qboinv", x.qbo_id, "expected_paid_date", x.expected_paid_date || x.due_date, "date")}${!x.expected_paid_date ? `<div class="text-[10px] text-black/40">the due date</div>` : ""}` : `<span class="text-black/30">—</span>`}</td><td class="py-1.5 text-right tabular-nums font-semibold">${money(x.amount)}</td><td class="py-1.5 text-right">${pill(x.status === "Paid" ? "Paid" : x.status === "Retainage" ? `Retainage held · ${money(x.balance)}` : x.status === "Partial" ? `Partial · ${money(x.balance)} A/R` : "Sent · A/R")}</td></tr>`).join("")}</tbody>
        <tfoot><tr class="border-t-2 border-black/15 font-bold"><td class="py-1.5" colspan="4">Total invoiced <span class="font-normal text-black/45">vs ${money(a.value)} est</span></td><td class="py-1.5 text-right tabular-nums">${money(actTotal)}</td><td></td></tr></tfoot></table>`) : "";
     return `<details open class="group card overflow-hidden mb-3 ${nr ? "border-amber-300" : ""}">
       <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
@@ -319,8 +383,8 @@ function render(container, entityId, d) {
           <span class="text-[13px] font-bold text-ink-900 border-l border-black/15 pl-2.5">${money(a.value)}</span>
         </span>
       </summary>
-      <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
-        <th class="py-2 pl-4 pr-3 text-left">Milestone</th><th class="py-2 px-2 text-left">%</th><th class="py-2 px-2 text-left">Invoice</th><th class="py-2 px-2 text-left">Due</th><th class="py-2 px-2 text-left">Expected paid</th><th class="py-2 px-2 text-right">Amount</th><th class="py-2 pl-2 pr-4 text-right">Status</th>
+      <div class="overflow-x-auto"><table class="w-full text-[12.5px] bl-ms"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10">
+        <th class="py-2 pl-4 pr-3 text-left bl-th-ms">Milestone</th><th class="py-2 px-2 text-right bl-th-pct">%</th><th class="py-2 px-2 text-left bl-th-in">Invoice</th><th class="py-2 px-2 text-left bl-th-in">Due</th><th class="py-2 px-2 text-left bl-th-in" title="When the cash is expected to land. On a sent invoice it is the invoice's date (also under Actual invoices); Cash Flow uses it">Expected paid</th><th class="py-2 px-2 text-right bl-th-inr">Amount</th><th class="py-2 pl-2 pr-4 text-right bl-th-st">Status</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       ${sumLine}
       ${a.schedule_id ? addBtn("milestone", a.schedule_id, "Add invoice milestone") : ""}
@@ -369,20 +433,11 @@ function render(container, entityId, d) {
         <div class="px-4 py-2 text-[11px] text-amber-800 bg-amber-50/60 border-t border-amber-200">Contract-Labor paid to crews not assigned to an estimate here. Assign the estimate to one of these crews to fold it into a rollup.</div>
       </div>`;
     }
-    const chips = g.estimates.map((e) => `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}${e.split_pct ? ` <span class="text-indigo-700 font-bold">· ${fmtPct(e.split_pct)}% split</span>` : ""}</span>`).join("");
+    const chips = g.estimates.map((e) => { const ea = est.accepted.find((x) => String(x.doc) === String(e.doc)); return `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}${e.split_pct ? ` <span class="text-indigo-700 font-bold">· ${fmtPct(e.split_pct)}% split</span>` : ""}</span>`; }).join("");
     const insts = g.installments.map((i) => `
       <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60"><span class="flex items-center gap-2">${DOT[i.tier] || ""}${shortDate(i.pay_date)}</span></td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
-    const o = g.offer;
-    let offerLine;
-    if (p.books_closed)
-      offerLine = "";  // complete: payments already sent, no offer to manage
-    else if (o && o.status === "accepted")
-      offerLine = `<div class="px-4 py-2.5 bg-emerald-50 border-t border-emerald-200 text-[12.5px] text-emerald-900 flex items-center gap-2 flex-wrap"><b>✓ Offer accepted</b> — ${escapeHtml(cn)} · ${money(o.labor_amount)}<button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-black/45 hover:underline">Withdraw</button></div>`;
-    else if (o && o.status === "sent")
-      offerLine = `<div class="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-[12.5px] text-blue-900 flex items-center gap-2 flex-wrap"><b>Offer sent</b> to ${escapeHtml(cn)} — awaiting response<button data-offer-accept="${o.id}" class="text-[11.5px] font-bold text-emerald-700 hover:underline">Record accepted</button><button data-offer-script data-crew="${g.crew_id}" class="ml-auto text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button><button data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-blue-700 hover:underline">Withdraw</button></div>`;
-    else offerLine = g.crew_id
-      ? `<div class="px-4 py-2.5 border-t border-black/[0.06] bg-black/[0.01] text-[12.5px] flex items-center gap-2 flex-wrap"><span class="font-semibold text-black/55">Rollup offer:</span><span>${escapeHtml(cn)} · ${money(g.labor)}</span><button data-offer-send data-crew="${g.crew_id}" data-labor="${Math.round(g.labor)}" class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer</button><button data-offer-script data-crew="${g.crew_id}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">📋 Script</button></div>`
-      : `<div class="px-4 py-2.5 border-t border-black/[0.06] text-[12px] text-amber-700 bg-amber-50">Assign these estimates to a crew below to send an offer.</div>`;
+    // 2026-11-19 (owner): offers are sent per estimate (below), not per roll-up.
+    const offerLine = "";
     return `<div class="rounded-xl border border-blue-300 overflow-hidden mb-3">
       <div class="flex items-center gap-2 px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex-wrap">
         <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 border border-blue-200">Rollup</span>
@@ -413,11 +468,15 @@ function render(container, entityId, d) {
       }).join("");
       return `<tr class="border-b border-black/5"><td colspan="3" class="pb-1.5 pl-6 pr-4"><span class="flex flex-wrap gap-1.5">${chips}</span></td></tr>`;
     };
+    const lead = Number(a.crew_invoice_lead_days ?? 7);
+    const sendOf = (i) => i.send_invoice_date || (i.pay_date ? addDaysIso(i.pay_date, -lead) : null);
     const insts = (a.crew_installments || []).map((i) => `
       <tr class="${split ? "" : "border-b border-black/5"}">
-        <td class="py-1 pl-4 pr-2">${complete ? `<span class="tabular-nums text-black/60">${shortDate(i.pay_date)}</span>` : eInput("installment", i.id, "pay_date", i.pay_date, "date")}</td>
-        <td class="py-1 px-2 text-right">${complete ? `<span class="tabular-nums font-semibold">${money(i.amount)}</span>` : eInput("installment", i.id, "amount", Math.round(i.amount), "number", "ml-auto")}</td>
-        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${i.edited ? editedChip(true) : ""}${complete ? "" : delBtn("installment", i.id)}</td>
+        <td class="py-1 pl-3 pr-1">${complete ? `<span class="tabular-nums text-black/60">${shortDate(i.pay_date)}</span>` : eInput("installment", i.id, "pay_date", i.pay_date, "date")}</td>
+        <td class="py-1 px-1 text-right">${complete ? `<span class="tabular-nums font-semibold">${money(i.amount)}</span>` : eInput("installment", i.id, "amount", Math.round(i.amount * 100) / 100, "number", "ml-auto")}</td>
+        <td class="py-1 px-1">${complete ? `<span class="tabular-nums text-black/60">${shortDate(sendOf(i))}</span>` : eInput("installment", i.id, "send_invoice_date", sendOf(i), "date", i.send_invoice_date ? "" : "text-black/45")}</td>
+        <td class="py-1 px-1 w-full">${complete ? `<span class="text-black/60">${escapeHtml(i.note || "")}</span>` : eInput("installment", i.id, "note", i.note || "", "text", "min-w-[8rem]")}</td>
+        <td class="py-1 pl-1 pr-3 text-right whitespace-nowrap">${i.status === "paid" ? pill("Paid") : ""}${i.amount_edited ? `<span class="bl-typed" title="Amount typed by hand: kept when the schedule re-balances">typed</span>` : ""}${complete ? "" : delBtn("installment", i.id)}</td>
       </tr>${split ? shareChips(i) : ""}`).join("");
     // per-company paid/remaining subtotals (split mode, from the server burn)
     const splitTotals = (compSched && compSched.split_summary) ? `
@@ -456,22 +515,43 @@ function render(container, entityId, d) {
         <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-[12.5px] font-semibold text-ink-900">Estimate #${escapeHtml(a.doc || "—")}</span>
         <span class="tabular-nums text-[12px] text-black/55">${money(a.labor)} labor</span>
+        ${offerChip(a.offer, a)}
         ${cs.source_doc_id ? `<button type="button" data-srcdoc="${cs.source_doc_id}" data-srcname="${escapeHtml(cs.source_file_name || "Payment Schedule")}" class="src-doc-btn" title="These payments were read from this Payment Schedule. Click to view it here.">${DOC_ICON} Payment Schedule</button>` : ""}
         <span class="ml-auto text-[11px] ${split ? "font-bold text-indigo-700" : "text-black/40"}">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "Unassigned"))}</span>
       </summary>
       ${assignRow}
       ${srcLine}
-      <div class="overflow-x-auto px-2 pb-2"><table class="w-full text-[12px]"><thead><tr class="text-[10px] text-black/40 text-left"><th class="py-1 pl-4">Pay date (auto bi-weekly)</th><th class="py-1 text-right">Amount</th><th></th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
+      <div class="overflow-x-auto px-1 pb-1"><table class="w-full text-[12px] bl-crew"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 text-left"><th class="py-1 pl-3 pr-1 bl-th-c">Pay date</th><th class="py-1 px-1 text-right bl-th-cr">Amount</th><th class="py-1 px-1 bl-th-c" title="The date the crew sends its invoice for this payment (pay date minus ${lead} days unless changed)">Send invoice</th><th class="py-1 px-1 bl-th-c">Comment</th><th></th></tr></thead><tbody>${insts || `<tr><td colspan="5" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
       ${(a.crew_installments || []).length ? (() => {
-        const tot = (a.crew_installments || []).reduce((x, i) => x + (Number(i.amount) || 0), 0), off = tot - (Number(a.labor) || 0);
-        return `<div class="px-4 pb-1 text-[11.5px] tabular-nums ${Math.abs(off) > 1 ? "text-rose-700 font-semibold" : "text-black/50"}">Total ${money(tot)} of ${money(a.labor)} contract labor${Math.abs(off) > 1 ? ` (${off > 0 ? "over" : "short"} by ${money(Math.abs(off))})` : ". Adding or removing a payment re-balances the open rows."}</div>`;
+        const tot = Math.round((a.crew_installments || []).reduce((x, i) => x + (Number(i.amount) || 0), 0) * 100) / 100;
+        const off = tot - (Number(a.labor) || 0);
+        const kept = a.crew_sum_ok_total != null && Math.abs(Number(a.crew_sum_ok_total) - tot) < 0.5;
+        if (Math.abs(off) <= 1) return `<div class="px-4 pb-1 text-[11.5px] tabular-nums text-black/50">Total ${money(tot)} of ${money(a.labor)} contract labor. Adding or removing a payment re-balances the payments nobody typed.</div>`;
+        if (kept) return `<div class="px-4 pb-1 text-[11.5px] tabular-nums text-black/55">Total ${money(tot)} of ${money(a.labor)} contract labor: ${off > 0 ? "over" : "short"} by ${money(Math.abs(off))}, kept that way on purpose. <button type="button" class="su-linkbtn" data-crew-rebal="${a.crew_schedule_id}">Re-balance instead</button></div>`;
+        return complete ? `<div class="px-4 pb-1 text-[11.5px] tabular-nums text-rose-700 font-semibold">Total ${money(tot)} of ${money(a.labor)} contract labor (${off > 0 ? "over" : "short"} by ${money(Math.abs(off))})</div>`
+          : `<div class="bl-sum-warn mx-3 mb-2"><span class="bl-sum-ico">!</span><div><b>The payments ${off > 0 ? "come to more than" : "come to less than"} the contract labor: ${money(tot)} of ${money(a.labor)} (${off > 0 ? "over" : "short"} by ${money(Math.abs(off))}).</b> Re-balance the open payments, or keep it this way if you are paying the crew ${off > 0 ? "more" : "less"} on purpose.</div>
+              <span class="flex gap-1.5 flex-wrap"><button type="button" class="bl-sum-btn" data-crew-rebal="${a.crew_schedule_id}">Re-balance</button><button type="button" class="bl-sum-btn" data-crew-keep="${a.crew_schedule_id}">Keep it</button></span></div>`;
       })() : ""}
       ${!complete && a.crew_schedule_id && a.crew_dates_confirmed === false ? `<div class="mx-4 mb-2 flex items-center gap-2 flex-wrap text-[11.5px] rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-2.5 py-1.5">
           <b>Check and confirm the payment dates.</b> The first payment is the second payday after the PO (the estimate's accepted date), then every other Friday.
           <button type="button" class="ml-auto pd-btn" data-confirm-dates="${a.crew_schedule_id}">Dates are right</button></div>` : ""}
       ${splitTotals}
       ${!complete && a.crew_schedule_id ? addBtn("installment", a.crew_schedule_id, "Add payment") : ""}
+      ${complete ? "" : estOfferLine(a)}
     </details>`;
+  };
+  // 2026-11-19 (owner): one crew offer per estimate / change order.
+  const estOfferLine = (a) => {
+    const o = a.offer, cn = (o && o.crew_name) || crewName(a.crew_id) || "the crew";
+    const lab = Number(a.labor) || 0;
+    const btns = (more) => `<span class="ml-auto flex items-center gap-2.5 flex-wrap">${more}<button type="button" data-est-script="${escapeHtml(a.qbo_id)}" class="text-[11.5px] font-semibold text-blue-600 hover:underline">Offer email</button></span>`;
+    const outside = `<button type="button" data-est-outside="${escapeHtml(a.qbo_id)}" class="text-[11.5px] font-semibold text-black/50 hover:underline" title="The offer went out by email, text or the Drive sheet: record when (and if it was accepted)">Sent outside the app</button>`;
+    const proj = o && o.project_level ? ` <span class="text-black/45">(one offer for the whole project, before offers per estimate)</span>` : "";
+    if (o && o.status === "accepted") return `<div class="bl-offer bl-offer-ok"><b>✓ Offer accepted</b> ${escapeHtml(cn)} · ${money(o.labor_amount || lab)}${o.responded_at ? ` · ${shortDate(o.responded_at)}` : ""}${proj}${btns("")}</div>`;
+    if (o && o.status === "sent") return `<div class="bl-offer bl-offer-sent"><b>Offer sent</b> to ${escapeHtml(cn)}${o.sent_at ? ` ${shortDate(o.sent_at)}` : ""}, no answer yet${proj}${btns(`<button type="button" data-offer-accept="${o.id}" class="text-[11.5px] font-bold text-emerald-700 hover:underline">Record accepted</button><button type="button" data-offer-withdraw="${o.id}" class="text-[11.5px] font-semibold text-black/50 hover:underline">Withdraw</button>`)}</div>`;
+    if (!a.crew_id) return `<div class="bl-offer bl-offer-none">Pick the crew company for this estimate (Assignment) to send its offer.</div>`;
+    if (!(a.crew_installments || []).length) return `<div class="bl-offer bl-offer-none">Offer: build this payment schedule first (it goes out with the offer).</div>`;
+    return `<div class="bl-offer bl-offer-none">${o && o.status === "declined" ? `<b>${escapeHtml(cn)} declined.</b> ` : "<b>Offer not sent</b> "}${escapeHtml(cn)} · ${money(lab)}${btns(`${outside}<button type="button" data-est-send="${escapeHtml(a.qbo_id)}" class="text-[12px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1">Send offer…</button>`)}</div>`;
   };
   const crewActualsTotal = (crew.actuals || []).reduce((s, a) => s + (a.amount || 0), 0);
   // On a complete project the actual bills ARE the story — surface them open, with
@@ -495,8 +575,24 @@ function render(container, entityId, d) {
         <td class="py-1 pl-6 pr-2"><span class="flex items-center gap-2">${w.estimate_doc && (c.by_estimate || []).length > 1 ? `<span class="text-[10px] font-bold text-black/40">#${escapeHtml(w.estimate_doc)}</span>` : ""}${DOT[w.tier]}${expenseComplete ? `<span class="tabular-nums text-black/60">${shortDate(w.week_of)}</span>` : eInput("expinst", w.id, "week_of", w.week_of, "date")}</span></td>
         <td class="py-1 px-2">${expenseComplete ? `<span class="tabular-nums text-black/60">${w.expected_paid_date ? shortDate(w.expected_paid_date) : "—"}</span>` : eInput("expinst", w.id, "expected_paid_date", w.expected_paid_date, "date")}</td>
         <td class="py-1 px-2 text-right">${expenseComplete ? `<span class="tabular-nums font-semibold">${money(w.amount)}</span>` : eInput("expinst", w.id, "amount", Math.round(w.amount), "number", "ml-auto")}</td>
-        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${editedChip(w.edited)}${basisChip(w)}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
+        <td class="py-1 pl-2 pr-4 text-right whitespace-nowrap">${pill(w.status_label)}${w.amount_edited ? `<span class="bl-typed" title="Amount typed by hand: kept when the plan re-balances">typed</span>` : editedChip(w.edited)}${basisChip(w)}${!expenseComplete && w.edited && w.app ? `<button type="button" data-exp-revert="${w.id}" class="bl-revert" title="Back to the app's plan: ${escapeHtml(`${shortDate(w.app.week_of)}, ${money(w.app.amount)}`)}">↺</button>` : ""}${expenseComplete ? "" : delBtn("expinst", w.id)}</td>
       </tr>`).join("");
+    // 2026-11-19 (owner): each plan (item x estimate) adds up to what the estimate
+    // has for it; when it doesn't, say so: Re-balance or Keep it.
+    const groups = (c.by_estimate || []);
+    const sumWarn = expenseComplete ? "" : groups.map((b) => {
+      const off = Math.round((b.planned - b.target) * 100) / 100;
+      if (Math.abs(off) <= 1 || !b.target) return "";
+      const key = `${escapeHtml(c.category)}|${escapeHtml(b.estimate_qbo_id || "")}`;
+      const who = b.doc ? `#${escapeHtml(b.doc)}'s ` : "The ";
+      if (b.kept_total != null && Math.abs(b.kept_total - b.planned) < 0.5)
+        return `<div class="px-6 py-1 text-[11.5px] text-black/55 tabular-nums">${who}${escapeHtml(c.category.toLowerCase())} plan: ${money(b.planned)} of ${money(b.target)}, kept that way on purpose. <button type="button" class="su-linkbtn" data-exp-rebal="${key}">Re-balance instead</button></div>`;
+      return `<div class="bl-sum-warn"><span class="bl-sum-ico">!</span><div><b>${who}${escapeHtml(c.category.toLowerCase())} rows come to ${money(b.planned)}, the estimate has ${money(b.target)} (${off > 0 ? "over" : "short"} by ${money(Math.abs(off))}).</b> Re-balance the rows nobody typed, or keep it this way on purpose.</div>
+        <span class="flex gap-1.5 flex-wrap"><button type="button" class="bl-sum-btn" data-exp-rebal="${key}">Re-balance</button><button type="button" class="bl-sum-btn" data-exp-keep="${key}">Keep it</button></span></div>`;
+    }).join("");
+    const addRows = expenseComplete ? "" : (groups.length > 1
+      ? `<div class="px-4 py-2 border-t border-black/[0.06] flex flex-wrap gap-3">${groups.map((b) => `<button data-add="expinst" data-sid="${escapeHtml(c.category)}" data-eq="${escapeHtml(b.estimate_qbo_id || "")}" class="text-[12px] font-semibold text-blue-600 hover:underline">+ Add a payment${b.doc ? ` (#${escapeHtml(b.doc)})` : ""}</button>`).join("")}</div>`
+      : `<div class="px-4 py-2 border-t border-black/[0.06]"><button data-add="expinst" data-sid="${escapeHtml(c.category)}" data-eq="${escapeHtml(groups[0]?.estimate_qbo_id || "")}" class="text-[12px] font-semibold text-blue-600 hover:underline">+ Add expense payment</button></div>`);
     const acts = c.actuals || [];
     const actuals = acts.length ? actualsBlock("Actual expenses in QuickBooks", acts.length,
       `<table class="w-full text-[12px]"><tbody>${acts.map((a) => `<tr class="border-b border-black/[0.04]"><td class="py-1 pr-3 font-semibold">${escapeHtml(a.vendor || "—")}</td><td class="py-1 pr-3 text-black/50">${escapeHtml(a.source_item || "")}</td><td class="py-1 pr-3 tabular-nums text-black/60">${shortDate(a.date)}</td><td class="py-1 text-right tabular-nums font-semibold">${money(a.amount)}</td></tr>`).join("")}</tbody></table>`) : "";
@@ -512,9 +608,11 @@ function render(container, entityId, d) {
       </summary>
       <div class="bg-black/[0.012]">
         ${c.timing_note ? `<div class="px-6 pt-2 pb-1 text-[11.5px] text-sky-900">${escapeHtml(c.timing_note)}</div>` : ""}
-        ${(c.by_estimate || []).length ? `<div class="px-6 pt-2 pb-1 text-[11.5px] text-black/60 flex flex-wrap gap-x-3 gap-y-1"><span class="font-bold text-black/45 uppercase text-[10px] tracking-wide">Planned per estimate</span>${c.by_estimate.map((b) => `<span class="tabular-nums">${b.doc ? `#${escapeHtml(b.doc)}` : "Whole project"} <b class="text-ink-900">${money(b.planned)}</b></span>`).join("")}</div>` : ""}
-        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left" title="When the vendor's bill is expected (an estimate unless a person edited it)">Expected bill date</th><th class="py-1.5 px-2 text-left" title="When the cash is expected to leave the bank. The Cash Flow forecast uses this date (blank = the bill date)">Expected paid</th><th class="py-1.5 px-2 text-right">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="4" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
-        ${expenseComplete ? "" : addBtn("expinst", c.category, "Add expense payment")}
+        ${(c.by_estimate || []).length > 1 || (c.by_estimate || [])[0]?.doc ? `<div class="px-6 pt-2 pb-1 text-[11.5px] text-black/60 flex flex-wrap gap-x-3 gap-y-1"><span class="font-bold text-black/45 uppercase text-[10px] tracking-wide">Planned per estimate</span>${c.by_estimate.map((b) => `<span class="tabular-nums">${b.doc ? `#${escapeHtml(b.doc)}` : "Whole project"} <b class="text-ink-900">${money(b.planned)}</b>${b.target && Math.abs(b.planned - b.target) > 1 ? ` <span class="text-black/45">of ${money(b.target)}</span>` : ""}</span>`).join("")}</div>` : ""}
+        ${["Materials", "Propane", "Rentals", "Travel"].includes(c.category) ? `<div class="px-6 pt-1 text-[11.5px] text-sky-900">Billed at the end of each month: the estimate is split evenly over the month-ends the work runs, each paid that month-end.</div>` : ""}
+        <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-1.5 pl-6 text-left bl-th-exp0" title="When the vendor's bill is expected (an estimate unless a person edited it)">Expected bill date</th><th class="py-1.5 px-2 text-left bl-th-in" title="When the cash is expected to leave the bank. The Cash Flow forecast uses this date (blank = the bill date)">Expected paid</th><th class="py-1.5 px-2 text-right bl-th-inr">Amount</th><th class="py-1.5 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${weekly || `<tr><td colspan="4" class="px-6 py-2 text-black/40 text-[12px]">No schedule — add dates + estimate.</td></tr>`}</tbody></table></div>
+        ${sumWarn}
+        ${addRows}
         ${actuals}
       </div>
     </details>`;
@@ -570,7 +668,7 @@ function render(container, entityId, d) {
       ${needsDates}
 
       <!-- project roll-up -->
-      <div data-bl-sec="summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
+      <div data-bl-sec="summary" class="bl-kpis grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-black/10 border border-black/10 rounded-xl overflow-hidden">
         ${container.dataset.blOnly === "invoice" ? `
         ${kpi("Invoice total", est.contract_total)}
         ${kpi("Paid", est.collected, "text-emerald-700")}
@@ -619,6 +717,7 @@ function render(container, entityId, d) {
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Crew payments</span>
           <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">rollup by crew · bi-weekly</span>
+          ${p.books_closed ? "" : `<span class="flex items-center gap-1 flex-wrap" title="Crew offer per estimate">${est.accepted.filter((a) => (Number(a.labor) || 0) > 0).map((a) => `<span class="bl-ofh">#${escapeHtml(a.doc || "")} ${offerChip(a.offer, a, true)}</span>`).join("")}</span>`}
           <span class="ml-auto text-[12px] tabular-nums text-black/55"><b class="text-ink-900">${money(crewLaborEst)}</b> labor</span>
         </summary>
         <div class="p-3">
@@ -634,7 +733,7 @@ function render(container, entityId, d) {
         <summary class="flex items-center gap-2 px-4 py-3 border-b border-black/10 bg-black/[0.02] cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
           <svg class="w-3.5 h-3.5 text-black/30 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
           <span class="text-sm font-bold text-ink-900">Project expenses</span>
-          <span class="text-[11.5px] text-black/45">estimated vs. actual by line item · weekly cash-out</span>
+          <span class="text-[11.5px] text-black/45">estimated vs. actual by line item · when the cash goes out</span>
           <span class="ml-auto tabular-nums text-[12px] text-black/55">${money(exp.estimate_total)} est · ${money(exp.spent_qbo)} actual</span>
         </summary>
         ${(exp.by_category && exp.by_category.length) ? exp.by_category.map(expenseCat).join("") : `<div class="px-4 py-4 text-[12.5px] text-black/45">No estimate cost lines to plan from.</div>`}
@@ -664,7 +763,7 @@ function render(container, entityId, d) {
       render(container, entityId, fresh);
     } catch (err) {
       if (btn) { btn.disabled = false; btn.textContent = orig; }
-      alert("Failed: " + (err?.message || "error"));
+      panelNote(container, "Failed: " + (err?.message || "error"));
     }
   };
 
@@ -680,14 +779,14 @@ function render(container, entityId, d) {
   });
 
   const reload = async () => {
-    const y = window.scrollY;
-    const scroller = container.closest("[data-scroll-host]");
-    const sy = scroller ? scroller.scrollTop : 0;
+    const restore = scrollState(container);
     try {
       const fresh = await api(`/billing/project/${encodeURIComponent(entityId)}`);
+      const h = container.offsetHeight;
+      if (h) container.style.minHeight = `${h}px`;
       render(container, entityId, fresh);
-      window.scrollTo(0, y);
-      if (scroller) scroller.scrollTop = sy;
+      restore();
+      requestAnimationFrame(() => { container.style.minHeight = ""; restore(); });
     } catch (_) {}
     // every edit ends in a reload: let the Cash Flow drawer know the plan changed
     window.dispatchEvent(new CustomEvent("opi:billing-changed", { detail: { entityId } }));
@@ -706,9 +805,9 @@ function render(container, entityId, d) {
     const estVal = Number(row?.getAttribute("data-estval") || 0);
     if (!row || !estVal) return;
     const other = row.querySelector(`[data-edit="milestone"][data-field="${field === "pct" ? "amount" : "pct"}"]`);
-    const v = Number(el.value);
-    if (!other || el.value === "" || !isFinite(v)) return;
-    if (field === "pct") other.value = Math.round(estVal * v) / 100;
+    let v; try { v = parseNumInput(el.value); } catch (_) { return; }
+    if (!other || v == null) return;
+    if (field === "pct") other.value = fmtNum(Math.round(estVal * v) / 100);
     else other.value = Math.round((v / estVal) * 1000) / 10;
   });
 
@@ -719,7 +818,7 @@ function render(container, entityId, d) {
       const eq = cr.getAttribute("data-eq");
       cr.disabled = true;
       try { await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/crew`, { method: "POST", body: JSON.stringify({ crew_id: cr.value ? Number(cr.value) : null }) }); await reload(); }
-      catch (err) { cr.disabled = false; alert("Reassign failed: " + (err?.message || "error")); }
+      catch (err) { cr.disabled = false; panelNote(container, "Reassign failed: " + (err?.message || "error")); }
       return;
     }
     // inline field edits (invoice milestones / expense items)
@@ -727,7 +826,11 @@ function render(container, entityId, d) {
     if (!el) return;
     const kind = el.getAttribute("data-edit"), id = el.getAttribute("data-id"), field = el.getAttribute("data-field");
     let val = el.value;
-    if (el.type === "number") val = val === "" ? null : Number(val);
+    try {
+      if (el.type === "number") val = val === "" ? null : Number(val);
+      else if (el.hasAttribute("data-num")) val = parseNumInput(val);
+      else if (el.hasAttribute("data-date")) { val = parseDateInput(val); el.value = mdy(val); }
+    } catch (err) { panelNote(container, err.message); return; }
     const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}`, qboinv: `/invoices/qbo-invoice/${encodeURIComponent(id)}/expected` }[kind];
     if (!url) return;
     let payload = { [field]: val };
@@ -742,15 +845,24 @@ function render(container, entityId, d) {
     }
     el.disabled = true;
     try { await api(url, { method: "PATCH", body: JSON.stringify(payload) }); await reload(); }
-    catch (err) { el.disabled = false; alert("Save failed: " + (err?.message || "error")); }
+    catch (err) { el.disabled = false; panelNote(container, "Save failed: " + (err?.message || "error")); }
   });
 
   root?.addEventListener("click", async (e) => {
+    const dp = e.target.closest("[data-dtpick]");
+    if (dp) {
+      e.preventDefault();
+      const txt = dp.previousElementSibling, hid = dp.nextElementSibling;
+      try { hid.value = parseDateInput(txt.value) || ""; } catch (_) { hid.value = ""; }
+      hid.onchange = () => { if (!hid.value) return; txt.value = mdy(hid.value); txt.dispatchEvent(new Event("change", { bubbles: true })); };
+      try { hid.showPicker(); } catch (_) { hid.click(); }
+      return;
+    }
     const ab = e.target.closest("[data-autobal]");
     if (ab) {
       ab.disabled = true; ab.textContent = "Balancing…";
       try { await api(`/invoices/schedule/${ab.getAttribute("data-autobal")}/auto-balance`, { method: "POST" }); await reload(); }
-      catch (err) { ab.disabled = false; ab.textContent = "Balance automatically"; alert("Failed: " + (err?.message || "error")); }
+      catch (err) { ab.disabled = false; ab.textContent = "Balance automatically"; panelNote(container, "Failed: " + (err?.message || "error")); }
       return;
     }
     if (e.target.closest("[data-goto-cos]")) {
@@ -764,7 +876,7 @@ function render(container, entityId, d) {
     if (ad) {
       ad.disabled = true; ad.textContent = "…";
       try { await api(`/invoices/milestone/${ad.getAttribute("data-autodates")}`, { method: "PATCH", body: JSON.stringify({ auto_dates: true, via: "billing" }) }); await reload(); }
-      catch (err) { ad.disabled = false; ad.textContent = "↺ auto"; alert("Failed: " + (err?.message || "error")); }
+      catch (err) { ad.disabled = false; ad.textContent = "↺ auto"; panelNote(container, "Failed: " + (err?.message || "error")); }
       return;
     }
     const sd = e.target.closest("[data-srcdoc]");
@@ -798,13 +910,12 @@ function render(container, entityId, d) {
     }
     const splitRevert = e.target.closest("[data-crew-split-revert]");
     if (splitRevert) {
-      if (!confirm("Revert this estimate to a single crew? The payment schedule is kept; the per-company split is removed (the current crew assignment stays).")) return;
       splitRevert.disabled = true;
       try {
         const fresh = await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(splitRevert.getAttribute("data-eq"))}/crew-split`,
           { method: "POST", body: JSON.stringify({ allocations: [] }) });
         render(container, entityId, fresh);
-      } catch (err) { splitRevert.disabled = false; alert("Revert failed: " + (err?.message || "error")); }
+      } catch (err) { splitRevert.disabled = false; panelNote(container, "Revert failed: " + (err?.message || "error")); }
       return;
     }
     // browse crews (availability picker) for one estimate → assign on pick
@@ -813,7 +924,7 @@ function render(container, entityId, d) {
       const eq = browse.getAttribute("data-eq");
       openCrewRoster(entityId, p.start_date, p.end_date, async (crewId) => {
         try { await api(`/billing/project/${encodeURIComponent(entityId)}/estimate/${encodeURIComponent(eq)}/crew`, { method: "POST", body: JSON.stringify({ crew_id: crewId ? Number(crewId) : null }) }); await reload(); }
-        catch (err) { alert("Reassign failed: " + (err?.message || "error")); }
+        catch (err) { panelNote(container, "Reassign failed: " + (err?.message || "error")); }
       });
       return;
     }
@@ -826,7 +937,7 @@ function render(container, entityId, d) {
         assignToast(r); // #4 glue: "Crew assigned to the project schedule ✓" / "Already on the schedule"
         await reload();
       }
-      catch (err) { oAccept.disabled = false; alert("Failed: " + (err?.message || "error")); }
+      catch (err) { oAccept.disabled = false; panelNote(container, "Failed: " + (err?.message || "error")); }
       return;
     }
     const script = e.target.closest("[data-offer-script]");
@@ -839,42 +950,106 @@ function render(container, entityId, d) {
     const oSend = e.target.closest("[data-offer-send]");
     if (oSend) {
       const crewId = oSend.getAttribute("data-crew"), labor = oSend.getAttribute("data-labor");
-      if (!crewId) { alert("Assign a crew first"); return; }
+      if (!crewId) { panelNote(container, "Assign a crew first"); return; }
       oSend.disabled = true;
       try { await api(`/offers/project/${encodeURIComponent(entityId)}`, { method: "POST", body: JSON.stringify({ crew_id: Number(crewId), labor_amount: Number(labor || 0) }) }); await reload(); }
-      catch (err) { oSend.disabled = false; alert("Send failed: " + (err?.message || "error")); }
+      catch (err) { oSend.disabled = false; panelNote(container, "Send failed: " + (err?.message || "error")); }
       return;
     }
     const oWithdraw = e.target.closest("[data-offer-withdraw]");
     if (oWithdraw) {
-      if (!confirm("Withdraw this crew offer?")) return;
       try { await api(`/offers/${oWithdraw.getAttribute("data-offer-withdraw")}/withdraw`, { method: "POST" }); await reload(); }
-      catch (err) { alert("Withdraw failed: " + (err?.message || "error")); }
+      catch (err) { panelNote(container, "Withdraw failed: " + (err?.message || "error")); }
+      return;
+    }
+    const xr = e.target.closest("[data-exp-revert],[data-exp-rebal],[data-exp-keep]");
+    if (xr) {
+      xr.disabled = true;
+      let url;
+      if (xr.dataset.expRevert) url = `/expenses/expense-installment/${xr.dataset.expRevert}/revert`;
+      else {
+        const [cat, q] = (xr.dataset.expRebal || xr.dataset.expKeep).split("|");
+        url = `/expenses/project/${encodeURIComponent(entityId)}/category/${encodeURIComponent(cat)}/${xr.dataset.expRebal ? "rebalance" : "keep"}${q ? `?estimate_qbo_id=${encodeURIComponent(q)}` : ""}`;
+      }
+      try { await api(url, { method: "POST" }); await reload(); }
+      catch (err) { xr.disabled = false; panelNote(container, "Couldn't save: " + (err?.message || "error")); }
+      return;
+    }
+    const rb = e.target.closest("[data-crew-rebal],[data-crew-keep]");
+    if (rb) {
+      const sid = rb.dataset.crewRebal || rb.dataset.crewKeep;
+      rb.disabled = true;
+      try { await api(`/payments/schedule/${sid}/${rb.dataset.crewRebal ? "rebalance" : "keep-total"}`, { method: "POST" }); await reload(); }
+      catch (err) { rb.disabled = false; panelNote(container, "Couldn't save: " + (err?.message || "error")); }
+      return;
+    }
+    const es = e.target.closest("[data-est-script],[data-est-send]");
+    if (es) {
+      const a = est.accepted.find((x) => String(x.qbo_id) === String(es.dataset.estScript || es.dataset.estSend));
+      if (!a) return;
+      const canSend = !!a.crew_id && (!a.offer || a.offer.status === "declined");
+      openEstimateOfferModal({ entityId, a, project: p, crewLabel: crewName(a.crew_id) || "the crew", canSend, onSent: reload });
+      return;
+    }
+    const eo = e.target.closest("[data-est-outside]");
+    if (eo) {
+      const line = eo.closest(".bl-offer");
+      if (!line || line.nextElementSibling?.matches("[data-outside-form]")) return;
+      const a = est.accepted.find((x) => String(x.qbo_id) === String(eo.dataset.estOutside));
+      const f = document.createElement("form");
+      f.setAttribute("data-outside-form", "");
+      f.className = "bl-outside";
+      const today = new Date(); const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      f.innerHTML = `<b class="text-[12px]">Offer sent outside the app</b>
+        <label>Sent <input name="sent" type="text" placeholder="mm/dd/yy" value="${mdy(iso)}" class="input text-xs py-1 w-[6rem]" required></label>
+        <label>Accepted <input name="accepted" type="text" placeholder="mm/dd/yy (if it was)" class="input text-xs py-1 w-[8.5rem]"></label>
+        <label class="bl-outside-file">Signed offer <input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.heic,.doc,.docx,.xlsx,.eml,.msg" class="text-xs"></label>
+        <button type="submit" class="bl-sum-btn">Record it</button><button type="button" data-outside-cancel class="text-[11.5px] text-black/50 hover:underline">Cancel</button>`;
+      line.after(f);
+      f.querySelector("[data-outside-cancel]").addEventListener("click", () => f.remove());
+      f.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const fd = new FormData(f);
+        let sent, acc;
+        try { sent = parseDateInput(fd.get("sent")); acc = parseDateInput(fd.get("accepted")); }
+        catch (err) { panelNote(container, err.message); return; }
+        if (!sent) { panelNote(container, "When was it sent?"); return; }
+        try {
+          await api(`/offers/project/${encodeURIComponent(entityId)}/outside`, { method: "POST", body: JSON.stringify({ crew_id: Number(a.crew_id), labor_amount: Number(a.labor) || null, sent_date: sent, accepted_date: acc, estimate_qbo_id: a.qbo_id }) });
+          const file = fd.get("file");
+          if (file && file.size) {
+            const up = new FormData(); up.append("file", file);
+            await api(`/documents/project/${encodeURIComponent(entityId)}?folder=7_notes`, { method: "POST", body: up });
+          }
+          panelNote(container, acc ? "Recorded: sent and accepted." : "Recorded as sent.");
+          await reload();
+        } catch (err) { panelNote(container, "Couldn't record it: " + (err?.message || "error")); }
+      });
       return;
     }
     const cd = e.target.closest("[data-confirm-dates]");
     if (cd) {
       cd.disabled = true;
       try { await api(`/payments/schedule/${cd.getAttribute("data-confirm-dates")}/confirm-dates`, { method: "POST" }); await reload(); }
-      catch (err) { cd.disabled = false; alert("Couldn't confirm: " + (err?.message || "error")); }
+      catch (err) { cd.disabled = false; panelNote(container, "Couldn't confirm: " + (err?.message || "error")); }
       return;
     }
     const add = e.target.closest("[data-add]");
     const del = e.target.closest("[data-del]");
     if (add) {
       const kind = add.getAttribute("data-add"), sid = add.getAttribute("data-sid");
-      const url = { milestone: `/invoices/schedule/${sid}/milestone`, installment: `/payments/schedule/${sid}/installment`, item: `/expenses/project/${encodeURIComponent(entityId)}/item`, expinst: `/expenses/project/${encodeURIComponent(entityId)}/category/${encodeURIComponent(sid)}/installment` }[kind];
+      const eq = add.getAttribute("data-eq");
+      const url = { milestone: `/invoices/schedule/${sid}/milestone`, installment: `/payments/schedule/${sid}/installment`, item: `/expenses/project/${encodeURIComponent(entityId)}/item`, expinst: `/expenses/project/${encodeURIComponent(entityId)}/category/${encodeURIComponent(sid)}/installment${eq ? `?estimate_qbo_id=${encodeURIComponent(eq)}` : ""}` }[kind];
       if (!url) return;
       add.disabled = true;
       try { await api(url, { method: "POST", body: JSON.stringify({}) }); await reload(); }
-      catch (err) { add.disabled = false; alert("Add failed: " + (err?.message || "error")); }
+      catch (err) { add.disabled = false; panelNote(container, "Add failed: " + (err?.message || "error")); }
     } else if (del) {
-      if (!confirm("Remove this row?")) return;
       const kind = del.getAttribute("data-del"), id = del.getAttribute("data-id");
       const url = { milestone: `/invoices/milestone/${id}`, installment: `/payments/installment/${id}`, item: `/expenses/item/${id}`, expinst: `/expenses/expense-installment/${id}` }[kind];
       if (!url) return;
       try { await api(url, { method: "DELETE" }); await reload(); }
-      catch (err) { alert("Delete failed: " + (err?.message || "error")); }
+      catch (err) { panelNote(container, "Delete failed: " + (err?.message || "error")); }
     }
   });
 }
@@ -1051,7 +1226,6 @@ function openCrewSplitEditor(entityId, estimateQboId, crews, existing, container
     postSplit(rows.map((r) => ({ company_crew_id: Number(r.company_crew_id), pct: Number(r.pct) })), e.currentTarget, "Saving…");
   });
   overlay.querySelector("[data-split-revert]")?.addEventListener("click", (e) => {
-    if (!confirm("Revert this estimate to a single crew? The payment schedule is kept; the per-company split is removed.")) return;
     postSplit([], e.currentTarget, "Reverting…");
   });
 }
@@ -1116,6 +1290,109 @@ function rollupScript(g, project, scope) {
   }
   L.push(`  Total: ${money(g.labor)}`);
   return L.join("\n");
+}
+
+// 2026-11-19 (owner): the offer is per estimate, and its payment schedule is a
+// grid like OPI's Drive Payment Schedule, so it pastes into Outlook as a table.
+function estimateOffer(a, project, crewLabel) {
+  const num = (String(project?.name || "").match(/^\s*(\d+)\s*-/) || [])[1] || "";
+  const { company, location } = parseProjectName(project?.name);
+  const insts = (a.crew_installments || []).filter((i) => i.pay_date).slice().sort((x, y) => String(x.pay_date).localeCompare(String(y.pay_date)));
+  const lead = Number(a.crew_invoice_lead_days ?? 7);
+  const sendOf = (i) => i.send_invoice_date || addDaysIso(i.pay_date, -lead);
+  const total = insts.reduce((t, i) => t + (Number(i.amount) || 0), 0);
+  const paid = insts.filter((i) => i.status === "paid").reduce((t, i) => t + (Number(i.amount) || 0), 0);
+  const labor = Number(a.labor) || total;
+  const start = a.crew_start || insts[0]?.pay_date || project?.start_date;
+  const end = a.crew_end || project?.end_date;
+  const md = (iso) => { if (!iso) return ""; const [y, m, d] = String(iso).slice(0, 10).split("-"); return `${Number(m)}/${Number(d)}/${y}`; };
+  const m2 = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const scope = (a.offer_scope || "").trim() || "[Add the Installation (Labor) scope from the estimate]";
+  const head = `${company}${location ? ": " + location : ""}${start ? " - " + dowOf(start) + " " + longDate(start) : ""} - ${money(labor)}${a.doc ? ` (estimate #${a.doc})` : ""}`;
+  const intro = [
+    "Please see the official offer below. The Payment Schedule below shows you when to send an invoice for payment and when it's expected to pay. This is subject to change.",
+    "",
+    "Offer is based on a 5 man crew, working 7am-7pm",
+    "Offer is based on a lump sum",
+    "",
+    "Please note we will need your daily updates submitted to the designated PM no later than 5pm each day.",
+    "Work outside of the scope below needs to be approved/reported to the PM before work is performed.",
+    "Delays, changes or issues related to the customer or equipment needs to be reported to the PM ASAP.",
+  ];
+  // plain text (pastes anywhere)
+  const L = [...intro, "", head, "", "Scope of work:", scope, "", "Payment Schedule:"];
+  L.push(`  Project: ${company}${num ? " #" + num : ""}   Start ${md(start)}   End ${md(end)}`);
+  L.push(`  Contract value ${m2(labor)}   Paid to date ${m2(paid)}   Remaining ${m2(labor - paid)}`);
+  L.push("  #   Payment date   Amount          Send invoice   Comments");
+  insts.forEach((i, k) => L.push(`  ${String(k + 1).padEnd(3)} ${md(i.pay_date).padEnd(14)} ${m2(i.amount).padEnd(15)} ${md(sendOf(i)).padEnd(14)} ${i.note || ""}`));
+  L.push(`      Total          ${m2(total)}`);
+  const text = L.join("\n");
+  // HTML (inline styles: Outlook keeps them)
+  const B = "border:1px solid #BFBFBF;padding:4px 8px;";
+  const H = `${B}background:#A9C4EB;font-weight:bold;text-align:center;`;
+  const C = `${B}text-align:center;`;
+  const esc = escapeHtml;
+  const info = [[["Project Name", company], ["Contract Value", m2(labor)]], [["Project Number", num], ["Paid to Date", m2(paid)]],
+    [["Project Start Date", md(start)], ["Remaining Value", m2(labor - paid)]], [["Estimated End Date", md(end)], ["", ""]]];
+  const grid = `<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:10.5pt;">
+    <tr><td colspan="6" style="${H}">Estimated Contract Payment Schedule</td></tr>
+    ${info.map(([[k1, v1], [k2, v2]]) => `<tr><td style="${B}">${esc(k1)}</td><td style="${C}">${esc(String(v1 || ""))}</td><td style="${B}"></td><td style="${B}"></td><td style="${B}">${esc(k2)}</td><td style="${B}text-align:right;">${esc(v2)}</td></tr>`).join("")}
+    <tr><td colspan="6" style="${B}height:8px;"></td></tr>
+    <tr><td style="${H}">Payment Number</td><td style="${H}">Payment Date</td><td style="${H}">Payment Amount</td><td style="${H}">Send Invoice Date</td><td style="${H}">Comments</td><td style="${H}"></td></tr>
+    ${insts.map((i, k) => `<tr><td style="${C}">${k + 1}</td><td style="${C}">${md(i.pay_date)}</td><td style="${C}">${m2(i.amount)}</td><td style="${C}">${md(sendOf(i))}</td><td style="${C}">${esc(i.note || "")}</td><td style="${B}"></td></tr>`).join("")}
+    <tr><td style="${B}"></td><td style="${C}font-weight:bold;">Total</td><td style="${C}font-weight:bold;">${m2(total)}</td><td style="${B}"></td><td style="${B}"></td><td style="${B}"></td></tr>
+  </table>`;
+  const P = (t) => `<p style="margin:0 0 10px 0;">${t}</p>`;
+  const html = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#111;">
+    ${P(esc(intro[0]))}${P(`${esc(intro[2])}<br>${esc(intro[3])}`)}${P(`${esc(intro[5])}<br>${esc(intro[6])}<br>${esc(intro[7])}`)}
+    ${P(`<b>${esc(head)}</b>`)}
+    ${P(`<b>Scope of work:</b><br>${esc(scope).replace(/\n/g, "<br>")}`)}
+    ${P("<b>Payment Schedule:</b>")}${grid}</div>`;
+  return { text, html, labor, crewLabel };
+}
+
+function openEstimateOfferModal({ entityId, a, project, crewLabel, canSend, onSent }) {
+  const off = estimateOffer(a, project, crewLabel);
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4";
+  overlay.style.zIndex = "100";
+  overlay.innerHTML = `<div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl p-5 flex flex-col" style="max-height:92vh">
+    <div class="text-base font-bold text-ink-900">Crew offer · estimate #${escapeHtml(a.doc || "")} · ${escapeHtml(crewLabel)}</div>
+    <div class="text-[12px] text-black/50 mb-3">Edit it here if you like, then <b>Copy for email</b> and paste into Outlook: the payment schedule pastes as a table.${canSend ? " <b>Mark offer as sent</b> records it and saves the email and the payment schedule in the job's 7 Notes folder." : ""}</div>
+    <div data-preview contenteditable="true" class="rounded-xl border border-black/15 p-4 overflow-auto bg-white text-ink-900" style="flex:1 1 auto;min-height:240px">${off.html}</div>
+    <div class="mt-3 flex items-center justify-end gap-2 flex-wrap"><span data-msg class="text-xs font-semibold text-emerald-700 mr-auto"></span>
+      <button data-close class="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-semibold hover:bg-slate-200">Close</button>
+      <button data-copy class="rounded-lg border border-blue-600 text-blue-700 px-3 py-1.5 text-sm font-semibold hover:bg-blue-50">Copy for email</button>
+      ${canSend ? `<button data-send class="btn-primary text-sm px-4 py-1.5">Mark offer as sent</button>` : ""}</div></div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const pv = overlay.querySelector("[data-preview]");
+  const msg = overlay.querySelector("[data-msg]");
+  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("[data-close]").addEventListener("click", close);
+  overlay.querySelector("[data-copy]").addEventListener("click", async () => {
+    const html = pv.innerHTML, text = pv.innerText;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) })]);
+    } catch (_) {
+      const r = document.createRange(); r.selectNodeContents(pv);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      document.execCommand("copy"); sel.removeAllRanges();
+    }
+    msg.textContent = "Copied. Paste it into the email.";
+  });
+  overlay.querySelector("[data-send]")?.addEventListener("click", async (e) => {
+    const b = e.currentTarget; b.disabled = true; msg.textContent = "Saving…";
+    try {
+      const r = await api(`/offers/project/${encodeURIComponent(entityId)}`, { method: "POST", body: JSON.stringify({
+        crew_id: Number(a.crew_id), labor_amount: off.labor, scope: a.offer_scope || null, estimate_qbo_id: a.qbo_id,
+        script_html: pv.innerHTML, script_text: pv.innerText }) });
+      const files = (r.docs || []).map((d) => d.filename);
+      panelNote(null, files.length ? `Offer recorded. Saved in 7 Notes: ${files.join(", ")}` : (r.docs_error ? `Offer recorded. The files didn't save: ${r.docs_error}` : "Offer recorded."));
+      close();
+      if (onSent) onSent();
+    } catch (err) { b.disabled = false; msg.textContent = ""; panelNote(null, "Couldn't record the offer: " + (err?.message || "error")); }
+  });
 }
 
 function openOfferScriptModal(text) {

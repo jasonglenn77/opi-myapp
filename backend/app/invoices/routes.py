@@ -253,6 +253,11 @@ def patch_milestone(mid: int, req: MilestonePatch, user=Depends(get_current_user
         ent, pname = _ms_entity(conn, mid=mid)
         new = conn.execute(text("SELECT invoice_date, due_date, expected_paid_date FROM project_invoice_milestones WHERE id = :id"),
                            {"id": mid}).mappings().first()
+        # 2026-11-19 (owner): a sent invoice has ONE expected-paid date. On a row
+        # that is a QuickBooks invoice, the date set here is the invoice's (the
+        # same one "Actual invoices in QuickBooks" and Cash Flow show).
+        if old and old["qbo_invoice_id"] and "expected_paid_date" in fields:
+            _set_invoice_expected(conn, old["qbo_invoice_id"], params.get("expected_paid_date"), user)
     changes = diff_fields(dict(old) if old else {}, {k: params[k] for k in fields}, list(fields))
     if changes:
         record_audit(user, "billing.milestone_update", "invoice_milestone", mid,
@@ -359,6 +364,17 @@ class QboInvoiceExpected(BaseModel):
     via: Optional[str] = None
 
 
+def _set_invoice_expected(conn, qbo_id, d, user):
+    actor = (user or {}).get("email") if isinstance(user, dict) else getattr(user, "email", None)
+    cust = conn.execute(text("SELECT customer_qbo_id FROM qbo_transactions WHERE entity_type = 'Invoice' AND qbo_id = :q"),
+                        {"q": qbo_id}).scalar()
+    conn.execute(text("""
+        INSERT INTO qbo_invoice_expected_paid (invoice_qbo_id, entity_id, expected_paid_date, updated_by)
+        VALUES (:q, :e, :d, :u)
+        ON DUPLICATE KEY UPDATE expected_paid_date = VALUES(expected_paid_date), updated_by = VALUES(updated_by)
+    """), {"q": str(qbo_id), "e": cust, "d": (str(d)[:10] if d else None), "u": actor})
+
+
 @router.patch("/qbo-invoice/{qbo_id}/expected")
 def patch_qbo_invoice_expected(qbo_id: str, req: QboInvoiceExpected, user=Depends(get_current_user)):
     _require(user)
@@ -386,6 +402,10 @@ def patch_qbo_invoice_expected(qbo_id: str, req: QboInvoiceExpected, user=Depend
             ON DUPLICATE KEY UPDATE entity_id = VALUES(entity_id), expected_paid_date = VALUES(expected_paid_date),
                                     note = COALESCE(VALUES(note), note), updated_by = VALUES(updated_by)
         """), {"q": qbo_id, "e": inv["customer_qbo_id"], "d": d, "n": fields.get("note"), "u": actor})
+        # ...and the schedule row that is this invoice shows the same date
+        # (cleared = the invoice's due date).
+        conn.execute(text("""UPDATE project_invoice_milestones SET expected_paid_date = :d
+                             WHERE qbo_invoice_id = :q"""), {"d": d or inv["due_date"], "q": qbo_id})
     record_audit(user, "billing.invoice_expected_paid", "qbo_invoice", qbo_id, f"Invoice #{inv['doc_number'] or qbo_id}",
                  {"entity_id": inv["customer_qbo_id"], "via": fields.get("via"),
                   "changes": {"expected_paid_date": [str(old) if old else None, d]}})

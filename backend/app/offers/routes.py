@@ -93,7 +93,7 @@ def _offer_rows(conn, where, params):
     included so rollup matching can compare at the company level."""
     rows = conn.execute(text(f"""
         SELECT o.id, o.entity_id, o.crew_id, o.labor_amount, o.scope, o.status,
-               o.sent_at, o.responded_at, o.response_note,
+               o.sent_at, o.responded_at, o.response_note, o.estimate_qbo_id,
                COALESCE(pc.id, wc.id) AS company_id,
                TRIM(CONCAT(COALESCE(pc.name, wc.name, ''),
                     CASE WHEN COALESCE(pc.boss_name, wc.boss_name) IS NOT NULL
@@ -108,6 +108,7 @@ def _offer_rows(conn, where, params):
         "company_id": r["company_id"],
         "crew_name": (r["crew_name"] or "").strip() or None,
         "labor_amount": float(r["labor_amount"] or 0), "scope": r["scope"], "status": r["status"],
+        "estimate_qbo_id": r["estimate_qbo_id"],
         "sent_at": str(r["sent_at"]) if r["sent_at"] else None,
         "responded_at": str(r["responded_at"]) if r["responded_at"] else None,
         "response_note": r["response_note"],
@@ -367,6 +368,11 @@ class OfferCreate(BaseModel):
     crew_id: int
     labor_amount: float
     scope: Optional[str] = None
+    # 2026-11-19 (owner): offers go out per estimate / change order. The script
+    # as copied is saved (with the payment schedule) in the job's 7 Notes folder.
+    estimate_qbo_id: Optional[str] = None
+    script_html: Optional[str] = None
+    script_text: Optional[str] = None
 
 
 @router.post("/project/{entity_id}")
@@ -383,16 +389,29 @@ def send_offer(entity_id: str, body: OfferCreate, user=Depends(get_current_user)
         # 2026-11-12: an offer sent from the app carries the crew payment schedule,
         # so the schedule has to exist first.
         n_pay = conn.execute(text("""SELECT COUNT(*) FROM project_payment_installments i
-            JOIN project_payment_schedules s ON s.id = i.schedule_id WHERE s.entity_id = :e"""), {"e": entity_id}).scalar()
+            JOIN project_payment_schedules s ON s.id = i.schedule_id WHERE s.entity_id = :e
+              AND (:q IS NULL OR s.estimate_qbo_id = :q)"""), {"e": entity_id, "q": body.estimate_qbo_id}).scalar()
         if not n_pay:
             raise HTTPException(status_code=400, detail="Build the crew payment schedule first (Project Setup → Schedules → "
-                                                         "Crew payment schedule): the offer is sent with it.")
+                                                         "Crew payments): the offer is sent with it.")
+        # A new offer for the same estimate replaces one still waiting.
+        conn.execute(text("""UPDATE work_offers SET status = 'withdrawn' WHERE entity_id = :e AND status = 'sent'
+                             AND (estimate_qbo_id <=> :q)"""), {"e": entity_id, "q": body.estimate_qbo_id})
         res = conn.execute(text("""
-            INSERT INTO work_offers (entity_id, crew_id, labor_amount, scope, status, sent_at, created_by_user_id)
-            VALUES (:e,:c,:amt,:sc,'sent',NOW(),:u)
+            INSERT INTO work_offers (entity_id, crew_id, labor_amount, scope, status, sent_at, created_by_user_id, estimate_qbo_id)
+            VALUES (:e,:c,:amt,:sc,'sent',NOW(),:u,:q)
         """), {"e": entity_id, "c": company_id, "amt": body.labor_amount,
-               "sc": (body.scope or None), "u": user.get("id")})
-    return {"ok": True, "id": res.lastrowid}
+               "sc": (body.scope or None), "u": user.get("id"), "q": body.estimate_qbo_id})
+        crew_name = conn.execute(text("SELECT name FROM work_crews WHERE id = :c"), {"c": company_id}).scalar()
+    out = {"ok": True, "id": res.lastrowid, "docs": []}
+    if body.estimate_qbo_id:
+        try:
+            from app.offers import docs as OD
+            out["docs"] = OD.save_offer_docs(entity_id, body.estimate_qbo_id, crew_name, body.script_html,
+                                             body.script_text, user.get("id"))
+        except Exception as exc:  # noqa: BLE001 - the offer stands; say what didn't save
+            out["docs_error"] = str(exc)[:300]
+    return out
 
 
 class OutsideOffer(BaseModel):
@@ -401,6 +420,7 @@ class OutsideOffer(BaseModel):
     sent_date: str
     accepted_date: Optional[str] = None
     note: Optional[str] = None
+    estimate_qbo_id: Optional[str] = None
 
 
 @router.post("/project/{entity_id}/outside")
@@ -423,16 +443,17 @@ def record_outside_offer(entity_id: str, body: OutsideOffer, user=Depends(get_cu
             raise HTTPException(status_code=400, detail="Unknown crew")
         res = conn.execute(text("""
             INSERT INTO work_offers (entity_id, crew_id, labor_amount, scope, status, sent_at, responded_at,
-                                     response_note, created_by_user_id, responded_by_user_id)
-            VALUES (:e, :c, :amt, :sc, :st, :sent, :acc, :n, :u, :ru)"""),
+                                     response_note, created_by_user_id, responded_by_user_id, estimate_qbo_id)
+            VALUES (:e, :c, :amt, :sc, :st, :sent, :acc, :n, :u, :ru, :q)"""),
             {"e": entity_id, "c": company_id, "amt": body.labor_amount or 0, "sc": None,
              "st": "accepted" if acc else "sent", "sent": sent, "acc": acc,
              "n": ("Sent outside the app" + (f": {body.note}" if body.note else ""))[:500],
-             "u": user.get("id"), "ru": user.get("id") if acc else None})
+             "u": user.get("id"), "ru": user.get("id") if acc else None, "q": body.estimate_qbo_id})
         oid = res.lastrowid
         if acc:
-            conn.execute(text("UPDATE work_offers SET status = 'withdrawn' WHERE entity_id = :e AND id <> :i AND status = 'sent'"),
-                         {"e": entity_id, "i": oid})
+            conn.execute(text("""UPDATE work_offers SET status = 'withdrawn' WHERE entity_id = :e AND id <> :i AND status = 'sent'
+                                 AND (:q IS NULL OR estimate_qbo_id <=> :q)"""),
+                         {"e": entity_id, "i": oid, "q": body.estimate_qbo_id})
     out = {"ok": True, "id": oid}
     if acc:
         try:
@@ -620,7 +641,7 @@ def respond(offer_id: int, body: OfferResponse, user=Depends(get_current_user)):
     if body.status not in ("accepted", "declined"):
         raise HTTPException(status_code=400, detail="status must be accepted or declined")
     with engine.begin() as conn:
-        o = conn.execute(text("SELECT entity_id, status FROM work_offers WHERE id=:id"),
+        o = conn.execute(text("SELECT entity_id, status, estimate_qbo_id FROM work_offers WHERE id=:id"),
                          {"id": offer_id}).mappings().first()
         if not o:
             raise HTTPException(status_code=404, detail="Offer not found")
@@ -630,10 +651,12 @@ def respond(offer_id: int, body: OfferResponse, user=Depends(get_current_user)):
                              responded_by_user_id=:u, response_note=:n WHERE id=:id"""),
                      {"s": body.status, "u": user.get("id"), "n": (body.note or None), "id": offer_id})
         if body.status == "accepted":
-            # only one accepted crew per project — withdraw other outstanding offers
+            # one accepted crew per estimate (per project for offers made before
+            # 2026-11-19, which name no estimate): withdraw the others waiting
             conn.execute(text("""UPDATE work_offers SET status='withdrawn'
-                                 WHERE entity_id=:e AND id<>:id AND status='sent'"""),
-                         {"e": o["entity_id"], "id": offer_id})
+                                 WHERE entity_id=:e AND id<>:id AND status='sent'
+                                   AND (:q IS NULL OR estimate_qbo_id <=> :q)"""),
+                         {"e": o["entity_id"], "id": offer_id, "q": o["estimate_qbo_id"]})
     out = {"ok": True}
     if body.status == "accepted":
         # Glue (#4): the accepted company goes on the project schedule unless it's

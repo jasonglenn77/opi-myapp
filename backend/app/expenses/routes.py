@@ -247,6 +247,61 @@ class ExpInstPatch(BaseModel):
     amount: Optional[float] = None
 
 
+def _group(conn, inst_id):
+    return conn.execute(text("SELECT entity_id, category, estimate_qbo_id FROM project_expense_installments WHERE id = :id"),
+                        {"id": inst_id}).mappings().first()
+
+
+def _group_target(conn, entity_id, category, q):
+    """What the estimate has for this item (per estimate; a plan made for the
+    whole project before 2026-11-18 uses the project's item total)."""
+    if q:
+        return float((_estimate_costs_by_estimate(conn, entity_id).get(str(q)) or {}).get(category) or 0)
+    return float(conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM project_expense_items WHERE entity_id = :e AND category = :c"),
+                              {"e": entity_id, "c": category}).scalar() or 0)
+
+
+def rebalance_group(conn, entity_id, category, q):
+    """2026-11-19 (owner): the rows of one plan (item x estimate) add up to the
+    estimate's amount for it. Rows whose amount someone typed stay as typed; the
+    others share the rest in proportion (equally if they're all 0). With no such
+    row, the last row takes the difference."""
+    target = round(_group_target(conn, entity_id, category, q), 2)
+    rows = conn.execute(text("""SELECT id, amount, amount_edited, app_amount FROM project_expense_installments
+                                WHERE entity_id = :e AND category = :c AND estimate_qbo_id <=> :q
+                                ORDER BY week_of IS NULL, week_of, seq, id"""), {"e": entity_id, "c": category, "q": q}).mappings().all()
+    if not rows or target <= 0:
+        return
+    fixed = [r for r in rows if r["amount_edited"]]
+    flex = [r for r in rows if not r["amount_edited"]]
+    left = round(target - sum(float(r["amount"] or 0) for r in fixed), 2)
+    upd = {}
+    if flex:
+        # weights = the app's plan for each row (keeps Lodging's shape, months
+        # even); a row added by hand weighs as much as an average row
+        ws = [float(r["app_amount"]) if r["app_amount"] is not None else None for r in flex]
+        known = [w for w in ws if w and w > 0]
+        if not known:
+            known = [float(r["amount"] or 0) for r in flex if float(r["amount"] or 0) > 0.004]
+            ws = [float(r["amount"] or 0) if float(r["amount"] or 0) > 0.004 else None for r in flex]
+        avg = (sum(known) / len(known)) if known else 1.0
+        ws = [w if w and w > 0 else avg for w in ws]
+        cur = sum(ws)
+        alloc = [w / cur for w in ws]
+        run = 0.0
+        for i, (r, w) in enumerate(zip(flex, alloc)):
+            amt = round(left * w, 2) if i < len(flex) - 1 else round(left - run, 2)
+            run = round(run + amt, 2)
+            upd[r["id"]] = amt
+    else:
+        r = rows[-1]
+        upd[r["id"]] = round(float(r["amount"] or 0) + left, 2)
+    for i, a in upd.items():
+        conn.execute(text("UPDATE project_expense_installments SET amount = :a WHERE id = :i"), {"a": a, "i": i})
+    conn.execute(text("DELETE FROM project_expense_sum_ok WHERE entity_id = :e AND category = :c AND estimate_qbo_id = :q"),
+                 {"e": entity_id, "c": category, "q": q or ""})
+
+
 @router.patch("/expense-installment/{inst_id}")
 def patch_expense_installment(inst_id: int, req: ExpInstPatch, user=Depends(get_current_user)):
     _require(user)
@@ -254,6 +309,8 @@ def patch_expense_installment(inst_id: int, req: ExpInstPatch, user=Depends(get_
     if not fields:
         return {"ok": True}
     sets, params = ["edited = 1"], {"id": inst_id}
+    if "amount" in fields:
+        sets.append("amount_edited = 1")      # typed: kept when the plan re-balances
     for k, v in fields.items():
         sets.append(f"{k} = :{k}")
         params[k] = (v if v != "" else None)
@@ -263,16 +320,30 @@ def patch_expense_installment(inst_id: int, req: ExpInstPatch, user=Depends(get_
 
 
 @router.post("/project/{entity_id}/category/{category}/installment")
-def add_expense_installment(entity_id: str, category: str, user=Depends(get_current_user)):
+def add_expense_installment(entity_id: str, category: str, estimate_qbo_id: Optional[str] = None,
+                            user=Depends(get_current_user)):
+    """A new row in one plan (item x estimate), dated a month after its last row;
+    the rows nobody typed re-balance so the plan still adds up (2026-11-19)."""
     _require(user)
+    q = estimate_qbo_id or None
     with engine.begin() as conn:
-        seq = conn.execute(text(
-            "SELECT COALESCE(MAX(seq),0)+1 FROM project_expense_installments WHERE entity_id=:e AND category=:c"),
-            {"e": entity_id, "c": category}).scalar()
+        last = conn.execute(text("""SELECT MAX(seq), MAX(week_of), MAX(expected_paid_date) FROM project_expense_installments
+                                    WHERE entity_id=:e AND category=:c AND estimate_qbo_id <=> :q"""),
+                            {"e": entity_id, "c": category, "q": q}).first()
+        import calendar
+        from datetime import date as _dt
+
+        def _next_month(d):
+            if not d:
+                return None
+            y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+            return _dt(y, m, min(d.day, calendar.monthrange(y, m)[1]) if d.day < 28 else calendar.monthrange(y, m)[1])
         conn.execute(text("""
-            INSERT INTO project_expense_installments (entity_id, category, seq, week_of, amount, edited, basis)
-            VALUES (:e, :c, :s, NULL, 0, 1, 'manual')
-        """), {"e": entity_id, "c": category, "s": seq})
+            INSERT INTO project_expense_installments (entity_id, category, seq, week_of, expected_paid_date, amount, edited, basis, estimate_qbo_id)
+            VALUES (:e, :c, :s, :w, :p, 0, 1, 'manual', :q)
+        """), {"e": entity_id, "c": category, "s": int(last[0] or 0) + 1, "w": _next_month(last[1]),
+               "p": _next_month(last[2]), "q": q})
+        rebalance_group(conn, entity_id, category, q)
     return {"ok": True}
 
 
@@ -280,5 +351,49 @@ def add_expense_installment(entity_id: str, category: str, user=Depends(get_curr
 def delete_expense_installment(inst_id: int, user=Depends(get_current_user)):
     _require(user)
     with engine.begin() as conn:
+        g = _group(conn, inst_id)
         conn.execute(text("DELETE FROM project_expense_installments WHERE id = :id"), {"id": inst_id})
+        if g:
+            rebalance_group(conn, g["entity_id"], g["category"], g["estimate_qbo_id"])
+    return {"ok": True}
+
+
+@router.post("/expense-installment/{inst_id}/revert")
+def revert_expense_installment(inst_id: int, user=Depends(get_current_user)):
+    """Back to what the app planned for this row (dates and amount)."""
+    _require(user)
+    with engine.begin() as conn:
+        r = conn.execute(text("SELECT app_week_of, app_expected_paid_date, app_amount FROM project_expense_installments WHERE id = :i"),
+                         {"i": inst_id}).mappings().first()
+        if not r or r["app_amount"] is None:
+            raise HTTPException(status_code=400, detail="The app has no plan saved for this row (added by hand).")
+        conn.execute(text("""UPDATE project_expense_installments SET week_of = :w, expected_paid_date = :p, amount = :a,
+                             edited = 0, amount_edited = 0 WHERE id = :i"""),
+                     {"w": r["app_week_of"], "p": r["app_expected_paid_date"], "a": r["app_amount"], "i": inst_id})
+        g = _group(conn, inst_id)
+        rebalance_group(conn, g["entity_id"], g["category"], g["estimate_qbo_id"])
+    return {"ok": True}
+
+
+@router.post("/project/{entity_id}/category/{category}/rebalance")
+def rebalance_plan(entity_id: str, category: str, estimate_qbo_id: Optional[str] = None, user=Depends(get_current_user)):
+    _require(user)
+    with engine.begin() as conn:
+        rebalance_group(conn, entity_id, category, estimate_qbo_id or None)
+    return {"ok": True}
+
+
+@router.post("/project/{entity_id}/category/{category}/keep")
+def keep_plan_total(entity_id: str, category: str, estimate_qbo_id: Optional[str] = None, user=Depends(get_current_user)):
+    """Keep a plan that doesn't add up to the estimate (on purpose)."""
+    _require(user)
+    q = estimate_qbo_id or None
+    with engine.begin() as conn:
+        tot = conn.execute(text("""SELECT COALESCE(SUM(amount), 0) FROM project_expense_installments
+                                   WHERE entity_id = :e AND category = :c AND estimate_qbo_id <=> :q"""),
+                           {"e": entity_id, "c": category, "q": q}).scalar()
+        conn.execute(text("""INSERT INTO project_expense_sum_ok (entity_id, category, estimate_qbo_id, total, by_email)
+                             VALUES (:e, :c, :q, :t, :u)
+                             ON DUPLICATE KEY UPDATE total = VALUES(total), by_email = VALUES(by_email), at = CURRENT_TIMESTAMP"""),
+                     {"e": entity_id, "c": category, "q": q or "", "t": tot, "u": user.get("email")})
     return {"ok": True}

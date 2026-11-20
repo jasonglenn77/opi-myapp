@@ -177,7 +177,7 @@ def _load_schedules(conn, entity_id):
     """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
     scheds = conn.execute(text("""
         SELECT s.id, s.estimate_qbo_id, s.estimate_doc_number, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
-               s.source, s.source_file_name, s.source_modified, s.dates_confirmed,
+               s.source, s.source_file_name, s.source_modified, s.dates_confirmed, s.sum_ok_total,
                -- the app's copy of the Drive file the schedule was read from (documents viewer)
                (SELECT d.id FROM documents d WHERE d.source_drive_id = s.source_file_id
                  ORDER BY d.entity_id = s.entity_id DESC, d.id DESC LIMIT 1) AS source_doc_id,
@@ -192,7 +192,7 @@ def _load_schedules(conn, entity_id):
     """), {"id": entity_id}).mappings().all()
     out = {}
     for sched in scheds:
-        inst = conn.execute(text("""SELECT id, seq, pay_date, amount, send_invoice_date, status, note, edited
+        inst = conn.execute(text("""SELECT id, seq, pay_date, amount, send_invoice_date, status, note, edited, amount_edited
              FROM project_payment_installments WHERE schedule_id=:sid ORDER BY seq, id"""),
             {"sid": sched["id"]}).mappings().all()
         schedule = {
@@ -207,6 +207,8 @@ def _load_schedules(conn, entity_id):
             "source": sched["source"], "source_file_name": sched["source_file_name"],
             "source_modified": str(sched["source_modified"])[:10] if sched["source_modified"] else None,
             "source_doc_id": sched["source_doc_id"],
+            "dates_confirmed": sched["dates_confirmed"],
+            "sum_ok_total": float(sched["sum_ok_total"]) if sched["sum_ok_total"] is not None else None,
         }
         installments = [{
             "id": r["id"], "seq": r["seq"],
@@ -214,6 +216,7 @@ def _load_schedules(conn, entity_id):
             "amount": float(r["amount"] or 0),
             "send_invoice_date": str(r["send_invoice_date"]) if r["send_invoice_date"] else None,
             "status": r["status"], "note": r["note"], "edited": bool(r["edited"]),
+            "amount_edited": bool(r["amount_edited"]),
         } for r in inst]
         out[sched["estimate_qbo_id"]] = (schedule, installments)
     return out
@@ -397,10 +400,10 @@ def patch_installment(inst_id: int, body: InstallmentBody, user=Depends(get_curr
         old = _sheet_row(conn, inst_id)
         before = _inst_row(conn, inst_id)
         conn.execute(text(f"UPDATE project_payment_installments SET {', '.join(sets)} WHERE id=:id"), params)
-        if body.amount is not None:     # the other open rows absorb the change (2026-11-18)
-            sid_of = conn.execute(text("SELECT schedule_id FROM project_payment_installments WHERE id=:id"), {"id": inst_id}).scalar()
-            if sid_of:
-                _rebalance(conn, sid_of)
+        # 2026-11-19 (owner): an amount typed here stays as typed and the other
+        # rows don't move; if the total is now off, the card says so and offers
+        # "Re-balance the open payments" or "Keep it". Adding or removing a row
+        # still re-balances (rows nobody typed an amount into).
         after = _inst_row(conn, inst_id)
         if old:   # 0088: a change to a value read from the Drive Payment Schedule is kept + listed on Data Review
             new = {"pay_date": params.get("pd"), "send_invoice_date": params.get("inv"), "amount": params.get("amt")}
@@ -437,10 +440,25 @@ def _rebalance(conn, sid):
     are; the other rows are scaled together to what's left, keeping their shape
     (a new empty row starts at their average; the last row takes the cents).
     With no such row, the last unpaid row takes the difference."""
-    sch = conn.execute(text("SELECT contract_labor FROM project_payment_schedules WHERE id=:sid"), {"sid": sid}).first()
-    if not sch or sch[0] is None:
+    sch = conn.execute(text("SELECT contract_labor, entity_id, estimate_qbo_id FROM project_payment_schedules WHERE id=:sid"),
+                       {"sid": sid}).first()
+    if not sch:
         return None
-    total = round(float(sch[0]), 2)
+    # 2026-11-19: the target is the estimate's contract labor as it is now (the
+    # card shows that); a schedule read from the Drive sheet can carry an old 0.
+    cur_lab = conn.execute(text("""
+        SELECT ROUND(SUM(COALESCE(sl.cost_amount, sl.amount)), 2)
+        FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
+        WHERE t.entity_type = 'Estimate' AND t.qbo_id = :q AND t.customer_qbo_id = :e AND sl.item_name LIKE 'Contract Labor%'"""),
+        {"q": sch[2], "e": sch[1]}).scalar() if sch[2] else None
+    if cur_lab is not None and float(cur_lab) > 0:
+        total = round(float(cur_lab), 2)
+        if sch[0] is None or abs(float(sch[0]) - total) > 0.004:
+            conn.execute(text("UPDATE project_payment_schedules SET contract_labor = :t WHERE id = :sid"), {"t": total, "sid": sid})
+    elif sch[0] is not None:
+        total = round(float(sch[0]), 2)
+    else:
+        return None
     rows = conn.execute(text("""SELECT id, amount, status, amount_edited FROM project_payment_installments
                                 WHERE schedule_id=:sid ORDER BY seq, id"""), {"sid": sid}).mappings().all()
     if not rows:
@@ -468,6 +486,33 @@ def _rebalance(conn, sid):
             conn.execute(text("UPDATE project_payment_installments SET amount=:a WHERE id=:id"),
                          {"a": round(float(r["amount"] or 0) + left, 2), "id": r["id"]})
     return total
+
+
+@router.post("/schedule/{sid}/rebalance")
+def rebalance_now(sid: int, user=Depends(get_current_user)):
+    """The open payments nobody typed an amount into absorb the difference, so
+    the schedule adds up to the contract labor again (if every open row was
+    typed, the last one does)."""
+    _require(user)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE project_payment_schedules SET sum_ok_total = NULL, sum_ok_by = NULL WHERE id=:sid"), {"sid": sid})
+        total = _rebalance(conn, sid)
+    record_audit(user, "crew_payment.rebalance", "payment_schedule", str(sid), None, {"schedule_id": sid, "to": total})
+    return {"ok": True}
+
+
+@router.post("/schedule/{sid}/keep-total")
+def keep_total(sid: int, user=Depends(get_current_user)):
+    """Keep a schedule that doesn't add up to the contract labor (paying the
+    crew more or less on purpose). The alert comes back if the total changes."""
+    _require(user)
+    with engine.begin() as conn:
+        tot = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM project_payment_installments WHERE schedule_id=:sid"),
+                           {"sid": sid}).scalar()
+        conn.execute(text("UPDATE project_payment_schedules SET sum_ok_total = :t, sum_ok_by = :u WHERE id=:sid"),
+                     {"t": tot, "u": user.get("email"), "sid": sid})
+    record_audit(user, "crew_payment.keep_total", "payment_schedule", str(sid), None, {"schedule_id": sid, "total": float(tot)})
+    return {"ok": True}
 
 
 @router.post("/schedule/{sid}/confirm-dates")
