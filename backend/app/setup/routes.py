@@ -52,10 +52,12 @@ STEPS = [
     ("qbo_project", "QuickBooks", "Project created in QuickBooks", "auto"),
     ("qbo_estimate", "QuickBooks", "Project estimate created", "auto"),
     ("first_invoice", "QuickBooks", "First invoice sent", "auto"),
-    ("pm", "Assignment", "Project manager assigned", "auto"),
-    ("crew", "Assignment", "Crew offer accepted", "auto"),
+    # 2026-11-19 (owner): dates first, then details, PM, crew. The crew card is
+    # "Crew company assigned" (per estimate); the offer is sent from Schedules.
     ("dates", "Assignment", "Start and end dates set", "auto"),
     ("details", "Assignment", "Job details checked (wire guidance, travel, days off, equipment)", "manual"),
+    ("pm", "Assignment", "Project manager assigned", "auto"),
+    ("crew", "Assignment", "Crew company assigned", "auto"),
     ("invoice_schedule", "Schedules", "Invoice schedule reviewed", "manual"),
     ("crew_schedule", "Schedules", "Crew payment schedule reviewed", "manual"),
     ("expense_schedule", "Schedules", "Expense schedule reviewed", "manual"),
@@ -179,6 +181,30 @@ def _gather(conn, opp_ids=None, extra_eids=None):
                SUM(st = 'Pending') AS pending_n, SUM(CASE WHEN st = 'Pending' THEN total_amt ELSE 0 END) AS pending_total
         FROM latest WHERE rn = 1 GROUP BY e""", "eids"),
         {"eids": eids}).mappings()}
+    # 2026-11-19: date ranges where the Job Schedule sheet says something else
+    d["js_diff"] = {}
+    try:
+        for r in conn.execute(_q("""SELECT qc.qbo_id, COUNT(*) FROM gsync_schedule_proposals g
+                                    JOIN qbo_customers qc ON qc.id = g.qbo_customer_id
+                                    WHERE qc.qbo_id IN :eids GROUP BY qc.qbo_id""", "eids"), {"eids": eids}).all():
+            d["js_diff"][str(r[0])] = int(r[1])
+    except Exception:
+        pass
+    # 2026-11-19: the crew company per accepted estimate (Billing's crew = who's paid)
+    d["est_crews"] = {}
+    for r in conn.execute(_q("""
+        WITH latest AS (
+          SELECT customer_qbo_id AS e, qbo_id, doc_number, JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.TxnStatus')) AS st,
+                 ROW_NUMBER() OVER (PARTITION BY customer_qbo_id, COALESCE(doc_number, qbo_id) ORDER BY id DESC) AS rn
+          FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id IN :eids)
+        SELECT l.e, l.qbo_id, l.doc_number, b.crew_id, COALESCE(pc.name, wc.name) AS crew
+        FROM latest l
+        LEFT JOIN project_estimate_billing b ON b.entity_id = l.e AND b.estimate_qbo_id = l.qbo_id
+        LEFT JOIN work_crews wc ON wc.id = b.crew_id
+        LEFT JOIN work_crews pc ON pc.id = wc.parent_id
+        WHERE l.rn = 1 AND l.st IN ('Accepted', 'Converted', 'Closed')
+        ORDER BY l.e, l.doc_number""", "eids"), {"eids": eids}).mappings():
+        d["est_crews"].setdefault(str(r["e"]), []).append(dict(r))
     d["invoices"] = {r["e"]: dict(r) for r in conn.execute(_q("""
         SELECT customer_qbo_id AS e, COUNT(*) AS n, MIN(txn_date) AS first_date,
                SUBSTRING_INDEX(GROUP_CONCAT(total_amt ORDER BY txn_date, id), ',', 1) AS first_amount
@@ -336,14 +362,18 @@ def _steps(o, d, today):
     pms = d["pms"].get(cid, []) if cid else []
     add("pm", "done" if pms else ("todo" if eid else "locked"), ", ".join(pms))
     crews = sorted(d["assigned_crews"].get(cid, set())) if cid else []
-    if accepted:
-        cs, cd = "done", f"{accepted[-1]['crew']} accepted {str(accepted[-1]['responded_at'] or '')[:10]}"
-    elif offers and offers[-1]["status"] == "sent":
-        cs, cd = "waiting", f"Sent to {offers[-1]['crew']} {str(offers[-1]['sent_at'])[:10]}, no answer yet"
-    elif offers and offers[-1]["status"] == "declined":
-        cs, cd = "todo", f"{offers[-1]['crew']} declined. Send to another crew"
+    # 2026-11-19: done when every accepted estimate has its crew company (the
+    # offer is sent per estimate from Schedules and shows there).
+    ec = d.get("est_crews", {}).get(str(eid), []) if eid else []
+    if ec:
+        miss = [f"#{r['doc_number']}" for r in ec if not r["crew_id"]]
+        names = sorted({r["crew"] for r in ec if r["crew"]})
+        if miss:
+            cs, cd = "todo", (f"{', '.join(names)} · " if names else "") + f"no crew yet: {', '.join(miss)}"
+        else:
+            cs, cd = "done", ", ".join(names)
     elif crews:
-        cs, cd = "done", f"Assigned: {', '.join(crews)} (no offer on record)"
+        cs, cd = "done", f"Assigned: {', '.join(crews)}"
     else:
         cs, cd = ("todo" if eid else "locked"), ""
     add("crew", cs, cd)
@@ -369,9 +399,11 @@ def _steps(o, d, today):
         if not has_dates:
             add(key, "locked", "Built once the start and end dates are set")
         else:
-            warn = "No crew has accepted yet" if key == "crew_schedule" and not accepted and not crews else ""
+            warn = "No crew company assigned yet" if key == "crew_schedule" and cs != "done" else ""
             add(key, "todo", (f"Built by the app" if n else f"Opens the {what} schedule to build it") + (f" · {warn}" if warn else ""),
                 warning=warn or None)
+    _pos = {k: i for i, (k, *_r) in enumerate(STEPS)}
+    out.sort(key=lambda x: _pos.get(x["key"], 99))     # cards follow STEPS (2026-11-19 order)
     return out, item, pms, crews
 
 
@@ -396,8 +428,10 @@ def _flags(o, steps, item, today):
             fl.append(("bad", f"Starts in {days} day{'s' if days != 1 else ''}, {', '.join(missing)}"))
     if st["dates"] == "done" and any(st[k] == "todo" for k in ("invoice_schedule", "crew_schedule", "expense_schedule")):
         fl.append(("info", "Dates set: review the schedules"))
-    if st["crew"] == "waiting":
-        fl.append(("info", "Crew offer waiting"))
+    # (crew offers are per estimate in Schedules now: the tile counts them)
+    jsd = (o.get("_js_diff") or 0)
+    if jsd:
+        fl.append(("warn", f"Job Schedule differs on {jsd} date range{'s' if jsd != 1 else ''}"))
     n_rv = sum(1 for s in steps if s["state"] == "review")
     if n_rv:
         fl.insert(0, ("bad", f"Back for re-review: {n_rv} step{'s' if n_rv != 1 else ''}"))
@@ -422,6 +456,7 @@ def _comment_counts(o, d):
 
 
 def _row(o, d, today):
+    o = {**o, "_js_diff": d.get("js_diff", {}).get(str(o["project_qbo_id"]), 0) if o["project_qbo_id"] else 0}
     steps, item, pms, crews = _steps(o, d, today)
     done = sum(1 for s in steps if s["state"] in ("done", "not_needed"))
     stage = next((s["stage"] for s in steps if s["state"] in ("todo", "waiting", "review")), "Ready")
@@ -429,6 +464,8 @@ def _row(o, d, today):
     n_review = sum(1 for s in steps if s["state"] == "review")
     return {
         "key": o["key"], "opportunity_id": o["id"], "other_opportunities": o["other_opportunities"],
+        "job_schedule_differs": d.get("js_diff", {}).get(str(o["project_qbo_id"]), 0) if o["project_qbo_id"] else 0,
+        "offers_waiting": sum(1 for x in (d["offers"].get(o["project_qbo_id"], []) if o["project_qbo_id"] else []) if x["status"] == "sent"),
         "title": o["title"], "quote_number": o["quote_number"], "project_qbo_id": o["project_qbo_id"],
         "project_internal_id": o["project_internal_id"], "project_name": o["project_name"],
         "customer": o["customer"] or o["customer_name_raw"], "dealer": o["dealer"],
@@ -462,7 +499,7 @@ def _visible(r, today):
     """To do: new jobs that still need something done (a job leaves the list once
     every step is done or not needed, or once it's finished or long under way),
     plus any live project a change sent back for re-review."""
-    if r["needs_review"] or r["unanswered_dates"]:
+    if r["needs_review"] or r["unanswered_dates"] or r.get("job_schedule_differs"):
         return (r.get("life") or {}).get("status") not in ("closed", "canceled")
     if r["status"] in ("completed", "canceled"):
         return False

@@ -595,19 +595,83 @@ def store_proposals(p):
     """Keep the sheet's would-be changes (not status-only ones: the status follows
     the dates) for the Assignment to show. Replaced on every run."""
     import json
+    import hashlib
     rows = []
     for c in p.get("changes") or []:
         if set(c["changes"]) <= {"status"}:
             continue
+        ch = {k: v for k, v in c["changes"].items() if k != "status"}
         rows.append({"cid": c["qbo_customer_id"], "sid": c["schedule_item_id"], "job": str(c.get("job") or "")[:40],
                      "f": c["visit"][0], "l": c["visit"][1], "ch": json.dumps(c["changes"], default=str),
-                     "pl": json.dumps(c, default=str)})
+                     "pl": json.dumps(c, default=str),
+                     "k": proposal_key(c["qbo_customer_id"], c["schedule_item_id"], c["visit"]),
+                     "h": hashlib.sha1(json.dumps(ch, sort_keys=True, default=str).encode()).hexdigest()})
     with engine.begin() as conn:
+        # 2026-11-19: differences the office chose to keep the app's values for stay
+        # hidden until the sheet changes again
+        try:
+            kept = {r[0]: r[1] for r in conn.execute(text("SELECT k, changes_hash FROM gsync_schedule_dismissed")).all()}
+        except Exception:
+            kept = {}
+        rows = [r for r in rows if kept.get(r["k"]) != r["h"]]
         conn.execute(text("DELETE FROM gsync_schedule_proposals"))
         for r in rows:
             conn.execute(text("""INSERT INTO gsync_schedule_proposals (qbo_customer_id, schedule_item_id, job, visit_first, visit_last, changes, payload)
                                  VALUES (:cid, :sid, :job, :f, :l, :ch, :pl)"""), r)
+    try:
+        _notify_differences(rows)
+    except Exception:
+        pass
     return len(rows)
+
+
+def proposal_key(cid, sid, visit):
+    return f"line:{sid}" if sid else f"new:{cid}:{visit[0]}:{visit[1]}"
+
+
+def _notify_differences(rows):
+    """One bell notice per project when the Job Schedule says something the app
+    doesn't (once per set of differences: the dedupe key carries their hash)."""
+    import hashlib
+    from collections import defaultdict
+    from app.help import notify as N
+    by = defaultdict(list)
+    for r in rows:
+        by[r["cid"]].append(r)
+    if not by:
+        return
+    users = N.users_with_capability("page.assignment")
+    with engine.connect() as conn:
+        names = {r[0]: (r[1], r[2]) for r in conn.execute(text(
+            "SELECT id, qbo_id, display_name FROM qbo_customers WHERE id IN :i").bindparams(
+            __import__("sqlalchemy").bindparam("i", expanding=True)), {"i": list(by)}).all()}
+    for cid, rs in by.items():
+        qid, name = names.get(cid, (None, f"customer {cid}"))
+        h = hashlib.sha1("|".join(sorted(r["k"] + r["h"] for r in rs)).encode()).hexdigest()[:16]
+        N.notify(users, "jobschedule.differs", f"Job Schedule differs: {name}",
+                 body=f"{len(rs)} date range{'s' if len(rs) != 1 else ''}: the Job Schedule sheet says something different from the app. "
+                      "Open the job's dates in Project Setup and choose Use these or Keep the app's.",
+                 link=f"#/setup?job={qid}" if qid else "#/setup", subject=str(qid or cid),
+                 dedupe_key=f"jobschedule.differs:{cid}:{h}", email=False)
+
+
+def dismiss_one(proposal_id, by_email):
+    """Keep the app's values for this line until the sheet changes again."""
+    import hashlib
+    import json
+    with engine.begin() as conn:
+        r = conn.execute(text("SELECT qbo_customer_id, schedule_item_id, visit_first, visit_last, changes FROM gsync_schedule_proposals WHERE id = :i"),
+                         {"i": proposal_id}).mappings().first()
+        if not r:
+            raise ValueError("That Job Schedule difference is gone (the sheet changed since). Reload.")
+        ch = json.loads(r["changes"]) if isinstance(r["changes"], str) else r["changes"]
+        ch = {k: v for k, v in ch.items() if k != "status"}
+        k = proposal_key(r["qbo_customer_id"], r["schedule_item_id"], [str(r["visit_first"]), str(r["visit_last"])])
+        h = hashlib.sha1(json.dumps(ch, sort_keys=True, default=str).encode()).hexdigest()
+        conn.execute(text("""INSERT INTO gsync_schedule_dismissed (k, changes_hash, by_email) VALUES (:k, :h, :u)
+                             ON DUPLICATE KEY UPDATE changes_hash = VALUES(changes_hash), by_email = VALUES(by_email), at = CURRENT_TIMESTAMP"""),
+                     {"k": k, "h": h, "u": by_email})
+        conn.execute(text("DELETE FROM gsync_schedule_proposals WHERE id = :i"), {"i": proposal_id})
 
 
 def apply_one(proposal_id, actor_user_id):

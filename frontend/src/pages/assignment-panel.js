@@ -35,6 +35,9 @@ const _openHist = new Set();
 // with the project, which the Job Schedule import keeps as a spare).
 const _showUndated = new Set();
 const _justAdded = new Set();   // lines added in this session: never hidden
+// 2026-11-19 (owner): no pop-up prompts while editing. Messages show inline at
+// the top of the panel and survive the remount that follows a save.
+const _pendingNote = new WeakMap();
 
 const STATUS_OPTIONS = [
   { value: "needs_attention", label: "Needs attention" },
@@ -76,7 +79,9 @@ const ALL_PARTS = ["dates", "pm", "crew", "details", "notes"];
 export async function mountAssignmentPanel(container, qboCustomerId, onChange, opts = {}) {
   const show = new Set(opts.show || ALL_PARTS);
   const has = (k) => show.has(k);
-  container.innerHTML = `<div class="p-4 text-sm text-black/40">Loading assignment…</div>`;
+  // Keep what's on screen while reloading (an empty "Loading…" box made the
+  // page jump after every save).
+  if (!container.querySelector(".ap-root")) container.innerHTML = `<div class="p-4 text-sm text-black/40">Loading assignment…</div>`;
   let bundle;
   try {
     bundle = await api(`/assignment/bundle?qbo_customer_id=${encodeURIComponent(qboCustomerId)}`);
@@ -157,7 +162,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
         ${has("dates") && !pkMode ? field("Overage days", `<input data-f="overage_days" type="number" min="0" step="1" value="${it.overage_days || 0}" class="input text-xs py-1.5 w-16" title="Calendar days worked past the quoted end (orange on the Job Schedule)"/>`) : ""}
         ${has("dates") && !pkMode ? field("Last day", `<span class="ap-ro" title="Quoted end + overage days">${fmtHd(lastDay(it))}</span>`) : ""}
         ${has("pm") && !pkMode ? field("Project manager", `<button data-assign="pm" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 min-w-[9rem]">${pmSummary(it.active_project_managers)}</button>`, "ap-grow") : ""}
-        ${has("crew") ? field(pkMode ? "Crew on site (boss · slot)" : "Crew (company · lead · slot)", `<button data-crew-edit="${it.id}" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 whitespace-normal" style="min-width:11rem;">${crewSummary(it.active_work_crews)}</button>`, "ap-grow2") : ""}
+        ${has("crew") ? field(pkMode ? "On site: crew boss · lead · slot (one or more)" : "Crew (company · lead · slot)", `<button data-crew-edit="${it.id}" class="text-left text-xs rounded px-1.5 py-1.5 border border-black/10 hover:bg-black/5 whitespace-normal" style="min-width:11rem;">${crewSummary(it.active_work_crews)}</button>`, "ap-grow2") : ""}
       </div>
       <div class="ap-deck">
         ${has("details") ? field("Wire", `<label class="inline-flex items-center" style="height:30px;"><input data-f="wire_guidance" type="checkbox" class="h-4 w-4 cursor-pointer" ${it.wire_guidance ? "checked" : ""}/></label>`) : ""}
@@ -234,7 +239,8 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       .map(([k, [a, b]]) => `${JS_LABEL[k] || k}: <b>${escapeHtml(jsVal(k, b))}</b> <span class="text-black/40">(app: ${escapeHtml(jsVal(k, a))})</span>`);
     if (!parts.length) return "";
     return `<div class="ap-js"><span class="ap-js-t">Job Schedule says</span> ${parts.join(" · ")}
-      <button type="button" class="pd-btn" data-js-use="${x.id}" title="Take the Job Schedule's values for this date range">Use these</button></div>`;
+      <button type="button" class="pd-btn" data-js-use="${x.id}" title="Take the Job Schedule's values for this date range">Use these</button>
+      <button type="button" class="pd-btn" data-js-keep="${x.id}" title="The app is right: stop showing this until the sheet changes again">Keep the app's</button></div>`;
   }
   function jsNewVisits() {
     const xs = (pk.job_schedule || []).filter((x) => !x.schedule_item_id);
@@ -246,9 +252,18 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
     const t = pk.timeline || {};
     const brk = (t.breaks || []).map((b) => `${fmtHd(b.from)}–${fmtHd(b.to)}`).join(", ");
     if (!has("dates")) {
-      return has("pm") ? `<div class="ap-proj"><div class="ap-proj-pm" style="margin-left:0"><span class="ap-l">PM for every estimate</span>
+      if (has("pm")) return `<div class="ap-proj"><div class="ap-proj-pm" style="margin-left:0"><span class="ap-l">PM for every estimate</span>
         <span class="flex gap-1"><select data-pk-pmall class="input text-xs py-1.5"><option value="">Pick a PM…</option>${pms.map((x) => `<option value="${x.id}">${escapeHtml(pmName(x))}</option>`).join("")}</select>
-        <button type="button" class="pd-btn" data-pk-pmall-go>Set for all</button></span></div></div>` : "";
+        <button type="button" class="pd-btn" data-pk-pmall-go>Set for all</button></span></div></div>`;
+      // 2026-11-19 (owner): one crew company for every estimate, like the PM.
+      if (has("crew")) {
+        const dated = pk.packages.find((p) => p.has_dates);
+        return `<div class="ap-proj"><div class="ap-proj-pm" style="margin-left:0"><span class="ap-l">Crew company for every estimate</span>
+          <span class="flex gap-1"><select data-pk-crewall class="input text-xs py-1.5" ${dated ? "" : "disabled"}>${dated ? crewOptions(dated, "") : `<option value="">Set dates first</option>`}</select>
+          <button type="button" class="pd-btn" data-pk-crewall-go ${dated ? "" : "disabled"}>Set for all</button></span>
+          <em class="text-[11px] text-black/45">Estimates whose package has no dates yet are skipped.</em></div></div>`;
+      }
+      return "";
     }
     return `<div class="ap-proj">
       <div><span class="ap-l">Project</span><b>${t.start ? `${fmtHd(t.start)} to ${fmtHd(t.end)}` : "No dates yet"}</b>
@@ -304,7 +319,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       const head = `${p.start ? `${fmtHd(p.start)} to ${fmtHd(p.end)}` : "No dates yet"}${p.breaks.length ? ` · ${p.breaks.length} break${p.breaks.length === 1 ? "" : "s"}` : ""} · ${mine.filter((e) => e.accepted).length} accepted · ${money0(p.accepted_total)}`;
       return `<section class="ap-pk" data-pk="${p.id}">
         <div class="ap-pk-head"><button type="button" class="ap-pk-name" data-pk-rename="${p.id}" title="Rename this package">${escapeHtml(p.name)}</button><span class="ap-pk-sum">${head}</span></div>
-        ${mine.length && (has("pm") || has("crew") || has("dates")) ? `<div class="overflow-x-auto"><table class="ap-pk-est"><thead><tr><th>Estimate</th>${has("pm") ? "<th>PM</th>" : ""}${has("crew") ? "<th>Crew</th>" : ""}${has("dates") ? "<th>Package</th>" : ""}</tr></thead>
+        ${mine.length && (has("pm") || has("crew") || has("dates")) ? `<div class="overflow-x-auto"><table class="ap-pk-est"><thead><tr><th>Estimate</th>${has("pm") ? "<th>PM</th>" : ""}${has("crew") ? `<th title="The crew company paid for this estimate: its crew payment schedule and offer follow it">Crew company (paid)</th>` : ""}${has("dates") ? "<th>Package</th>" : ""}</tr></thead>
           <tbody>${mine.map((e) => estRow(e, p)).join("")}</tbody></table></div>` : mine.length ? "" : `<div class="text-xs text-black/45 py-1">No estimates in this package.</div>`}
         ${dropped.length ? `<div class="text-[11px] text-black/45 pb-1">Not counted: ${dropped.map((e) => `#${escapeHtml(e.doc_number || "")} (${escapeHtml((e.status || "").toLowerCase() || "not accepted")})`).join(", ")}</div>` : ""}
         ${has("dates") || has("details") || has("crew") ? `<div class="ap-pk-lines">${lines.map((it) => lineHtml(it, lineIdx.get(String(it.id)))).join("") || `<div class="text-xs text-black/45 py-2">No date range yet.</div>`}
@@ -320,8 +335,11 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       try { avail[p.id] = await api(`/offers/crew-availability?start=${p.start}&end=${p.end}`); } catch (_) { /* picker shows names only */ }
     }));
   }
+  const keepH = container.offsetHeight;
+  if (keepH) container.style.minHeight = `${keepH}px`;
   container.innerHTML = `
-    <div class="p-4 sm:p-5 text-ink-900">
+    <div class="p-4 sm:p-5 text-ink-900 ap-root">
+      <div data-apnote class="ap-note" hidden></div>
       ${holdBar}
       ${cancelBtn}
       <div class="flex items-start gap-3 flex-wrap mb-3">
@@ -330,7 +348,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
           : "Assign the PM(s), crew(s), dates, and schedule detail for each set of dates. A project can have more than one (extra crews / phases). Changes save automatically."))}</div>
         ${has("crew") ? `<span data-ccx-slot></span>` : ""}
       </div>
-      ${pkMode && (has("dates") || has("pm")) ? projectStrip() : ""}
+      ${pkMode && (has("dates") || has("pm") || has("crew")) ? projectStrip() : ""}
       ${pkMode && has("dates") ? jsNewVisits() : ""}
       <div data-rows>${pkMode ? packagesHtml() : bodyLines}</div>
       ${pkMode ? "" : hiddenNote}
@@ -339,6 +357,15 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       </div>` : ""}
     </div>`;
 
+  requestAnimationFrame(() => { container.style.minHeight = ""; });
+  function showNote(msg) {
+    const n = container.querySelector("[data-apnote]");
+    _pendingNote.set(container, { msg, at: Date.now() });
+    if (!n) return;
+    n.textContent = msg; n.hidden = false;
+    clearTimeout(n._t); n._t = setTimeout(() => { n.hidden = true; _pendingNote.delete(container); }, 8000);
+  }
+  { const pn = _pendingNote.get(container); if (pn && Date.now() - pn.at < 8000) showNote(pn.msg); }
   const rowsHost = container.querySelector("[data-rows]");
   const itemById = (sid) => items.find((x) => String(x.id) === String(sid));
 
@@ -407,7 +434,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       if (onChange) onChange();
     } catch (e) {
       if (state) { state.textContent = "Failed"; state.className = "text-[11px] text-red-600"; }
-      alert("Save failed: " + (e?.message || e));
+      showNote("Save failed: " + (e?.message || e));
     }
   }
 
@@ -604,9 +631,8 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       const line = del.closest("[data-sid]");
       const sid = line?.getAttribute("data-sid");
       if (!sid || sid === "null") return;
-      if (!confirm("Delete this schedule item? This removes its assignment and cannot be undone.")) return;
-      try { await api(`/assignment/schedule-item/${sid}`, { method: "DELETE" }); if (onChange) onChange(); remount(); }
-      catch (err) { alert("Delete failed: " + (err?.message || err)); }
+      try { await api(`/assignment/schedule-item/${sid}`, { method: "DELETE" }); showNote("Date range removed."); if (onChange) onChange(); remount(); }
+      catch (err) { showNote("Delete failed: " + (err?.message || err)); }
     }
   });
 
@@ -615,7 +641,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
     const eid = encodeURIComponent(bundle.qbo.qbo_id);
     const post = async (path, body, method = "POST") => {
       try { await api(`/packages/${eid}${path}`, { method, body: JSON.stringify(body || {}) }); if (onChange) onChange(); remount(); }
-      catch (err) { alert(`Couldn't save: ${err?.message || err}`); remount(); }
+      catch (err) { showNote(`Couldn't save: ${err?.message || err}`); remount(); }
     };
     container.addEventListener("change", (e) => {
       const t = e.target;
@@ -627,7 +653,9 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
     container.addEventListener("click", async (e) => {
       const js = e.target.closest("[data-js-use]");
       if (js) { post(`/job-schedule/${js.dataset.jsUse}/apply`, {}); return; }
-      const b = e.target.closest("[data-pk-addline],[data-pk-rename],[data-pk-keep],[data-pk-pmall-go]");
+      const jk = e.target.closest("[data-js-keep]");
+      if (jk) { post(`/job-schedule/${jk.dataset.jsKeep}/keep`, {}); return; }
+      const b = e.target.closest("[data-pk-addline],[data-pk-rename],[data-pk-keep],[data-pk-pmall-go],[data-pk-crewall-go]");
       if (!b) return;
       if (b.dataset.pkAddline) {
         try {
@@ -635,16 +663,32 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
           if (r && r.added_line) _justAdded.add(String(r.added_line));
           if (onChange) onChange();
           remount();
-        } catch (err) { alert(`Couldn't add: ${err?.message || err}`); }
+        } catch (err) { showNote(`Couldn't add: ${err?.message || err}`); }
       } else if (b.dataset.pkRename) {
+        // Rename in place: the name turns into a box; Enter or leaving it saves.
         const cur = pk.packages.find((x) => String(x.id) === b.dataset.pkRename);
-        const name = prompt("Package name (blank = Package n)", cur?.custom_name ? cur.name : "");
-        if (name !== null) post(`/package/${b.dataset.pkRename}`, { name }, "PATCH");
+        const inp = document.createElement("input");
+        inp.className = "input text-xs py-1"; inp.style.width = "12rem";
+        inp.value = cur?.custom_name ? cur.name : ""; inp.placeholder = cur?.name || "Package name";
+        b.replaceWith(inp); inp.focus();
+        let done = false;
+        const save = () => { if (done) return; done = true; const v = inp.value.trim(); if (v !== (cur?.custom_name ? cur.name : "")) post(`/package/${b.dataset.pkRename}`, { name: v }, "PATCH"); else remount(); };
+        inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(); if (ev.key === "Escape") { done = true; remount(); } });
+        inp.addEventListener("blur", save);
       } else if (b.dataset.pkKeep) {
         post(`/estimate/${encodeURIComponent(b.dataset.pkKeep)}/package`, { package_id: Number(b.dataset.pkid) });
+      } else if (b.matches("[data-pk-crewall-go]")) {
+        const v = container.querySelector("[data-pk-crewall]")?.value;
+        if (!v) return;
+        try {
+          const r = await api(`/packages/${eid}/crew`, { method: "POST", body: JSON.stringify({ crew_id: Number(v) }) });
+          if (r && r.skipped && r.skipped.length) showNote(`Skipped (no dates yet): ${r.skipped.map((x) => `#${x}`).join(", ")}`);
+          if (onChange) onChange();
+          remount();
+        } catch (err) { showNote(`Couldn't save: ${err?.message || err}`); }
       } else if (b.matches("[data-pk-pmall-go]")) {
         const v = container.querySelector("[data-pk-pmall]")?.value;
-        if (!v) { alert("Pick a PM first."); return; }
+        if (!v) { showNote("Pick a PM first."); return; }
         post("/pm", { pm_id: Number(v), estimates: null });
       }
     });
@@ -682,6 +726,6 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
       if (r && r.schedule_item_id) _justAdded.add(String(r.schedule_item_id));   // keep the new (undated) line in view
       if (onChange) onChange();
       remount();
-    } catch (e) { alert("Could not add schedule item: " + (e?.message || e)); }
+    } catch (e) { showNote("Could not add schedule item: " + (e?.message || e)); }
   });
 }

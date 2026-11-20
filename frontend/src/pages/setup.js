@@ -63,7 +63,8 @@ export async function setupPage(routeFn) {
     noqbo: ["Not in QuickBooks", (j) => stepOf(j, "qbo_project").state !== "done"],
     firstinv: ["First invoice to send", (j) => stepOf(j, "first_invoice").state === "todo"],
     soon: ["Starting soon with gaps", (j) => j.flags.some((f) => f.text.startsWith("Starts in"))],
-    offers: ["Crew offers waiting", (j) => stepOf(j, "crew").state === "waiting"],
+    offers: ["Crew offers waiting", (j) => (j.offers_waiting || 0) > 0],
+    jsdiff: ["Job Schedule differs", (j) => (j.job_schedule_differs || 0) > 0],
     sched: ["Schedules to review", (j) => openIn(j, "Schedules")],
     review: ["Back for re-review", (j) => j.needs_review > 0 || j.unanswered_dates > 0],
   };
@@ -111,9 +112,9 @@ export async function setupPage(routeFn) {
         const r = (await api("/review/runs")).b151;
         if (r && r.started_at !== before && r.finished_at) { b151.run = r; break; }
       }
-      if (b151.run && !b151.run.ok) alert("B151 refresh failed: " + (b151.run.error || "unknown error"));
+      if (b151.run && !b151.run.ok) toast("B151 refresh failed: " + (b151.run.error || "unknown error"));
       else toast("B151 read. Newly won jobs are on the list.");
-    } catch (e) { alert("B151 refresh failed: " + (e?.message || e)); }
+    } catch (e) { toast("B151 refresh failed: " + (e?.message || e)); }
     b151.busy = false;
     await load(true);
     paintB151();
@@ -172,6 +173,7 @@ export async function setupPage(routeFn) {
       ${tile("firstinv", "In QuickBooks, nothing invoiced")}
       ${tile("soon", "Within 14 days, no PM, crew or dates", true)}
       ${tile("offers", "Sent, no answer yet")}
+      ${tile("jsdiff", "The sheet says other dates or crews", true)}
       ${tile("sched", "Dates set, schedules not confirmed")}
     </div>`;
   }
@@ -381,13 +383,12 @@ export async function setupPage(routeFn) {
       b.dataset.wired = "1";
       b.addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        const note = prompt("Re-checked after the change. A note for the record (optional):", "");
-        if (note === null) return;
+        const note = "";   // 2026-11-19 (owner): no pop-ups; the step's Comment holds any note
         b.disabled = true;
         try {
           await api(`/setup/job/${encodeURIComponent(j.key)}/review/${b.dataset.reviewed}`, { method: "POST", body: JSON.stringify({ note }) });
           await reloadJob(j.key);
-        } catch (e) { b.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
+        } catch (e) { b.disabled = false; toast(`Couldn't save: ${e?.message || e}`); }
       });
     });
     sec.querySelectorAll("[data-mark]").forEach((b) => {
@@ -396,10 +397,9 @@ export async function setupPage(routeFn) {
       b.addEventListener("click", async () => {
         b.disabled = true;
         try {
-          if (b.dataset.status && b.dataset.mark === "qbo_estimate" && !confirm("Mark the estimate done? It ticks itself once the next QuickBooks sync brings it in.")) { b.disabled = false; return; }
           await api(`/setup/job/${encodeURIComponent(j.key)}/step/${b.dataset.mark}`, { method: "POST", body: JSON.stringify({ status: b.dataset.status || null }) });
           await reloadJob(j.key);
-        } catch (e) { b.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
+        } catch (e) { b.disabled = false; toast(`Couldn't save: ${e?.message || e}`); }
       });
     });
   }
@@ -500,7 +500,7 @@ export async function setupPage(routeFn) {
         const all = !step && host.querySelector("[data-pall]")?.checked;
         await loadThread(j, host, step, all);
         await reloadJob(j.key);
-      } catch (err) { alert(`Couldn't post: ${err?.message || err}`); }
+      } catch (err) { toast(`Couldn't post: ${err?.message || err}`); }
       finally { btn.disabled = false; }
     });
   }
@@ -550,7 +550,7 @@ export async function setupPage(routeFn) {
   const copyBtn = (v, label = "Copy") => `<button class="su-copy" data-copy="${escapeHtml(String(v))}" title="Copy ${escapeHtml(String(v))}">${label}</button>`;
   const wireCopy = (el) => el.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(b.dataset.copy); const t = b.textContent; b.textContent = "Copied"; setTimeout(() => { b.textContent = t; }, 1200); }
-    catch (_) { alert(b.dataset.copy); }
+    catch (_) { toast(b.dataset.copy); }
   }));
 
   // ── Step bodies ─────────────────────────────────────────────────────────
@@ -572,9 +572,12 @@ export async function setupPage(routeFn) {
   const noteReason = (n) => { for (const list of Object.values(st.meta.note_reasons || {})) { const hit = list.find(([k]) => k === n.reason_code); if (hit) return hit[1]; } return n.reason_code; };
   function noteForm(j, step, title) {
     const reasons = (st.meta.note_reasons || {})[step] || [];
-    const cur = (j.steps.find((s) => s.key === step) || {}).note;
-    return `<form class="su-sub mt-3 grid gap-2" data-noteform="${step}">
-      <h4 class="font-bold text-sm">${title}</h4>
+    const sx = j.steps.find((s) => s.key === step) || {};
+    const cur = sx.note;
+    // 2026-11-19 (owner): once the step is done the "not done yet?" form folds away.
+    const fold = sx.state === "done" || sx.state === "not_needed";
+    const form = `<form class="${fold ? "" : "su-sub mt-3 "}grid gap-2" data-noteform="${step}">
+      ${fold ? "" : `<h4 class="font-bold text-sm">${title}</h4>`}
       ${cur ? `<div class="text-xs text-black/60">Last note: ${escapeHtml(noteLine(cur))}</div>` : ""}
       <div class="flex flex-wrap gap-2 items-end">
         <label class="text-xs grid gap-1"><span class="text-black/55">Why</span><select name="reason" class="input text-sm"><option value="">Pick one…</option>${reasons.map(([k, l]) => `<option value="${k}">${escapeHtml(l)}</option>`).join("")}</select></label>
@@ -582,18 +585,19 @@ export async function setupPage(routeFn) {
         <label class="text-xs grid gap-1" style="flex:1;min-width:200px"><span class="text-black/55">Note</span><input name="note" class="input text-sm" placeholder="Anything the office should know"></label>
         <button type="submit" class="btn-primary text-sm">Save and notify</button>
       </div></form>`;
+    return fold ? `<details class="su-sub mt-3"><summary class="text-xs font-semibold text-black/60 cursor-pointer">${title}</summary><div class="mt-2">${form}</div></details>` : form;
   }
   function wireNoteForm(j, body) {
     body.querySelectorAll("[data-noteform]").forEach((f) => f.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const fd = new FormData(f);
-      if (!fd.get("reason") && !fd.get("note")) { alert("Pick a reason or write a note."); return; }
+      if (!fd.get("reason") && !fd.get("note")) { toast("Pick a reason or write a note."); return; }
       try {
         await api(`/setup/job/${encodeURIComponent(j.key)}/note`, { method: "POST", body: JSON.stringify({ step: f.dataset.noteform, reason_code: fd.get("reason") || null, note: fd.get("note") || null, expected_date: fd.get("expected") || null }) });
         toast("Saved. The office was notified.");
         await reloadJob(j.key);
         f.reset();
-      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't save: ${e?.message || e}`); }
     }));
   }
 
@@ -633,7 +637,7 @@ export async function setupPage(routeFn) {
         toast("PO uploaded.");
         await reloadJob(j.key);
         bodyPo(D?.j || j, body);
-      } catch (e) { drop.classList.remove("busy"); alert(`Couldn't upload: ${e?.message || e}`); }
+      } catch (e) { drop.classList.remove("busy"); toast(`Couldn't upload: ${e?.message || e}`); }
     };
     input.addEventListener("change", () => upload(input.files));
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
@@ -661,12 +665,11 @@ export async function setupPage(routeFn) {
       <div class="flex flex-wrap gap-2 mt-2 items-center"><input data-findproj class="input text-sm" style="max-width:280px" placeholder="Search QuickBooks projects"><div data-projhits class="flex flex-wrap gap-1.5"></div></div>`;
     wireCopy(body);
     const linkTo = async (qboId, nm) => {
-      if (!confirm(`Link "${j.title}" (quote ${j.quote_number}) to ${nm}?`)) return;
       try {
         await api(`/opportunities/${j.opportunity_id}`, { method: "PATCH", body: JSON.stringify({ project_qbo_id: String(qboId) }) });
         st.sel = String(qboId); remember(); delete st.cache[`draft:${j.key}`]; delete st.cache[`docs:${j.key}`];
         await load();
-      } catch (e) { alert(`Couldn't link: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't link: ${e?.message || e}`); }
     };
     body.querySelector("[data-link]")?.addEventListener("click", (e) => linkTo(e.currentTarget.dataset.link, j.same_site.name));
     const find = body.querySelector("[data-findproj]");
@@ -749,7 +752,7 @@ export async function setupPage(routeFn) {
     body.querySelector("[data-qbosync]")?.addEventListener("click", async (e) => {
       const b = e.currentTarget; b.disabled = true; b.textContent = "Syncing…";
       try { await api("/qbo/sync/transactions", { method: "POST" }); delete st.cache[`draft:${j.key}`]; await reloadJob(j.key); toast("QuickBooks synced."); bodyEstimate(D?.j || j, body); }
-      catch (er) { b.disabled = false; b.textContent = "Sync now"; alert(`Couldn't sync: ${er?.message || er}`); }
+      catch (er) { b.disabled = false; b.textContent = "Sync now"; toast(`Couldn't sync: ${er?.message || er}`); }
     });
   }
 
@@ -836,19 +839,19 @@ export async function setupPage(routeFn) {
       try {
         await api(`/invoices/qbo-invoice/${encodeURIComponent(inp.dataset.invexp)}/expected`, { method: "PATCH", body: JSON.stringify({ expected_paid_date: inp.value || null, via: "project_setup" }) });
         toast(inp.value ? "Expected date saved. Cash Flow follows." : "Expected date cleared: back to the due date.");
-      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't save: ${e?.message || e}`); }
     }));
     body.querySelectorAll("[data-need]").forEach((sel) => sel.addEventListener("change", async () => {
       try {
         await api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice/${encodeURIComponent(sel.dataset.need)}/need`, { method: "POST", body: JSON.stringify({ need: sel.value }) });
         await after(sel.value === "needed" ? "Marked: needs a first invoice." : "Marked: no first invoice needed.");
-      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't save: ${e?.message || e}`); }
     }));
     body.querySelectorAll("[data-needreset]").forEach((b) => b.addEventListener("click", async () => {
       try {
         await api(`/setup/job/${encodeURIComponent(j.key)}/first-invoice/${encodeURIComponent(b.dataset.needreset)}/need`, { method: "POST", body: JSON.stringify({ need: null }) });
         await after("Back to the app's default.");
-      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't save: ${e?.message || e}`); }
     }));
     body.querySelectorAll("[data-msform]").forEach((f) => f.addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -861,7 +864,7 @@ export async function setupPage(routeFn) {
           if (inp && r && k in r) inp.value = r[k] || "";
         }
         toast(r && r.due_from_terms ? `Saved. Due date set from the terms (${r.due_from_terms.replace("due = ", "")}).` : "Saved. Billing & Schedule and Cash Flow follow.");
-      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't save: ${e?.message || e}`); }
     }));
   }
 
@@ -915,11 +918,13 @@ export async function setupPage(routeFn) {
       const before = D?.j;
       await reloadJob(j.key);
       const fresh = D?.j;
-      if (fresh && before && (fresh.start !== before.start || fresh.end !== before.end)) {
+      // 2026-11-19 (owner): the PM and crew availability follow every change
+      // (a PM just picked shows this job in their list straight away).
+      if (fresh) {
         const av = document.querySelector('#suDetail .sc[data-sc="crew"] [data-avail]');
-        if (av) loadAvailability(fresh, av);
+        if (av && fresh.start) loadAvailability(fresh, av);
         const pm = document.querySelector('#suDetail .sc[data-sc="pm"] [data-pms]');
-        if (pm) loadPmWorkload(fresh, pm);
+        if (pm) { st.cache.pms = null; loadPmWorkload(fresh, pm); }
       }
       const dc = document.querySelector('#suDetail .sc[data-sc="dates"] [data-dchanges]');
       if (dc) setTimeout(() => loadDateChanges(D?.j || j, dc), 1500);
@@ -934,16 +939,15 @@ export async function setupPage(routeFn) {
     loadPmWorkload(j, body.querySelector("[data-pms]"));
     mountPart(j, body.querySelector("[data-part]"), ["pm"], "Pick the PM for each estimate, or set one PM for all of them. A PM can be set before there are dates. Saves as you go.");
   }
+  const CREW_INTRO = "Pick the crew company for each estimate (it's who gets paid and gets the offer), or set one for all. A crew needs dates, so set each package's dates first; the list is sorted by who's free. Who is on site (crew boss, leads, slots) is picked on each date range. The offer is sent per estimate from Schedules → Crew payments.";
   async function bodyCrew(j, body) {
     body.innerHTML = `
       <div class="su-sub"><h4 class="font-bold text-sm">Crew availability${j.start ? ` · ${day(j.start)} to ${day(j.end)}` : ""}</h4>
         <div class="text-xs text-black/55 mt-0.5">${j.start ? "Click a crew to see each day (each week on long jobs) and what they're booked on." : ""}</div>
         <div data-avail class="text-xs text-black/45 mt-1.5">${j.start ? "Loading…" : "Set the dates first (Start and end dates) to see which crews are free."}</div></div>
-      <div class="su-sub mt-3"><h4 class="font-bold text-sm">Crew offer</h4><div data-offers class="text-xs text-black/45 mt-1.5">${j.project_qbo_id ? "Loading…" : "Opens once the project is in QuickBooks."}</div></div>
-      ${partSlot("Assign the crew to each set of dates")}`;
+      ${partSlot("Crew company per estimate")}`;
     if (j.start) loadAvailability(j, body.querySelector("[data-avail]"));
-    if (j.project_qbo_id) loadOffers(j, body.querySelector("[data-offers]"));
-    mountPart(j, body.querySelector("[data-part]"), ["crew"], "Pick the crew for each estimate once its package has dates (sorted by who's free). The crew boss and slot go on each date range. Saves as you go.");
+    mountPart(j, body.querySelector("[data-part]"), ["crew"], CREW_INTRO);
   }
   async function bodyDates(j, body) {
     body.innerHTML = `<div class="text-xs text-black/55">${j.target_start ? `The quote targeted ${day(j.target_start)} to ${day(j.target_end)}${j.labor_days ? ` (${j.labor_days} labor days${j.travel_days ? `, ${j.travel_days} travel` : ""})` : ""}. ` : ""}Quoted end = the end the price was built on (green on the Job Schedule). Overage days = calendar days worked past it (orange). Moving a date sends the job back here and asks why.</div>
@@ -962,8 +966,8 @@ export async function setupPage(routeFn) {
   async function bodySchedule(j, body, key) {
     const only = { invoice_schedule: "invoice", crew_schedule: "crew", expense_schedule: "expense" }[key];
     const what = { invoice: "The customer invoices: contract value, dates, what's paid, sent and due, the invoice schedule (edit any row), the QuickBooks invoices and pending change orders.",
-      crew: "The crew payment schedule: what each crew is paid and when (payroll Fridays). An offer sent from the app goes out with it.",
-      expense: "The expense schedule: lodging, rentals and other costs by category and week." }[only];
+      crew: "The crew payment schedule per estimate: pay date, amount, the date the crew sends its invoice, and a comment (payroll Fridays). Each estimate's offer is sent from its card: the offer email carries the schedule as a table, and marking it sent saves the email and the schedule in the job's 7 Notes folder.",
+      expense: "The expense schedule per item: lodging on Hotel Engine's monthly statements; materials, propane, rentals and travel at each month-end. Edit any row; ↺ takes a row back to the app's plan." }[only];
     body.innerHTML = `<div class="text-xs text-black/55">${what} Check it, fix any date or amount, then press "Mark reviewed".</div><div data-billing-slot class="mt-2"></div>`;
     const slot = body.querySelector("[data-billing-slot]");
     if (!j.project_qbo_id || !j.start) { slot.innerHTML = `<div class="text-xs text-black/50">${j.project_qbo_id ? "Set the start and end dates first. The schedules are built from them." : "Opens once the project is in QuickBooks and has dates."}</div>`; return; }
@@ -1002,7 +1006,7 @@ export async function setupPage(routeFn) {
         await api(`/setup/date-change/${f.dataset.answer}`, { method: "POST", body: JSON.stringify({ reason_code: fd.get("reason"), co_needed: fd.get("co"), note: fd.get("note") || null }) });
         await reloadJob(j.key);
         loadDateChanges(D?.j || j, el);
-      } catch (e) { alert(`Couldn't save: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't save: ${e?.message || e}`); }
     }));
   }
 
@@ -1111,8 +1115,8 @@ export async function setupPage(routeFn) {
         tr.after(drill);
         tr.setAttribute("aria-expanded", "true"); tr.lastElementChild.textContent = "▾";
         drill.querySelector("[data-offer-crew]")?.addEventListener("click", () => {
-          const sel = document.querySelector('#suDetail .sc[data-sc="crew"] form[data-new] select[name="crew"]');
-          if (sel) { sel.value = String(c.id); sel.closest("form").scrollIntoView({ behavior: "smooth", block: "center" }); sel.focus(); }
+          const sel = document.querySelector('#suDetail .sc[data-sc="crew"] [data-pk-crewall]');
+          if (sel) { sel.value = String(c.id); sel.closest(".ap-proj")?.querySelector("[data-pk-crewall-go]")?.click(); }
         });
       };
       tr.addEventListener("click", (ev) => { if (!ev.target.closest("a")) toggle(); });
@@ -1123,7 +1127,7 @@ export async function setupPage(routeFn) {
     const wd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     const byProj = {};
     for (const b of c.bookings || []) (byProj[b.project || "—"] ||= { entity_id: b.entity_id, rows: [] }).rows.push(b);
-    const canOffer = !!document.querySelector('#suDetail .sc[data-sc="crew"] form[data-new]:not([hidden])');
+    const canOffer = !!document.querySelector('#suDetail .sc[data-sc="crew"] [data-pk-crewall]');
     // long jobs (over ~3 months): one box per week = the fewest crews free on a weekday that week
     const weeks = [];
     if (st.availWeekly) {
@@ -1146,12 +1150,12 @@ export async function setupPage(routeFn) {
       ${Object.keys(byProj).length ? `<div class="grid gap-0.5 mt-2">${Object.entries(byProj).map(([name, g]) => `<div class="text-xs"><a class="font-semibold underline" href="${g.entity_id ? projectLink(g.entity_id) : "#"}">${escapeHtml(name)}</a>
           <span class="text-black/55">${g.rows.map((b) => `${escapeHtml(b.slot || "")}${b.lead ? ` ${escapeHtml(b.lead)}` : ""} ${day(b.from)} to ${day(b.thru)}`).join("; ")}</span></div>`).join("")}</div>` : `<div class="text-xs text-black/55 mt-2">Not booked on anything during this job.</div>`}
       ${(c.time_off || []).length ? `<div class="text-xs text-amber-800 mt-1">Time off: ${(c.time_off || []).map((t) => escapeHtml(`${t.lead || "whole company"} ${t.start || t.from || ""} to ${t.end || t.thru || ""}`)).join("; ")}</div>` : ""}
-      ${canOffer ? `<button type="button" class="pd-btn mt-2" data-offer-crew>Offer the job to ${escapeHtml(c.name)}</button>` : ""}`;
+      ${canOffer ? `<button type="button" class="pd-btn mt-2" data-offer-crew>Use ${escapeHtml(c.name)} for every estimate</button>` : ""}`;
   }
 
   const remountEditor = (j) => {
     const slot = document.querySelector('#suDetail .sc[data-sc="crew"] [data-part]');
-    if (slot) mountPart(j, slot, ["crew"], "Pick the crew for each estimate once its package has dates (sorted by who's free). The crew boss and slot go on each date range. Saves as you go.");
+    if (slot) mountPart(j, slot, ["crew"], CREW_INTRO);
   };
   async function loadOffers(j, el) {
     let d;
@@ -1196,12 +1200,11 @@ export async function setupPage(routeFn) {
     el.querySelectorAll("[data-resp]").forEach((b) => b.addEventListener("click", async () => {
       b.disabled = true;
       try { await api(`/offers/${b.dataset.resp}/respond`, { method: "POST", body: JSON.stringify({ status: b.dataset.st }) }); await reloadJob(j.key); loadOffers(j, el); remountEditor(j); }
-      catch (e) { b.disabled = false; alert(`Couldn't save: ${e?.message || e}`); }
+      catch (e) { b.disabled = false; toast(`Couldn't save: ${e?.message || e}`); }
     }));
     el.querySelectorAll("[data-wd]").forEach((b) => b.addEventListener("click", async () => {
-      if (!confirm("Withdraw this offer?")) return;
       try { await api(`/offers/${b.dataset.wd}/withdraw`, { method: "POST" }); await reloadJob(j.key); loadOffers(j, el); }
-      catch (e) { alert(`Couldn't withdraw: ${e?.message || e}`); }
+      catch (e) { toast(`Couldn't withdraw: ${e?.message || e}`); }
     }));
     const form = el.querySelector("[data-new]");
     el.querySelector("[data-showoffer]")?.addEventListener("click", (ev) => { if (form) form.hidden = false; ev.target.parentElement.remove(); });
@@ -1225,7 +1228,7 @@ export async function setupPage(routeFn) {
           const r = await api(`/offers/project/${encodeURIComponent(j.project_qbo_id)}/outside`, { method: "POST", body: JSON.stringify({ crew_id: Number(f.get("crew")), labor_amount: Number(f.get("amount") || 0) || null, sent_date: f.get("sent"), accepted_date: f.get("accepted") || null }) });
           toast(r.assign_error ? `Recorded. Couldn't put the crew on the schedule: ${r.assign_error}` : "Offer recorded.");
           await reloadJob(j.key); loadOffers(D?.j || j, el); remountEditor(j);
-        } catch (e) { alert(`Couldn't record it: ${e?.message || e}`); }
+        } catch (e) { toast(`Couldn't record it: ${e?.message || e}`); }
       });
     }
     form?.querySelector("[data-copytext]").addEventListener("click", async (ev) => {
@@ -1233,7 +1236,7 @@ export async function setupPage(routeFn) {
       const crew = d.crews.find((c) => String(c.id) === f.get("crew"));
       const txt = offerText(crew?.name, Number(f.get("amount") || 0), f.get("scope"));
       try { await navigator.clipboard.writeText(txt); ev.target.textContent = "Copied"; setTimeout(() => { ev.target.textContent = "Copy offer text"; }, 1200); }
-      catch (_) { alert(txt); }
+      catch (_) { toast(txt); }
     });
     form?.addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -1243,7 +1246,7 @@ export async function setupPage(routeFn) {
         await api(`/offers/project/${encodeURIComponent(j.project_qbo_id)}`, { method: "POST", body: JSON.stringify({ crew_id: Number(f.get("crew")), labor_amount: Number(f.get("amount") || 0), scope: f.get("scope") || null }) });
         await reloadJob(j.key);
         loadOffers(j, el);
-      } catch (e) { alert(`Couldn't record the offer: ${e?.message || e}`); }
+      } catch (e) { toast(`Couldn't record the offer: ${e?.message || e}`); }
     });
   }
 
