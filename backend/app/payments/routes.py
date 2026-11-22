@@ -346,6 +346,11 @@ def patch_schedule(sid: int, body: SchedulePatch, user=Depends(get_current_user)
                            {"id": sid}).mappings().first()
         conn.execute(text("UPDATE project_payment_schedules SET crew_id=:c WHERE id=:id"),
                      {"c": body.crew_id, "id": sid})
+        # 2026-11-22: one paid crew per estimate; the estimate's crew follows
+        if old and body.crew_id:
+            conn.execute(text("""UPDATE project_estimate_billing b JOIN project_payment_schedules s
+                                   ON s.entity_id = b.entity_id AND s.estimate_qbo_id = b.estimate_qbo_id
+                                 SET b.crew_id = :c WHERE s.id = :id"""), {"c": body.crew_id, "id": sid})
     if not old:
         raise HTTPException(status_code=404, detail="No schedule to update")
     record_audit(user, "crew_schedule.crew", "crew_schedule", sid, None,

@@ -494,6 +494,32 @@ def _single_assigned_company(conn, entity_id):
     return ids.pop() if len(ids) == 1 else None
 
 
+_SCHED_CREW_DRIFT = """
+    SELECT s.id, b.crew_id
+    FROM project_payment_schedules s
+    JOIN project_estimate_billing b ON b.entity_id = s.entity_id AND b.estimate_qbo_id = s.estimate_qbo_id
+    LEFT JOIN work_crews sc ON sc.id = s.crew_id
+    LEFT JOIN work_crews bc ON bc.id = b.crew_id
+    WHERE s.entity_id = :e AND b.crew_id IS NOT NULL
+      AND (s.crew_id IS NULL OR COALESCE(sc.parent_id, sc.id) <> COALESCE(bc.parent_id, bc.id))
+      AND NOT EXISTS (SELECT 1 FROM project_estimate_crew_allocations a
+                      WHERE a.entity_id = s.entity_id AND a.estimate_qbo_id = s.estimate_qbo_id)
+"""
+
+
+def _align_schedule_crews(conn, entity_id):
+    """2026-11-22 (Lee, 6755): the estimate's crew company is the paid crew; its
+    payment schedule follows it. Schedules copied from the Drive Payment
+    Schedule kept the sheet's crew, so the roll-up showed the old company with
+    the new company's QBO payments under "Other crews paid". Read first, write
+    only when a schedule's company differs (split estimates keep theirs)."""
+    rows = conn.execute(text(_SCHED_CREW_DRIFT), {"e": entity_id}).all()
+    for sid, crew_id in rows:
+        conn.execute(text("UPDATE project_payment_schedules SET crew_id = :c WHERE id = :i"),
+                     {"c": crew_id, "i": sid})
+    return len(rows)
+
+
 def _apply_assignment_default_crew(conn, entity_id):
     """Assignment-workflow glue (Jason item #4, 2026-10-06): an estimate whose
     billing header has NO crew chosen defaults to the project's assigned company
@@ -501,6 +527,7 @@ def _apply_assignment_default_crew(conn, entity_id):
     bundle's ensure pass (both tables, mirroring assign_estimate_crew) so the
     rollups/schedules group correctly immediately; the office can still override
     via the existing crew select. Multiple companies or none → left unset."""
+    _align_schedule_crews(conn, entity_id)
     has_null = conn.execute(text(
         "SELECT 1 FROM project_estimate_billing WHERE entity_id=:e AND crew_id IS NULL LIMIT 1"),
         {"e": entity_id}).scalar()
@@ -1455,12 +1482,20 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
         g["vid"] = str(_crew_vendor(conn, cid)) if cid else None
         return g
 
+    def _sched_labor(s, insts):
+        # 2026-11-22 (Ashley, 7607): the roll-up's contract labor is what the
+        # payment rows add up to (what the forecast pays); the schedule's stored
+        # contract value can be a stale Drive-sheet number ($7,000 vs $1,400)
+        if insts:
+            return round(sum(float(i["amount"] or 0) for i in insts), 2)
+        return round(float(s.get("contract_labor") or 0), 2)
+
     for eq, (s, insts) in sched_map.items():
         if not s:
             continue
         allocs = splits.get(str(eq))
         if allocs and len(allocs) >= 2:
-            labor_shares = _split_shares(s.get("contract_labor"), allocs)
+            labor_shares = _split_shares(_sched_labor(s, insts), allocs)
             inst_shares = {i["id"]: _split_shares(i.get("amount"), allocs) for i in insts}
             for idx, a in enumerate(allocs):
                 g = _group_for(a["company_crew_id"], a["name"])
@@ -1475,8 +1510,8 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
         cid = s.get("crew_id")
         g = _group_for(cid, s.get("crew_name"))
         g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
-                               "labor": round(float(s.get("contract_labor") or 0), 2)})
-        g["labor"] = round(g["labor"] + float(s.get("contract_labor") or 0), 2)
+                               "labor": _sched_labor(s, insts)})
+        g["labor"] = round(g["labor"] + _sched_labor(s, insts), 2)
         for i in insts:
             d = i.get("pay_date")
             if d:
