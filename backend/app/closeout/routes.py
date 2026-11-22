@@ -593,6 +593,43 @@ def job_forecast(entity_id: str, user=Depends(require_capability(CAP))):
     return {"state": st, "cutover": str(CUTOVER), "plans": preview_books_open(entity_id)}
 
 
+@router.get("/job/{entity_id}/planned")
+def job_planned(entity_id: str, user=Depends(require_capability(CAP))):
+    """2026-11-22 "Still planned": what the job's invoice, crew and expense
+    schedules still plan to bill or pay (the forecast's own per-job events,
+    computed as if the books were open, read-only), so staff can fix or clear
+    stale plans before closing out. Closing out drops all of it from Cash Flow."""
+    from app.cashflow.schedule_forecast import _project_events
+    today = date.today()
+    with engine.connect() as conn:
+        t = conn.begin()
+        try:
+            ev = _project_events(conn, entity_id, force_open=True)
+        finally:
+            t.rollback()
+        st = BK.state(conn, entity_id)
+    kinds = {k: {"total": 0.0, "past": 0.0, "n": 0, "n_past": 0, "items": []} for k in ("invoice", "crew", "expense")}
+    for e in (ev or {}).get("events", []):
+        k = kinds.get(e.get("src"))
+        if k is None:
+            continue
+        past = e["date"][:10] < today.isoformat()
+        what = (e.get("label") or "Invoice") + (f" · #{e['est']}" if e.get("est") else "") if e["src"] == "invoice" \
+            else (e.get("crew") or "Crew payment") if e["src"] == "crew" else (e.get("cat") or "Expense")
+        k["items"].append({"date": e["date"][:10], "amount": round(e["amt"], 2), "what": what, "past": past})
+        k["total"] += e["amt"]
+        k["n"] += 1
+        if past:
+            k["past"] += e["amt"]
+            k["n_past"] += 1
+    for k in kinds.values():
+        k["items"].sort(key=lambda x: x["date"])
+        k["total"], k["past"] = round(k["total"], 2), round(k["past"], 2)
+    return {"state": st, "kinds": kinds,
+            "undated_in": round(float((ev or {}).get("backlog_in") or 0), 2),
+            "undated_out": round(float((ev or {}).get("backlog_out") or 0), 2)}
+
+
 class ForecastChoice(BaseModel):
     include: bool
     note: Optional[str] = None

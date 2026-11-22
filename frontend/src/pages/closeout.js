@@ -12,6 +12,7 @@ import { chip, C, day, money0, money2, projectLink } from "../utils/ui.js";
 import { openDocViewer, DOC_ICON } from "../utils/doc-viewer.js";
 import { stepCardHtml, bindStepCards, STATE_ICON } from "../utils/stepcards.js";
 import { modal, closeModal, toast } from "../utils/help.js";
+import { mountBillingPanel } from "./billing.js";
 
 // Tabs: which finished jobs (by when they ended and what's open). The KPI tiles
 // filter further (to bill, to collect, crew owed, forms, ready to close).
@@ -234,6 +235,11 @@ export async function closeoutPage(routeFn) {
           <div class="grid gap-1 mt-1.5" data-links>${j.steps.filter((s) => s.group === g).map(stepLink).join("")}</div></div>`).join("")}</div>
         <div class="text-[11px] text-black/45 mt-2">Click a step to open it below.</div>
       </section>
+      <section class="card p-4 su-sec" data-planned>
+        <div class="su-h">Still planned</div>
+        <div class="text-xs text-black/55 mt-1">What the job's schedules still plan to bill or pay. Cash Flow counts it until the job is closed out, and closing out drops whatever is left. Fix or clear stale rows here first.</div>
+        <div class="grid gap-2 mt-2" data-planned-body><span class="text-xs text-black/40">Loading…</span></div>
+      </section>
       ${GROUPS.map((g) => `<section class="card p-4 su-sec">
         <div class="su-h">${g} <span class="text-xs font-bold text-black/40 tabular-nums" data-gn="${g}">${groupCount(j, g)}</span></div>
         <div class="grid gap-2 mt-2">${j.steps.filter((s) => s.group === g).map((s) => stepCardHtml(headParts(j, s))).join("")}</div>
@@ -286,6 +292,87 @@ export async function closeoutPage(routeFn) {
     const next = j.steps.find((s) => s.state === "todo");
     if (next) D.cards.open(next.key, { scroll: false });
     loadForecast(j, box.querySelector("[data-fc]"));
+    loadPlanned(j, box.querySelector("[data-planned-body]"));
+  }
+
+  // ── Still planned (2026-11-22): the schedules' leftover plans, by kind, with
+  // the same Invoice / Crew / Expense panels Project Setup shows to fix them.
+  const PLAN_KINDS = [
+    ["invoice", "Invoices still to bill", "invoice", "to bill"],
+    ["crew", "Crew payments still to pay", "crew", "to pay"],
+    ["expense", "Expenses still to pay", "expense", "to pay"],
+  ];
+  const mdy = (iso) => { const [y, m, d] = String(iso).slice(0, 10).split("-"); return `${m}/${d}/${y.slice(2)}`; };
+  const planHead = (x, verb) => x.n
+    ? `<b class="tabular-nums">${money0(x.total)}</b> <span class="text-black/55">${verb}, ${x.n} planned row${x.n === 1 ? "" : "s"}</span>
+       ${x.n_past ? chip(`${money0(x.past)} dated in the past`, C.warn, "These dates have passed: re-date them, or clear them if the money already moved") : ""}`
+    : `<span class="text-black/45">Nothing planned</span>`;
+  const planList = (x) => {
+    if (!x.n) return "";
+    const list = x.items.slice(0, 40).map((i) => `<tr class="border-t border-black/5">
+        <td class="py-1 pr-3 tabular-nums whitespace-nowrap">${mdy(i.date)}</td>
+        <td class="py-1 pr-3 min-w-0">${esc(i.what)}</td>
+        <td class="py-1 pr-2 text-right tabular-nums whitespace-nowrap">${money0(i.amount)}</td>
+        <td class="py-1 text-right">${i.past ? chip("Past", C.warn) : ""}</td></tr>`).join("");
+    const more = x.items.length > 40 ? `<div class="text-[11px] text-black/45 mt-1">+${x.items.length - 40} more in the schedule below.</div>` : "";
+    return `<div class="overflow-x-auto"><table class="w-full text-xs"><tbody>${list}</tbody></table></div>${more}`;
+  };
+  async function loadPlanned(j, el) {
+    if (!el) return;
+    const openKinds = new Set([...el.querySelectorAll("details[open][data-kind]")].map((x) => x.dataset.kind));
+    let p;
+    try { p = await api(`/closeout/job/${encodeURIComponent(j.entity_id)}/planned`); }
+    catch (e) { if (el.isConnected) el.innerHTML = `<span class="text-xs text-rose-700">Couldn't load the plans: ${esc(e?.message || e)}</span>`; return; }
+    if (!el.isConnected) return;
+    const rows = PLAN_KINDS.map(([k, label, only, verb]) => {
+      const x = p.kinds[k] || { total: 0, n: 0, items: [] };
+      return `<details class="rounded-lg border border-black/10" data-kind="${k}" ${openKinds.has(k) ? "open" : ""}>
+        <summary class="cursor-pointer px-3 py-2 flex flex-wrap items-center gap-2 text-xs"><span class="font-bold">${label}</span><span class="flex flex-wrap items-center gap-2" data-plan-head>${planHead(x, verb)}</span></summary>
+        <div class="px-3 pb-3">
+          <div data-plan-list>${planList(x)}</div>
+          <button type="button" class="pd-btn mt-2" data-plan-edit="${only}">Edit the ${only === "invoice" ? "invoice" : only === "crew" ? "crew payment" : "expense"} schedule</button>
+          <div class="mt-2" data-plan-slot="${only}"></div>
+        </div></details>`;
+    });
+    const undated = (p.undated_in > 0.5 || p.undated_out > 0.5)
+      ? `<div class="text-[11.5px] text-black/55">${[p.undated_in > 0.5 ? `${money0(p.undated_in)} to bill` : "", p.undated_out > 0.5 ? `${money0(p.undated_out)} to pay` : ""].filter(Boolean).join(" and ")} has no date yet, so Cash Flow lists it apart.</div>` : "";
+    el.innerHTML = rows.join("") + undated;
+    el.querySelectorAll("[data-plan-edit]").forEach((b) => b.addEventListener("click", () => {
+      const slot = el.querySelector(`[data-plan-slot="${b.dataset.planEdit}"]`);
+      if (slot.dataset.mounted) return;
+      slot.dataset.mounted = "1";
+      slot.classList.add("su-embed");
+      b.remove();
+      // opening the panel lines its plans up with QuickBooks first: re-read the totals after
+      mountBillingPanel(slot, j.entity_id, { only: b.dataset.planEdit }).then(() => refreshPlannedTotals(j, el));
+    }));
+  }
+  // a save in any embedded schedule refreshes the totals (the panels stay mounted)
+  if (window.__coPlanListener) window.removeEventListener("opi:billing-changed", window.__coPlanListener);
+  window.__coPlanListener = (ev) => {
+    const box = root.querySelector("#coDetail");
+    if (!box?.isConnected || !D || String(ev.detail?.entityId) !== String(D.j.entity_id)) return;
+    clearTimeout(window.__coPlanTimer);
+    window.__coPlanTimer = setTimeout(() => {
+      refreshPlannedTotals(D.j, box.querySelector("[data-planned-body]"));
+      loadForecast(D.j, box.querySelector("[data-fc]"));
+    }, 400);
+  };
+  window.addEventListener("opi:billing-changed", window.__coPlanListener);
+  // re-read the totals without tearing down an open schedule panel
+  async function refreshPlannedTotals(j, el) {
+    if (!el) return;
+    const mounted = [...el.querySelectorAll("[data-plan-slot][data-mounted]")];
+    if (!mounted.length) return loadPlanned(j, el);
+    let p;
+    try { p = await api(`/closeout/job/${encodeURIComponent(j.entity_id)}/planned`); } catch (_) { return; }
+    for (const [k, , , verb] of PLAN_KINDS) {
+      const x = p.kinds[k] || { total: 0, n: 0, items: [] };
+      const det = el.querySelector(`details[data-kind="${k}"]`);
+      if (!det) continue;
+      det.querySelector("[data-plan-head]").innerHTML = planHead(x, verb);
+      det.querySelector("[data-plan-list]").innerHTML = planList(x);
+    }
   }
 
   // ── Cash forecast (backend projects/books.py): a job that ended on/after Oct 1
