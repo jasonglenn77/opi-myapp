@@ -237,7 +237,7 @@ export async function closeoutPage(routeFn) {
       </section>
       <section class="card p-4 su-sec" data-planned>
         <div class="su-h">Still planned</div>
-        <div class="text-xs text-black/55 mt-1">What the job's schedules still plan to bill or pay. Cash Flow counts it until the job is closed out, and closing out drops whatever is left. Fix or clear stale rows here first.</div>
+        <div class="text-xs text-black/55 mt-1" data-planned-note>What the job's schedules still plan to bill or pay.</div>
         <div class="grid gap-2 mt-2" data-planned-body><span class="text-xs text-black/40">Loading…</span></div>
       </section>
       ${GROUPS.map((g) => `<section class="card p-4 su-sec">
@@ -337,6 +337,13 @@ export async function closeoutPage(routeFn) {
     const undated = (p.undated_in > 0.5 || p.undated_out > 0.5)
       ? `<div class="text-[11.5px] text-black/55">${[p.undated_in > 0.5 ? `${money0(p.undated_in)} to bill` : "", p.undated_out > 0.5 ? `${money0(p.undated_out)} to pay` : ""].filter(Boolean).join(" and ")} has no date yet, so Cash Flow lists it apart.</div>` : "";
     el.innerHTML = rows.join("") + undated;
+    const note = el.closest("[data-planned]")?.querySelector("[data-planned-note]");
+    const why = (p.state || {}).why;
+    if (note) note.textContent = why === "closed_out"
+      ? "What the job's schedules still plan to bill or pay. It's closed out, so Cash Flow doesn't count any of it."
+      : ["open_until_closed_out", "not_finished", "included"].includes(why)
+        ? "What the job's schedules still plan to bill or pay. Cash Flow counts it until the job is closed out, and closing out drops whatever is left. Fix or clear stale rows here first."
+        : "What the job's schedules still plan to bill or pay. This older job isn't in Cash Flow (see above), so these plans don't count unless it's included. Clear stale rows, or close it out.";
     el.querySelectorAll("[data-plan-edit]").forEach((b) => b.addEventListener("click", () => {
       const slot = el.querySelector(`[data-plan-slot="${b.dataset.planEdit}"]`);
       if (slot.dataset.mounted) return;
