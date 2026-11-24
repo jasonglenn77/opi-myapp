@@ -2205,6 +2205,11 @@ def get_bundle(entity_id: str, user=Depends(get_current_user)):
     }
     if crew_splits:
         out["crew_splits"] = crew_splits
+    try:    # 2026-11-22: crew paid (QuickBooks) vs the app's crew vs the Job Schedule
+        from app import crewcheck
+        out["crew_check"] = crewcheck.check_one(entity_id)
+    except Exception:
+        out["crew_check"] = None
     return out
 
 

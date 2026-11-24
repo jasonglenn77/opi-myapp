@@ -761,7 +761,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     const bar = document.getElementById("tabBar");
     if (!bar) return;
     const btn = (key, label) => `<button type="button" data-tab="${key}" class="px-3 py-2 text-xs font-bold border-b-2 ${activeTab === key ? "border-blue-600 text-ink-900" : "border-transparent text-black/40 hover:text-black/70"}">${label}</button>`;
-    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("changeorders", "Change Orders") + btn("billing", "Billing &amp; Schedule") + btn("financials", "Financials");
+    bar.innerHTML = btn("overview", "Overview") + btn("assignment", "Assignment") + btn("documents", "Documents") + btn("kickoff", "Kickoff &amp; Process") + btn("changeorders", "Change Orders") + btn("billing", "Billing &amp; Schedule") + btn("financials", "Financials");
     bar.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => goTab(b.getAttribute("data-tab"))));
   }
 
@@ -771,7 +771,7 @@ export async function entityDetailPage(routeFn, { entityType, entityId }) {
     // specific opening tab via a one-shot sessionStorage hint.
     let wantTab = null;
     try { wantTab = sessionStorage.getItem("opi_entity_tab"); sessionStorage.removeItem("opi_entity_tab"); } catch (_) {}
-    const TABS = ["overview", "assignment", "documents", "kickoff", "daily", "changeorders", "billing", "financials"];
+    const TABS = ["overview", "assignment", "documents", "kickoff", "changeorders", "billing", "financials"];
     activeTab = "overview";
     renderTabs();
     showOverview();

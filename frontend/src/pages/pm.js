@@ -293,7 +293,7 @@ async function pmProjectDetail(routeFn, qboId) {
     const formsLabel = toReview
       ? `<span class="pm-tab-alert">Forms <span class="pm-tab-count" title="${toReview} submission${toReview === 1 ? "" : "s"} to review">${toReview}</span></span>`
       : "Forms";
-    bar.innerHTML = btn("overview", "Overview") + btn("kickoff", "Kickoff &amp; Process") + btn("daily", "Daily Log") + btn("forms", formsLabel) + btn("documents", "Documents") + btn("financials", "Financials") + btn("receipts", "Receipts") + btn("crew", "Crew");
+    bar.innerHTML = btn("overview", "Overview") + btn("kickoff", "Kickoff &amp; Process") + btn("forms", formsLabel) + btn("documents", "Documents") + btn("contacts", "Contacts") + btn("financials", "Financials") + btn("receipts", "Receipts") + btn("crew", "Crew");
     bar.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
       const t = b.getAttribute("data-tab");
       if (t === activeTab) return;
@@ -317,6 +317,7 @@ async function pmProjectDetail(routeFn, qboId) {
     else if (activeTab === "financials") mountPmFinancialsTab(el, qboId, switchTab);
     else if (activeTab === "receipts") mountPmReceiptsTab(el, qboId);
     else if (activeTab === "crew") mountPmCrewTab(el, qboId);
+    else if (activeTab === "contacts") mountPmContacts(el, qboId);
     else mountPmDocuments(el, qboId);
   }
 
@@ -345,6 +346,19 @@ function overUnderHtml(ou, scheduled) {
   if (v < -0.5) return `<div class="text-[11px] font-bold mt-0.5" style="color:#047857">▼ ${fmtMoney(-v)} under</div>`;
   if (Number(scheduled || 0) > 0) return `<div class="text-[11px] font-semibold mt-0.5 text-black/45">— on budget</div>`;
   return "";
+}
+
+// 2026-11-22 (Leo): the job's day count next to its dates: calendar days start
+// to end (both counted), and which day today is while it's running.
+function dayCount(start, end) {
+  const d = (v) => { if (!v) return null; const [y, m, dd] = String(v).slice(0, 10).split("-").map(Number); return new Date(y, m - 1, dd); };
+  const s = d(start), e = d(end);
+  if (!s || !e || e < s) return "";
+  const n = Math.round((e - s) / 86400000) + 1;
+  const t = new Date(); const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  const k = Math.round((today - s) / 86400000) + 1;
+  const now = k >= 1 && k <= n ? ` · today is day ${k}` : k > n ? " · finished" : ` · starts in ${1 - k} day${1 - k === 1 ? "" : "s"}`;
+  return ` <span class="text-black/50 text-xs">(${n} day${n === 1 ? "" : "s"}${now})</span>`;
 }
 
 async function mountPmOverview(container, qboId, switchTab) {
@@ -390,7 +404,7 @@ async function mountPmOverview(container, qboId, switchTab) {
       ${ovRow("Project manager", (a.pms || []).length ? a.pms.map(person).join("") : dash)}
       ${ovRow("Work crew", (a.crews || []).length ? a.crews.map(crewPerson).join("") : dash)}
       ${ovRow("Schedule", (a.start_date || a.end_date)
-        ? `<span class="tabular-nums">${escapeHtml(fmtDate(a.start_date) || "—")} → ${escapeHtml(fmtDate(a.end_date) || "—")}</span>` : "Dates TBD")}
+        ? `<span class="tabular-nums">${escapeHtml(fmtDate(a.start_date) || "—")} → ${escapeHtml(fmtDate(a.end_date) || "—")}</span>${dayCount(a.start_date, a.end_date)}` : "Dates TBD")}
       ${ovRow("Wire guidance", a.wire_guidance ? `<span class="font-bold">Yes</span>` : "No")}
       ${ovRow("Travel days", a.travel_days ? `${a.travel_days} days` : "None")}
       ${ovRow("Overage days", a.overage_days ? `${a.overage_days} days` : "None")}
@@ -508,11 +522,6 @@ async function mountPmOverview(container, qboId, switchTab) {
       laneKind: "pm", title: "Kickoff & Process", goto: "kickoff",
       sub: `${kick.items_done ?? 0}/${kick.items_total ?? 0} checklist items done`,
       chips: kickChip,
-    }),
-    trackRow({
-      laneKind: "pm", title: "Daily Log", goto: "daily",
-      sub: daily.last_date ? `Last log ${escapeHtml(fmtDate(daily.last_date))}` : "No daily logs recorded",
-      chips: dailyChip,
     }),
     ...(trk.crew_forms || []).map((f) => trackRow({
       laneKind: "crew", title: f.title || f.form_code, goto: "forms",
@@ -1857,6 +1866,107 @@ function crewLeadsHtml(cl, crewCount) {
     </div>`;
 }
 
+// ── Contacts tab (2026-11-22, Leo): the job's site contacts, the customer's
+// contacts and the crew bosses / leads on the job, with phone and email, so
+// nobody retypes them. Backend: app/pm/contacts.py.
+async function mountPmContacts(container, qboId) {
+  container.innerHTML = `<div class="p-6 text-sm text-black/45">Loading contacts…</div>`;
+  let d;
+  const load = async () => {
+    try { d = await api(`/pm/project/${encodeURIComponent(qboId)}/contacts`); }
+    catch (e) { container.innerHTML = `<div class="p-6 text-sm text-rose-700">Couldn't load contacts: ${escapeHtml(e?.message || e)}</div>`; return; }
+    render();
+  };
+  const tel = (v) => v ? `<a class="text-blue-700 hover:underline tabular-nums" href="tel:${escapeHtml(String(v).replace(/[^\d+]/g, ""))}">${escapeHtml(v)}</a>` : `<span class="text-black/35">no phone</span>`;
+  const mail = (v) => v ? `<a class="text-blue-700 hover:underline break-all" href="mailto:${escapeHtml(v)}">${escapeHtml(v)}</a>` : `<span class="text-black/35">no email</span>`;
+  const ROW = "grid gap-1 sm:grid-cols-[1.3fr_1fr_1.5fr_auto] items-center py-2 border-t border-black/5 text-xs";
+  const person = (c) => `<div class="${ROW}" data-cid="${c.id}">
+      <div class="min-w-0"><div class="font-semibold">${escapeHtml(c.name || "(no name)")}</div>${c.title ? `<div class="text-black/50">${escapeHtml(c.title)}</div>` : ""}</div>
+      <div>${tel(c.phone)}</div><div class="min-w-0">${mail(c.email)}</div>
+      <div class="flex gap-1 justify-end"><button type="button" class="pm-btn" data-cedit="${c.id}">Edit</button></div></div>`;
+  const form = (where, c = {}) => `<form class="grid gap-2 sm:grid-cols-4 mt-2 text-xs" data-cform="${where}" ${c.id ? `data-id="${c.id}"` : ""}>
+      <input class="input" name="name" placeholder="Name" value="${escapeHtml(c.name || "")}">
+      <input class="input" name="title" placeholder="Role (site super, GC, receiving…)" value="${escapeHtml(c.title || "")}">
+      <input class="input" name="phone" placeholder="Phone" value="${escapeHtml(c.phone || "")}">
+      <input class="input" name="email" placeholder="Email" value="${escapeHtml(c.email || "")}">
+      <div class="sm:col-span-4 flex flex-wrap gap-2"><button class="btn-primary text-xs px-3 py-1.5">${c.id ? "Save" : "Add contact"}</button>
+        ${c.id ? `<button type="button" class="pm-btn" data-cremove="${c.id}">Remove</button>` : ""}
+        <button type="button" class="pm-btn" data-ccancel>Cancel</button><span class="text-rose-700 self-center" data-cmsg></span></div></form>`;
+  const crewLine = (p, role) => `<div class="${ROW}" data-crew="${p.id}">
+      <div><div class="font-semibold">${escapeHtml(p.name || "—")}</div><div class="text-black/50">${role}</div></div>
+      <div>${tel(p.phone)}</div><div class="min-w-0">${mail(p.email)}</div>
+      <div class="flex justify-end"><button type="button" class="pm-btn" data-crewedit="${p.id}" data-ph="${escapeHtml(p.phone || "")}" data-em="${escapeHtml(p.email || "")}">Edit</button></div></div>`;
+  const emails = (list) => [...new Set(list.map((c) => c.email).filter(Boolean))];
+  const people = () => [...(d.site || []), ...((d.customer && d.customer.contacts) || [])];
+  function render() {
+    const cust = d.customer;
+    const allEmails = emails(people());
+    container.innerHTML = `<div class="grid gap-3">
+      <section class="card p-4">
+        <div class="flex flex-wrap items-center gap-2"><div class="text-sm font-bold">Site contacts for this job</div>
+          ${allEmails.length ? `<button type="button" class="pm-btn ml-auto" data-copyall>Copy all customer emails</button>` : ""}</div>
+        <div class="text-xs text-black/50 mt-0.5">The people on site for ${escapeHtml(d.project.name)}: superintendent, GC, receiving.</div>
+        <div class="mt-1">${(d.site || []).map(person).join("") || `<div class="text-xs text-black/45 py-2">None yet.</div>`}</div>
+        <button type="button" class="pm-btn mt-2" data-cadd="site">Add a site contact</button><div data-slot="site"></div>
+      </section>
+      ${cust ? `<section class="card p-4">
+        <div class="text-sm font-bold">Customer: ${escapeHtml(cust.name)}</div>
+        ${cust.email ? `<div class="text-xs text-black/55 mt-0.5">QuickBooks email: ${mail(cust.email)}</div>` : ""}
+        <div class="mt-1">${(cust.contacts || []).map(person).join("") || `<div class="text-xs text-black/45 py-2">No contacts on the customer yet.</div>`}</div>
+        <button type="button" class="pm-btn mt-2" data-cadd="customer">Add a customer contact</button><div data-slot="customer"></div>
+      </section>` : ""}
+      <section class="card p-4">
+        <div class="text-sm font-bold">Crews on this job</div>
+        <div class="text-xs text-black/50 mt-0.5">Each crew company's boss and the leads assigned here. A phone or email saved here shows on every job that crew works.</div>
+        ${(d.crews || []).map((g) => `<div class="mt-2"><div class="text-[11px] uppercase tracking-wide font-bold text-black/45">${escapeHtml(g.company || "")}${g.code ? ` · ${escapeHtml(g.code)}` : ""}</div>
+          ${crewLine(g.boss, "Crew boss")}${g.leads.map((l) => crewLine(l, "Lead")).join("")}</div>`).join("") || `<div class="text-xs text-black/45 py-2">No crews assigned yet.</div>`}
+      </section></div>`;
+  }
+  container.addEventListener("click", async (e) => {
+    const t = e.target;
+    if (t.closest("[data-copyall]")) {
+      const list = emails(people()).join("; ");
+      try { await navigator.clipboard.writeText(list); t.textContent = "Copied"; } catch (_) { t.textContent = list; }
+      return;
+    }
+    const add = t.closest("[data-cadd]");
+    if (add) { container.querySelector(`[data-slot="${add.dataset.cadd}"]`).innerHTML = form(add.dataset.cadd); return; }
+    const ed = t.closest("[data-cedit]");
+    if (ed) {
+      const c = people().find((x) => String(x.id) === ed.dataset.cedit);
+      const row = ed.closest("[data-cid]");
+      row.insertAdjacentHTML("afterend", form("edit", c)); row.remove(); return;
+    }
+    if (t.closest("[data-ccancel]")) { render(); return; }
+    const rm = t.closest("[data-cremove]");
+    if (rm) {
+      try { await api(`/pm/contacts/${rm.dataset.cremove}`, { method: "PATCH", body: JSON.stringify({ active: false }) }); await load(); }
+      catch (er) { rm.closest("form").querySelector("[data-cmsg]").textContent = er?.message || String(er); }
+      return;
+    }
+    const ce = t.closest("[data-crewedit]");
+    if (ce) {
+      const row = ce.closest("[data-crew]");
+      row.className = "py-2 border-t border-black/5 text-xs";
+      row.innerHTML = `<form class="grid gap-2 sm:grid-cols-[1fr_1.4fr_auto_auto]" data-crewform="${ce.dataset.crewedit}">
+        <input class="input" name="phone" placeholder="Phone" value="${ce.dataset.ph}"><input class="input" name="email" placeholder="Email" value="${ce.dataset.em}">
+        <button class="btn-primary text-xs px-3 py-1.5">Save</button><button type="button" class="pm-btn" data-ccancel>Cancel</button></form>`;
+    }
+  });
+  container.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const v = Object.fromEntries(new FormData(f).entries());
+    try {
+      if (f.dataset.crewform) await api(`/pm/crew-contact/${f.dataset.crewform}`, { method: "PATCH", body: JSON.stringify(v) });
+      else if (f.dataset.id) await api(`/pm/contacts/${f.dataset.id}`, { method: "PATCH", body: JSON.stringify(v) });
+      else await api(`/pm/project/${encodeURIComponent(qboId)}/contacts`, { method: "POST", body: JSON.stringify({ ...v, where: f.dataset.cform }) });
+      await load();
+    } catch (er) { const m = f.querySelector("[data-cmsg]"); if (m) m.textContent = er?.message || String(er); }
+  });
+  await load();
+}
+
 async function mountPmCrewTab(container, qboId) {
   container.innerHTML = `<div class="p-4 text-sm text-black/40">Loading crew setup…</div>`;
   let ov = null, pcs = null, pcErr = null, cl = null;
@@ -2373,7 +2483,7 @@ function openPmReceiptModal(qboId, onSaved) {
 function mount(routeFn, bodyHtml) {
   setShell({
     title: "PM Portal",
-    subtitle: "Your projects: kickoff, daily log & documents",
+    subtitle: "Your projects: kickoff, forms, documents and contacts",
     bodyHtml,
     showLogout: true,
     routeFn,

@@ -57,6 +57,7 @@ from app.billing.routes import router as billing_router
 from app.phases.routes import router as phases_router
 from app.packages.routes import router as packages_router
 from app.pm.routes import router as pm_router
+from app.pm.contacts import router as pm_contacts_router
 from app.crewauth.routes import router as crewauth_router
 from app.forms.routes import router as forms_router
 from app.crewportal.routes import router as crewportal_router
@@ -118,6 +119,7 @@ app.include_router(billing_router)
 app.include_router(phases_router)
 app.include_router(packages_router)
 app.include_router(pm_router)
+app.include_router(pm_contacts_router)
 app.include_router(crewauth_router)
 app.include_router(forms_router)
 app.include_router(crewportal_router)

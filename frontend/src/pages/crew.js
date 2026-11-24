@@ -98,7 +98,6 @@ export async function crewPortalPage(routeFn, params = null) {
     mount(`
       <div class="mx-auto w-full max-w-5xl grid grid-cols-1 gap-3 pb-3">
         <div><a href="#/crew/child/${params.childId}" class="text-xs font-semibold text-blue-600 hover:text-blue-800">← ${escapeHtml(crewName)} · other projects</a></div>
-        <div class="card p-0 overflow-hidden"><div id="crewDailyHost"></div></div>
         <div id="crewForemanHost" class="grid gap-3"></div>
       </div>`, routeFn);
     // the daily log keys on the project's QBO id (shared with the project page),

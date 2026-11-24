@@ -190,6 +190,12 @@ def _gather(conn, opp_ids=None, extra_eids=None):
             d["js_diff"][str(r[0])] = int(r[1])
     except Exception:
         pass
+    # 2026-11-22: crew paid (QuickBooks) vs the app's crew vs the Job Schedule
+    try:
+        from app import crewcheck
+        d["crewcheck"] = crewcheck.check(conn, eids)
+    except Exception:
+        d["crewcheck"] = {}
     # 2026-11-19: the crew company per accepted estimate (Billing's crew = who's paid)
     d["est_crews"] = {}
     for r in conn.execute(_q("""
@@ -432,6 +438,8 @@ def _flags(o, steps, item, today):
     jsd = (o.get("_js_diff") or 0)
     if jsd:
         fl.append(("warn", f"Job Schedule differs on {jsd} date range{'s' if jsd != 1 else ''}"))
+    if o.get("_crew_diffs"):
+        fl.append(("warn", "Crew paid differs: " + o["_crew_diffs"][0] + (f" (+{len(o['_crew_diffs']) - 1} more)" if len(o["_crew_diffs"]) > 1 else "")))
     n_rv = sum(1 for s in steps if s["state"] == "review")
     if n_rv:
         fl.insert(0, ("bad", f"Back for re-review: {n_rv} step{'s' if n_rv != 1 else ''}"))
@@ -456,8 +464,13 @@ def _comment_counts(o, d):
 
 
 def _row(o, d, today):
-    o = {**o, "_js_diff": d.get("js_diff", {}).get(str(o["project_qbo_id"]), 0) if o["project_qbo_id"] else 0}
+    cdiffs = [x["text"] for x in ((d.get("crewcheck") or {}).get(str(o["project_qbo_id"])) or {}).get("diffs") or []] if o["project_qbo_id"] else []
+    o = {**o, "_js_diff": d.get("js_diff", {}).get(str(o["project_qbo_id"]), 0) if o["project_qbo_id"] else 0,
+         "_crew_diffs": cdiffs}
     steps, item, pms, crews = _steps(o, d, today)
+    if item.get("status") in ("completed", "canceled"):
+        cdiffs = []                       # finished jobs: Project Closeout calls the crew out
+        o["_crew_diffs"] = []
     done = sum(1 for s in steps if s["state"] in ("done", "not_needed"))
     stage = next((s["stage"] for s in steps if s["state"] in ("todo", "waiting", "review")), "Ready")
     life = d.get("life", {}).get(str(o["project_qbo_id"])) if o["project_qbo_id"] else None
@@ -465,6 +478,7 @@ def _row(o, d, today):
     return {
         "key": o["key"], "opportunity_id": o["id"], "other_opportunities": o["other_opportunities"],
         "job_schedule_differs": d.get("js_diff", {}).get(str(o["project_qbo_id"]), 0) if o["project_qbo_id"] else 0,
+        "crew_paid_differs": len(cdiffs), "crew_diffs": cdiffs,
         "offers_waiting": sum(1 for x in (d["offers"].get(o["project_qbo_id"], []) if o["project_qbo_id"] else []) if x["status"] == "sent"),
         "title": o["title"], "quote_number": o["quote_number"], "project_qbo_id": o["project_qbo_id"],
         "project_internal_id": o["project_internal_id"], "project_name": o["project_name"],
@@ -499,7 +513,7 @@ def _visible(r, today):
     """To do: new jobs that still need something done (a job leaves the list once
     every step is done or not needed, or once it's finished or long under way),
     plus any live project a change sent back for re-review."""
-    if r["needs_review"] or r["unanswered_dates"] or r.get("job_schedule_differs"):
+    if r["needs_review"] or r["unanswered_dates"] or r.get("job_schedule_differs") or r.get("crew_paid_differs"):
         return (r.get("life") or {}).get("status") not in ("closed", "canceled")
     if r["status"] in ("completed", "canceled"):
         return False

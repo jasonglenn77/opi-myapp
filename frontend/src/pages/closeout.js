@@ -109,7 +109,7 @@ export async function closeoutPage(routeFn) {
           <span class="text-[11px] font-bold tabular-nums text-black/55">${j.done}/${j.total}</span>
         </div>
         <div class="su-bar" aria-hidden="true"><span style="width:${pct}%"></span></div>
-        ${j.flags.length || j.forecast === "included" ? `<div class="flex flex-wrap gap-1 mt-1.5">${j.forecast === "included" ? chip("In cash forecast", C.info) : ""}${j.flags.map((f) => chip(f.text, C[f.tone])).join("")}</div>` : ""}
+        ${j.flags.length || j.forecast === "included" ? `<div class="flex flex-wrap gap-1 mt-1.5">${j.forecast === "included" ? chip("In cash forecast", C.info) : ""}${j.flags.map((f) => chip(f.text, C[f.tone], f.title || "")).join("")}</div>` : ""}
       </button>`;
     }).join("");
   }
@@ -226,9 +226,12 @@ export async function closeoutPage(routeFn) {
         <div class="flex flex-wrap gap-2 mt-3">
           <button type="button" class="pd-btn" data-act="drawer">Quick view</button>
           <a class="pd-btn" href="${projectLink(j.entity_id)}">Open project workspace</a>
-          <span data-flags class="contents">${j.flags.map((f) => chip(f.text, C[f.tone])).join(" ")}</span>
+          <span data-flags class="contents">${j.flags.map((f) => chip(f.text, C[f.tone], f.title || "")).join(" ")}</span>
         </div>
         <div class="co-money mt-3" data-money>${moneyTiles(j.money)}</div>
+        ${(j.crew_diffs || []).length ? `<div class="mt-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2 text-[12px]"><b>Crew paid differs</b>
+          <ul class="list-disc pl-4 mt-1 space-y-0.5">${j.crew_diffs.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
+          <div class="mt-1 text-[11.5px] text-amber-900/80">Fix the paid crew under Still planned, Edit the crew payment schedule (Crew assignment per estimate), or tell whoever keeps the Job Schedule.</div></div>` : ""}
         <div class="co-fc mt-3" data-fc><span class="text-xs text-black/40">Cash forecast…</span></div>
         <div class="su-stages co-stages mt-3">${GROUPS.map((g) => `<div class="su-stage" data-group="${g}">
           <div class="flex items-center justify-between"><div class="text-[11px] uppercase tracking-wide font-bold text-black/50">${g}</div><div class="text-[11px] font-bold tabular-nums text-black/45" data-n>${groupCount(j, g)}</div></div>
@@ -452,7 +455,7 @@ export async function closeoutPage(routeFn) {
       box.querySelector(`[data-gn="${g}"]`).textContent = groupCount(j, g);
     }
     box.querySelector("[data-money]").innerHTML = moneyTiles(j.money);
-    box.querySelector("[data-flags]").innerHTML = j.flags.map((f) => chip(f.text, C[f.tone])).join(" ");
+    box.querySelector("[data-flags]").innerHTML = j.flags.map((f) => chip(f.text, C[f.tone], f.title || "")).join(" ");
     for (const s of j.steps) D.cards.setHead(s.key, headParts(j, s));
   }
 

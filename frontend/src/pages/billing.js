@@ -721,7 +721,8 @@ function render(container, entityId, d) {
           <span class="ml-auto text-[12px] tabular-nums text-black/55"><b class="text-ink-900">${money(crewLaborEst)}</b> labor</span>
         </summary>
         <div class="p-3">
-          <div class="px-1 pb-2" data-ccx-slot></div>
+          ${crewCheckBanner(d.crew_check)}
+          ${(d.crew_check && (d.crew_check.diffs || []).length) ? "" : `<div class="px-1 pb-2" data-ccx-slot></div>`}
           ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
           ${est.accepted.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}</div></div>` : ""}
         </div>
@@ -1290,6 +1291,20 @@ function rollupScript(g, project, scope) {
   }
   L.push(`  Total: ${money(g.labor)}`);
   return L.join("\n");
+}
+
+// 2026-11-22 (owner): who QuickBooks paid vs the app's paid crew vs the crews on
+// the Job Schedule sheet (backend app/crewcheck.py), called out when they differ.
+function crewCheckBanner(cc) {
+  if (!cc || !(cc.diffs || []).length) return "";
+  const list = (xs) => (xs && xs.length ? xs.map(escapeHtml).join(", ") : "none");
+  const paid = (cc.paid || []).map((x) => `${escapeHtml(x.name)} ${money(x.amount)}`).join(", ") || "nothing yet";
+  return `<div class="mx-1 mb-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2 text-[12px]">
+      <div class="font-bold">Crew paid differs</div>
+      <ul class="list-disc pl-4 mt-1 space-y-0.5">${cc.diffs.map((x) => `<li>${escapeHtml(x.text)}</li>`).join("")}</ul>
+      <div class="mt-1.5 text-[11.5px] text-amber-900/80">QuickBooks paid: ${paid} · App's paid crew: ${list(cc.app_paid)} · On site in the app: ${list(cc.onsite)} · Job Schedule: ${cc.on_sheet ? list(cc.sheet) : "job not on the synced tabs"}</div>
+      <div class="mt-1 text-[11.5px] text-amber-900/80">If QuickBooks shows the right crew, set it under Crew assignment per estimate below (crew payments follow it). If the Job Schedule is wrong, let whoever keeps the sheet know. A crew that helped on part of the job can be split across crews.</div>
+    </div>`;
 }
 
 // 2026-11-19 (owner): the offer is per estimate, and its payment schedule is a

@@ -15,10 +15,11 @@ const MAX_DIM = 2400;      // longest side of the working canvas (iOS memory)
 const INK_ALPHA = 0.45;    // highlighter transparency (screen + export)
 
 export const MARK_COLORS = [
-  { key: "yellow", hex: "#facc15", label: "In progress" },
-  { key: "green",  hex: "#22c55e", label: "Completed" },
-  { key: "red",    hex: "#ef4444", label: "Red flag / CO" },
-  { key: "blue",   hex: "#3b82f6", label: "Other" },
+  // 2026-11-22 (Leo): OPI's install-progress colors
+  { key: "yellow", hex: "#facc15", label: "Standing", tip: "Standing" },
+  { key: "blue",   hex: "#3b82f6", label: "Structurally complete", tip: "Structurally complete: all levels installed and anchored" },
+  { key: "green",  hex: "#22c55e", label: "100% complete", tip: "100% complete: all detail work done (wire decks, ERGs, dividers, etc.)" },
+  { key: "red",    hex: "#ef4444", label: "Red flag", tip: "Red flag: material missing or a layout problem" },
 ];
 const SIZES = [{ key: "S", px: 14 }, { key: "M", px: 28 }, { key: "L", px: 56 }];
 
@@ -162,7 +163,7 @@ export function openMarkupViewer({ title, loadBlob, contentType, filename, onSav
         <button type="button" class="dm-tool on" data-dm-mode="ink" title="Highlighter">🖍 Highlight</button>
       </div>
       <div class="dm-group">
-        ${MARK_COLORS.map((c, i) => `<button type="button" class="dm-swatch${i === 0 ? " on" : ""}" data-dm-color="${c.hex}" title="${esc(c.label)}" style="--sw:${c.hex}"><span></span><em>${esc(c.label)}</em></button>`).join("")}
+        ${MARK_COLORS.map((c, i) => `<button type="button" class="dm-swatch${i === 0 ? " on" : ""}" data-dm-color="${c.hex}" title="${esc(c.tip || c.label)}" style="--sw:${c.hex}"><span></span><em>${esc(c.label)}</em></button>`).join("")}
       </div>
       <div class="dm-group">
         ${SIZES.map((z) => `<button type="button" class="dm-tool${z.key === "M" ? " on" : ""}" data-dm-size="${z.px}" title="Highlighter size">${z.key}</button>`).join("")}
@@ -170,7 +171,7 @@ export function openMarkupViewer({ title, loadBlob, contentType, filename, onSav
         <button type="button" class="dm-tool" data-dm-clear title="Erase all marks">Clear</button>
         <button type="button" class="dm-tool" data-dm-fit title="Fit to screen">Fit</button>
       </div>
-      <div class="dm-legend">${MARK_COLORS.slice(0, 3).map((c) => `<span><i style="background:${c.hex}"></i>${esc(c.label)}</span>`).join("")} · two fingers to zoom</div>
+      <div class="dm-legend">${MARK_COLORS.map((c) => `<span title="${esc(c.tip || c.label)}"><i style="background:${c.hex}"></i>${esc(c.label)}</span>`).join("")} · two fingers to zoom</div>
     </div>`}`;
   document.body.appendChild(overlay);
   const prevOverflow = document.body.style.overflow;

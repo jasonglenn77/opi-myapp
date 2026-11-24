@@ -240,6 +240,11 @@ def _gather(conn, ids=None, finished_only=None):
     for r in conn.execute(_q("""SELECT entity_id, step_key, status, note, by_email, at FROM project_closeout_steps
                                 WHERE entity_id IN :ids""", "ids"), p).mappings():
         d["marks"][str(r["entity_id"])][r["step_key"]] = dict(r)
+    try:    # 2026-11-22: crew paid vs the app's crew vs the Job Schedule
+        from app import crewcheck
+        d["crewcheck"] = crewcheck.check(conn, E)
+    except Exception:
+        d["crewcheck"] = {}
     return d
 
 
@@ -347,6 +352,9 @@ def _row(e, d, today):
         flags.append({"text": f"Labor ${money['labor_left']:,.0f} under estimate", "tone": "info"})
     if not d["forms"].get(e):
         flags.append({"text": "No completion form", "tone": "info"})
+    cc = (d.get("crewcheck") or {}).get(e) or {}
+    if cc.get("diffs"):
+        flags.append({"text": "Crew paid differs", "tone": "warn", "title": " · ".join(x["text"] for x in cc["diffs"])})
     c = d["cost"].get(e) or {}
     st_of = {s["key"]: s["state"] for s in steps}
     closed = st_of.get("margin") == "done"
@@ -367,6 +375,7 @@ def _row(e, d, today):
         "start": str(P["start"]) if P["start"] else None, "end": str(end) if end else None,
         "days_since_end": (today - end).days if end else None,
         "status": P["status"], "steps": steps, "done": done, "total": len(steps), "money": money, "flags": flags,
+        "crew_diffs": [x["text"] for x in cc.get("diffs") or []],
         "margin_pct": round(float(c["actual_profit_pct"]) * 100, 1) if c.get("actual_profit_pct") is not None else None,
         "profit": float(c["actual_profit"]) if c.get("actual_profit") is not None else None,
     }

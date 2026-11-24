@@ -140,6 +140,11 @@ def refresh_assignments(who="manual"):
             record_audit({"email": f"gsync:{who}"}, "schedule.job_schedule_import", "project_schedule_item", None,
                          "Assignments updated from the Job Schedule",
                          {k: v for k, v in summary.items() if k != "sample"})
+        try:    # 2026-11-22: crew paid vs the app's crew vs the Job Schedule, one bell notice per job
+            from app import crewcheck
+            summary["crew_paid_differs"] = crewcheck.notify_differences()
+        except Exception as ce:
+            summary["crew_paid_differs_error"] = str(ce)[:300]
         return summary
     except Exception as e:
         _finish(run_id, False, error=str(e))

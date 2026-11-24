@@ -65,6 +65,7 @@ export async function setupPage(routeFn) {
     soon: ["Starting soon with gaps", (j) => j.flags.some((f) => f.text.startsWith("Starts in"))],
     offers: ["Crew offers waiting", (j) => (j.offers_waiting || 0) > 0],
     jsdiff: ["Job Schedule differs", (j) => (j.job_schedule_differs || 0) > 0],
+    crewdiff: ["Crew paid differs", (j) => (j.crew_paid_differs || 0) > 0],
     sched: ["Schedules to review", (j) => openIn(j, "Schedules")],
     review: ["Back for re-review", (j) => j.needs_review > 0 || j.unanswered_dates > 0],
   };
@@ -174,6 +175,7 @@ export async function setupPage(routeFn) {
       ${tile("soon", "Within 14 days, no PM, crew or dates", true)}
       ${tile("offers", "Sent, no answer yet")}
       ${tile("jsdiff", "The sheet says other dates or crews", true)}
+      ${tile("crewdiff", "QuickBooks paid a crew the app or sheet doesn't show", true)}
       ${tile("sched", "Dates set, schedules not confirmed")}
     </div>`;
   }
