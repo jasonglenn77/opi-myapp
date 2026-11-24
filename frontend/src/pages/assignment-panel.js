@@ -292,6 +292,11 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
   }
   function estRow(e, p) {
     const off = !e.accepted;
+    // 2026-11-24 (owner): the paid crew vs who is on site on this package's dates
+    const onsite = new Set(items.filter((it) => it.package_id === p.id && it.status !== "canceled")
+      .flatMap((it) => it.active_work_crews || []).map((w) => String(w.company_id)).filter((x) => x && x !== "null"));
+    const coName = (id) => ((bundle.companies || []).find((c) => String(c.id) === String(id)) || {}).name || "another crew";
+    const notOnSite = has("crew") && e.accepted && e.crew_company_id && onsite.size && !onsite.has(String(e.crew_company_id));
     const oc = e.offer ? OFFER[e.offer.status] || [e.offer.status, "ap-chip-quiet"] : null;
     const moveSel = `<select class="input text-xs py-1.5" data-pk-move="${e.qbo_id}" title="Estimates in one package share dates. Pick another package, or give it its own.">
         ${pk.packages.map((x) => `<option value="${x.id}" ${x.id === e.package_id ? "selected" : ""}>${escapeHtml(x.name)}</option>`).join("")}
@@ -299,10 +304,11 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
     return `<tr class="${off ? "ap-est-off" : ""}">
       <td><b>#${escapeHtml(e.doc_number || "")}</b> ${chipH(e.change_order ? "Change order" : "Original", e.change_order ? "ap-chip-quiet" : "ap-chip-info")}
         ${off ? chipH(e.status || "Not accepted", "ap-chip-quiet") : ""}${!e.placed && e.accepted ? chipH("New: check its package", "ap-chip-warn", "Arrived after the project was set up: keep it here or move it") : ""}
-        <div class="text-[11px] text-black/50 tabular-nums">${money0(e.total)}${e.accepted_date ? ` · accepted ${fmtHd(e.accepted_date)}` : ""}</div></td>
+        <div class="text-[11px] text-black/50 tabular-nums">${money0(e.total)}${has("crew") && e.contract_labor ? ` · <b class="text-black/70">${money0(e.contract_labor)} labor</b>` : ""}${e.accepted_date ? ` · accepted ${fmtHd(e.accepted_date)}` : ""}</div></td>
       ${has("pm") ? `<td><select class="input text-xs py-1.5" data-pk-pm="${e.qbo_id}"><option value="">— PM</option>${pms.map((x) => `<option value="${x.id}" ${String(e.pm_id) === String(x.id) ? "selected" : ""}>${escapeHtml(pmName(x))}</option>`).join("")}</select></td>` : ""}
       ${has("crew") ? `<td><select class="input text-xs py-1.5" data-pk-crew="${e.qbo_id}" ${p.has_dates && e.accepted ? "" : "disabled"} title="${p.has_dates ? "Crews sorted by how many are free on these dates (weekdays)" : "A crew is picked for dates: set this package's dates first"}">${crewOptions(p, e.crew_company_id || e.crew_id)}</select>
-        ${oc ? `<div class="mt-0.5">${chipH(oc[0], oc[1], e.offer.sent_at ? `Sent ${e.offer.sent_at}` : "")}</div>` : e.crew_id ? `<div class="mt-0.5">${chipH("Offer not sent", "ap-chip-warn", "Send it from the crew roll-up under Schedules, once the pay schedule is confirmed")}</div>` : ""}</td>` : ""}
+        ${oc ? `<div class="mt-0.5">${chipH(oc[0], oc[1], e.offer.sent_at ? `Sent ${e.offer.sent_at}` : "")}</div>` : e.crew_id ? `<div class="mt-0.5">${chipH("Offer not sent", "ap-chip-warn", "Send it from the crew roll-up under Schedules, once the pay schedule is confirmed")}</div>` : ""}
+        ${notOnSite ? `<div class="mt-0.5">${chipH("Not on site in this package", "ap-chip-warn", `On site on this package's dates: ${[...onsite].map(coName).join(", ")}. If they did this estimate's work, pick them here; if this crew helped, add them on a date range below.`)}</div>` : ""}</td>` : ""}
       ${has("dates") ? `<td>${moveSel}${!e.placed && e.accepted ? ` <button type="button" class="su-linkbtn" data-pk-keep="${e.qbo_id}" data-pkid="${e.package_id}">Keep here</button>` : ""}</td>` : ""}
     </tr>`;
   }
@@ -332,7 +338,7 @@ export async function mountAssignmentPanel(container, qboCustomerId, onChange, o
   let avail = {};
   if (pkMode && has("crew")) {
     await Promise.all(pk.packages.filter((p) => p.has_dates).map(async (p) => {
-      try { avail[p.id] = await api(`/offers/crew-availability?start=${p.start}&end=${p.end}`); } catch (_) { /* picker shows names only */ }
+      try { avail[p.id] = await api(`/offers/crew-availability?start=${p.start}&end=${p.end}${bundle.qbo?.qbo_id ? `&exclude_entity=${encodeURIComponent(bundle.qbo.qbo_id)}` : ""}`); } catch (_) { /* picker shows names only */ }
     }));
   }
   const keepH = container.offsetHeight;

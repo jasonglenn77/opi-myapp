@@ -188,6 +188,7 @@ def _require_schedule_or_office(user):
 
 @router.get("/crew-availability")
 def crew_availability(start: str, end: str, crews_needed: Optional[int] = None,
+                      exclude_entity: Optional[str] = None,
                       user=Depends(get_current_user)):
     """Schedules-page "Crew availability" search (estimators asking the office
     whether crews are free before a project exists). Per Crew Boss company and
@@ -229,6 +230,9 @@ def crew_availability(start: str, end: str, crews_needed: Optional[int] = None,
             s_ = b["start_date"] - timedelta(days=(tr + 1) // 2)
             e_ = b_end + timedelta(days=tr // 2)
             if e_ < ws or s_ > we:
+                continue
+            # 2026-11-24 (Project Setup): the job being set up doesn't book its own crew
+            if exclude_entity and str(b["entity_id"]) == str(exclude_entity):
                 continue
             key = b["slot_code"] or f"?{b['schedule_item_id']}?{b['lead_name'] or ''}"
             spans.append((s_, e_, key, b))

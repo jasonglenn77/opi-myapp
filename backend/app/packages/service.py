@@ -163,6 +163,12 @@ def estimates(conn, eid):
             by_est[str(r["estimate_qbo_id"])] = dict(r)   # 2026-11-19: offers per estimate
         else:
             offers[r["crew_id"]] = dict(r)          # older project-wide offers: latest per crew
+    # 2026-11-24 (owner): the estimate's contract labor next to its paid crew
+    labor = {str(q): float(v or 0) for q, v in conn.execute(text("""
+        SELECT t.qbo_id, ROUND(SUM(COALESCE(sl.cost_amount, sl.amount)), 2)
+        FROM qbo_sales_transaction_lines sl JOIN qbo_transactions t ON t.id = sl.transaction_id
+        WHERE t.entity_type = 'Estimate' AND sl.item_name LIKE 'Contract Labor%' AND sl.project_customer_qbo_id = :e
+        GROUP BY t.qbo_id"""), {"e": eid}).all()}
     out = []
     for r in rows:
         off = by_est.get(str(r["qbo_id"])) or offers.get(r["crew_id"]) or offers.get(r["crew_company_id"])
@@ -171,7 +177,7 @@ def estimates(conn, eid):
                     "accepted": (r["status"] or "") in ACCEPTED, "accepted_date": _iso(r["accepted_date"]),
                     "change_order": str(r["qbo_id"]) in cos, "package_id": r["package_id"],
                     "placed": bool(r["placed"]), "pm_id": r["pm_id"], "crew_id": r["crew_id"], "crew_name": r["crew_name"],
-                    "crew_company_id": r["crew_company_id"],
+                    "crew_company_id": r["crew_company_id"], "contract_labor": labor.get(str(r["qbo_id"])),
                     "offer": ({"status": off["status"], "sent_at": _iso(off["sent_at"]), "responded_at": _iso(off["responded_at"])}
                               if off else None)})
     return out

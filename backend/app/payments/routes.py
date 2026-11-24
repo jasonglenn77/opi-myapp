@@ -177,7 +177,7 @@ def _load_schedules(conn, entity_id):
     """All schedules for the project, keyed by estimate_qbo_id -> (schedule, installments)."""
     scheds = conn.execute(text("""
         SELECT s.id, s.estimate_qbo_id, s.estimate_doc_number, s.crew_id, s.contract_labor, s.start_date, s.end_date, s.invoice_lead_days,
-               s.source, s.source_file_name, s.source_modified, s.dates_confirmed, s.sum_ok_total,
+               s.source, s.source_file_id, s.source_file_name, s.source_modified, s.dates_confirmed, s.sum_ok_total,
                -- the app's copy of the Drive file the schedule was read from (documents viewer)
                (SELECT d.id FROM documents d WHERE d.source_drive_id = s.source_file_id
                  ORDER BY d.entity_id = s.entity_id DESC, d.id DESC LIMIT 1) AS source_doc_id,
@@ -204,7 +204,7 @@ def _load_schedules(conn, entity_id):
             "end_date": str(sched["end_date"]) if sched["end_date"] else None,
             "invoice_lead_days": sched["invoice_lead_days"],
             # where the installments came from: 'sheet' = the Payment Schedule in Drive
-            "source": sched["source"], "source_file_name": sched["source_file_name"],
+            "source": sched["source"], "source_file_id": sched["source_file_id"], "source_file_name": sched["source_file_name"],
             "source_modified": str(sched["source_modified"])[:10] if sched["source_modified"] else None,
             "source_doc_id": sched["source_doc_id"],
             "dates_confirmed": sched["dates_confirmed"],

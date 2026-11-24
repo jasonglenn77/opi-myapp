@@ -753,6 +753,7 @@ def _compose_estimates(conn, entity_id):
         # keyed by the estimate's QBO id (doc numbers can repeat across estimates)
         actuals_by_est.setdefault(str(a.get("estimate_qbo_id") or ""), []).append(a)
     crew_map = _load_schedules(conn, entity_id)  # keyed by estimate_qbo_id
+    crew_orphans_ids, crew_covered = _schedule_context(conn, entity_id, crew_map)
 
     # load per-estimate invoice schedules + milestones
     scheds = {}
@@ -890,6 +891,9 @@ def _compose_estimates(conn, entity_id):
             "crew_schedule_id": (cs["id"] if cs else None),
             "crew_dates_confirmed": (bool(cs.get("dates_confirmed", 1)) if cs else True),
             "crew_installments": cinsts,
+            # 2026-11-24 (owner): labor vs what this estimate's own rows add up to
+            "crew_scheduled": round(sum(float(i.get("amount") or 0) for i in cinsts), 2),
+            "crew_covered_by": crew_covered.get(str(e["qbo_id"])),
             "crew_sum_ok_total": (cs.get("sum_ok_total") if cs else None),
             "crew_start": (cs.get("start_date") if cs else None), "crew_end": (cs.get("end_date") if cs else None),
             "crew_invoice_lead_days": (cs.get("invoice_lead_days") if cs else None),
@@ -911,6 +915,15 @@ def _compose_estimates(conn, entity_id):
                       "release_expected": rel.isoformat() if rel else None},
         "invoiced_qbo": round(invoiced, 2), "collected": collected, "open_ar": round(open_ar, 2),
         "contract_total": round(sum(a["value"] for a in accepted), 2),
+        # crew payment schedules whose estimate is no longer on this job in QuickBooks
+        "crew_orphans": [{
+            "qbo_id": eq, "doc": s.get("estimate_doc_number"), "crew_id": s.get("crew_id"),
+            "crew_name": s.get("crew_name"), "schedule_id": s.get("id"),
+            "scheduled": round(sum(float(i.get("amount") or 0) for i in insts), 2),
+            "source_file_name": s.get("source_file_name"), "source_doc_id": s.get("source_doc_id"),
+            "installments": [{"pay_date": i.get("pay_date"), "amount": float(i.get("amount") or 0),
+                              "note": i.get("note"), "status": i.get("status")} for i in insts],
+        } for eq, (s, insts) in crew_map.items() if s and str(eq) in crew_orphans_ids],
     }
 
 
@@ -1414,7 +1427,33 @@ def _compose_crew(conn, entity_id, meta, crew_vendor_ids, books_closed):
     }
 
 
-def _tier_installments(by_date, paid, books_closed):
+def _schedule_context(conn, entity_id, sched_map):
+    """(orphans, covered_by) for the project's crew payment schedules.
+    orphans     estimate ids of schedules whose estimate is no longer a QuickBooks
+                estimate on this job (deleted, or its number now belongs to another
+                customer's estimate: 5184's #7115). 'gs-' keys are sheet scope files,
+                never estimates, so they are not orphans.
+    covered_by  estimate id -> {"doc", "file"}: a 'sheet_covered' schedule ($0,
+                folded into the job's Drive Payment Schedule) and the schedule that
+                holds that sheet's rows (same source file)."""
+    on_job = {str(r[0]) for r in conn.execute(text(
+        "SELECT DISTINCT qbo_id FROM qbo_transactions WHERE entity_type = 'Estimate' AND customer_qbo_id = :e"),
+        {"e": entity_id}).all()}
+    orphans = {str(eq) for eq in sched_map if eq and not str(eq).startswith("gs-") and str(eq) not in on_job}
+    holders = {}
+    for eq, (s, insts) in sched_map.items():
+        if s and s.get("source") == "sheet" and s.get("source_file_id") and insts:
+            holders.setdefault(s["source_file_id"], s)
+    covered = {}
+    for eq, (s, _i) in sched_map.items():
+        if s and s.get("source") == "sheet_covered":
+            h = holders.get(s.get("source_file_id"))
+            covered[str(eq)] = {"doc": (h or {}).get("estimate_doc_number"),
+                                "file": (h or s).get("source_file_name")}
+    return orphans, covered
+
+
+def _tier_installments(by_date, paid, books_closed, undated=0.0):
     """Burn a crew rollup's bi-weekly lumps down against what was ACTUALLY paid to
     this crew — earliest dates fill first, splitting the boundary lump (partial).
     Status reflects real payment even on a closed project: if this crew wasn't paid
@@ -1435,6 +1474,21 @@ def _tier_installments(by_date, paid, books_closed):
         out.append({"seq": idx + 1, "pay_date": d, "amount": amt, "tier": tier,
                     "paid": round(covered, 2), "remaining": round(amt - covered, 2),
                     "status_label": label})
+    # 2026-11-24 (owner, 5184): rows with no pay date ("Phase 3 - TBD") were left
+    # out, so the dated rows didn't add up to the labor. They show last, burn last.
+    if undated > EPS:
+        amt = round(undated, 2)
+        covered = min(amt, max(0.0, paid - cum))
+        if covered >= amt - EPS:
+            tier, label = "realized", "Paid"
+        elif covered > EPS:
+            tier, label = "partial", f"Partial · ${round(covered):,} paid"
+        elif books_closed:
+            tier, label = "undated", "Not paid"
+        else:
+            tier, label = "undated", "Needs a date"
+        out.append({"seq": len(out) + 1, "pay_date": None, "undated": True, "amount": amt, "tier": tier,
+                    "paid": round(covered, 2), "remaining": round(amt - covered, 2), "status_label": label})
     return out
 
 
@@ -1473,12 +1527,14 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
     # crew — so each company's rollup burns against ITS OWN vendor's bills and
     # the totals still sum to the full schedule.
     splits = _crew_splits(conn, entity_id)
+    orphans, covered_by = _schedule_context(conn, entity_id, sched_map)
 
     groups = {}
 
     def _group_for(cid, crew_name):
         g = groups.setdefault(cid, {"crew_id": cid, "crew_name": crew_name,
-                                    "estimates": [], "labor": 0.0, "by_date": {}, "vid": None})
+                                    "estimates": [], "labor": 0.0, "by_date": {}, "undated": 0.0,
+                                    "orphan_labor": 0.0, "vid": None})
         g["vid"] = str(_crew_vendor(conn, cid)) if cid else None
         return g
 
@@ -1500,22 +1556,32 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
             for idx, a in enumerate(allocs):
                 g = _group_for(a["company_crew_id"], a["name"])
                 g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
-                                       "labor": labor_shares[idx], "split_pct": a["pct"]})
+                                       "labor": labor_shares[idx], "split_pct": a["pct"],
+                                       "orphan": str(eq) in orphans, "covered_by": covered_by.get(str(eq))})
                 g["labor"] = round(g["labor"] + labor_shares[idx], 2)
+                if str(eq) in orphans:
+                    g["orphan_labor"] = round(g["orphan_labor"] + labor_shares[idx], 2)
                 for i in insts:
                     d = i.get("pay_date")
                     if d:
                         g["by_date"][d] = round(g["by_date"].get(d, 0.0) + inst_shares[i["id"]][idx], 2)
+                    else:
+                        g["undated"] = round(g["undated"] + inst_shares[i["id"]][idx], 2)
             continue
         cid = s.get("crew_id")
         g = _group_for(cid, s.get("crew_name"))
         g["estimates"].append({"doc": s.get("estimate_doc_number"), "qbo_id": eq,
-                               "labor": _sched_labor(s, insts)})
+                               "labor": _sched_labor(s, insts),
+                               "orphan": str(eq) in orphans, "covered_by": covered_by.get(str(eq))})
         g["labor"] = round(g["labor"] + _sched_labor(s, insts), 2)
+        if str(eq) in orphans:
+            g["orphan_labor"] = round(g["orphan_labor"] + _sched_labor(s, insts), 2)
         for i in insts:
             d = i.get("pay_date")
             if d:
                 g["by_date"][d] = round(g["by_date"].get(d, 0.0) + float(i["amount"] or 0), 2)
+            else:
+                g["undated"] = round(g["undated"] + float(i["amount"] or 0), 2)
 
     matched_vids = {g["vid"] for g in groups.values() if g["vid"]}
     null_group = next((g for g in groups.values() if g["crew_id"] is None), None)
@@ -1554,12 +1620,18 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
                            if o.get("company_id") is not None and g_company is not None
                            and int(o["company_id"]) == g_company
                            and o["status"] in ("accepted", "sent")), None)
+        tiers = _tier_installments(g["by_date"], paid, books_closed, g["undated"])
         out.append({
             "crew_id": cid, "crew_name": g["crew_name"],
             "estimates": sorted(g["estimates"], key=lambda x: x["doc"] or ""),
             "labor": g["labor"], "paid_qbo": round(paid, 2),
             "remaining": round(max(0.0, g["labor"] - paid), 2),
-            "installments": _tier_installments(g["by_date"], paid, books_closed),
+            # 2026-11-24 (owner): the header says it all, no math: paid, dated rows
+            # still to pay, rows with no date yet, of the labor
+            "scheduled_left": round(sum(t["remaining"] for t in tiers if not t.get("undated")), 2),
+            "undated_left": round(sum(t["remaining"] for t in tiers if t.get("undated")), 2),
+            "orphan_labor": g["orphan_labor"],
+            "installments": tiers,
             "offer": crew_offer, "is_other": False,
         })
     out.sort(key=lambda x: -x["labor"])
@@ -1576,7 +1648,10 @@ def _compose_crew_rollups(conn, entity_id, books_closed):
 
     return {"rollups": out,
             "total_labor": round(sum(g["labor"] for g in out), 2),
-            "total_paid": round(sum(g["paid_qbo"] for g in out), 2)}
+            "total_paid": round(sum(g["paid_qbo"] for g in out), 2),
+            # schedules on estimates no longer on this job in QuickBooks: in the
+            # total above, shown labeled (never silently counted or dropped)
+            "orphan_labor": round(sum(g.get("orphan_labor") or 0 for g in out), 2)}
 
 
 def _compose_expenses(conn, entity_id, books_closed, start=None, end=None):

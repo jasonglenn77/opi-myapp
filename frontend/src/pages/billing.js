@@ -21,6 +21,7 @@ const DOT = {
   scheduled: '<span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 align-middle"></span>',
   retainage: '<span class="inline-block w-2.5 h-2.5 rounded-full align-middle bl-ret-dot"></span>',
   estimated: '<span class="inline-block w-2.5 h-2.5 rounded-full border-[1.5px] border-black/40 align-middle"></span>',
+  undated:   '<span class="inline-block w-2.5 h-2.5 rounded-full border-[1.5px] border-amber-500 align-middle"></span>',
 };
 const PILL = {
   Paid:          "text-emerald-700 bg-emerald-50 border border-emerald-200",
@@ -31,6 +32,7 @@ const PILL = {
   "Not paid":    "text-rose-700 bg-rose-50 border border-rose-200",
   "Not spent":   "text-rose-700 bg-rose-50 border border-rose-200",
   Allocated:     "text-black/45 bg-transparent border border-black/15",
+  "Needs a date": "text-amber-700 bg-amber-50 border border-amber-200",
 };
 // Held retainage (paid except a held-back 5-15%) — its own colour: money that
 // comes at release, not overdue A/R.
@@ -259,6 +261,17 @@ function render(container, entityId, d) {
   // bi-weekly schedules are generated, e.g. a project with no dates yet).
   const crewLaborEst = est.accepted.reduce((s, a) => s + (a.labor || 0), 0) || roll.total_labor;
   const crewLeft = Math.max(0, crewLaborEst - crewPaid);
+  // 2026-11-24: estimates folded into another estimate's Drive Payment Schedule
+  // ('sheet_covered'): the holder's rows carry their labor too.
+  const coveredLabor = (holderQboId) => {
+    const h = est.accepted.find((x) => String(x.qbo_id) === String(holderQboId));
+    if (!h) return 0;
+    // only the part the sheet carries: a covered estimate can hold its own row
+    // for labor the sheet can't include (gsync payment_import, 'labor_not_on_sheet')
+    return est.accepted.filter((x) => x.crew_covered_by && String(x.crew_covered_by.doc) === String(h.doc))
+      .reduce((t, x) => t + Math.max(0, (Number(x.labor) || 0) - (Number(x.crew_scheduled) || 0)), 0);
+  };
+  const crewOrphans = est.crew_orphans || [];
 
   // ── roll-up KPIs + burn bars ──
   const kpi = (label, val, cls = "", sub = "") =>
@@ -433,9 +446,33 @@ function render(container, entityId, d) {
         <div class="px-4 py-2 text-[11px] text-amber-800 bg-amber-50/60 border-t border-amber-200">Contract-Labor paid to crews not assigned to an estimate here. Assign the estimate to one of these crews to fold it into a rollup.</div>
       </div>`;
     }
-    const chips = g.estimates.map((e) => { const ea = est.accepted.find((x) => String(x.doc) === String(e.doc)); return `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">#${escapeHtml(e.doc || "—")} · ${money(e.labor)}${e.split_pct ? ` <span class="text-indigo-700 font-bold">· ${fmtPct(e.split_pct)}% split</span>` : ""}</span>`; }).join("");
+    // 2026-11-24 (owner, 5184): each chip says what the estimate has SCHEDULED in
+    // this roll-up and, when that isn't its own labor, why (covered by another
+    // estimate's Drive schedule, holds that schedule, or simply off).
+    const chips = g.estimates.map((e) => {
+      const ea = est.accepted.find((x) => String(x.qbo_id) === String(e.qbo_id));
+      const base = `#${escapeHtml(e.doc || "—")}`;
+      if (e.orphan) return `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-rose-200 bg-rose-50 text-rose-700" title="This schedule's estimate is no longer on this job in QuickBooks">${base} · ${money(e.labor)} scheduled · estimate not on this job in QuickBooks</span>`;
+      if (e.covered_by && !(e.labor > 0.5)) return `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/45" title="Folded into the job's Drive Payment Schedule${e.covered_by.file ? ` (${escapeHtml(e.covered_by.file)})` : ""}">${base} · in #${escapeHtml(e.covered_by.doc || "?")}'s schedule</span>`;
+      const lab = ea ? Number(ea.labor) || 0 : null;
+      const held = coveredLabor(e.qbo_id);
+      const target = lab == null ? null : lab + held;
+      const labTxt = target != null && Math.abs(target - e.labor) > 1
+        ? ` · <span class="text-amber-700">${money(lab)} labor${held ? ` + ${money(held)} it covers` : ""}</span>`
+        : (held ? ` <span class="text-black/40">(incl. ${money(held)} it covers)</span>` : "");
+      return `<span class="text-[10.5px] font-semibold px-2 py-0.5 rounded border border-black/10 bg-black/[0.02] text-black/60">${base} · ${money(e.labor)} scheduled${labTxt}${e.split_pct ? ` <span class="text-indigo-700 font-bold">· ${fmtPct(e.split_pct)}% split</span>` : ""}</span>`;
+    }).join("");
     const insts = g.installments.map((i) => `
-      <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60"><span class="flex items-center gap-2">${DOT[i.tier] || ""}${shortDate(i.pay_date)}</span></td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
+      <tr class="border-b border-black/5"><td class="py-1 pl-4 pr-3 tabular-nums text-black/60"><span class="flex items-center gap-2">${DOT[i.tier] || ""}${i.undated ? `<span class="font-semibold text-amber-700">No date yet</span>` : shortDate(i.pay_date)}</span></td><td class="py-1 px-2 text-right tabular-nums font-semibold text-ink-900">${money(i.amount)}</td><td class="py-1 pl-2 pr-4 text-right">${pill(i.status_label)}</td></tr>`).join("");
+    const orphanNote = g.orphan_labor > 0.5 ? `<div class="px-4 py-2 text-[11.5px] text-rose-700 bg-rose-50 border-b border-rose-200">${money(g.orphan_labor)} here is on ${g.estimates.filter((e) => e.orphan).map((e) => "#" + escapeHtml(e.doc || "?")).join(", ")}, which ${g.estimates.filter((e) => e.orphan).length > 1 ? "are" : "is"} no longer on this job in QuickBooks. It's still counted below; check whether its payments are already in another schedule before removing it.</div>` : "";
+    const fig = (v, label, cls = "text-ink-900") => `<span><b class="${cls}">${money(v)}</b> <span class="text-black/45">${label}</span></span>`;
+    const headFigs = `<span class="ml-auto tabular-nums text-[12.5px] flex items-center gap-x-3 flex-wrap justify-end">
+        ${fig(g.paid_qbo, "paid")}
+        ${fig(g.scheduled_left || 0, "scheduled", "text-emerald-700")}
+        ${(g.undated_left || 0) > 0.5 ? fig(g.undated_left, "no date yet", "text-amber-700") : ""}
+        <span class="text-black/45">of <b class="text-ink-900">${money(g.labor)}</b> labor</span>
+        ${g.paid_qbo > g.labor + 0.5 ? `<span class="font-bold text-red-600">${money(g.paid_qbo - g.labor)} over</span>` : ""}
+      </span>`;
     // 2026-11-19 (owner): offers are sent per estimate (below), not per roll-up.
     const offerLine = "";
     return `<div class="rounded-xl border border-blue-300 overflow-hidden mb-3">
@@ -443,12 +480,34 @@ function render(container, entityId, d) {
         <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 border border-blue-200">Rollup</span>
         <span class="text-[13px] font-bold text-ink-900">${escapeHtml(cn)}</span>
         <span class="text-[11.5px] text-black/45">covers ${g.estimates.length} estimate${g.estimates.length > 1 ? "s" : ""}</span>
-        <span class="ml-auto tabular-nums text-[13px]"><b class="text-ink-900">${money(g.paid_qbo)}</b> <span class="text-black/45">paid / ${money(g.labor)}</span></span>
+        ${headFigs}
       </div>
       <div class="px-4 py-2 flex flex-wrap gap-1.5 border-b border-black/[0.05]">${chips}</div>
+      ${orphanNote}
       <div class="overflow-x-auto"><table class="w-full text-[12.5px]"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 border-b border-black/10"><th class="py-2 pl-4 pr-3 text-left">Rollup pay date</th><th class="py-2 px-2 text-right">Amount (lump)</th><th class="py-2 pl-2 pr-4 text-right">Status</th></tr></thead><tbody>${insts || `<tr><td colspan="3" class="px-4 py-3 text-black/40 text-[12px]">No installments — add assignment dates.</td></tr>`}</tbody></table></div>
       ${offerLine}
     </div>`;
+  };
+  // 2026-11-24 (owner, 5184): labor vs what this estimate's own payment rows add
+  // up to, so a schedule that doesn't balance shows without opening it.
+  const balanceOf = (a) => {
+    const lab = Number(a.labor) || 0, held = coveredLabor(a.qbo_id);
+    const sched = a.crew_scheduled != null ? Number(a.crew_scheduled) : (a.crew_installments || []).reduce((x, i) => x + (Number(i.amount) || 0), 0);
+    const covered = a.crew_covered_by && sched < 0.5;
+    return { lab, held, target: lab + held, sched, off: Math.round((sched - lab - held) * 100) / 100, covered };
+  };
+  const balanceSummary = (a) => {
+    const b = balanceOf(a);
+    const figs = `<span class="tabular-nums text-[12px] text-black/55">Labor <b class="text-ink-900">${money(b.lab)}</b> · Scheduled <b class="text-ink-900">${money(b.sched)}</b></span>`;
+    if (b.covered) return `${figs}<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full text-indigo-700 bg-indigo-50 border border-indigo-200" title="Its labor is paid in the job's Drive Payment Schedule${a.crew_covered_by.file ? ` (${escapeHtml(a.crew_covered_by.file)})` : ""}">Covered by #${escapeHtml(a.crew_covered_by.doc || "?")}'s schedule</span>`;
+    if (b.held) {
+      const n = est.accepted.filter((x) => x.crew_covered_by && String(x.crew_covered_by.doc) === String(a.doc) && (Number(x.labor) || 0) - (Number(x.crew_scheduled) || 0) > 0.5).length;
+      const note = `<span class="text-[11px] text-black/45 tabular-nums">holds the Drive schedule for ${n} more estimate${n === 1 ? "" : "s"} (${money(b.held)} labor)</span>`;
+      return `${figs}${note}${Math.abs(b.off) > 1 ? `<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full text-amber-700 bg-amber-50 border border-amber-200">Doesn't balance · ${b.off > 0 ? "over" : "short"} ${money(Math.abs(b.off))}</span>` : ""}`;
+    }
+    if (Math.abs(b.off) <= 1 || (!b.lab && !b.sched)) return figs;
+    const none = b.sched < 0.5;
+    return `${figs}<span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full ${none ? "text-amber-700 bg-amber-50 border border-amber-200" : "text-rose-700 bg-rose-50 border border-rose-200"}">${none ? "Not scheduled" : `Doesn't balance · ${b.off > 0 ? "over" : "short"} ${money(Math.abs(b.off))}`}</span>`;
   };
   const crewEstimateRow = (a) => {
     const complete = p.books_closed;
@@ -514,7 +573,7 @@ function render(container, entityId, d) {
       <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden hover:bg-black/[0.015] flex-wrap">
         <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
         <span class="text-[12.5px] font-semibold text-ink-900">Estimate #${escapeHtml(a.doc || "—")}</span>
-        <span class="tabular-nums text-[12px] text-black/55">${money(a.labor)} labor</span>
+        ${balanceSummary(a)}
         ${offerChip(a.offer, a)}
         ${cs.source_doc_id ? `<button type="button" data-srcdoc="${cs.source_doc_id}" data-srcname="${escapeHtml(cs.source_file_name || "Payment Schedule")}" class="src-doc-btn" title="These payments were read from this Payment Schedule. Click to view it here.">${DOC_ICON} Payment Schedule</button>` : ""}
         <span class="ml-auto text-[11px] ${split ? "font-bold text-indigo-700" : "text-black/40"}">${escapeHtml(split ? splitLabel(split) : (crewName(a.crew_id) || "Unassigned"))}</span>
@@ -524,6 +583,14 @@ function render(container, entityId, d) {
       <div class="overflow-x-auto px-1 pb-1"><table class="w-full text-[12px] bl-crew"><thead><tr class="text-[10px] font-bold uppercase tracking-wide text-black/40 text-left"><th class="py-1 pl-3 pr-1 bl-th-c">Pay date</th><th class="py-1 px-1 text-right bl-th-cr">Amount</th><th class="py-1 px-1 bl-th-c" title="The date the crew sends its invoice for this payment (pay date minus ${lead} days unless changed)">Send invoice</th><th class="py-1 px-1 bl-th-c">Comment</th><th></th></tr></thead><tbody>${insts || `<tr><td colspan="5" class="px-4 py-2 text-black/40">No schedule — add dates.</td></tr>`}</tbody></table></div>
       ${(a.crew_installments || []).length ? (() => {
         const tot = Math.round((a.crew_installments || []).reduce((x, i) => x + (Number(i.amount) || 0), 0) * 100) / 100;
+        const bal = balanceOf(a);
+        // folded into another estimate's Drive schedule: nothing to re-balance here
+        if (bal.covered) return `<div class="px-4 pb-1 text-[11.5px] text-indigo-700">This estimate's ${money(bal.lab)} labor is paid in #${escapeHtml(a.crew_covered_by.doc || "?")}'s schedule (the job's Drive Payment Schedule${a.crew_covered_by.file ? `, ${escapeHtml(a.crew_covered_by.file)}` : ""}), so it has no payments of its own.</div>`;
+        // holds that schedule: compare to its labor plus the labor it covers; a
+        // re-balance would squeeze the whole job's rows into one estimate's labor
+        if (bal.held) return Math.abs(bal.off) <= 1
+          ? `<div class="px-4 pb-1 text-[11.5px] tabular-nums text-black/50">Total ${money(tot)} = ${money(bal.lab)} labor on #${escapeHtml(a.doc || "")} + ${money(bal.held)} on the estimates this schedule covers.</div>`
+          : `<div class="px-4 pb-1 text-[11.5px] tabular-nums text-amber-700 font-semibold">Total ${money(tot)}, but #${escapeHtml(a.doc || "")} and the estimates this schedule covers have ${money(bal.target)} labor (${bal.off > 0 ? "over" : "short"} by ${money(Math.abs(bal.off))}). Fix the rows here; Re-balance isn't offered because it would fit them to #${escapeHtml(a.doc || "")}'s labor alone.</div>`;
         const off = tot - (Number(a.labor) || 0);
         const kept = a.crew_sum_ok_total != null && Math.abs(Number(a.crew_sum_ok_total) - tot) < 0.5;
         if (Math.abs(off) <= 1) return `<div class="px-4 pb-1 text-[11.5px] tabular-nums text-black/50">Total ${money(tot)} of ${money(a.labor)} contract labor. Adding or removing a payment re-balances the payments nobody typed.</div>`;
@@ -540,6 +607,20 @@ function render(container, entityId, d) {
       ${complete ? "" : estOfferLine(a)}
     </details>`;
   };
+  // 2026-11-24 (owner, 5184): a schedule whose estimate is no longer on this job
+  // in QuickBooks: shown, labeled, read-only (counted in its roll-up above).
+  const orphanRow = (o) => `<details class="group/ce border-b border-black/[0.06] bg-rose-50">
+      <summary class="flex items-center gap-2 px-4 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden flex-wrap">
+        <svg class="w-3 h-3 text-black/30 transition-transform group-open/ce:rotate-90 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5z"/></svg>
+        <span class="text-[12.5px] font-semibold text-ink-900">Estimate #${escapeHtml(o.doc || "—")}</span>
+        <span class="tabular-nums text-[12px] text-black/55">Scheduled <b class="text-ink-900">${money(o.scheduled)}</b></span>
+        <span class="text-[10.5px] font-bold px-2 py-0.5 rounded-full text-rose-700 bg-rose-50 border border-rose-200">Estimate not on this job in QuickBooks</span>
+        ${o.source_doc_id ? `<button type="button" data-srcdoc="${o.source_doc_id}" data-srcname="${escapeHtml(o.source_file_name || "Payment Schedule")}" class="src-doc-btn" title="The file this schedule was read from">${DOC_ICON} ${escapeHtml(o.source_file_name || "Payment Schedule")}</button>` : ""}
+        <span class="ml-auto text-[11px] text-black/40">${escapeHtml(o.crew_name || crewName(o.crew_id) || "Unassigned")}</span>
+      </summary>
+      <div class="px-4 py-1.5 text-[11.5px] text-rose-800">This schedule was read${o.source_file_name ? ` from ${escapeHtml(o.source_file_name)}` : ""} for estimate #${escapeHtml(o.doc || "?")}, which is no longer on this job in QuickBooks (deleted, or its number now belongs to another estimate). Its ${money(o.scheduled)} is still counted in the roll-up above. Check whether its payments are already in another schedule before it's removed.</div>
+      <div class="overflow-x-auto px-1 pb-2"><table class="w-full text-[12px]"><tbody>${(o.installments || []).map((i) => `<tr class="border-b border-black/5"><td class="py-1 pl-3 pr-3 tabular-nums text-black/60">${i.pay_date ? shortDate(i.pay_date) : `<span class="font-semibold text-amber-700">No date yet</span>`}</td><td class="py-1 px-2 text-right tabular-nums font-semibold">${money(i.amount)}</td><td class="py-1 px-2 w-full text-black/55">${escapeHtml(i.note || "")}</td></tr>`).join("")}</tbody></table></div>
+    </details>`;
   // 2026-11-19 (owner): one crew offer per estimate / change order.
   const estOfferLine = (a) => {
     const o = a.offer, cn = (o && o.crew_name) || crewName(a.crew_id) || "the crew";
@@ -718,13 +799,13 @@ function render(container, entityId, d) {
           <span class="text-sm font-bold text-ink-900">Crew payments</span>
           <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">rollup by crew · bi-weekly</span>
           ${p.books_closed ? "" : `<span class="flex items-center gap-1 flex-wrap" title="Crew offer per estimate">${est.accepted.filter((a) => (Number(a.labor) || 0) > 0).map((a) => `<span class="bl-ofh">#${escapeHtml(a.doc || "")} ${offerChip(a.offer, a, true)}</span>`).join("")}</span>`}
-          <span class="ml-auto text-[12px] tabular-nums text-black/55"><b class="text-ink-900">${money(crewLaborEst)}</b> labor</span>
+          <span class="ml-auto text-[12px] tabular-nums text-black/55"><b class="text-ink-900">${money(crewLaborEst)}</b> labor${Math.abs((roll.total_labor || 0) - crewLaborEst) > 1 && roll.rollups.some((r) => !r.is_other) ? ` · <span title="What the crew payment schedules add up to">roll-ups <b class="text-ink-900">${money(roll.total_labor)}</b></span>${(roll.orphan_labor || 0) > 0.5 ? ` <span class="text-rose-700">(incl. ${money(roll.orphan_labor)} on an estimate not on this job)</span>` : ""}` : ""}</span>
         </summary>
         <div class="p-3">
           ${crewCheckBanner(d.crew_check)}
           ${(d.crew_check && (d.crew_check.diffs || []).length) ? "" : `<div class="px-1 pb-2" data-ccx-slot></div>`}
           ${roll.rollups.map(rollupBlock).join("") || `<div class="p-4 text-sm text-black/45">No crew schedules yet — add assignment dates.</div>`}
-          ${est.accepted.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}</div></div>` : ""}
+          ${est.accepted.length || crewOrphans.length ? `<div class="mt-1"><div class="text-[10.5px] font-bold uppercase tracking-wide text-black/40 px-1 mb-1">Crew assignment per estimate</div><div class="rounded-xl border border-black/10 overflow-hidden">${est.accepted.map(crewEstimateRow).join("")}${crewOrphans.map(orphanRow).join("")}</div></div>` : ""}
         </div>
         ${crewActuals}
       </details>

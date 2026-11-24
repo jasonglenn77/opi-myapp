@@ -12324,6 +12324,29 @@ body.hp-explaining, body.hp-explaining * {
   color:#1f3a5f;
 }
 
+/* date-range picker for PM / crew availability (2026-11-24) */
+
+.su-rchip {
+  font-size:11px;
+  font-weight:600;
+  padding:3px 9px;
+  border-radius:999px;
+  border:1px solid rgba(0,0,0,.14);
+  color:#374151;
+  background:#fff;
+  white-space:nowrap;
+}
+
+.su-rchip:hover {
+  border-color:#1f3a5f;
+}
+
+.su-rchip.on {
+  background:#1f3a5f;
+  border-color:#1f3a5f;
+  color:#fff;
+}
+
 .su-linkbtn:hover {
   text-decoration:underline;
 }
@@ -13577,6 +13600,37 @@ table.bl-crew th.bl-th-cr {
 
 th.bl-th-exp0 {
   padding-left: calc(1.5rem + 23px) !important;
+}
+
+/* Setup → Job history (2026-11-24) */
+
+.su-hphase {
+  min-width:0;
+  border:1px solid rgba(0,0,0,.08);
+  border-radius:12px;
+  padding:10px 12px;
+  background:#fafbfc;
+}
+
+.su-hphase .su-table {
+  background:#fff;
+}
+
+.su-pochip {
+  display:inline-flex;
+  align-items:center;
+  font-size:11px;
+  font-weight:600;
+  color:#1f3a5f;
+  background:#eef2f7;
+  border:1px solid rgba(31,58,95,.18);
+  border-radius:999px;
+  padding:2px 8px;
+  white-space:nowrap;
+}
+
+.su-pochip:hover {
+  background:#e2e8f0;
 }
 
 .after\:absolute::after {

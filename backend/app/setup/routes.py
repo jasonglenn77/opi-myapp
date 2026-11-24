@@ -258,6 +258,16 @@ def _gather(conn, opp_ids=None, extra_eids=None):
           AND ((entity_type = 'opportunity' AND entity_id IN :oids) OR (entity_type = 'project' AND entity_id IN :eids))
         GROUP BY entity_type, entity_id""", "oids", "eids"), {"oids": oids, "eids": eids}).mappings():
         d["po_docs"][(r["entity_type"], str(r["entity_id"]))] = r["n"]
+    # 2026-11-24 (owner, 5184): a project's PO files can sit under any of the
+    # pipeline items linked to it (one per change order), and the PO list shows
+    # them all, so the step counts them all too
+    d["po_by_project"] = {}
+    for r in conn.execute(_q("""
+        SELECT o.project_qbo_id AS e, COUNT(*) AS n FROM opportunities o
+        JOIN documents d ON d.entity_type = 'opportunity' AND d.entity_id = CAST(o.id AS CHAR) COLLATE utf8mb4_unicode_ci
+        WHERE o.project_qbo_id IN :eids AND d.folder = '5_purchase_orders' AND d.drive_removed_at IS NULL
+        GROUP BY o.project_qbo_id""", "eids"), {"eids": eids}).mappings():
+        d["po_by_project"][str(r["e"])] = int(r["n"])
     d["sched"] = {}
     for tbl, k in (("project_invoice_schedules", "invoice"), ("project_payment_schedules", "crew"),
                    ("project_expense_installments", "expense")):
@@ -350,6 +360,8 @@ def _steps(o, d, today):
                     "review": rv, "note": notes.get(key), "comments": ccount.get(key, 0), **extra})
 
     po_n = d["po_docs"].get(("opportunity", str(o["id"])), 0) + (d["po_docs"].get(("project", eid), 0) if eid else 0)
+    if eid:
+        po_n = max(po_n, d["po_by_project"].get(str(eid), 0) + d["po_docs"].get(("project", eid), 0))
     add("po", "done" if po_n else "todo", f"{po_n} file(s) in 5 Purchase Orders" if po_n else "No PO in the job's Drive folder yet")
     add("qbo_project", "done" if eid else "todo", o["project_name"] or "Not linked to a QuickBooks project yet")
     est = d["estimates"].get(eid) if eid else None
@@ -590,6 +602,60 @@ def job_estimates(key: str, user=Depends(require_capability(CAP))):
             return {"estimates": [], "po_files": [], "accepted_total": 0, "accepted_n": 0, "pending_total": 0, "pending_n": 0, "other_n": 0}
         opp_ids = [r[0] for r in conn.execute(text("SELECT id FROM opportunities WHERE project_qbo_id = :e"), {"e": eid}).all()]
         return EL.overview(conn, eid, opp_ids or [o["id"]], d.get("reviews", {}).get(str(eid), {}))
+
+
+@router.get("/job/{key}/history")
+def job_history(key: str, user=Depends(require_capability(CAP))):
+    """Read-only job history (2026-11-24 owner): estimates + POs placed on Ashley's
+    Job Schedule, the bi-weekly crew pay ledger and the invoices (history.py)."""
+    from . import history as H
+    with engine.begin() as conn:     # begin: a PO read is cached on first use
+        o, d = _one(conn, key)
+        eid = o["project_qbo_id"]
+        if not eid:
+            return {"empty": True}
+        opp_ids = [r[0] for r in conn.execute(text("SELECT id FROM opportunities WHERE project_qbo_id = :e"), {"e": eid}).all()]
+        return H.history(conn, eid, opp_ids or [o["id"]])
+
+
+class PoLinkIn(BaseModel):
+    document_id: Optional[int] = None     # the PO file for this estimate
+    no_po: bool = False                   # this estimate has no PO of its own
+    clear: bool = False                   # back to the automatic match
+
+
+@router.post("/job/{key}/estimate/{estimate_qbo_id}/po")
+def set_estimate_po(key: str, estimate_qbo_id: str, req: PoLinkIn, user=Depends(require_capability(CAP))):
+    """Tie an estimate to its PO file by hand (2026-11-24 owner), or say it has
+    no PO of its own, or go back to the automatic match."""
+    from . import estimates_list as EL
+    with engine.begin() as conn:
+        o, d = _one(conn, key)
+        eid = o["project_qbo_id"]
+        if not eid:
+            raise HTTPException(status_code=400, detail="The project isn't in QuickBooks yet")
+        if req.clear:
+            conn.execute(text("DELETE FROM project_estimate_po_link WHERE entity_id = :e AND estimate_qbo_id = :q"),
+                         {"e": eid, "q": estimate_qbo_id})
+        else:
+            if not req.no_po:
+                ok = conn.execute(text("""SELECT 1 FROM documents d WHERE d.id = :d AND d.folder = '5_purchase_orders'
+                      AND ((d.entity_type = 'project' AND d.entity_id = :e) OR (d.entity_type = 'opportunity' AND d.entity_id IN
+                           (SELECT CAST(id AS CHAR) COLLATE utf8mb4_unicode_ci FROM opportunities WHERE project_qbo_id = :e)))"""),
+                                  {"d": req.document_id, "e": eid}).scalar()
+                if not ok:
+                    raise HTTPException(status_code=400, detail="Pick one of this job's PO files")
+            conn.execute(text("""INSERT INTO project_estimate_po_link (entity_id, estimate_qbo_id, document_id, no_po, by_email)
+                                 VALUES (:e, :q, :d, :n, :b) ON DUPLICATE KEY UPDATE document_id = VALUES(document_id),
+                                 no_po = VALUES(no_po), by_email = VALUES(by_email)"""),
+                         {"e": eid, "q": estimate_qbo_id, "d": None if req.no_po else req.document_id,
+                          "n": 1 if req.no_po else 0, "b": user.get("email")})
+        opp_ids = [r[0] for r in conn.execute(text("SELECT id FROM opportunities WHERE project_qbo_id = :e"), {"e": eid}).all()]
+        out = EL.overview(conn, eid, opp_ids or [o["id"]], d.get("reviews", {}).get(str(eid), {}))
+    record_audit(user, "setup.estimate_po", "project", eid, o["project_name"] or o["title"],
+                 {"estimate": estimate_qbo_id, "document_id": req.document_id, "no_po": req.no_po, "clear": req.clear,
+                  "entity_id": eid})
+    return out
 
 
 @router.get("/job/{key}/estimate-draft")

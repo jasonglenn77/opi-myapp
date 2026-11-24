@@ -90,11 +90,16 @@ def check(conn, entity_ids):
                 p = out[str(e)]["paid"]
                 p[co] = round(p.get(co, 0) + float(amt), 2)
 
-    for e, c in conn.execute(_q("""SELECT entity_id, crew_id FROM project_estimate_billing
-                                   WHERE entity_id IN :e AND crew_id IS NOT NULL""", "e"), {"e": eids}).all():
+    # 2026-11-24: only estimates still on the job in QuickBooks. A header left on a
+    # deleted estimate (5184's #7115, whose number now belongs to another customer)
+    # isn't the job's paid crew; Crew payments labels it instead.
+    on_job = """EXISTS (SELECT 1 FROM qbo_transactions t WHERE t.entity_type = 'Estimate'
+                        AND t.qbo_id = x.estimate_qbo_id AND t.customer_qbo_id = x.entity_id)"""
+    for e, c in conn.execute(_q(f"""SELECT x.entity_id, x.crew_id FROM project_estimate_billing x
+                                   WHERE x.entity_id IN :e AND x.crew_id IS NOT NULL AND {on_job}""", "e"), {"e": eids}).all():
         out[str(e)]["app_paid"].add(company_of.get(int(c), int(c)))
-    for e, c in conn.execute(_q("""SELECT entity_id, company_crew_id FROM project_estimate_crew_allocations
-                                   WHERE entity_id IN :e""", "e"), {"e": eids}).all():
+    for e, c in conn.execute(_q(f"""SELECT x.entity_id, x.company_crew_id FROM project_estimate_crew_allocations x
+                                   WHERE x.entity_id IN :e AND {on_job}""", "e"), {"e": eids}).all():
         out[str(e)]["app_paid"].add(company_of.get(int(c), int(c)))
     for e, c in conn.execute(_q("""
         SELECT qc.qbo_id, COALESCE(w.company_id, wc.parent_id, wc.id)

@@ -19,6 +19,7 @@ import { openDocViewer, DOC_ICON } from "../utils/doc-viewer.js";
 import { openProjectDrawer } from "../utils/project-drawer.js";
 import { mountAssignmentPanel } from "./assignment-panel.js";
 import { mountBillingPanel } from "./billing.js";
+import { mountHistory } from "./setup-history.js";
 import { stepCardHtml, bindStepCards } from "../utils/stepcards.js";
 import { projectLink } from "../utils/ui.js";
 import { toast } from "../utils/help.js";
@@ -300,6 +301,7 @@ export async function setupPage(routeFn) {
           ${j.life ? chip(`Status: ${j.life.label}`, LIFE[j.life.status] || C.quiet, "Worked out from the job: set up, started, ended, closed out") : ""}
           ${j.project_qbo_id ? `<a class="pd-btn" href="${projectLink(j.project_qbo_id)}">Open workspace</a>` : ""}
           ${j.opportunity_id ? `<button class="pd-btn" data-act="pipeline">Open in Pipeline</button>` : `<span class="text-xs text-black/45">No pipeline row</span>`}
+          ${j.project_qbo_id ? `<button class="pd-btn" data-act="history" title="Estimates, POs, Job Schedule, crew pay and invoices on one page (read-only)">Job history</button>` : ""}
           ${j.flags.map((f) => chip(f.text, C[f.tone])).join(" ")}
         </div>
         <div class="su-stages mt-3">${STAGES.map((sg) => `<div class="su-stage" data-stage="${sg}">
@@ -310,6 +312,11 @@ export async function setupPage(routeFn) {
           <summary><span class="su-hcmt-t">Comments <span data-pcount>${j.comments ? `(${j.comments})` : ""}</span></span><span class="su-hcmt-add">Add comment</span></summary>
           <div class="mt-2">${projectCommentsShell(j)}</div>
         </details>
+      </section>
+      <section class="card p-4" data-history hidden>
+        <div class="flex items-center gap-2"><h3 class="su-h flex-1">Job history</h3>
+          <button type="button" class="su-linkbtn" data-histclose>Close</button></div>
+        <div class="mt-2" data-histbody></div>
       </section>
       <div data-why>${whyHtml(j)}</div>
       ${STAGES.map((sg) => `<section class="card p-4 su-sec" id="su-${sg}">
@@ -325,6 +332,16 @@ export async function setupPage(routeFn) {
       document.querySelector(`.su-job[data-key="${CSS.escape(j.key)}"]`)?.scrollIntoView({ block: "center" });
     });
     box.querySelector("[data-act=pipeline]")?.addEventListener("click", () => openPipelineDrawer(j));
+    const hist = box.querySelector("[data-history]");
+    box.querySelector("[data-act=history]")?.addEventListener("click", () => {
+      hist.hidden = !hist.hidden;
+      if (!hist.hidden) {
+        const b = hist.querySelector("[data-histbody]");
+        if (!b.dataset.loaded) { b.dataset.loaded = "1"; mountHistory(b, j.key); }
+        hist.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+    hist?.querySelector("[data-histclose]")?.addEventListener("click", () => { hist.hidden = true; });
     D.cards = bindStepCards(box, { onOpen: (key, body) => buildBody(j, key, body) });
 
     box.addEventListener("click", (e) => {
@@ -604,13 +621,26 @@ export async function setupPage(routeFn) {
   }
 
   async function bodyPo(j, body) {
-    const [files, d] = await Promise.all([getDocs(j).catch(() => ({})), getDraft(j).catch(() => null)]);
-    const pos = (files["5_purchase_orders"] || []).filter((f) => !f.link_only);
-    const po = d?.po;
+    const [files, d, ex] = await Promise.all([getDocs(j).catch(() => ({})), getDraft(j).catch(() => null),
+      j.project_qbo_id ? api(`/setup/job/${encodeURIComponent(j.key)}/estimates`).catch(() => null) : null]);
+    // 2026-11-24 (owner): every PO file on the job (any of its pipeline items),
+    // with its PO number, total and the estimate(s) it's tied to
+    const parsed = ex?.po_files || [];
+    const pos = parsed.length ? parsed : (files["5_purchase_orders"] || []).filter((f) => !f.link_only);
+    const po = parsed.length ? null : d?.po;
     const done = (j.steps.find((s) => s.key === "po") || {}).state === "done";
+    const poTable = parsed.length ? `<div class="overflow-x-auto"><table class="w-full text-xs su-table">
+        <thead><tr><th class="text-left">PO file</th><th class="text-left">PO #</th><th class="text-right">PO total</th><th class="text-left">For estimate</th></tr></thead>
+        <tbody>${parsed.map((f) => `<tr>
+          <td><button type="button" class="su-linkbtn text-left" data-doc="${f.document_id}" data-fn="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</button></td>
+          <td class="tabular-nums">${f.po_number ? escapeHtml(f.po_number) : `<span class="text-black/40">not read</span>`}</td>
+          <td class="text-right tabular-nums">${f.total != null ? money2(f.total) : `<span class="text-black/40">not read</span>`}</td>
+          <td>${f.estimates.length ? f.estimates.map((n) => `#${escapeHtml(n)}`).join(", ") : `<span class="text-black/40">${f.names_estimates?.length ? `names #${f.names_estimates.map(escapeHtml).join(", #")}` : "none"}</span>`}</td>
+        </tr>`).join("")}</tbody></table></div>
+        <div class="text-[11px] text-black/45 mt-1">Each estimate's tie (and a way to set it by hand) is under Project estimate created.</div>` : "";
     body.innerHTML = `
       <div class="text-[10px] uppercase tracking-wide font-bold text-black/45 mb-1">Purchase order files</div>
-      ${pos.length ? pos.map(docBtn).join("") : `<div class="text-xs text-black/55">No PO in the job's folder (5 Purchase Orders) yet.</div>`}
+      ${parsed.length ? poTable : pos.length ? pos.map(docBtn).join("") : `<div class="text-xs text-black/55">No PO in the job's folder (5 Purchase Orders) yet.</div>`}
       <label class="su-drop mt-2" data-drop><input type="file" accept=".pdf,.png,.jpg,.jpeg,.heic,.doc,.docx,.xlsx,.msg,.eml" multiple hidden>
         <span><b>Drop the PO here</b> or click to upload. It's saved in the job's 5 Purchase Orders folder.</span></label>
       ${po ? `<div class="su-facts mt-2">
@@ -699,8 +729,22 @@ export async function setupPage(routeFn) {
   // has an estimate, the app's copy-ready draft of the first one shows instead.
   const EST_ST = { Accepted: C.good, Converted: C.good, Closed: C.good, Pending: C.warn, Rejected: C.quiet };
   function estimatesHtml(x) {
-    const tie = (e) => e.ties === true ? chip("Ties to PO", C.good) : e.ties === false ? chip("PO differs", C.bad)
+    const tie = (e) => e.ties === "no_po" ? chip("No PO (set)", C.quiet, "Set by hand: this estimate has no PO of its own")
+      : e.ties === true ? chip("Ties to PO", C.good) : e.ties === false ? chip("PO differs", C.bad)
       : e.po_number ? chip("PO not on file", C.warn) : chip("No PO", C.quiet);
+    // 2026-11-24 (owner): tie the estimate to a PO file by hand when the match misses
+    const files = x.po_files || [];
+    const tieSel = (e) => {
+      const cur = e.po_link ? (e.po_link.no_po ? "none" : String(e.po_link.document_id)) : "auto";
+      const auto = e.po_link ? "Automatic match" : `Automatic match${e.po ? ` (${e.po.po_number ? "PO #" + e.po.po_number : e.po.filename})` : " (none found)"}`;
+      return `<label class="flex flex-wrap items-center gap-2 text-xs mt-2"><span class="font-semibold text-black/60">Tie to PO</span>
+        <select class="input text-xs py-1" data-potie="${escapeHtml(e.qbo_id)}" style="max-width:100%">
+          <option value="auto"${cur === "auto" ? " selected" : ""}>${escapeHtml(auto)}</option>
+          ${files.map((f) => `<option value="${f.document_id}"${cur === String(f.document_id) ? " selected" : ""}>${escapeHtml([f.po_number ? "PO #" + f.po_number : f.filename, f.total != null ? money2(f.total) : null, f.po_number ? f.filename : null].filter(Boolean).join(" · "))}</option>`).join("")}
+          <option value="none"${cur === "none" ? " selected" : ""}>No PO for this estimate</option>
+        </select>
+        ${e.po_link ? `<span class="text-black/45">set by ${escapeHtml(e.po_link.by || "someone")} ${day(e.po_link.at)}</span>` : ""}</label>`;
+    };
     const ico = (ok) => ok === true ? ICON.done : ok === false ? ICON.review || ICON.todo : ICON.todo;
     const rows = x.estimates.map((e) => {
       const off = !["Accepted", "Converted", "Closed", "Pending"].includes(e.status);
@@ -722,6 +766,7 @@ export async function setupPage(routeFn) {
             <div><span>PO terms</span>${e.po ? escapeHtml(e.po.terms?.text || "Not found on the PO") : "No PO on file"}</div>
           </div>
           ${e.po ? `<button type="button" class="pd-btn mt-2" data-doc="${e.po.document_id}" data-fn="${escapeHtml(e.po.filename)}">${DOC_ICON || ""} Open the PO</button>` : ""}
+          ${off || !files.length ? "" : tieSel(e)}
         </div>
       </details>`;
     }).join("");
@@ -738,8 +783,22 @@ export async function setupPage(routeFn) {
     if (j.project_qbo_id) {
       const x = await api(`/setup/job/${encodeURIComponent(j.key)}/estimates`);
       if ((x.estimates || []).length) {
-        body.innerHTML = estimatesHtml(x);
-        wireDocs(body);
+        const paint = (data, openId) => {
+          body.innerHTML = estimatesHtml(data);
+          wireDocs(body);
+          if (openId) body.querySelector(`[data-potie="${CSS.escape(openId)}"]`)?.closest("details")?.setAttribute("open", "");
+          body.querySelectorAll("[data-potie]").forEach((sel) => sel.addEventListener("change", async () => {
+            const v = sel.value, q = sel.dataset.potie;
+            const payload = v === "auto" ? { clear: true } : v === "none" ? { no_po: true } : { document_id: Number(v) };
+            sel.disabled = true;
+            try {
+              const r = await api(`/setup/job/${encodeURIComponent(j.key)}/estimate/${encodeURIComponent(q)}/po`, { method: "POST", body: JSON.stringify(payload) });
+              toast(v === "auto" ? "Back to the automatic match." : "Saved.");
+              paint(r, q);
+            } catch (er) { sel.disabled = false; toast(`Couldn't save: ${er?.message || er}`); }
+          }));
+        };
+        paint(x);
         return;
       }
     }
@@ -811,7 +870,7 @@ export async function setupPage(routeFn) {
           <td class="font-semibold">#${escapeHtml(i.doc_number || "")}</td>
           <td class="text-right tabular-nums">${money2(i.amount)}${i.pct != null ? `<div class="text-[11px] text-black/45">${i.pct}%</div>` : ""}</td>
           <td>${day(i.date)}</td><td>${day(i.due)}</td>
-          <td>${open ? `<input type="date" class="input text-xs py-1" data-invexp="${escapeHtml(i.qbo_id)}" value="${escapeHtml(i.expected || "")}" title="When the money is expected to land (blank = the due date). Cash Flow follows.">${i.expected_set ? "" : `<div class="text-[10px] text-black/40">due date</div>`}` : `<span class="text-black/45">—</span>`}</td>
+          <td>${open ? `<input type="date" class="input text-xs py-1" data-invexp="${escapeHtml(i.qbo_id)}" value="${escapeHtml(i.expected || "")}" title="When the money is expected to land (blank = the due date). Cash Flow follows.">${i.expected_set ? "" : `<div class="text-[10px] text-black/40">same as the due date</div>`}` : `<span class="text-black/45">—</span>`}</td>
           <td>${escapeHtml(i.terms || "—")}</td>
           <td>${chip(i.status, stCls(i.status))}${i.balance > 0.01 && i.balance < i.amount - 0.01 ? `<div class="text-[11px] text-black/50">${money2(i.balance)} open</div>` : ""}</td></tr>`;
       }
@@ -825,14 +884,14 @@ export async function setupPage(routeFn) {
           <span class="text-[11px] text-black/50">${e.need_set ? `Set by ${escapeHtml(shortWho(e.need_by || ""))}` : escapeHtml(e.default_reason)}</span></div>
           ${e.need === "needed" && p ? `<form class="flex flex-wrap gap-2 items-end mt-2" data-msform="${p.id}">
             <div class="text-xs"><div class="text-black/55">Planned</div><b class="tabular-nums">${money2(p.amount)}</b>${p.pct != null ? ` <span class="text-black/45">(${p.pct}%)</span>` : ""}</div>
-            ${dateIn("invoice_date", p.invoice_date, "Send date")}${dateIn("due_date", p.due_date, "Due date")}${dateIn("expected_paid_date", p.expected_paid_date, "Expected", "Blank = the due date")}
+            ${dateIn("invoice_date", p.invoice_date, "Send date")}${dateIn("due_date", p.due_date, "Due date")}${dateIn("expected_paid_date", p.expected_paid_date, "Expected paid", "Blank = the due date")}
             <button type="submit" class="pd-btn">Save dates</button></form>` : ""}</td></tr>`;
     }).join("");
     body.innerHTML = ests.length ? `
       <div class="overflow-x-auto"><table class="w-full text-xs su-table">
-        <thead><tr><th class="text-left">Estimate</th><th class="text-left">Invoice</th><th class="text-right">Amount</th><th class="text-left">Sent</th><th class="text-left">Due</th><th class="text-left">Expected</th><th class="text-left">Terms</th><th class="text-left">Status</th></tr></thead>
+        <thead><tr><th class="text-left">Estimate</th><th class="text-left">Invoice</th><th class="text-right">Amount</th><th class="text-left">Sent</th><th class="text-left">Due</th><th class="text-left">Expected paid</th><th class="text-left">Terms</th><th class="text-left">Status</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
-      <div class="text-[11px] text-black/45 mt-1">Each accepted estimate's first invoice in QuickBooks. Change orders and small estimates are billed once, at completion, so they need no first invoice unless you say so. Expected dates feed Billing &amp; Schedule and Cash Flow.</div>
+      <div class="text-[11px] text-black/45 mt-1">Each accepted estimate's first invoice in QuickBooks. Change orders and small estimates are billed once, at completion, so they need no first invoice unless you say so. For one that does, its Send, Due and Expected paid dates here are the first row of its invoice schedule. Expected paid dates feed Billing &amp; Schedule and Cash Flow.</div>
       ${noteForm(j, "first_invoice", "First invoice not sent yet?")}`
       : `<div class="text-sm text-black/55">No accepted estimate on the project yet.</div>${noteForm(j, "first_invoice", "First invoice not sent yet?")}`;
     wireNoteForm(j, body);
@@ -923,32 +982,74 @@ export async function setupPage(routeFn) {
       // 2026-11-19 (owner): the PM and crew availability follow every change
       // (a PM just picked shows this job in their list straight away).
       if (fresh) {
+        delete st.cache[`ranges:${fresh.key}`];
         const av = document.querySelector('#suDetail .sc[data-sc="crew"] [data-avail]');
-        if (av && fresh.start) loadAvailability(fresh, av);
+        if (av && fresh.start) mountAvail(fresh, av.closest(".sc"));
         const pm = document.querySelector('#suDetail .sc[data-sc="pm"] [data-pms]');
-        if (pm) { st.cache.pms = null; loadPmWorkload(fresh, pm); }
+        if (pm) { st.cache.pms = null; mountAvail(fresh, pm.closest(".sc")); }
       }
       const dc = document.querySelector('#suDetail .sc[data-sc="dates"] [data-dchanges]');
       if (dc) setTimeout(() => loadDateChanges(D?.j || j, dc), 1500);
     }, 600);
   }
+  // 2026-11-24 (owner): availability per date range. A long job with breaks is
+  // never free for its whole span, and a change order is about its own dates;
+  // defaults to the next range that isn't finished, with the whole job a click away.
+  async function availRanges(j) {
+    const k = `ranges:${j.key}`;
+    if (!st.cache[k]) st.cache[k] = (j.project_qbo_id ? api(`/setup/job/${encodeURIComponent(j.key)}/dates`).then((d) => d.lines || []) : Promise.resolve([])).catch(() => []);
+    return (await st.cache[k]).filter((l) => l.start_date && l.end_date)
+      .map((l) => ({ start: String(l.start_date).slice(0, 10), end: String(l.last_day || l.end_date).slice(0, 10), status: l.status }));
+  }
+  function pickRange(j, lines) {
+    const cur = (st.availRange || {})[j.key];
+    if (cur === "all" || lines.length < 2) return { start: j.start, end: j.end, all: true };
+    if (cur != null && lines[cur]) return { ...lines[cur], idx: cur };
+    const today = new Date().toISOString().slice(0, 10);
+    let idx = lines.findIndex((l) => l.status !== "completed" && l.end >= today);
+    if (idx < 0) idx = lines.length - 1;
+    return { ...lines[idx], idx };
+  }
+  async function mountAvail(j, box) {
+    if (!box) return;
+    const lines = await availRanges(j);
+    const sel = pickRange(j, lines);
+    const jr = { ...j, start: sel.start, end: sel.end };
+    const rg = box.querySelector("[data-ranges]");
+    if (rg) {
+      const b = (label, v, on, title) => `<button type="button" class="su-rchip${on ? " on" : ""}" data-rng="${v}" title="${escapeHtml(title || "")}">${label}</button>`;
+      rg.innerHTML = lines.length < 2 ? "" : `<div class="flex flex-wrap gap-1.5 mt-2">${lines.map((l, i) =>
+        b(`#${i + 1} · ${day(l.start)} to ${day(l.end)}`, i, sel.idx === i, l.status === "completed" ? "Finished" : "")).join("")}${b("Whole job", "all", !!sel.all, `${day(j.start)} to ${day(j.end)}`)}</div>`;
+      rg.querySelectorAll("[data-rng]").forEach((x) => x.addEventListener("click", () => {
+        st.availRange = { ...(st.availRange || {}), [j.key]: x.dataset.rng === "all" ? "all" : Number(x.dataset.rng) };
+        document.querySelectorAll('#suDetail .sc[data-sc="crew"], #suDetail .sc[data-sc="pm"]').forEach((sc) => mountAvail(j, sc));
+      }));
+    }
+    const t = box.querySelector("[data-rangetitle]");
+    if (t) t.textContent = jr.start ? ` · ${day(jr.start)} to ${day(jr.end)}` : "";
+    const crewEl = box.querySelector("[data-avail]"), pmEl = box.querySelector("[data-pms]");
+    if (crewEl && jr.start) loadAvailability(jr, crewEl);
+    if (pmEl) loadPmWorkload(jr, pmEl);
+  }
   const partSlot = (title) => `<div class="su-sub mt-3"><h4 class="font-bold text-sm">${title}</h4><div data-part class="mt-2"></div></div>`;
 
   async function bodyPm(j, body) {
-    body.innerHTML = `<div class="su-sub"><h4 class="font-bold text-sm">PM availability</h4>
-        <div class="text-xs text-black/55 mt-0.5">Each PM's running and upcoming jobs and how many overlap this one. Click a PM for their jobs on a timeline.</div>
+    body.innerHTML = `<div class="su-sub"><h4 class="font-bold text-sm">PM availability<span data-rangetitle></span></h4>
+        <div class="text-xs text-black/55 mt-0.5">Each PM's running and upcoming jobs and how many overlap these dates. Click a PM for their jobs on a timeline.</div>
+        <div data-ranges></div>
         <div data-pms class="text-xs text-black/45 mt-2">Loading…</div></div>${partSlot("Assign the PM(s)")}`;
-    loadPmWorkload(j, body.querySelector("[data-pms]"));
+    mountAvail(j, body);
     mountPart(j, body.querySelector("[data-part]"), ["pm"], "Pick the PM for each estimate, or set one PM for all of them. A PM can be set before there are dates. Saves as you go.");
   }
-  const CREW_INTRO = "Pick the crew company for each estimate (it's who gets paid and gets the offer), or set one for all. A crew needs dates, so set each package's dates first; the list is sorted by who's free. Who is on site (crew boss, leads, slots) is picked on each date range. The offer is sent per estimate from Schedules → Crew payments.";
+  const CREW_INTRO = "Two things are set here. Per estimate: the crew company that gets paid for it (its crew payments and offer follow it), or set one for all. Per date range (below each package): who is on site (crew boss, leads, slots). They're usually the same company; an estimate whose paid crew isn't on site in its package is flagged. A crew needs dates, so set each package's dates first; the list is sorted by who's free. The offer is sent per estimate from Schedules → Crew payments.";
   async function bodyCrew(j, body) {
     body.innerHTML = `
-      <div class="su-sub"><h4 class="font-bold text-sm">Crew availability${j.start ? ` · ${day(j.start)} to ${day(j.end)}` : ""}</h4>
-        <div class="text-xs text-black/55 mt-0.5">${j.start ? "Click a crew to see each day (each week on long jobs) and what they're booked on." : ""}</div>
+      <div class="su-sub"><h4 class="font-bold text-sm">Crew availability<span data-rangetitle></span></h4>
+        <div class="text-xs text-black/55 mt-0.5">${j.start ? "Pick a date range. Click a crew to see each day (each week on long jobs) and what they're booked on. This job's own bookings don't count." : ""}</div>
+        <div data-ranges></div>
         <div data-avail class="text-xs text-black/45 mt-1.5">${j.start ? "Loading…" : "Set the dates first (Start and end dates) to see which crews are free."}</div></div>
       ${partSlot("Crew company per estimate")}`;
-    if (j.start) loadAvailability(j, body.querySelector("[data-avail]"));
+    if (j.start) mountAvail(j, body);
     mountPart(j, body.querySelector("[data-part]"), ["crew"], CREW_INTRO);
   }
   async function bodyDates(j, body) {
@@ -1038,7 +1139,7 @@ export async function setupPage(routeFn) {
       return { p, live, now: now.length, next, overlap };
     }).sort((a, b) => (a.overlap.length - b.overlap.length) || (a.now - b.now));
     el.className = "overflow-x-auto mt-2";
-    el.innerHTML = `<table class="w-full text-xs su-table su-clicktable"><thead><tr><th class="text-left">PM</th><th class="text-right">Running now</th><th class="text-right">Coming up</th><th class="text-left">${s ? "Busy during this job" : "During this job"}</th><th></th></tr></thead>
+    el.innerHTML = `<table class="w-full text-xs su-table su-clicktable"><thead><tr><th class="text-left">PM</th><th class="text-right">Running now</th><th class="text-right">Coming up</th><th class="text-left">${s ? "Busy on these dates" : "On these dates"}</th><th></th></tr></thead>
       <tbody>${rows.map(({ p, now, next, overlap }, i) => `<tr data-pmrow="${i}" class="su-rowbtn${(j.pms || []).includes(p.name) ? " su-mine" : ""}" tabindex="0" aria-expanded="false"><td class="font-semibold">${escapeHtml(p.name)}${(j.pms || []).includes(p.name) ? " (assigned)" : ""}</td>
         <td class="text-right tabular-nums">${now}</td><td class="text-right tabular-nums">${next}</td>
         <td>${s ? (overlap.length ? `${overlap.length} job${overlap.length > 1 ? "s" : ""}` : chip("Free", C.good)) : '<span class="text-black/40">Set dates first</span>'}</td>
@@ -1096,7 +1197,7 @@ export async function setupPage(routeFn) {
     if (!el) return;
     el.textContent = "Loading…";
     let d;
-    try { d = await api(`/offers/crew-availability?start=${j.start}&end=${j.end}`); }
+    try { d = await api(`/offers/crew-availability?start=${j.start}&end=${j.end}${j.project_qbo_id ? `&exclude_entity=${encodeURIComponent(j.project_qbo_id)}` : ""}`); }
     catch (e) { el.textContent = `Couldn't load availability: ${e?.message || e}`; return; }
     st.availWeekly = (d.companies[0]?.days || []).length > 92;
     const rows = [...d.companies].sort((a, b) => b.min_free_weekdays - a.min_free_weekdays);
